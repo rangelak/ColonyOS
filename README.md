@@ -480,8 +480,33 @@ When done:
 deactivate
 ```
 
-Run the PM workflow prototype:
+## Running the PM Workflow
+
+The PM workflow uses the OpenAI API to generate clarifying questions, autonomous expert answers, risk assessments, and a full PRD from a rough feature request.
+
+Setup:
 
 ```bash
-./.venv/bin/python scripts/run_pm_workflow.py "Your feature request here"
+cp .env.example .env
+# Edit .env and add your real OPENAI_API_KEY
+```
+
+Run:
+
+```bash
+./.venv/bin/python scripts/run_pm_workflow.py "Build an autonomous PM workflow for startup teams"
+```
+
+Override the model:
+
+```bash
+./.venv/bin/python scripts/run_pm_workflow.py --model gpt-4o "Your feature request"
+```
+
+Output artifacts are written to `generated/pm-workflow/<work_id>/` and include a `prd.md` and `artifact_bundle.json`.
+
+Run tests (mocked, no API key needed):
+
+```bash
+./.venv/bin/python -m pytest -v
 ```

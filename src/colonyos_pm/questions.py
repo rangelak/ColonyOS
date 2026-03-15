@@ -1,54 +1,43 @@
 from __future__ import annotations
 
+from colonyos_pm.llm import chat_json
 from colonyos_pm.models import ClarifyingQuestion
 
+SYSTEM_PROMPT = """\
+You are a world-class product manager. Given a rough feature request, generate \
+8-12 high-value clarifying questions that a senior PM would ask before writing \
+a PRD. Each question must probe a specific dimension: goal, users, scope, \
+artifact, autonomy, quality, handoff, validation, risk, design, or technical.
 
-BASE_QUESTIONS: list[tuple[str, str]] = [
-    (
-        "goal",
-        "What is the primary business outcome this workflow should optimize for first?",
-    ),
-    ("users", "Who are the primary and secondary users for this feature?"),
-    (
-        "artifact",
-        "What is the exact output artifact this workflow must produce in v1?",
-    ),
-    (
-        "autonomy",
-        "How autonomous should clarification be before any human is involved?",
-    ),
-    (
-        "quality",
-        "What quality bar should generated artifacts meet before handoff?",
-    ),
-    (
-        "handoff",
-        "What should happen immediately after PRD generation in the pipeline?",
-    ),
-    (
-        "validation",
-        "What minimum validation should run before handing work to coding agents?",
-    ),
-    (
-        "risk",
-        "How should the system classify risk and decide escalation thresholds?",
-    ),
-]
+Return JSON with this exact schema:
+{
+  "questions": [
+    {"id": "q1", "category": "<dimension>", "text": "<question>"},
+    ...
+  ]
+}
+
+Rules:
+- Questions must be concrete and opinionated, not generic filler.
+- Each question must target a different dimension of the problem.
+- Questions should expose hidden assumptions and force explicit trade-offs.
+- Keep the total between 8 and 12 questions.
+"""
 
 
-def generate_clarifying_questions(prompt: str, max_questions: int = 10) -> list[ClarifyingQuestion]:
-    """Generate bounded, deterministic clarifying questions for weak prompts."""
-    normalized = prompt.strip()
-    questions = [
-        ClarifyingQuestion(id=f"q{i + 1}", text=text, category=category)
-        for i, (category, text) in enumerate(BASE_QUESTIONS)
-    ]
-    if len(normalized.split()) < 10:
-        questions.append(
-            ClarifyingQuestion(
-                id=f"q{len(questions) + 1}",
-                category="scope",
-                text="What should explicitly be out of scope for v1 to avoid overreach?",
-            )
+def generate_clarifying_questions(prompt: str) -> list[ClarifyingQuestion]:
+    data = chat_json(
+        system=SYSTEM_PROMPT,
+        user=f"Feature request:\n\n{prompt}",
+        temperature=0.5,
+    )
+    raw_questions = data.get("questions", []) if isinstance(data, dict) else []
+    return [
+        ClarifyingQuestion(
+            id=q.get("id", f"q{i}"),
+            text=q["text"],
+            category=q.get("category", "general"),
         )
-    return questions[:max(4, min(max_questions, 12))]
+        for i, q in enumerate(raw_questions, start=1)
+        if "text" in q
+    ]

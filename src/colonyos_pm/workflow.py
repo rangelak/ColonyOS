@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from hashlib import sha1
 
 from colonyos_pm.answers import generate_autonomous_answer
@@ -15,14 +16,31 @@ def _build_work_id(prompt: str) -> str:
     return f"pmw-{digest}"
 
 
+def _log(msg: str) -> None:
+    print(f"[pm-workflow] {msg}", file=sys.stderr, flush=True)
+
+
 def run_pm_workflow(prompt: str) -> WorkflowArtifacts:
+    _log("Generating clarifying questions...")
     questions = generate_clarifying_questions(prompt)
-    answers = [
-        generate_autonomous_answer(question, select_persona(question))
-        for question in questions
-    ]
+    _log(f"  Generated {len(questions)} questions.")
+
+    _log("Generating autonomous answers with expert personas...")
+    answers = []
+    for question in questions:
+        persona = select_persona(question)
+        _log(f"  [{persona.value}] answering: {question.text[:80]}...")
+        answer = generate_autonomous_answer(question, persona)
+        answers.append(answer)
+    _log(f"  Answered {len(answers)} questions.")
+
+    _log("Assessing risk...")
     risk = assess_risk(prompt)
+    _log(f"  Risk tier: {risk.tier.value} (score={risk.score}, escalate={risk.escalate_to_human})")
+
+    _log("Building PRD from Q&A output...")
     prd_markdown = build_prd_markdown(prompt=prompt, answers=answers)
+    _log(f"  PRD generated ({len(prd_markdown)} chars).")
 
     work_id = _build_work_id(prompt)
     handoff = HandoffPayload(
@@ -41,9 +59,9 @@ def run_pm_workflow(prompt: str) -> WorkflowArtifacts:
         "question_count": len(questions),
         "persona_distribution": {
             persona.value: len(
-                [answer for answer in answers if answer.answered_by.value == persona.value]
+                [a for a in answers if a.answered_by.value == persona.value]
             )
-            for persona in {answer.answered_by for answer in answers}
+            for persona in {a.answered_by for a in answers}
         },
         "visibility": {
             "user_visible": ["prompt", "clarifying_questions", "answers", "prd_markdown"],
@@ -56,6 +74,7 @@ def run_pm_workflow(prompt: str) -> WorkflowArtifacts:
         ],
     }
 
+    _log("Workflow complete.")
     return WorkflowArtifacts(
         work_id=work_id,
         prompt=prompt,

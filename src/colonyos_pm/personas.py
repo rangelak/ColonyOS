@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from colonyos_pm.models import ClarifyingQuestion, ExpertPersona
 
-
 CATEGORY_TO_PERSONA: dict[str, ExpertPersona] = {
     "goal": ExpertPersona.STARTUP_CEO,
     "users": ExpertPersona.YC_PARTNER,
@@ -14,8 +13,12 @@ CATEGORY_TO_PERSONA: dict[str, ExpertPersona] = {
     "risk": ExpertPersona.YC_PARTNER,
     "scope": ExpertPersona.STARTUP_CEO,
     "design": ExpertPersona.SENIOR_DESIGNER,
+    "technical": ExpertPersona.SENIOR_ENGINEER,
+    "general": ExpertPersona.SENIOR_ENGINEER,
 }
 
 
 def select_persona(question: ClarifyingQuestion) -> ExpertPersona:
-    return CATEGORY_TO_PERSONA.get(question.category, ExpertPersona.SENIOR_ENGINEER)
+    return CATEGORY_TO_PERSONA.get(
+        question.category.lower(), ExpertPersona.SENIOR_ENGINEER
+    )
