@@ -21,9 +21,16 @@ To guide an AI assistant in creating a detailed, step-by-step task list in Markd
 3.  **Phase 1: Generate Parent Tasks:** Based on the PRD analysis, create the file and generate the main, high-level tasks required to implement the feature. Use your judgement on how many high-level tasks to use. It's likely to be about 5. Present these tasks to the user in the specified format (without sub-tasks yet). Inform the user: "I have generated the high-level tasks based on the PRD. Ready to generate the sub-tasks? Respond with 'Go' to proceed."
 4.  **Wait for Confirmation:** Pause and wait for the user to respond with "Go".
 5.  **Phase 2: Generate Sub-Tasks:** Once the user confirms, break down each parent task into smaller, actionable sub-tasks necessary to complete the parent task. Ensure sub-tasks logically follow from the parent task and cover the implementation details implied by the PRD.
+    - For every parent task that involves code changes, the first sub-task must be a test-first step (write or update failing tests before implementation).
 6.  **Identify Relevant Files:** Based on the tasks and PRD, identify potential files that will need to be created or modified. List these under the `Relevant Files` section, including corresponding test files if applicable.
 7.  **Generate Final Output:** Combine the parent tasks, sub-tasks, relevant files, and notes into the final Markdown structure.
 8.  **Save Task List:** Save the generated document in the `/tasks/` directory with the filename `tasks-[prd-file-name].md`, where `[prd-file-name]` matches the base name of the input PRD file (e.g., if the input was `prd-user-profile-editing.md`, the output is `tasks-prd-user-profile-editing.md`).
+
+## Test-First Requirement
+
+- For any parent task that changes behavior or logic, sub-task `x.1` must explicitly require writing or updating tests first.
+- Implementation sub-tasks should come after the test-first sub-task.
+- If a parent task is purely non-code (docs/planning/config only), note why a test-first step does not apply.
 
 ## Output Format
 
@@ -43,6 +50,7 @@ The generated task list _must_ follow this structure:
 
 - Unit tests should typically be placed alongside the code files they are testing (e.g., `MyComponent.tsx` and `MyComponent.test.tsx` in the same directory).
 - Use `npx jest [optional/path/to/test/file]` to run tests. Running without a path executes all tests found by the Jest configuration.
+- Task lists must follow a tests-first approach: for each coding task, write/update tests before implementation.
 
 ## Tasks
 

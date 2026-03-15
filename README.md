@@ -479,3 +479,9 @@ When done:
 ```bash
 deactivate
 ```
+
+Run the PM workflow prototype:
+
+```bash
+./.venv/bin/python scripts/run_pm_workflow.py "Your feature request here"
+```
