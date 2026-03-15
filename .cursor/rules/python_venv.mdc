@@ -1,0 +1,25 @@
+---
+description: Always use the local Python virtual environment for Python tooling in this repository.
+alwaysApply: true
+---
+# Rule: Use Local Python Virtual Environment
+
+## Goal
+
+Ensure all Python commands in this repository run inside the local `.venv` to keep dependencies isolated and reproducible.
+
+## Requirements
+
+1. If `.venv` does not exist, create it with `python3 -m venv .venv`.
+2. Never use global/system `python`, `pip`, or test tooling for repo work when `.venv` is available.
+3. Prefer explicit venv binaries in commands, for example:
+   - `./.venv/bin/python`
+   - `./.venv/bin/pip`
+   - `./.venv/bin/pytest`
+4. If activation is preferred for interactive work, use `source .venv/bin/activate` before Python commands.
+5. Install dependencies into the venv, not globally (e.g., `./.venv/bin/python -m pip install -r requirements.txt`).
+
+## Command Policy
+
+- Default to venv-scoped commands in scripts, docs, and agent-run terminal commands.
+- If a command fails because the venv is missing, create the venv first and retry using venv binaries.

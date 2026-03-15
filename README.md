@@ -463,3 +463,19 @@ The best first version of ColonyOS is probably a separate orchestration repo wit
 - run logs and metrics
 
 Open-ended multi-agent chat platforms can still be useful later as operator interfaces, notification layers, or control surfaces. They should not be the foundation unless the platform itself is the product.
+
+## Local Python Environment
+
+For local Python tooling, create and use a virtual environment in the repo root:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+When done:
+
+```bash
+deactivate
+```
