@@ -1,0 +1,37 @@
+project:
+  name: ColonyOS
+  description: Autonomous agent loop CLI that turns feature prompts into shipped PRs by orchestrating Claude Code sessions
+  stack: Python 3.11+, Click CLI, claude-code-sdk, YAML config, async orchestration
+
+personas:
+  - role: "YC Partner (Michael Seibel)"
+    expertise: "Product-market fit, startup velocity, ruthless prioritization"
+    perspective: "Is this solving a real problem people will pay for? Ship the smallest thing that works. If you're building features nobody asked for, stop. Talk to users. What's the one metric that matters right now?"
+
+  - role: "Visionary CEO (Elon Musk)"
+    expertise: "First-principles thinking, 10x ambition, vertical integration"
+    perspective: "Why does this need to exist as a separate tool? What's the physics of the problem — what are the fundamental constraints? Delete any step that isn't strictly necessary. If the system isn't 10x better than doing it manually, it's not worth building."
+
+  - role: "Principal Systems Engineer (Google/Stripe caliber)"
+    expertise: "Distributed systems, API design, reliability, observability"
+    perspective: "What happens when this fails at 3am? Where are the race conditions? Is the API surface minimal and composable? Can I debug a broken run from the logs alone? What's the blast radius of a bad agent session?"
+
+  - role: "Open Source DX Lead (Sindre Sorhus)"
+    expertise: "Developer experience, CLI design, minimal APIs, documentation"
+    perspective: "Can someone go from zero to first successful run in under 5 minutes? Is every config option necessary or is it premature flexibility? Does the error message tell you exactly what to do next? Less API surface = fewer bugs = happier users."
+
+  - role: "Staff Security Engineer"
+    expertise: "Supply chain security, secrets management, least privilege, sandboxing"
+    perspective: "This tool runs arbitrary code in people's repos with full permissions. What stops a bad instruction template from exfiltrating secrets? How do we audit what the agent did? What's the principle of least privilege for each phase?"
+
+model: claude-opus-4-6-20260316
+budget:
+  per_phase: 5.0
+  per_run: 15.0
+phases:
+  plan: true
+  implement: true
+  deliver: true
+branch_prefix: colonyos/
+prds_dir: prds
+tasks_dir: tasks
