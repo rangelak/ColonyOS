@@ -46,6 +46,7 @@ def main() -> None:
     print(f"questions:        {len(artifacts.clarifying_questions)}")
     print(f"answers:          {len(artifacts.autonomous_answers)}")
     print(f"prd_path:         {locations['prd_path']}")
+    print(f"task_prd_path:    {locations['task_prd_path']}")
     print(f"bundle_path:      {locations['bundle_path']}")
 
 

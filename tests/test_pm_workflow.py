@@ -1,7 +1,13 @@
+import threading
+import time
 from pathlib import Path
+from unittest.mock import patch
 
+import colonyos_pm.workflow as workflow_module
 from colonyos_pm.models import HumanInterventionRecord, RiskTier
+from colonyos_pm.models import AutonomousAnswer, ClarifyingQuestion, ExpertPersona, RiskAssessment
 from colonyos_pm.personas import select_persona
+from colonyos_pm.prd import build_prd_markdown
 from colonyos_pm.questions import generate_clarifying_questions
 from colonyos_pm.risk import assess_risk
 from colonyos_pm.storage import LocalArtifactStore
@@ -82,10 +88,110 @@ class TestFullWorkflow:
             assert answer.reasoning.strip()
             assert answer.answer.strip()
 
+    def test_parallel_answer_generation_preserves_question_order(
+        self, monkeypatch
+    ) -> None:
+        questions = [
+            ClarifyingQuestion(id="q1", text="First question", category="goal"),
+            ClarifyingQuestion(id="q2", text="Second question", category="users"),
+            ClarifyingQuestion(id="q3", text="Third question", category="technical"),
+        ]
+        thread_ids: set[int] = set()
+
+        monkeypatch.setattr(
+            workflow_module,
+            "generate_clarifying_questions",
+            lambda prompt: questions,
+        )
+        monkeypatch.setattr(
+            workflow_module,
+            "assess_risk",
+            lambda prompt: RiskAssessment(
+                tier=RiskTier.LOW,
+                score=1,
+                escalate_to_human=False,
+                rationale=["safe"],
+            ),
+        )
+        monkeypatch.setattr(
+            workflow_module,
+            "build_prd_markdown",
+            lambda prompt, answers: "## Goals\n\n- Ship it",
+        )
+        monkeypatch.setattr(
+            workflow_module,
+            "select_persona",
+            lambda question: ExpertPersona.SENIOR_ENGINEER,
+        )
+
+        def fake_generate_answer(
+            question: ClarifyingQuestion, persona: ExpertPersona
+        ) -> AutonomousAnswer:
+            thread_ids.add(threading.get_ident())
+            time.sleep(0.2)
+            return AutonomousAnswer(
+                question_id=question.id,
+                question=question.text,
+                answer=f"answer for {question.id}",
+                answered_by=persona,
+                reasoning=f"reasoning for {question.id}",
+            )
+
+        monkeypatch.setattr(
+            workflow_module,
+            "generate_autonomous_answer",
+            fake_generate_answer,
+        )
+
+        started_at = time.perf_counter()
+        artifacts = run_pm_workflow("Parallelize answers")
+        elapsed = time.perf_counter() - started_at
+
+        assert [a.question_id for a in artifacts.autonomous_answers] == ["q1", "q2", "q3"]
+        assert len(thread_ids) > 1
+        assert elapsed < 0.45
+
+
+class TestPrdFormatting:
+    def test_build_prd_normalizes_to_task_prd_style(self) -> None:
+        answers = [
+            AutonomousAnswer(
+                question_id="q1",
+                question="What matters most?",
+                answer="Execution-ready scope.",
+                answered_by=ExpertPersona.STARTUP_CEO,
+                reasoning="It unlocks delivery.",
+            )
+        ]
+        raw_prd = """# PRD: Example
+
+## Clarifying Questions And Autonomous Answers
+
+### 1. What matters most?
+- Answer: Execution-ready scope.
+- Answered by: CEO of an insanely fast-growing startup
+- Reasoning: It unlocks delivery.
+
+## Introduction/Overview
+
+Hello
+"""
+
+        with patch("colonyos_pm.prd.chat", return_value=raw_prd):
+            prd_markdown = build_prd_markdown("Prompt", answers)
+
+        assert "**Answer:** Execution-ready scope." in prd_markdown
+        assert "**Answered by:** CEO of an insanely fast-growing startup" in prd_markdown
+        assert "**Reasoning:** It unlocks delivery." in prd_markdown
+        assert "\n---\n\n## Introduction/Overview" in prd_markdown
+
 
 class TestLocalArtifactStore:
     def test_writes_prd_and_bundle(self, tmp_path: Path) -> None:
-        store = LocalArtifactStore(base_dir=str(tmp_path / "generated"))
+        store = LocalArtifactStore(
+            base_dir=str(tmp_path / "generated"),
+            tasks_dir=str(tmp_path / "tasks"),
+        )
         artifacts = run_pm_workflow("Build PM workflow")
         result = store.save_workflow_artifacts(artifacts)
 
@@ -94,9 +200,15 @@ class TestLocalArtifactStore:
         prd_content = Path(result["prd_path"]).read_text()
         assert len(prd_content) > 100
         assert Path(result["bundle_path"]).exists()
+        assert Path(result["task_prd_path"]).exists()
+        task_prd_content = Path(result["task_prd_path"]).read_text()
+        assert task_prd_content.startswith("# PRD:")
 
     def test_saves_human_intervention_record(self, tmp_path: Path) -> None:
-        store = LocalArtifactStore(base_dir=str(tmp_path / "generated"))
+        store = LocalArtifactStore(
+            base_dir=str(tmp_path / "generated"),
+            tasks_dir=str(tmp_path / "tasks"),
+        )
         memory_path = store.save_human_intervention(
             HumanInterventionRecord(
                 work_id="pmw-test123",

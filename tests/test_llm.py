@@ -30,6 +30,25 @@ class TestLlmResponsesApi:
             max_output_tokens=321,
         )
 
+    def test_chat_omits_token_limit_when_max_tokens_is_none(self) -> None:
+        mock_client = MagicMock()
+        mock_client.responses.create.return_value = SimpleNamespace(
+            output_text="uncapped output"
+        )
+
+        with (
+            patch("colonyos_pm.llm.get_client", return_value=mock_client),
+            patch("colonyos_pm.llm.get_default_model", return_value="gpt-5.4"),
+        ):
+            result = chat("system prompt", "user prompt", max_tokens=None)
+
+        assert result == "uncapped output"
+        mock_client.responses.create.assert_called_once_with(
+            model="gpt-5.4",
+            instructions="system prompt",
+            input="user prompt",
+        )
+
     def test_chat_json_parses_fenced_json_output(self) -> None:
         mock_client = MagicMock()
         mock_client.responses.create.return_value = SimpleNamespace(

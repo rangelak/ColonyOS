@@ -39,7 +39,7 @@ Preferred Azure setup:
 ```env
 AZURE_OPENAI_API_KEY=your-azure-key-here
 AZURE_OPENAI_ENDPOINT=https://your-resource-name.cognitiveservices.azure.com/
-AZURE_OPENAI_MODEL=gpt-5.4-pro
+AZURE_OPENAI_MODEL=gpt-5.4
 # Optional override if your Azure deployment requires a different supported version.
 # AZURE_OPENAI_API_VERSION=2025-03-01-preview
 ```
@@ -81,7 +81,9 @@ Notes:
 - The shared client lives in `src/colonyos_pm/client.py` and is reused by all workflow agents.
 - Azure GPT-5 deployments are queried through the Responses API, so the shared wrapper in `src/colonyos_pm/llm.py` uses `client.responses.create(...)` rather than `chat.completions`.
 - The repo defaults Azure Responses calls to `2025-03-01-preview`, which matches the working live deployment we verified.
+- The recommended Azure model for the PM workflow is `gpt-5.4`, which is noticeably faster than `gpt-5.4-pro` for the multi-call planning flow.
 - If you paste a full Azure portal URL that includes `/openai/...`, the client normalizes it back to the Azure resource endpoint automatically.
+- The shared LLM wrapper accepts optional token caps; the PRD synthesis step now runs without a hard `max_output_tokens` limit to avoid truncating full markdown output.
 
 Why this is the best entrypoint:
 
@@ -97,10 +99,17 @@ Each run writes files to:
 generated/pm-workflow/<work_id>/
 ```
 
+It also writes a task-style PRD into:
+
+```text
+tasks/YYYYMMDD_HHMMSS_prd_<slug>.md
+```
+
 Main outputs:
 
 - `prd.md` - the generated PRD
 - `artifact_bundle.json` - the full structured workflow output
+- `tasks/..._prd_*.md` - the same PRD normalized into the repo's task-document format
 
 The CLI also prints:
 

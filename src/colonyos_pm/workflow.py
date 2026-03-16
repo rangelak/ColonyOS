@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha1
 
 from colonyos_pm.answers import generate_autonomous_answer
@@ -9,6 +10,8 @@ from colonyos_pm.personas import select_persona
 from colonyos_pm.prd import build_prd_markdown
 from colonyos_pm.questions import generate_clarifying_questions
 from colonyos_pm.risk import assess_risk
+
+MAX_PARALLEL_ANSWER_CALLS = 4
 
 
 def _build_work_id(prompt: str) -> str:
@@ -20,22 +23,36 @@ def _log(msg: str) -> None:
     print(f"[pm-workflow] {msg}", file=sys.stderr, flush=True)
 
 
+def _parallel_answer_workers(question_count: int) -> int:
+    return max(1, min(MAX_PARALLEL_ANSWER_CALLS, question_count))
+
+
 def run_pm_workflow(prompt: str) -> WorkflowArtifacts:
     _log("Generating clarifying questions...")
-    questions = generate_clarifying_questions(prompt)
-    _log(f"  Generated {len(questions)} questions.")
+    with ThreadPoolExecutor(max_workers=2) as planning_executor:
+        question_future = planning_executor.submit(generate_clarifying_questions, prompt)
+        risk_future = planning_executor.submit(assess_risk, prompt)
 
-    _log("Generating autonomous answers with expert personas...")
-    answers = []
-    for question in questions:
-        persona = select_persona(question)
-        _log(f"  [{persona.value}] answering: {question.text[:80]}...")
-        answer = generate_autonomous_answer(question, persona)
-        answers.append(answer)
+        questions = question_future.result()
+        _log(f"  Generated {len(questions)} questions.")
+
+        _log("Generating autonomous answers with expert personas...")
+        with ThreadPoolExecutor(
+            max_workers=_parallel_answer_workers(len(questions))
+        ) as answer_executor:
+            answer_futures = []
+            for question in questions:
+                persona = select_persona(question)
+                _log(f"  [{persona.value}] answering: {question.text[:80]}...")
+                answer_futures.append(
+                    answer_executor.submit(generate_autonomous_answer, question, persona)
+                )
+            answers = [future.result() for future in answer_futures]
+
+        risk = risk_future.result()
     _log(f"  Answered {len(answers)} questions.")
 
     _log("Assessing risk...")
-    risk = assess_risk(prompt)
     _log(f"  Risk tier: {risk.tier.value} (score={risk.score}, escalate={risk.escalate_to_human})")
 
     _log("Building PRD from Q&A output...")

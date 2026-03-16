@@ -55,15 +55,16 @@ def _create_response(
     user: str,
     *,
     model: str | None,
-    max_tokens: int,
+    max_tokens: int | None,
 ) -> object:
     client = get_client()
     request_kwargs = {
         "model": model or get_default_model(),
         "instructions": system,
         "input": user,
-        "max_output_tokens": max_tokens,
     }
+    if max_tokens is not None:
+        request_kwargs["max_output_tokens"] = max_tokens
     for attempt in range(3):
         try:
             return client.responses.create(**request_kwargs)
@@ -84,7 +85,7 @@ def chat(
     *,
     model: str | None = None,
     temperature: float = 0.7,
-    max_tokens: int = 4096,
+    max_tokens: int | None = 4096,
 ) -> str:
     response = _create_response(
         system,
@@ -102,7 +103,7 @@ def chat_json(
     *,
     model: str | None = None,
     temperature: float = 0.4,
-    max_tokens: int = 4096,
+    max_tokens: int | None = 4096,
 ) -> dict | list:
     """Call the model and parse the response as JSON."""
     response = _create_response(

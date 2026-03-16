@@ -498,7 +498,7 @@ Preferred Azure configuration:
 ```env
 AZURE_OPENAI_API_KEY=your-azure-key-here
 AZURE_OPENAI_ENDPOINT=https://your-resource-name.cognitiveservices.azure.com/
-AZURE_OPENAI_MODEL=gpt-5.4-pro
+AZURE_OPENAI_MODEL=gpt-5.4
 # Optional override if your Azure deployment requires a different supported version.
 # AZURE_OPENAI_API_VERSION=2025-03-01-preview
 ```
@@ -521,9 +521,9 @@ Override the model:
 ./.venv/bin/python scripts/run_pm_workflow.py --model gpt-4o "Your feature request"
 ```
 
-The shared client is defined in `src/colonyos_pm/client.py` and reused across all workflow agents. Azure GPT-5 deployments are queried through the Responses API in `src/colonyos_pm/llm.py`, default to `2025-03-01-preview`, and normalize pasted Azure request URLs back to the Azure resource endpoint automatically.
+The shared client is defined in `src/colonyos_pm/client.py` and reused across all workflow agents. Azure GPT-5 deployments are queried through the Responses API in `src/colonyos_pm/llm.py`, default to `2025-03-01-preview`, normalize pasted Azure request URLs back to the Azure resource endpoint automatically, and work best with `gpt-5.4` for the latency-sensitive PM workflow. Token caps are optional in the shared wrapper, and the PRD synthesis step now runs without a hard output-token ceiling to avoid truncating full markdown documents.
 
-Output artifacts are written to `generated/pm-workflow/<work_id>/` and include a `prd.md` and `artifact_bundle.json`.
+Output artifacts are written to `generated/pm-workflow/<work_id>/` and include a `prd.md` and `artifact_bundle.json`. Each run also writes a task-style PRD into `tasks/YYYYMMDD_HHMMSS_prd_<slug>.md`.
 
 Run tests (mocked, no API key needed):
 

@@ -278,7 +278,15 @@ A shared `src`-level LLM client that makes Azure OpenAI the first-class configur
 - Added retry handling and stderr retry logs for transient Azure Responses API connection failures.
 - Tuned token budgets for the question, answer, and risk stages so smaller JSON outputs do not request oversized responses while still allowing the clarifying-question stage enough room to complete.
 - Hardened response parsing so empty `output_text` falls back to `response.output`, and truncation at `max_output_tokens` raises a clear runtime error instead of silently parsing partial JSON.
-- Verified the Responses API refactor with `./.venv/bin/python -m pytest -q` (`33 passed`).
+- Parallelized per-question answer generation and overlapped risk assessment with question generation so the PM workflow stops waiting on every Azure call serially.
+- Updated the recommended Azure model from `gpt-5.4-pro` to `gpt-5.4` for the PM workflow's latency-sensitive multi-call path.
+- Added workflow-level regression coverage to verify answer generation remains ordered even when it runs in parallel.
+- Increased the PRD synthesis output budget after a live run showed the full markdown step still truncating at the previous 4096-token ceiling.
+- Made `max_output_tokens` optional in the shared Responses wrapper so specific stages, especially PRD synthesis, can run without a hard cap when needed.
+- Normalized generated PRDs into the same answer/reasoning formatting style used by the repo's `tasks/*_prd_*.md` files.
+- Updated artifact persistence so each PM workflow run also writes a timestamped task-style PRD into `tasks/` using the repo naming helper.
+- Verified the latest workflow changes with `./.venv/bin/python -m pytest -q` (`36 passed`).
+- Verified a live PM workflow run completed successfully and wrote both `generated/pm-workflow/pmw-5196ac5ee9/` artifacts and `tasks/20260316_155339_prd_colonyos_next_phase_roadmap_and_agent_ready_implementation_plan.md`.
 
 ### Files created or modified
 
@@ -288,13 +296,18 @@ README.md
 START_HERE.md
 src/colonyos_pm/client.py
 src/colonyos_pm/cli.py
+src/colonyos_pm/workflow.py
 src/colonyos_pm/questions.py
 src/colonyos_pm/answers.py
 src/colonyos_pm/risk.py
+src/colonyos_pm/prd.py
+src/colonyos_pm/storage.py
 src/colonyos_pm/llm.py
 tasks/20260316_114331_tasks_azure_shared_client.md
+tasks/20260316_155339_prd_colonyos_next_phase_roadmap_and_agent_ready_implementation_plan.md
 tasks/CHANGELOG.md
 tests/conftest.py
 tests/test_client.py
 tests/test_llm.py
+tests/test_pm_workflow.py
 ```
