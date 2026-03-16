@@ -1,5 +1,7 @@
 # ColonyOS
 
+For actual local setup and the runnable project entrypoint, start with `START_HERE.md`.
+
 ColonyOS is an autonomous software engineering operating system for startups that want to automate coding without turning their repo into chaos. It coordinates specialized AI agents to plan, implement, test, review, and ship code through a deterministic, policy-driven workflow. Inspired by ant colonies, it replaces ad-hoc agent swarms with a structured pipeline that turns product requirements into production-ready pull requests.
 
 ## The Core Idea
