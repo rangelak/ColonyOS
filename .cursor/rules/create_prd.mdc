@@ -13,7 +13,8 @@ To guide an AI assistant in creating a detailed Product Requirements Document (P
 1.  **Receive Initial Prompt:** The user provides a brief description or request for a new feature or functionality.
 2.  **Ask Clarifying Questions:** Before writing the PRD, the AI *must* ask clarifying questions to gather sufficient detail. The goal is to understand the "what" and "why" of the feature, not necessarily the "how" (which the developer will figure out). Make sure to provide options in letter/number lists so I can respond easily with my selections.
 3.  **Generate PRD:** Based on the initial prompt and the user's answers to the clarifying questions, generate a PRD using the structure outlined below.
-4.  **Save PRD:** Save the generated document as `prd-[feature-name].md` inside the `/tasks` directory.
+4.  **Generate Names Deterministically:** Do not invent filenames manually. Run `./.venv/bin/python -m colonyos_pm.naming bundle "[feature-name]" --title "[Feature Title]"` and use the returned `prd_filename` and `changelog_heading`.
+5.  **Save PRD:** Save the generated document inside the `/tasks` directory using the helper-generated filename.
 
 ## Clarifying Questions (Examples)
 
@@ -51,11 +52,14 @@ Assume the primary reader of the PRD is a **junior developer**. Therefore, requi
 
 *   **Format:** Markdown (`.md`)
 *   **Location:** `/tasks/`
-*   **Filename:** `NNN_prd_[feature-name].md` where `NNN` is the next sequential number (zero-padded to 3 digits). Check existing files in `/tasks/` to determine the next number. For example, if the highest existing prefix is `001`, the next PRD is `002_prd_[feature-name].md`.
+*   **Filename:** `YYYYMMDD_HHMMSS_prd_[feature-name].md`
+*   **Timestamp rule:** Use a creation timestamp rather than a sequential number. This avoids merge conflicts when multiple branches create PRDs in parallel.
+*   **Example:** `20260316_110957_prd_billing_reconciliation.md`
+*   **Name source:** Generate the filename with `./.venv/bin/python -m colonyos_pm.naming bundle ...` rather than formatting it manually.
 
 ## Changelog
 
-After saving the PRD, append an entry to `tasks/CHANGELOG.md` under a new heading `## NNN — [Feature Title]` with the PRD path, status set to `In Progress`, and a brief description of what the PRD covers.
+After saving the PRD, append an entry to `tasks/CHANGELOG.md` under the helper-generated heading in the form `## YYYYMMDD_HHMMSS — [Feature Title]`, with the PRD path, status set to `In Progress`, and a brief description of what the PRD covers.
 
 ## Final instructions
 

@@ -1,0 +1,28 @@
+---
+description: Keep START_HERE and README aligned with completed repository work.
+alwaysApply: true
+---
+# Rule: Maintain Entry Docs
+
+## Goal
+
+Keep `START_HERE.md` and `README.md` accurate as the project evolves.
+
+## Required Behavior
+
+After completing any meaningful user-requested task, review both `START_HERE.md` and `README.md`.
+
+Update one or both files if the completed work changes any of the following:
+
+- local setup steps
+- runtime entrypoints or commands
+- environment variables or external dependencies
+- current implemented scope versus future-state scope
+- output locations, artifact formats, or developer navigation
+
+## Rules
+
+- Do not leave the entry docs stale after changing how the project is set up, run, or understood.
+- If a task does not affect either document, explicitly decide that no doc update is needed instead of ignoring the check.
+- Prefer `START_HERE.md` for practical onboarding and `README.md` for higher-level project context.
+- If both docs would repeat the same operational details, keep the detail in `START_HERE.md` and make `README.md` point to it.

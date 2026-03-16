@@ -12,7 +12,8 @@ To guide an AI assistant in creating a detailed, step-by-step task list in Markd
 
 - **Format:** Markdown (`.md`)
 - **Location:** `/tasks/`
-- **Filename:** `NNN_tasks_[prd-base-name].md` — use the same `NNN` prefix as the source PRD. For example, if the PRD is `002_prd_billing.md`, the task file is `002_tasks_prd_billing.md`.
+- **Filename:** `YYYYMMDD_HHMMSS_tasks_[feature-name].md` — reuse the timestamp from the source PRD. For example, if the PRD is `20260316_110957_prd_billing.md`, the task file is `20260316_110957_tasks_billing.md`.
+- **Name source:** Do not derive this manually. Run `./.venv/bin/python -m colonyos_pm.naming task-from-prd "[path-to-prd]"` and use the returned task filename.
 
 ## Process
 
@@ -24,8 +25,9 @@ To guide an AI assistant in creating a detailed, step-by-step task list in Markd
     - For every parent task that involves code changes, the first sub-task must be a test-first step (write or update failing tests before implementation).
 6.  **Identify Relevant Files:** Based on the tasks and PRD, identify potential files that will need to be created or modified. List these under the `Relevant Files` section, including corresponding test files if applicable.
 7.  **Generate Final Output:** Combine the parent tasks, sub-tasks, relevant files, and notes into the final Markdown structure.
-8.  **Save Task List:** Save the generated document in the `/tasks/` directory with the filename `NNN_tasks_[prd-base-name].md`, using the same `NNN` prefix as the source PRD file.
-9.  **Update Changelog:** Update the corresponding entry in `tasks/CHANGELOG.md` to note that the task list has been generated.
+8.  **Generate Task Filename Deterministically:** Run `./.venv/bin/python -m colonyos_pm.naming task-from-prd "[path-to-prd]"` and use the returned filename.
+9.  **Save Task List:** Save the generated document in the `/tasks/` directory with that helper-generated filename so the PRD and task file pair cleanly.
+10. **Update Changelog:** Update the corresponding entry in `tasks/CHANGELOG.md` to note that the task list has been generated.
 
 ## Test-First Requirement
 

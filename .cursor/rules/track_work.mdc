@@ -12,14 +12,15 @@ Every meaningful change to the repository must be recorded in the corresponding 
 
 After completing any user-requested change — code, config, rules, docs, refactors, or fixes — you must:
 
-1. **Update the task file** (`tasks/NNN_tasks_*.md`):
+1. **Update the task file** (`tasks/YYYYMMDD_HHMMSS_tasks_*.md`):
    - If the work maps to an existing task, mark it complete.
    - If it is new work not covered by an existing task, add a new numbered parent task (and sub-tasks if needed) and mark them complete.
    - Keep the relevant files section accurate.
+   - When creating a new task file, do not invent the filename manually. Generate it with `./.venv/bin/python -m colonyos_pm.naming bundle "[feature-name-or-work-label]"`.
 
 2. **Update `tasks/CHANGELOG.md`**:
    - If the work falls under an existing changelog entry, append to that entry's implementation log.
-   - If it is a new initiative, add a new numbered section.
+   - If it is a new initiative, add a new timestamped section heading in the form `## YYYYMMDD_HHMMSS — [Title]`.
    - Always list the files created or modified.
 
 ## Rules
@@ -27,4 +28,4 @@ After completing any user-requested change — code, config, rules, docs, refact
 - Do NOT skip this step. Every change gets tracked.
 - Do NOT wait until the end of a session. Update incrementally as work completes.
 - Keep entries concise but specific enough that someone reading the log understands what changed and why.
-- If a task file does not exist yet for the current work, create one following the `NNN_tasks_` naming convention.
+- If a task file does not exist yet for the current work, create one following the `YYYYMMDD_HHMMSS_tasks_` naming convention.
