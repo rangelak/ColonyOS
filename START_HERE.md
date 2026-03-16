@@ -38,8 +38,10 @@ Preferred Azure setup:
 
 ```env
 AZURE_OPENAI_API_KEY=your-azure-key-here
-AZURE_OPENAI_ENDPOINT=https://your-resource-name.cognitiveservices.azure.com/
-AZURE_OPENAI_MODEL=gpt-5.4
+AZURE_OPENAI_ENDPOINT=https://your-resource-name.openai.azure.com/openai/v1/
+AZURE_OPENAI_MODEL=gpt-5.4-pro
+# Optional override if your Azure deployment requires a different supported version.
+# AZURE_OPENAI_API_VERSION=2025-03-01-preview
 ```
 
 Optional non-Azure fallback:
@@ -77,7 +79,9 @@ Optional model override:
 Notes:
 
 - The shared client lives in `src/colonyos_pm/client.py` and is reused by all workflow agents.
-- If you paste a full Azure portal URL that includes `/openai/...`, the client normalizes it to the resource root automatically.
+- Azure GPT-5 deployments are queried through the Responses API, so the shared wrapper in `src/colonyos_pm/llm.py` uses `client.responses.create(...)` rather than `chat.completions`.
+- The repo defaults Azure Responses calls to `2025-03-01-preview`, which matches the working live deployment we verified.
+- If you paste a full Azure portal URL that includes `/openai/...`, the client normalizes it to the Azure Responses base URL automatically.
 
 Why this is the best entrypoint:
 

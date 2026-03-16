@@ -13,7 +13,7 @@ def generate_autonomous_answer(
     )
     user = f"Question: {question.text}"
 
-    data = chat_json(system=system, user=user, temperature=0.6)
+    data = chat_json(system=system, user=user, temperature=0.6, max_tokens=1200)
     answer_text = data.get("answer", "") if isinstance(data, dict) else ""
     reasoning = data.get("reasoning", "") if isinstance(data, dict) else ""
 

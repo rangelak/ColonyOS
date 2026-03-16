@@ -14,22 +14,12 @@ from colonyos_pm.client import reset_client_cache
 
 
 @dataclass
-class _FakeMessage:
-    content: str
-
-
-@dataclass
-class _FakeChoice:
-    message: _FakeMessage
-
-
-@dataclass
 class _FakeResponse:
-    choices: list[_FakeChoice]
+    output_text: str
 
 
 def _make_fake_response(content: str) -> _FakeResponse:
-    return _FakeResponse(choices=[_FakeChoice(message=_FakeMessage(content=content))])
+    return _FakeResponse(output_text=content)
 
 
 FAKE_QUESTIONS_JSON = json.dumps({
@@ -117,21 +107,12 @@ This feature creates an autonomous PM workflow.
 
 def _route_fake_response(*args, **kwargs) -> _FakeResponse:
     """Route to different fake responses based on the system prompt content."""
-    messages = kwargs.get("messages", [])
-    system_content = ""
-    for msg in messages:
-        if isinstance(msg, dict) and msg.get("role") == "system":
-            system_content = msg.get("content", "")
-            break
+    system_content = kwargs.get("instructions", "")
+    user_content = kwargs.get("input", "")
 
     if "clarifying questions" in system_content.lower() and "json" in system_content.lower():
         return _make_fake_response(FAKE_QUESTIONS_JSON)
     elif "risk classification" in system_content.lower():
-        user_content = ""
-        for msg in messages:
-            if isinstance(msg, dict) and msg.get("role") == "user":
-                user_content = msg.get("content", "")
-                break
         if any(kw in user_content.lower() for kw in ["billing", "auth", "migration", "secret"]):
             return _make_fake_response(FAKE_RISK_HIGH_JSON)
         return _make_fake_response(FAKE_RISK_JSON)
@@ -154,11 +135,8 @@ def mock_openai(monkeypatch):
     reset_client_cache()
 
     mock_client = MagicMock()
-    mock_client.chat.completions.create.side_effect = _route_fake_response
+    mock_client.responses.create.side_effect = _route_fake_response
 
-    with (
-        patch("colonyos_pm.client.OpenAI", return_value=mock_client),
-        patch("colonyos_pm.client.AzureOpenAI", return_value=mock_client),
-    ):
+    with patch("colonyos_pm.client.OpenAI", return_value=mock_client):
         yield mock_client
     reset_client_cache()

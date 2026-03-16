@@ -10,6 +10,7 @@ def assess_risk(prompt: str) -> RiskAssessment:
         system=RISK_CLASSIFICATION_SYSTEM,
         user=f"Feature request:\n\n{prompt}",
         temperature=0.3,
+        max_tokens=600,
     )
 
     if not isinstance(data, dict):

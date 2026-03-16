@@ -4,10 +4,10 @@ import os
 from functools import lru_cache
 from urllib.parse import urlparse
 
-from openai import AzureOpenAI, OpenAI
+from openai import OpenAI
 
 DEFAULT_MODEL = "gpt-4o"
-DEFAULT_AZURE_API_VERSION = "2024-12-01-preview"
+DEFAULT_AZURE_RESPONSES_API_VERSION = "2025-03-01-preview"
 
 
 def get_default_model() -> str:
@@ -18,14 +18,22 @@ def get_default_model() -> str:
     )
 
 
-def _normalize_azure_endpoint(endpoint: str) -> str:
+def _normalize_azure_base_url(endpoint: str) -> str:
     parsed = urlparse(endpoint)
     if parsed.scheme and parsed.netloc:
-        return f"{parsed.scheme}://{parsed.netloc}"
-    return endpoint.rstrip("/")
+        scheme = parsed.scheme
+        host = parsed.netloc
+    else:
+        scheme = "https"
+        host = endpoint.rstrip("/")
+
+    if host.endswith(".cognitiveservices.azure.com"):
+        host = host.removesuffix(".cognitiveservices.azure.com") + ".openai.azure.com"
+
+    return f"{scheme}://{host}/openai/v1/"
 
 
-def _get_azure_config() -> tuple[str, str, str] | None:
+def _get_azure_config() -> tuple[str, str, str | None] | None:
     api_key = os.environ.get("AZURE_OPENAI_API_KEY")
     endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
 
@@ -45,22 +53,23 @@ def _get_azure_config() -> tuple[str, str, str] | None:
             + ". Export them or add them to .env"
         )
 
-    api_version = os.environ.get(
-        "AZURE_OPENAI_API_VERSION", DEFAULT_AZURE_API_VERSION
-    )
-    return api_key, _normalize_azure_endpoint(endpoint), api_version
+    base_url = _normalize_azure_base_url(endpoint)
+    api_version = os.environ.get("AZURE_OPENAI_API_VERSION", DEFAULT_AZURE_RESPONSES_API_VERSION)
+    return api_key, base_url, api_version
 
 
 @lru_cache(maxsize=1)
-def get_client() -> OpenAI | AzureOpenAI:
+def get_client() -> OpenAI:
     azure_config = _get_azure_config()
     if azure_config:
-        api_key, endpoint, api_version = azure_config
-        return AzureOpenAI(
-            api_version=api_version,
-            azure_endpoint=endpoint,
-            api_key=api_key,
-        )
+        api_key, base_url, api_version = azure_config
+        client_kwargs: dict[str, object] = {
+            "api_key": api_key,
+            "base_url": base_url,
+        }
+        if api_version:
+            client_kwargs["default_query"] = {"api-version": api_version}
+        return OpenAI(**client_kwargs)
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:

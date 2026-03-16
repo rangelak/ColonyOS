@@ -23,7 +23,7 @@ def main() -> None:
     parser.add_argument(
         "--model",
         default=None,
-        help="Override the OpenAI model (default: gpt-4o or COLONYOS_MODEL env var).",
+        help="Override the LLM model (default: gpt-4o or COLONYOS_MODEL env var).",
     )
     args = parser.parse_args()
 

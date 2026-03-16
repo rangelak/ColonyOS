@@ -269,7 +269,15 @@ A shared `src`-level LLM client that makes Azure OpenAI the first-class configur
 - Added `tests/test_client.py` to cover Azure-first configuration, OpenAI fallback, model precedence, and partial Azure config failures.
 - Extended `tests/test_client.py` with regression coverage for custom Azure API version overrides and the no-credentials failure path.
 - Updated `.env.example`, `START_HERE.md`, and `README.md` so setup instructions match the real shared client implementation.
-- Verified the change with `./.venv/bin/python -m pytest -q` (`28 passed`).
+- Reworked the shared Azure path to use the Responses API base URL and updated `src/colonyos_pm/llm.py` to call `client.responses.create(...)` with `response.output_text` parsing for both text and JSON helpers.
+- Tightened Azure endpoint handling so pasted request URLs are normalized to `/openai/v1/` but embedded query-string API versions are ignored unless `AZURE_OPENAI_API_VERSION` is set explicitly.
+- Defaulted Azure Responses calls to `2025-03-01-preview`, the minimum preview version we verified works with the live `gpt-5.4-pro` deployment.
+- Added `tests/test_llm.py` to pin the Responses API request shape and fenced JSON parsing behavior.
+- Updated the CLI help text and Azure setup docs to describe the Responses API path and the correct `/openai/v1/` endpoint format.
+- Added retry handling and stderr retry logs for transient Azure Responses API connection failures.
+- Tightened token budgets for the question, answer, and risk stages so smaller JSON outputs do not request oversized responses.
+- Hardened response parsing so empty `output_text` falls back to `response.output`, and truncation at `max_output_tokens` raises a clear runtime error instead of silently parsing partial JSON.
+- Verified the Responses API refactor with `./.venv/bin/python -m pytest -q` (`33 passed`).
 
 ### Files created or modified
 
@@ -278,9 +286,14 @@ A shared `src`-level LLM client that makes Azure OpenAI the first-class configur
 README.md
 START_HERE.md
 src/colonyos_pm/client.py
+src/colonyos_pm/cli.py
+src/colonyos_pm/questions.py
+src/colonyos_pm/answers.py
+src/colonyos_pm/risk.py
 src/colonyos_pm/llm.py
 tasks/20260316_114331_tasks_azure_shared_client.md
 tasks/CHANGELOG.md
 tests/conftest.py
 tests/test_client.py
+tests/test_llm.py
 ```

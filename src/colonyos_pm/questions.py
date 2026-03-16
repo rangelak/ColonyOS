@@ -10,6 +10,7 @@ def generate_clarifying_questions(prompt: str) -> list[ClarifyingQuestion]:
         system=QUESTION_GENERATION_SYSTEM,
         user=f"Feature request:\n\n{prompt}",
         temperature=0.5,
+        max_tokens=1200,
     )
     raw_questions = data.get("questions", []) if isinstance(data, dict) else []
     return [
