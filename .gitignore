@@ -3,5 +3,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
-generated/
+*.egg-info/
+dist/
+build/
 .env
+.colonyos/runs/

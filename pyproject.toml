@@ -1,17 +1,32 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "colonyos-pm-workflow"
+name = "colonyos"
 version = "0.1.0"
-description = "Autonomous PM workflow primitives for ColonyOS."
+description = "Autonomous agent loop that turns prompts into shipped PRs."
+readme = "README.md"
 requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "pyyaml>=6.0",
+    "claude-code-sdk>=0.0.25",
+]
+
+[project.scripts]
+colonyos = "colonyos.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+colonyos = ["instructions/*.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
 
-[tool.basedpyright]
-include = ["src", "tests", "scripts"]
-extraPaths = ["src"]
+[tool.pyright]
+pythonVersion = "3.11"
+include = ["src", "tests"]

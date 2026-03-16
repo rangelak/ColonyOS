@@ -1,77 +1,69 @@
-import json
 from datetime import datetime
 
 import pytest
 
-from colonyos_pm.naming import (
-    generate_planning_names,
+from colonyos.naming import (
+    PlanningNames,
+    planning_names,
+    slugify,
+    task_filename_from_prd,
     generate_timestamp,
-    main,
-    normalize_feature_slug,
-    task_filename_from_prd_path,
-    validate_timestamp,
 )
 
 
+class TestSlugify:
+    def test_basic(self):
+        assert slugify("Add Stripe Billing") == "add_stripe_billing"
+
+    def test_special_chars(self):
+        assert slugify("feat: add OAuth 2.0!") == "feat_add_oauth_2_0"
+
+    def test_empty(self):
+        assert slugify("") == "untitled"
+
+    def test_consecutive_separators(self):
+        assert slugify("a---b___c   d") == "a_b_c_d"
+
+    def test_leading_trailing_stripped(self):
+        assert slugify("  hello world  ") == "hello_world"
+
+
 class TestPlanningNames:
-    def test_normalize_feature_slug(self) -> None:
-        assert normalize_feature_slug(" Billing & Auth: V2 ") == "billing_auth_v2"
+    def test_generates_filenames(self):
+        names = planning_names("Add auth", timestamp="20260316_120000")
+        assert names.timestamp == "20260316_120000"
+        assert names.slug == "add_auth"
+        assert names.prd_filename == "20260316_120000_prd_add_auth.md"
+        assert names.task_filename == "20260316_120000_tasks_add_auth.md"
 
-    def test_generate_timestamp_from_datetime(self) -> None:
-        timestamp = generate_timestamp(datetime(2026, 3, 16, 11, 11, 29))
-        assert timestamp == "20260316_111129"
+    def test_auto_timestamp(self):
+        names = planning_names("some feature")
+        assert len(names.timestamp) == 15  # YYYYMMDD_HHMMSS
+        assert names.prd_filename.startswith(names.timestamp)
 
-    def test_generate_planning_names_uses_supplied_timestamp(self) -> None:
-        planning_names = generate_planning_names(
-            "Billing Reconciliation",
-            title="Billing Reconciliation",
-            timestamp="20260316_111129",
-        )
-
-        assert planning_names.prd_filename == "20260316_111129_prd_billing_reconciliation.md"
-        assert planning_names.task_filename == "20260316_111129_tasks_billing_reconciliation.md"
-        assert planning_names.changelog_heading == "## 20260316_111129 — Billing Reconciliation"
-
-    def test_task_filename_from_prd_path(self) -> None:
-        task_filename = task_filename_from_prd_path(
-            "tasks/20260316_111129_prd_billing_reconciliation.md"
-        )
-        assert task_filename == "20260316_111129_tasks_billing_reconciliation.md"
-
-    def test_validate_timestamp_rejects_invalid_input(self) -> None:
-        with pytest.raises(ValueError):
-            validate_timestamp("2026-03-16 11:11:29")
+    def test_frozen(self):
+        names = planning_names("test", timestamp="20260101_000000")
+        with pytest.raises(AttributeError):
+            names.slug = "changed"
 
 
-class TestNamingCli:
-    def test_bundle_command_outputs_json(self, capsys: pytest.CaptureFixture[str]) -> None:
-        main(
-            [
-                "bundle",
-                "Billing Reconciliation",
-                "--title",
-                "Billing Reconciliation",
-                "--timestamp",
-                "20260316_111129",
-            ]
-        )
-
-        output = json.loads(capsys.readouterr().out)
-        assert output["prd_filename"] == "20260316_111129_prd_billing_reconciliation.md"
-        assert output["task_filename"] == "20260316_111129_tasks_billing_reconciliation.md"
-
-    def test_task_from_prd_command_outputs_filename(
-        self,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        main(
-            [
-                "task-from-prd",
-                "tasks/20260316_111129_prd_billing_reconciliation.md",
-            ]
-        )
-
+class TestTaskFilenameFromPrd:
+    def test_valid(self):
         assert (
-            capsys.readouterr().out.strip()
-            == "20260316_111129_tasks_billing_reconciliation.md"
+            task_filename_from_prd("20260316_120000_prd_add_auth.md")
+            == "20260316_120000_tasks_add_auth.md"
         )
+
+    def test_invalid_raises(self):
+        with pytest.raises(ValueError, match="must match"):
+            task_filename_from_prd("not_a_prd.md")
+
+
+class TestGenerateTimestamp:
+    def test_format(self):
+        ts = generate_timestamp(datetime(2026, 3, 16, 12, 0, 0))
+        assert ts == "20260316_120000"
+
+    def test_auto(self):
+        ts = generate_timestamp()
+        assert len(ts) == 15

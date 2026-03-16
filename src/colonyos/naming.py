@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from datetime import datetime
+
+TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
+PRD_FILENAME_RE = re.compile(
+    r"^(?P<timestamp>\d{8}_\d{6})_prd_(?P<slug>[a-z0-9_]+)\.md$"
+)
+
+
+@dataclass(frozen=True)
+class PlanningNames:
+    timestamp: str
+    slug: str
+    prd_filename: str
+    task_filename: str
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", value.lower())
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    return slug or "untitled"
+
+
+def generate_timestamp(now: datetime | None = None) -> str:
+    return (now or datetime.now()).strftime(TIMESTAMP_FORMAT)
+
+
+def planning_names(
+    feature_name: str,
+    *,
+    timestamp: str | None = None,
+) -> PlanningNames:
+    ts = timestamp or generate_timestamp()
+    slug = slugify(feature_name)
+    return PlanningNames(
+        timestamp=ts,
+        slug=slug,
+        prd_filename=f"{ts}_prd_{slug}.md",
+        task_filename=f"{ts}_tasks_{slug}.md",
+    )
+
+
+def task_filename_from_prd(prd_filename: str) -> str:
+    match = PRD_FILENAME_RE.match(prd_filename)
+    if not match:
+        raise ValueError(
+            f"PRD filename must match YYYYMMDD_HHMMSS_prd_<slug>.md, got: {prd_filename}"
+        )
+    return f"{match.group('timestamp')}_tasks_{match.group('slug')}.md"
