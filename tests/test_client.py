@@ -24,13 +24,13 @@ class TestSharedClientConfig:
             "AZURE_OPENAI_ENDPOINT",
             "https://example-resource.cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview",
         )
-        with patch("colonyos_pm.client.OpenAI") as openai_client:
+        with patch("colonyos_pm.client.AzureOpenAI") as azure_client:
             get_client()
 
-        openai_client.assert_called_once_with(
+        azure_client.assert_called_once_with(
             api_key="azure-key",
-            base_url="https://example-resource.openai.azure.com/openai/v1/",
-            default_query={"api-version": "2025-03-01-preview"},
+            azure_endpoint="https://example-resource.cognitiveservices.azure.com",
+            api_version="2025-03-01-preview",
         )
 
     def test_uses_openai_key_when_azure_env_is_absent(
@@ -56,16 +56,16 @@ class TestSharedClientConfig:
         )
         monkeypatch.setenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
 
-        with patch("colonyos_pm.client.OpenAI") as openai_client:
+        with patch("colonyos_pm.client.AzureOpenAI") as azure_client:
             get_client()
 
-        openai_client.assert_called_once_with(
+        azure_client.assert_called_once_with(
             api_key="azure-key",
-            base_url="https://example-resource.openai.azure.com/openai/v1/",
-            default_query={"api-version": "2025-04-01-preview"},
+            azure_endpoint="https://example-resource.cognitiveservices.azure.com",
+            api_version="2025-04-01-preview",
         )
 
-    def test_azure_base_url_without_api_version_uses_repo_default_preview(
+    def test_azure_endpoint_without_api_version_uses_repo_default_preview(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -73,16 +73,16 @@ class TestSharedClientConfig:
         monkeypatch.setenv("AZURE_OPENAI_API_KEY", "azure-key")
         monkeypatch.setenv(
             "AZURE_OPENAI_ENDPOINT",
-            "https://example-resource.openai.azure.com/openai/v1/",
+            "https://example-resource.cognitiveservices.azure.com/",
         )
 
-        with patch("colonyos_pm.client.OpenAI") as openai_client:
+        with patch("colonyos_pm.client.AzureOpenAI") as azure_client:
             get_client()
 
-        openai_client.assert_called_once_with(
+        azure_client.assert_called_once_with(
             api_key="azure-key",
-            base_url="https://example-resource.openai.azure.com/openai/v1/",
-            default_query={"api-version": "2025-03-01-preview"},
+            azure_endpoint="https://example-resource.cognitiveservices.azure.com",
+            api_version="2025-03-01-preview",
         )
 
     def test_default_model_uses_azure_model_when_no_override(

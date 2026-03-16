@@ -497,7 +497,7 @@ Preferred Azure configuration:
 
 ```env
 AZURE_OPENAI_API_KEY=your-azure-key-here
-AZURE_OPENAI_ENDPOINT=https://your-resource-name.openai.azure.com/openai/v1/
+AZURE_OPENAI_ENDPOINT=https://your-resource-name.cognitiveservices.azure.com/
 AZURE_OPENAI_MODEL=gpt-5.4-pro
 # Optional override if your Azure deployment requires a different supported version.
 # AZURE_OPENAI_API_VERSION=2025-03-01-preview
@@ -521,7 +521,7 @@ Override the model:
 ./.venv/bin/python scripts/run_pm_workflow.py --model gpt-4o "Your feature request"
 ```
 
-The shared client is defined in `src/colonyos_pm/client.py` and reused across all workflow agents. Azure GPT-5 deployments are queried through the Responses API in `src/colonyos_pm/llm.py`, default to `2025-03-01-preview`, and normalize pasted Azure request URLs back to the reusable `/openai/v1/` base URL automatically.
+The shared client is defined in `src/colonyos_pm/client.py` and reused across all workflow agents. Azure GPT-5 deployments are queried through the Responses API in `src/colonyos_pm/llm.py`, default to `2025-03-01-preview`, and normalize pasted Azure request URLs back to the Azure resource endpoint automatically.
 
 Output artifacts are written to `generated/pm-workflow/<work_id>/` and include a `prd.md` and `artifact_bundle.json`.
 

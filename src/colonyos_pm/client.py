@@ -4,7 +4,7 @@ import os
 from functools import lru_cache
 from urllib.parse import urlparse
 
-from openai import OpenAI
+from openai import AzureOpenAI, OpenAI
 
 DEFAULT_MODEL = "gpt-4o"
 DEFAULT_AZURE_RESPONSES_API_VERSION = "2025-03-01-preview"
@@ -18,7 +18,7 @@ def get_default_model() -> str:
     )
 
 
-def _normalize_azure_base_url(endpoint: str) -> str:
+def _normalize_azure_endpoint(endpoint: str) -> str:
     parsed = urlparse(endpoint)
     if parsed.scheme and parsed.netloc:
         scheme = parsed.scheme
@@ -27,10 +27,7 @@ def _normalize_azure_base_url(endpoint: str) -> str:
         scheme = "https"
         host = endpoint.rstrip("/")
 
-    if host.endswith(".cognitiveservices.azure.com"):
-        host = host.removesuffix(".cognitiveservices.azure.com") + ".openai.azure.com"
-
-    return f"{scheme}://{host}/openai/v1/"
+    return f"{scheme}://{host}"
 
 
 def _get_azure_config() -> tuple[str, str, str | None] | None:
@@ -53,23 +50,21 @@ def _get_azure_config() -> tuple[str, str, str | None] | None:
             + ". Export them or add them to .env"
         )
 
-    base_url = _normalize_azure_base_url(endpoint)
+    azure_endpoint = _normalize_azure_endpoint(endpoint)
     api_version = os.environ.get("AZURE_OPENAI_API_VERSION", DEFAULT_AZURE_RESPONSES_API_VERSION)
-    return api_key, base_url, api_version
+    return api_key, azure_endpoint, api_version
 
 
 @lru_cache(maxsize=1)
-def get_client() -> OpenAI:
+def get_client() -> OpenAI | AzureOpenAI:
     azure_config = _get_azure_config()
     if azure_config:
-        api_key, base_url, api_version = azure_config
-        client_kwargs: dict[str, object] = {
-            "api_key": api_key,
-            "base_url": base_url,
-        }
-        if api_version:
-            client_kwargs["default_query"] = {"api-version": api_version}
-        return OpenAI(**client_kwargs)
+        api_key, azure_endpoint, api_version = azure_config
+        return AzureOpenAI(
+            api_key=api_key,
+            azure_endpoint=azure_endpoint,
+            api_version=api_version,
+        )
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:

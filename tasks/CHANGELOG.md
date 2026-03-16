@@ -272,10 +272,11 @@ A shared `src`-level LLM client that makes Azure OpenAI the first-class configur
 - Reworked the shared Azure path to use the Responses API base URL and updated `src/colonyos_pm/llm.py` to call `client.responses.create(...)` with `response.output_text` parsing for both text and JSON helpers.
 - Tightened Azure endpoint handling so pasted request URLs are normalized to `/openai/v1/` but embedded query-string API versions are ignored unless `AZURE_OPENAI_API_VERSION` is set explicitly.
 - Defaulted Azure Responses calls to `2025-03-01-preview`, the minimum preview version we verified works with the live `gpt-5.4-pro` deployment.
+- Corrected the Azure adapter to use `AzureOpenAI` with the resource endpoint instead of `OpenAI(base_url=...)`, matching the only live request shape that actually worked for this deployment.
 - Added `tests/test_llm.py` to pin the Responses API request shape and fenced JSON parsing behavior.
 - Updated the CLI help text and Azure setup docs to describe the Responses API path and the correct `/openai/v1/` endpoint format.
 - Added retry handling and stderr retry logs for transient Azure Responses API connection failures.
-- Tightened token budgets for the question, answer, and risk stages so smaller JSON outputs do not request oversized responses.
+- Tuned token budgets for the question, answer, and risk stages so smaller JSON outputs do not request oversized responses while still allowing the clarifying-question stage enough room to complete.
 - Hardened response parsing so empty `output_text` falls back to `response.output`, and truncation at `max_output_tokens` raises a clear runtime error instead of silently parsing partial JSON.
 - Verified the Responses API refactor with `./.venv/bin/python -m pytest -q` (`33 passed`).
 

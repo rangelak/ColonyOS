@@ -137,6 +137,9 @@ def mock_openai(monkeypatch):
     mock_client = MagicMock()
     mock_client.responses.create.side_effect = _route_fake_response
 
-    with patch("colonyos_pm.client.OpenAI", return_value=mock_client):
+    with (
+        patch("colonyos_pm.client.OpenAI", return_value=mock_client),
+        patch("colonyos_pm.client.AzureOpenAI", return_value=mock_client),
+    ):
         yield mock_client
     reset_client_cache()
