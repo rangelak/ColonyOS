@@ -135,7 +135,7 @@ def _route_fake_response(*args, **kwargs) -> _FakeResponse:
         return _make_fake_response(FAKE_RISK_JSON)
     elif "answering a clarifying question" in system_content.lower():
         return _make_fake_response(FAKE_ANSWER_JSON)
-    elif "writing a prd" in system_content.lower():
+    elif "product requirements document" in system_content.lower():
         return _make_fake_response(FAKE_PRD_MARKDOWN)
     else:
         return _make_fake_response(FAKE_ANSWER_JSON)

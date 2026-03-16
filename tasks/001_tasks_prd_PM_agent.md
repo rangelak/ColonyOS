@@ -1,17 +1,23 @@
 ## Relevant Files
 
-- `ColonyOS/.cursor/rules/create_prd.mdc` - Existing PRD contract the PM workflow must target.
-- `ColonyOS/.cursor/rules/generate_tasks.mdc` - Downstream task-generation contract this workflow must hand off into.
+- `ColonyOS/.cursor/rules/create_prd.mdc` - PRD contract with sequential `NNN_` naming and changelog update requirement.
+- `ColonyOS/.cursor/rules/generate_tasks.mdc` - Task generation contract with sequential `NNN_` naming and changelog update requirement.
+- `ColonyOS/.cursor/rules/track_work.mdc` - Mandatory always-apply rule to update tasks and changelog on every change.
 - `ColonyOS/tasks/001_prd_PM_agent.md` - Source PRD that defines the autonomous PM workflow requirements.
 - `ColonyOS/tasks/001_tasks_prd_PM_agent.md` - Implementation task list derived from the PRD.
 - `ColonyOS/README.md` - Current project context and likely place to align or document the PM workflow.
 - `ColonyOS/src/colonyos_pm/models.py` - Core domain models for questions, answers, risk, handoff, and workflow artifacts.
 - `ColonyOS/src/colonyos_pm/llm.py` - Thin OpenAI client wrapper (`chat()` and `chat_json()`).
-- `ColonyOS/src/colonyos_pm/questions.py` - LLM-backed clarifying question generation.
+- `ColonyOS/src/colonyos_pm/prompts/` - All system prompts, written as senior-engineer-quality prose.
+- `ColonyOS/src/colonyos_pm/prompts/questions.py` - Question generation system prompt.
+- `ColonyOS/src/colonyos_pm/prompts/answers.py` - Persona identities and answer generation system prompt.
+- `ColonyOS/src/colonyos_pm/prompts/prd.py` - PRD assembly system prompt.
+- `ColonyOS/src/colonyos_pm/prompts/risk.py` - Risk classification system prompt.
+- `ColonyOS/src/colonyos_pm/questions.py` - LLM-backed clarifying question generation (imports prompt from `prompts/`).
 - `ColonyOS/src/colonyos_pm/personas.py` - Persona-selection rules per question category.
-- `ColonyOS/src/colonyos_pm/answers.py` - LLM-backed autonomous answer generation with persona system prompts.
-- `ColonyOS/src/colonyos_pm/prd.py` - LLM-backed PRD assembly from Q&A output.
-- `ColonyOS/src/colonyos_pm/risk.py` - LLM-backed risk-tier classification and escalation policy.
+- `ColonyOS/src/colonyos_pm/answers.py` - LLM-backed autonomous answer generation (imports prompt and persona identities from `prompts/`).
+- `ColonyOS/src/colonyos_pm/prd.py` - LLM-backed PRD assembly (imports prompt from `prompts/`).
+- `ColonyOS/src/colonyos_pm/risk.py` - LLM-backed risk-tier classification (imports prompt from `prompts/`).
 - `ColonyOS/src/colonyos_pm/workflow.py` - End-to-end PM workflow orchestration with progress logging.
 - `ColonyOS/src/colonyos_pm/storage.py` - Local artifact persistence and long-term memory hooks.
 - `ColonyOS/src/colonyos_pm/cli.py` - CLI entrypoint with `.env` loading and `--model` override.
@@ -72,3 +78,10 @@
   - [x] 6.8 Update `cli.py` to load `.env` via `python-dotenv` and support `--model` override flag.
   - [x] 6.9 Add `openai` and `python-dotenv` to `requirements.txt`, create `.env.example`, add `.env` to `.gitignore`.
   - [x] 6.10 Expand test suite from 5 to 14 tests covering question generation, persona routing, risk escalation, full workflow output, PRD structure, tests-first policy, and artifact persistence.
+- [x] 7.0 Extract prompts into dedicated `prompts/` folder and enforce work-tracking rule
+  - [x] 7.1 Create `src/colonyos_pm/prompts/` package with separate modules for each prompt domain (questions, answers, prd, risk).
+  - [x] 7.2 Rewrite all system prompts to senior-staff-engineer-at-Anthropic quality: precise constraints, explicit schemas, no hedging.
+  - [x] 7.3 Rewire `questions.py`, `answers.py`, `prd.py`, and `risk.py` to import prompts from `prompts/` instead of defining them inline.
+  - [x] 7.4 Update `conftest.py` mock router to match new prompt wording.
+  - [x] 7.5 Add mandatory always-apply Cursor rule (`track_work.mdc`) requiring task list and changelog updates on every change.
+  - [x] 7.6 Update task list and changelog to reflect all work done in this phase.

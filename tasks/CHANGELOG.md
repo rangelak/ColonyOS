@@ -49,6 +49,15 @@ An end-to-end autonomous PM workflow that takes a rough feature request and prod
 - Added `.env.example` and `python-dotenv` for API key management.
 - `generated/` directory ignored by git.
 
+#### Phase 5: Prompt extraction and work-tracking rule
+- Created `src/colonyos_pm/prompts/` package with dedicated prompt modules.
+- Rewrote all system prompts to senior-staff-engineer-at-Anthropic quality: precise constraints, explicit output schemas, no hedging or filler.
+- Prompt modules: `questions.py`, `answers.py` (with persona identities), `prd.py`, `risk.py`.
+- Rewired `questions.py`, `answers.py`, `prd.py`, `risk.py` to import prompts from `prompts/` rather than defining them inline.
+- Updated `conftest.py` mock router to match new prompt wording.
+- Added mandatory always-apply Cursor rule `track_work.mdc` requiring task and changelog updates on every change.
+- Updated `create_prd.mdc` and `generate_tasks.mdc` with sequential `NNN_` file naming and changelog update steps.
+
 ### Files created or modified
 
 ```
@@ -76,6 +85,13 @@ src/colonyos_pm/storage.py
 src/colonyos_pm/workflow.py
 tasks/001_prd_PM_agent.md
 tasks/001_tasks_prd_PM_agent.md
+src/colonyos_pm/prompts/__init__.py
+src/colonyos_pm/prompts/answers.py
+src/colonyos_pm/prompts/prd.py
+src/colonyos_pm/prompts/questions.py
+src/colonyos_pm/prompts/risk.py
+tasks/CHANGELOG.md
 tests/conftest.py
 tests/test_pm_workflow.py
+.cursor/rules/track_work.mdc
 ```
