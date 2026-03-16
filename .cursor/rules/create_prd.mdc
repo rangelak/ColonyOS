@@ -51,7 +51,11 @@ Assume the primary reader of the PRD is a **junior developer**. Therefore, requi
 
 *   **Format:** Markdown (`.md`)
 *   **Location:** `/tasks/`
-*   **Filename:** `prd-[feature-name].md`
+*   **Filename:** `NNN_prd_[feature-name].md` where `NNN` is the next sequential number (zero-padded to 3 digits). Check existing files in `/tasks/` to determine the next number. For example, if the highest existing prefix is `001`, the next PRD is `002_prd_[feature-name].md`.
+
+## Changelog
+
+After saving the PRD, append an entry to `tasks/CHANGELOG.md` under a new heading `## NNN — [Feature Title]` with the PRD path, status set to `In Progress`, and a brief description of what the PRD covers.
 
 ## Final instructions
 

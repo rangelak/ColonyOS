@@ -2,8 +2,8 @@
 
 - `ColonyOS/.cursor/rules/create_prd.mdc` - Existing PRD contract the PM workflow must target.
 - `ColonyOS/.cursor/rules/generate_tasks.mdc` - Downstream task-generation contract this workflow must hand off into.
-- `ColonyOS/tasks/prd_PM_agent.md` - Source PRD that defines the autonomous PM workflow requirements.
-- `ColonyOS/tasks/tasks-prd_PM_agent.md` - Implementation task list derived from the PRD.
+- `ColonyOS/tasks/001_prd_PM_agent.md` - Source PRD that defines the autonomous PM workflow requirements.
+- `ColonyOS/tasks/001_tasks_prd_PM_agent.md` - Implementation task list derived from the PRD.
 - `ColonyOS/README.md` - Current project context and likely place to align or document the PM workflow.
 - `ColonyOS/src/colonyos_pm/models.py` - Core domain models for questions, answers, risk, handoff, and workflow artifacts.
 - `ColonyOS/src/colonyos_pm/questions.py` - Clarifying question generation logic.
