@@ -6,15 +6,20 @@
 - `ColonyOS/tasks/001_tasks_prd_PM_agent.md` - Implementation task list derived from the PRD.
 - `ColonyOS/README.md` - Current project context and likely place to align or document the PM workflow.
 - `ColonyOS/src/colonyos_pm/models.py` - Core domain models for questions, answers, risk, handoff, and workflow artifacts.
-- `ColonyOS/src/colonyos_pm/questions.py` - Clarifying question generation logic.
+- `ColonyOS/src/colonyos_pm/llm.py` - Thin OpenAI client wrapper (`chat()` and `chat_json()`).
+- `ColonyOS/src/colonyos_pm/questions.py` - LLM-backed clarifying question generation.
 - `ColonyOS/src/colonyos_pm/personas.py` - Persona-selection rules per question category.
-- `ColonyOS/src/colonyos_pm/answers.py` - Autonomous answer generation and reasoning.
-- `ColonyOS/src/colonyos_pm/prd.py` - PRD formatter using the required section structure.
-- `ColonyOS/src/colonyos_pm/risk.py` - Risk-tier scoring and escalation policy.
-- `ColonyOS/src/colonyos_pm/workflow.py` - End-to-end PM workflow orchestration and artifact assembly.
+- `ColonyOS/src/colonyos_pm/answers.py` - LLM-backed autonomous answer generation with persona system prompts.
+- `ColonyOS/src/colonyos_pm/prd.py` - LLM-backed PRD assembly from Q&A output.
+- `ColonyOS/src/colonyos_pm/risk.py` - LLM-backed risk-tier classification and escalation policy.
+- `ColonyOS/src/colonyos_pm/workflow.py` - End-to-end PM workflow orchestration with progress logging.
 - `ColonyOS/src/colonyos_pm/storage.py` - Local artifact persistence and long-term memory hooks.
-- `ColonyOS/tests/test_pm_workflow.py` - Unit/integration-style coverage for workflow behavior.
+- `ColonyOS/src/colonyos_pm/cli.py` - CLI entrypoint with `.env` loading and `--model` override.
+- `ColonyOS/tests/test_pm_workflow.py` - Unit/integration-style coverage for workflow behavior (14 tests).
+- `ColonyOS/tests/conftest.py` - Auto-mocking fixture for OpenAI so tests run offline.
 - `ColonyOS/pyproject.toml` - Python project and pytest configuration.
+- `ColonyOS/.env.example` - Template for `OPENAI_API_KEY` and optional model override.
+- `ColonyOS/requirements.txt` - Runtime dependencies: `openai`, `python-dotenv`, `pytest`.
 
 ### Notes
 
@@ -56,3 +61,14 @@
   - [x] 5.3 Design a backend-friendly persistence shape that can later map to Supabase for multi-user support, stored artifacts, and long-term memory.
   - [x] 5.4 Add placeholders or interfaces for future persistence adapters so local artifact output can evolve into backend-backed storage without rewriting the workflow core.
   - [x] 5.5 Add integration-style tests or fixtures that verify a full PM workflow run produces the expected planning artifacts and a clean handoff payload.
+- [x] 6.0 Integrate OpenAI as the LLM provider for all workflow stages
+  - [x] 6.1 Write/update tests first with auto-mocked OpenAI fixtures (`conftest.py`) so all tests run offline without an API key.
+  - [x] 6.2 Create `llm.py` thin OpenAI client wrapper with `chat()` (plain text) and `chat_json()` (structured JSON responses) helpers. Default model: `gpt-4o`, configurable via `COLONYOS_MODEL` env var.
+  - [x] 6.3 Replace static question generation with real LLM call that produces 8-12 context-specific clarifying questions per prompt.
+  - [x] 6.4 Replace static answer lookup with per-question LLM calls using full persona system prompts (designer/engineer/CEO/YC partner).
+  - [x] 6.5 Replace static PRD string assembly with LLM-based synthesis of Q&A into a structured PRD following `create_prd.mdc`.
+  - [x] 6.6 Replace keyword-matching risk assessment with LLM-based risk tier classification returning tier, score, escalation flag, and rationale.
+  - [x] 6.7 Update `workflow.py` to orchestrate real LLM calls with stderr progress logging.
+  - [x] 6.8 Update `cli.py` to load `.env` via `python-dotenv` and support `--model` override flag.
+  - [x] 6.9 Add `openai` and `python-dotenv` to `requirements.txt`, create `.env.example`, add `.env` to `.gitignore`.
+  - [x] 6.10 Expand test suite from 5 to 14 tests covering question generation, persona routing, risk escalation, full workflow output, PRD structure, tests-first policy, and artifact persistence.
