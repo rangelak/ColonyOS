@@ -32,9 +32,23 @@ python3 -m venv .venv
 cp .env.example .env
 ```
 
-Then edit `.env` and set a real `OPENAI_API_KEY`.
+Then edit `.env` and set real LLM credentials.
 
-If you skip the API key, the runtime will fail in `src/colonyos_pm/llm.py`.
+Preferred Azure setup:
+
+```env
+AZURE_OPENAI_API_KEY=your-azure-key-here
+AZURE_OPENAI_ENDPOINT=https://your-resource-name.cognitiveservices.azure.com/
+AZURE_OPENAI_MODEL=gpt-5.4
+```
+
+Optional non-Azure fallback:
+
+```env
+OPENAI_API_KEY=sk-your-key-here
+```
+
+If you skip credentials, the runtime will fail in `src/colonyos_pm/client.py`.
 
 ## Sanity Check
 
@@ -59,6 +73,11 @@ Optional model override:
 ```bash
 ./.venv/bin/python scripts/run_pm_workflow.py --model gpt-4o "Your feature request"
 ```
+
+Notes:
+
+- The shared client lives in `src/colonyos_pm/client.py` and is reused by all workflow agents.
+- If you paste a full Azure portal URL that includes `/openai/...`, the client normalizes it to the resource root automatically.
 
 Why this is the best entrypoint:
 

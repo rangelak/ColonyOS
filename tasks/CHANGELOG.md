@@ -247,3 +247,40 @@ tasks/20260316_110957_tasks_timestamp_naming_rule.md
 tasks/20260316_111929_tasks_backfill_legacy_planning_timestamps.md
 tasks/CHANGELOG.md
 ```
+
+---
+
+## 20260316_114331 — Azure Shared Client Config
+
+**Tasks:** `tasks/20260316_114331_tasks_azure_shared_client.md`
+**Status:** Complete
+
+### What was built
+
+A shared `src`-level LLM client that makes Azure OpenAI the first-class configuration path for the PM workflow while preserving the existing non-Azure OpenAI fallback.
+
+### Implementation log
+
+- Added `src/colonyos_pm/client.py` as the shared client module used by all workflow agents.
+- The shared client now prefers `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_ENDPOINT`, uses `AZURE_OPENAI_MODEL` as the provider default model, and still honors `COLONYOS_MODEL` as an explicit override.
+- Added Azure endpoint normalization so pasted portal URLs containing `/openai/...` are trimmed to the correct resource root automatically.
+- Updated `src/colonyos_pm/llm.py` to delegate provider selection and default model resolution to the shared client module.
+- Updated `tests/conftest.py` to patch the shared client constructors and clear cache state between tests.
+- Added `tests/test_client.py` to cover Azure-first configuration, OpenAI fallback, model precedence, and partial Azure config failures.
+- Extended `tests/test_client.py` with regression coverage for custom Azure API version overrides and the no-credentials failure path.
+- Updated `.env.example`, `START_HERE.md`, and `README.md` so setup instructions match the real shared client implementation.
+- Verified the change with `./.venv/bin/python -m pytest -q` (`28 passed`).
+
+### Files created or modified
+
+```
+.env.example
+README.md
+START_HERE.md
+src/colonyos_pm/client.py
+src/colonyos_pm/llm.py
+tasks/20260316_114331_tasks_azure_shared_client.md
+tasks/CHANGELOG.md
+tests/conftest.py
+tests/test_client.py
+```

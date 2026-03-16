@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from colonyos_pm.client import reset_client_cache
+
 
 @dataclass
 class _FakeMessage:
@@ -145,9 +147,18 @@ def _route_fake_response(*args, **kwargs) -> _FakeResponse:
 def mock_openai(monkeypatch):
     """Patch OpenAI client globally so no real API calls are made."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-key-fake")
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_API_VERSION", raising=False)
+    reset_client_cache()
 
     mock_client = MagicMock()
     mock_client.chat.completions.create.side_effect = _route_fake_response
 
-    with patch("colonyos_pm.llm.OpenAI", return_value=mock_client):
+    with (
+        patch("colonyos_pm.client.OpenAI", return_value=mock_client),
+        patch("colonyos_pm.client.AzureOpenAI", return_value=mock_client),
+    ):
         yield mock_client
+    reset_client_cache()

@@ -490,7 +490,21 @@ Setup:
 
 ```bash
 cp .env.example .env
-# Edit .env and add your real OPENAI_API_KEY
+# Edit .env and add real LLM credentials
+```
+
+Preferred Azure configuration:
+
+```env
+AZURE_OPENAI_API_KEY=your-azure-key-here
+AZURE_OPENAI_ENDPOINT=https://your-resource-name.cognitiveservices.azure.com/
+AZURE_OPENAI_MODEL=gpt-5.4
+```
+
+Optional non-Azure fallback:
+
+```env
+OPENAI_API_KEY=sk-your-key-here
 ```
 
 Run:
@@ -504,6 +518,8 @@ Override the model:
 ```bash
 ./.venv/bin/python scripts/run_pm_workflow.py --model gpt-4o "Your feature request"
 ```
+
+The shared client is defined in `src/colonyos_pm/client.py` and reused across all workflow agents. If an Azure endpoint is pasted with an `/openai/...` path from the portal, the client trims it back to the resource root automatically.
 
 Output artifacts are written to `generated/pm-workflow/<work_id>/` and include a `prd.md` and `artifact_bundle.json`.
 
