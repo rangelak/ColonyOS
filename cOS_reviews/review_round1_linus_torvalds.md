@@ -1,36 +1,19 @@
 # Review by Linus Torvalds (Round 1)
 
-I've now reviewed everything I need. Here's my assessment:
+I now have a complete picture. Here's my review:
 
 ---
-
-## Code Review: GitHub Issue Integration
-
-**Reviewing as Linus Torvalds**
-
----
-
-### Completeness Assessment
-
-Every functional requirement from the PRD (FR-1 through FR-8) is implemented. All 66 tasks in the task file are marked complete. No TODOs or placeholders remain. 416 tests pass, including 61 new ones covering every surface area specified in the PRD's success metrics.
-
-### Quality Assessment
-
-The code is straightforward. `github.py` is a clean, focused module — 250 lines, four public functions, one dataclass, no unnecessary abstractions. It follows the existing project patterns (frozen dataclass, subprocess with `capture_output=True, text=True, timeout=10`, `click.ClickException` for errors). Good.
-
-The threading of `source_issue` through the pipeline is mechanical but correct — keyword-only arguments at the prompt-building layer, optional fields on the dataclass, `.get()` with defaults for backward compatibility. This is the boring, correct approach.
-
-### Findings
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/orchestrator.py]: Lines 419-424 — `import logging as _logging` inside the except block is ugly. The module already has access to `logging` patterns elsewhere. This is a lazy inline import aliased with an underscore to avoid shadowing. Not a blocker, but it smells. Should use a module-level logger like `github.py` does.
-- [src/colonyos/orchestrator.py]: The bare `except Exception:` in `_build_ceo_prompt` (line 416) is a broad catch. It's documented as intentional (non-blocking), and the PRD explicitly requires graceful degradation, so it's acceptable here — but I'd prefer catching `(subprocess.SubprocessError, FileNotFoundError, json.JSONDecodeError, OSError)` to avoid swallowing genuine programming errors.
-- [src/colonyos/github.py]: `parse_issue_ref` rejects `#42` (hash-prefixed format). This is correct per the PRD but will annoy users who copy-paste from GitHub's UI. Minor UX gap — could strip a leading `#` trivially. Not a blocker for v1.
-- [src/colonyos/cli.py]: The lazy import of `colonyos.github` inside the `run` function (line 270) is the right call — it avoids importing subprocess-heavy code when `--issue` isn't used. Clean.
-- [tests/test_github.py]: Thorough coverage — parse edge cases, subprocess mocking for all error paths, comment truncation, label formatting. The `type: ignore` comments on mock returns are noisy but necessary for the typing setup. Fine.
-- [src/colonyos/models.py]: Two-line change. `source_issue: int | None = None` and `source_issue_url: str | None = None` added to `RunLog` with correct defaults. Backward compatible. This is how you add fields to a dataclass.
+- [src/colonyos/stats.py:128]: Dead code path — `loop_state_*.json` files are already excluded by the `run-*.json` glob, making the `if f.name.startswith("loop_state_")` check unreachable. Harmless but misleading — a developer will look at it and waste time figuring out when that could ever be true. Delete it.
+- [src/colonyos/stats.py:297]: Import inside a loop body — `from datetime import datetime, timezone` sits inside a for-loop iteration. This is not a performance catastrophe (Python caches it), but it looks sloppy. Move it to the top of the file where every other import lives.
+- [src/colonyos/stats.py:192]: `avg_cost` divides by `len(runs)` (total runs) rather than `len(costs)` (runs that actually have cost data for that phase). If a phase only appears in 2 of 10 runs, the average is diluted by 8 runs that didn't execute that phase. This is a defensible product choice (cost-per-run-regardless), but the column header says "Avg Cost/Run" without clarifying which denominator. Worth a comment.
+- [src/colonyos/stats.py]: The `filter_runs` function accepts a `phase` parameter but does absolutely nothing with it — the docstring even says "Phase filtering is handled at compute time." This is a useless parameter that clutters the interface. Either use it or remove it from the signature.
+- [src/colonyos/cli.py:856]: The `phase` kwarg is passed to `filter_runs()` which ignores it. Not a bug, but it's a lie in the call site — the reader thinks phase filtering happens in `filter_runs` when it doesn't.
+- [tests/test_stats.py]: Solid test coverage — 65 tests covering empty cases, edge cases, corrupted files, None costs, parallel reviews, and rendering. The computation/rendering separation makes every function independently testable. This is how you write testable code.
+- [src/colonyos/stats.py]: Clean two-layer architecture (data → rendering) with typed dataclasses. No raw dicts leaking into rendering. The structure makes future `--json` output trivial to add. Good data structure design.
 
 SYNTHESIS:
-This is a clean, well-scoped implementation. The developer understood the existing codebase patterns and followed them — no new dependencies, no clever abstractions, no unnecessary indirection. The `github.py` module is a focused piece of code that does exactly one thing: talk to `gh` and parse the results. The data flow is linear and traceable: CLI → parse → fetch → format → thread through orchestrator. The error handling follows the PRD's fail-fast/warn-and-continue contract correctly. Tests are comprehensive and test actual behavior, not implementation details. The two nits I'd push back on (bare `except Exception` and the inline `import logging`) are cosmetic — they don't affect correctness. Ship it.
+This is straightforward, honest code. The architecture is right: pure computation functions returning typed dataclasses, rendering functions that take those dataclasses and don't touch I/O themselves. The data structures tell you what the code does. Tests are comprehensive — 65 of them covering the meaningful edge cases (empty dirs, corrupted JSON, None costs, parallel review blocks). The review round counting algorithm is a clean state machine, not some over-engineered visitor pattern. The commit is well-scoped: 6 files, all directly relevant. The nitpicks are real (dead code path in the glob filter, import-in-a-loop, vestigial `phase` parameter in `filter_runs`) but none of them are bugs — they're just code hygiene. Ship it, clean up the nits in a follow-up.
