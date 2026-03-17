@@ -648,9 +648,26 @@ def auto(
             break
 
         if loop_count > 1:
-            click.echo(f"\n{'=' * 60}")
-            click.echo(f"Autonomous iteration {iteration}/{loop_count}")
-            click.echo(f"{'=' * 60}")
+            from rich.console import Console
+            from rich.panel import Panel
+            from rich.text import Text
+
+            _iter_console = Console()
+            label = Text()
+            label.append("  Iteration ", style="dim")
+            label.append(f"{iteration}", style="bold bright_cyan")
+            label.append(f" / {loop_count}", style="dim")
+            _iter_console.print()
+            _iter_console.print(
+                Panel(
+                    label,
+                    title="[bold bright_cyan]Autonomous Loop[/bold bright_cyan]",
+                    title_align="left",
+                    border_style="bright_black",
+                    padding=(0, 2),
+                    expand=True,
+                )
+            )
 
         if iteration > 1:
             config = load_config(repo_root)
