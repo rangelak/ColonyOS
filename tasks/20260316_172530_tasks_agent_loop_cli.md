@@ -83,3 +83,10 @@
   - [x] 10.3 Remove workarounds for `MessageParseError` / missing `ResultMessage`
   - [x] 10.4 Verify end-to-end with smoke test (cost, duration, result all populated)
   - [x] 10.5 Update README and task docs to reference Agent SDK
+
+- [x] 11.0 Add iconic personas + parallel subagent Q&A
+  - [x] 11.1 Add Steve Jobs, Jony Ive, Linus Torvalds, Andrej Karpathy personas
+  - [x] 11.2 Build `_build_persona_agents()` to create AgentDefinition per persona
+  - [x] 11.3 Wire subagents into plan phase via `agents` kwarg on `run_phase`
+  - [x] 11.4 Update plan.md to instruct parallel Agent tool invocation
+  - [x] 11.5 Add tests for subagent plumbing

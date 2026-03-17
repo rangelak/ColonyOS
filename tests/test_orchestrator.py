@@ -5,7 +5,13 @@ import pytest
 
 from colonyos.config import ColonyConfig, BudgetConfig, PhasesConfig, save_config
 from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, RunStatus
-from colonyos.orchestrator import run, _format_personas_block, _build_run_id
+from colonyos.orchestrator import (
+    run,
+    _format_personas_block,
+    _build_persona_agents,
+    _build_run_id,
+    _persona_slug,
+)
 
 
 @pytest.fixture
@@ -46,12 +52,46 @@ class TestFormatPersonasBlock:
             Persona(role="Engineer", expertise="APIs", perspective="Scale")
         ]
         block = _format_personas_block(personas)
-        assert "Engineer" in block
-        assert "APIs" in block
+        assert "engineer" in block
+        assert "subagent" in block.lower()
 
     def test_without_personas(self):
         block = _format_personas_block([])
         assert "senior engineer" in block
+
+    def test_lists_subagent_keys(self):
+        personas = [
+            Persona(role="Steve Jobs", expertise="Product", perspective="Simplify"),
+            Persona(role="Linus Torvalds", expertise="Kernel", perspective="Correctness"),
+        ]
+        block = _format_personas_block(personas)
+        assert "`steve_jobs`" in block
+        assert "`linus_torvalds`" in block
+
+
+class TestBuildPersonaAgents:
+    def test_builds_agents_per_persona(self):
+        personas = [
+            Persona(role="Steve Jobs", expertise="Product vision", perspective="Simplify"),
+            Persona(role="Linus Torvalds", expertise="Kernel", perspective="Correctness"),
+        ]
+        agents = _build_persona_agents(personas)
+        assert "steve_jobs" in agents
+        assert "linus_torvalds" in agents
+        assert agents["steve_jobs"].description.startswith("Steve Jobs")
+        assert "Read" in agents["linus_torvalds"].tools
+
+    def test_empty_personas(self):
+        agents = _build_persona_agents([])
+        assert agents == {}
+
+
+class TestPersonaSlug:
+    def test_basic(self):
+        assert _persona_slug("Steve Jobs") == "steve_jobs"
+
+    def test_complex_role(self):
+        assert _persona_slug("YC Partner (Michael Seibel)") == "yc_partner_michael_seibel"
 
 
 class TestBuildRunId:
@@ -76,6 +116,17 @@ class TestRun:
         assert log.status == RunStatus.COMPLETED
         assert len(log.phases) == 3
         assert mock_run.call_count == 3
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_plan_passes_persona_agents(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+        save_config(tmp_repo, config)
+        mock_run.return_value = _fake_phase_result(Phase.PLAN)
+
+        run("Add tests", repo_root=tmp_repo, config=config, plan_only=True)
+
+        call_kwargs = mock_run.call_args_list[0]
+        assert call_kwargs.kwargs.get("agents") is not None
+        assert "engineer" in call_kwargs.kwargs["agents"]
 
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_plan_only(self, mock_run, tmp_repo: Path, config: ColonyConfig):

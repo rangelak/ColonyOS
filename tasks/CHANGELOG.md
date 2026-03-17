@@ -1,5 +1,20 @@
 # Changelog
 
+## 20260317_100000 — Add iconic personas + parallel subagent Q&A
+
+Added Steve Jobs, Jony Ive, Linus Torvalds, and Andrej Karpathy as personas.
+Replaced Elon Musk and Sindre Sorhus. Each persona now runs as a separate
+Agent SDK subagent during the plan phase, so all 7 personas answer clarifying
+questions in parallel rather than sequentially in a single session.
+
+**Changes:**
+- `.colonyos/config.yaml` — 7 personas (was 5), fixed stack reference
+- `src/colonyos/orchestrator.py` — `_build_persona_agents()` creates `AgentDefinition` per persona,
+  `_format_personas_block()` now lists subagent keys and instructs parallel invocation
+- `src/colonyos/agent.py` — accepts `agents` kwarg, adds `Agent` to allowed tools when subagents present
+- `src/colonyos/instructions/plan.md` — explicit instruction to call all persona agents in parallel
+- `tests/test_orchestrator.py` — tests for `_build_persona_agents`, `_persona_slug`, subagent plumbing
+
 ## 20260316_180500 — Migrate to Claude Agent SDK
 
 Replaced `claude-code-sdk` (0.0.25) with the renamed `claude-agent-sdk` (0.1.49).

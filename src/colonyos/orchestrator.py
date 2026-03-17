@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
 
+from claude_agent_sdk import AgentDefinition
+
 from colonyos.agent import run_phase_sync
 from colonyos.config import ColonyConfig, runs_dir_path
 from colonyos.models import Persona, Phase, PhaseResult, RunLog, RunStatus
@@ -30,7 +32,38 @@ def _load_instruction(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _persona_slug(role: str) -> str:
+    """Turn a persona role into a safe subagent key, e.g. 'Steve Jobs' → 'steve-jobs'."""
+    return slugify(role)
+
+
+def _build_persona_agents(personas: list[Persona]) -> dict[str, AgentDefinition]:
+    """Build an AgentDefinition per persona so the plan agent can call them in parallel."""
+    agents: dict[str, AgentDefinition] = {}
+    for p in personas:
+        key = _persona_slug(p.role)
+        agents[key] = AgentDefinition(
+            description=f"{p.role} — {p.expertise}",
+            prompt=(
+                f"You are {p.role}.\n"
+                f"Expertise: {p.expertise}\n"
+                f"Perspective: {p.perspective}\n\n"
+                "You will be given clarifying questions about a feature request. "
+                "Answer every question from your unique perspective. Be opinionated, "
+                "specific, and grounded in the codebase you can see. Keep each answer "
+                "to 2-4 sentences."
+            ),
+            tools=["Read", "Glob", "Grep"],
+        )
+    return agents
+
+
 def _format_personas_block(personas: list[Persona]) -> str:
+    """Build a persona listing for the plan system prompt.
+
+    When subagents are available, this tells the planner which agents to call.
+    Falls back to inline role-play when no personas are defined.
+    """
     if not personas:
         return (
             "No project personas are defined. Answer clarifying questions from "
@@ -38,12 +71,21 @@ def _format_personas_block(personas: list[Persona]) -> str:
             "potential end-user of this feature."
         )
 
-    lines = ["Answer each clarifying question from the following personas:\n"]
+    lines = [
+        "The following expert personas are available as subagents. "
+        "After generating your clarifying questions, delegate ALL questions to "
+        "EVERY persona subagent IN PARALLEL (call all Agent tools at once). "
+        "Each persona has read-only access to the codebase and will answer "
+        "from their unique perspective.\n"
+    ]
     for p in personas:
-        lines.append(f"**{p.role}**")
-        lines.append(f"- Expertise: {p.expertise}")
-        lines.append(f"- Perspective: {p.perspective}")
-        lines.append("")
+        key = _persona_slug(p.role)
+        lines.append(f"- **`{key}`**: {p.role} — {p.expertise}")
+    lines.append("")
+    lines.append(
+        "After collecting all persona responses, synthesize their answers "
+        "into the PRD. Highlight areas of agreement and tension between personas."
+    )
     return "\n".join(lines)
 
 
@@ -186,6 +228,9 @@ def run(
         system, user = _build_plan_prompt(
             prompt, config, names.prd_filename, names.task_filename
         )
+        persona_agents = _build_persona_agents(config.personas) or None
+        if persona_agents:
+            _log(f"  {len(persona_agents)} persona subagents configured for parallel Q&A")
         plan_result = run_phase_sync(
             Phase.PLAN,
             user,
@@ -193,6 +238,7 @@ def run(
             system_prompt=system,
             model=config.model,
             budget_usd=config.budget.per_phase,
+            agents=persona_agents,
         )
         log.phases.append(plan_result)
 
