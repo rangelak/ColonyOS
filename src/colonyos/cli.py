@@ -10,7 +10,12 @@ from colonyos import __version__
 from colonyos.config import load_config, runs_dir_path
 from colonyos.init import run_init
 from colonyos.models import RunLog, RunStatus
-from colonyos.orchestrator import run as run_orchestrator, run_ceo
+from colonyos.orchestrator import (
+    run as run_orchestrator,
+    run_ceo,
+    _load_run_log,
+    _validate_resume_preconditions,
+)
 
 
 def _find_repo_root() -> Path:
@@ -58,9 +63,18 @@ def init(personas: bool) -> None:
 @click.argument("prompt", required=False)
 @click.option("--plan-only", is_flag=True, help="Stop after PRD + task generation.")
 @click.option("--from-prd", type=click.Path(exists=True), help="Skip planning, implement an existing PRD.")
-def run(prompt: str | None, plan_only: bool, from_prd: str | None) -> None:
+@click.option("--resume", "resume_run_id", default=None, help="Resume a failed run from its last successful phase.")
+def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None) -> None:
     """Run the autonomous agent loop for a feature prompt."""
-    if not prompt and not from_prd:
+    # Mutual exclusivity check
+    if resume_run_id:
+        if prompt or plan_only or from_prd:
+            click.echo(
+                "Error: --resume cannot be combined with a prompt, --plan-only, or --from-prd.",
+                err=True,
+            )
+            sys.exit(1)
+    elif not prompt and not from_prd:
         click.echo("Error: provide a prompt or --from-prd path.", err=True)
         sys.exit(1)
 
@@ -74,15 +88,40 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None) -> None:
         )
         sys.exit(1)
 
-    effective_prompt = prompt or f"Implement the PRD at {from_prd}"
+    if resume_run_id:
+        existing_log = _load_run_log(repo_root, resume_run_id)
+        _validate_resume_preconditions(repo_root, existing_log)
 
-    log = run_orchestrator(
-        effective_prompt,
-        repo_root=repo_root,
-        config=config,
-        plan_only=plan_only,
-        from_prd=from_prd,
-    )
+        # Derive last_successful_phase
+        last_successful_phase = None
+        for p in existing_log.phases:
+            if p.success:
+                last_successful_phase = p.phase.value
+
+        resume_from = {
+            "log": existing_log,
+            "branch_name": existing_log.branch_name,
+            "prd_rel": existing_log.prd_rel,
+            "task_rel": existing_log.task_rel,
+            "last_successful_phase": last_successful_phase,
+        }
+
+        log = run_orchestrator(
+            existing_log.prompt,
+            repo_root=repo_root,
+            config=config,
+            resume_from=resume_from,
+        )
+    else:
+        effective_prompt = prompt or f"Implement the PRD at {from_prd}"
+
+        log = run_orchestrator(
+            effective_prompt,
+            repo_root=repo_root,
+            config=config,
+            plan_only=plan_only,
+            from_prd=from_prd,
+        )
 
     _print_run_summary(log)
 
@@ -209,9 +248,21 @@ def status(limit: int) -> None:
             status_val = data.get("status", "unknown")
             cost = data.get("total_cost_usd", 0)
             prompt_preview = (data.get("prompt", "")[:60] + "...") if len(data.get("prompt", "")) > 60 else data.get("prompt", "")
+
+            # Check if this failed run is resumable
+            resumable_tag = ""
+            if (
+                status_val == "failed"
+                and data.get("branch_name")
+                and data.get("prd_rel")
+                and data.get("task_rel")
+                and any(p.get("success") for p in data.get("phases", []))
+            ):
+                resumable_tag = " [resumable]"
+
             click.echo(
                 f"  {data.get('run_id', '?'):40s} "
-                f"{status_val:10s} "
+                f"{status_val:10s}{resumable_tag} "
                 f"${cost:>7.4f}  "
                 f"{prompt_preview}"
             )

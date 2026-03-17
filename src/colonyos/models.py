@@ -68,6 +68,9 @@ class RunLog:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     finished_at: str | None = None
+    branch_name: str | None = None
+    prd_rel: str | None = None
+    task_rel: str | None = None
 
     def mark_finished(self) -> None:
         self.finished_at = datetime.now(timezone.utc).isoformat()

@@ -1,22 +1,28 @@
+import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import click
 import pytest
 
 from colonyos.config import ColonyConfig, BudgetConfig, PhasesConfig, save_config
-from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, RunStatus
+from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, RunLog, RunStatus
 from colonyos.orchestrator import (
     run,
     _format_personas_block,
     _build_persona_agents,
     _build_fix_prompt,
     _build_run_id,
+    _load_run_log,
     _parse_parent_tasks,
     _persona_slug,
     _reviewer_personas,
     _build_persona_review_prompt,
     _extract_review_verdict,
     _collect_review_findings,
+    _save_run_log,
+    _validate_resume_preconditions,
+    _compute_next_phase,
 )
 
 
@@ -727,3 +733,437 @@ class TestFixLoop:
         reviews_dir = tmp_repo / config.reviews_dir
         filenames = {f.name for f in reviews_dir.glob("*.md")}
         assert any("review_round1_engineer" in f for f in filenames)
+
+
+class TestRunLogResumeFields:
+    """Task 1: RunLog can hold branch_name, prd_rel, task_rel."""
+
+    def test_defaults_to_none(self):
+        log = RunLog(run_id="r1", prompt="test", status=RunStatus.RUNNING)
+        assert log.branch_name is None
+        assert log.prd_rel is None
+        assert log.task_rel is None
+
+    def test_accepts_values(self):
+        log = RunLog(
+            run_id="r1", prompt="test", status=RunStatus.RUNNING,
+            branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
+        )
+        assert log.branch_name == "feat/x"
+        assert log.prd_rel == "cOS_prds/prd.md"
+        assert log.task_rel == "cOS_tasks/tasks.md"
+
+
+class TestSaveRunLogResumeFields:
+    """Task 2: _save_run_log persists resume fields and last_successful_phase."""
+
+    def test_persists_resume_fields(self, tmp_repo: Path):
+        log = RunLog(
+            run_id="r1", prompt="test", status=RunStatus.COMPLETED,
+            branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
+        )
+        path = _save_run_log(tmp_repo, log)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["branch_name"] == "feat/x"
+        assert data["prd_rel"] == "cOS_prds/prd.md"
+        assert data["task_rel"] == "cOS_tasks/tasks.md"
+
+    def test_persists_last_successful_phase(self, tmp_repo: Path):
+        log = RunLog(
+            run_id="r2", prompt="test", status=RunStatus.FAILED,
+            phases=[
+                _fake_phase_result(Phase.PLAN),
+                _fake_phase_result(Phase.IMPLEMENT),
+                _fake_phase_result(Phase.REVIEW, success=False),
+            ],
+        )
+        path = _save_run_log(tmp_repo, log)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["last_successful_phase"] == "implement"
+
+    def test_last_successful_phase_none_when_no_success(self, tmp_repo: Path):
+        log = RunLog(
+            run_id="r3", prompt="test", status=RunStatus.FAILED,
+            phases=[_fake_phase_result(Phase.PLAN, success=False)],
+        )
+        path = _save_run_log(tmp_repo, log)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["last_successful_phase"] is None
+
+
+class TestLoadRunLog:
+    """Task 3.1: _load_run_log tests."""
+
+    def test_loads_valid_json(self, tmp_repo: Path):
+        log = RunLog(
+            run_id="r1", prompt="test", status=RunStatus.FAILED,
+            branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
+            phases=[_fake_phase_result(Phase.PLAN)],
+        )
+        _save_run_log(tmp_repo, log)
+        loaded = _load_run_log(tmp_repo, "r1")
+        assert loaded.run_id == "r1"
+        assert loaded.status == RunStatus.FAILED
+        assert loaded.branch_name == "feat/x"
+        assert len(loaded.phases) == 1
+        assert loaded.phases[0].phase == Phase.PLAN
+
+    def test_missing_file_raises(self, tmp_repo: Path):
+        with pytest.raises(click.ClickException, match="Run log not found"):
+            _load_run_log(tmp_repo, "nonexistent-id")
+
+    def test_corrupted_json_raises(self, tmp_repo: Path):
+        runs_dir = tmp_repo / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "bad.json").write_text("{invalid json", encoding="utf-8")
+        with pytest.raises(click.ClickException, match="Corrupted run log"):
+            _load_run_log(tmp_repo, "bad")
+
+    def test_old_log_without_resume_fields(self, tmp_repo: Path):
+        runs_dir = tmp_repo / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "old.json").write_text(json.dumps({
+            "run_id": "old", "prompt": "test", "status": "failed",
+            "phases": [], "total_cost_usd": 0.0,
+        }), encoding="utf-8")
+        loaded = _load_run_log(tmp_repo, "old")
+        assert loaded.branch_name is None
+        assert loaded.prd_rel is None
+        assert loaded.task_rel is None
+
+
+class TestValidateResumePreconditions:
+    """Task 3.2: _validate_resume_preconditions tests."""
+
+    def test_fails_on_running_status(self, tmp_repo: Path):
+        log = RunLog(
+            run_id="r1", prompt="test", status=RunStatus.RUNNING,
+            branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
+        )
+        with pytest.raises(click.ClickException, match="Only failed runs"):
+            _validate_resume_preconditions(tmp_repo, log)
+
+    def test_fails_on_completed_status(self, tmp_repo: Path):
+        log = RunLog(
+            run_id="r1", prompt="test", status=RunStatus.COMPLETED,
+            branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
+        )
+        with pytest.raises(click.ClickException, match="Only failed runs"):
+            _validate_resume_preconditions(tmp_repo, log)
+
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_fails_on_missing_branch(self, mock_subprocess, tmp_repo: Path):
+        log = RunLog(
+            run_id="r1", prompt="test", status=RunStatus.FAILED,
+            branch_name="feat/gone", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
+        )
+        mock_subprocess.return_value = MagicMock(stdout="")
+        (tmp_repo / "cOS_prds" / "prd.md").write_text("# PRD", encoding="utf-8")
+        (tmp_repo / "cOS_tasks" / "tasks.md").write_text("# Tasks", encoding="utf-8")
+        with pytest.raises(click.ClickException, match="not found locally"):
+            _validate_resume_preconditions(tmp_repo, log)
+
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_fails_on_missing_prd(self, mock_subprocess, tmp_repo: Path):
+        log = RunLog(
+            run_id="r1", prompt="test", status=RunStatus.FAILED,
+            branch_name="feat/x", prd_rel="cOS_prds/missing.md", task_rel="cOS_tasks/tasks.md",
+        )
+        mock_subprocess.return_value = MagicMock(stdout="  feat/x\n")
+        with pytest.raises(click.ClickException, match="PRD file not found"):
+            _validate_resume_preconditions(tmp_repo, log)
+
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_fails_on_missing_task_file(self, mock_subprocess, tmp_repo: Path):
+        log = RunLog(
+            run_id="r1", prompt="test", status=RunStatus.FAILED,
+            branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/missing.md",
+        )
+        mock_subprocess.return_value = MagicMock(stdout="  feat/x\n")
+        (tmp_repo / "cOS_prds" / "prd.md").write_text("# PRD", encoding="utf-8")
+        with pytest.raises(click.ClickException, match="Task file not found"):
+            _validate_resume_preconditions(tmp_repo, log)
+
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_succeeds_when_all_conditions_met(self, mock_subprocess, tmp_repo: Path):
+        log = RunLog(
+            run_id="r1", prompt="test", status=RunStatus.FAILED,
+            branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
+        )
+        mock_subprocess.return_value = MagicMock(stdout="  feat/x\n")
+        (tmp_repo / "cOS_prds" / "prd.md").write_text("# PRD", encoding="utf-8")
+        (tmp_repo / "cOS_tasks" / "tasks.md").write_text("# Tasks", encoding="utf-8")
+        _validate_resume_preconditions(tmp_repo, log)  # Should not raise
+
+
+class TestComputeNextPhase:
+    def test_plan_to_implement(self):
+        assert _compute_next_phase("plan") == "implement"
+
+    def test_implement_to_review(self):
+        assert _compute_next_phase("implement") == "review"
+
+    def test_review_to_review(self):
+        assert _compute_next_phase("review") == "review"
+
+    def test_fix_to_review(self):
+        assert _compute_next_phase("fix") == "review"
+
+    def test_decision_to_deliver(self):
+        assert _compute_next_phase("decision") == "deliver"
+
+    def test_unknown_returns_none(self):
+        assert _compute_next_phase("unknown") is None
+
+
+class TestResumeFromRun:
+    """Task 4: Phase resumption and log continuity."""
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_resume_after_plan_runs_implement_review_deliver(
+        self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig
+    ):
+        """When last_successful_phase is 'plan', skip plan and run implement+review+deliver."""
+        save_config(tmp_repo, config)
+        existing_log = RunLog(
+            run_id="r-resume", prompt="Add feature", status=RunStatus.FAILED,
+            branch_name="colonyos/add_feature", prd_rel="cOS_prds/prd.md",
+            task_rel="cOS_tasks/tasks.md",
+            phases=[_fake_phase_result(Phase.PLAN)],
+        )
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        resume_from = {
+            "log": existing_log,
+            "branch_name": "colonyos/add_feature",
+            "prd_rel": "cOS_prds/prd.md",
+            "task_rel": "cOS_tasks/tasks.md",
+            "last_successful_phase": "plan",
+        }
+
+        log = run(
+            "Add feature", repo_root=tmp_repo, config=config,
+            resume_from=resume_from,
+        )
+
+        assert log.status == RunStatus.COMPLETED
+        # Plan was from the original run, then implement+review+decision+deliver added
+        phase_types = [p.phase for p in log.phases]
+        assert phase_types[0] == Phase.PLAN  # Original
+        assert Phase.IMPLEMENT in phase_types
+        assert Phase.DELIVER in phase_types
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_resume_after_implement_skips_plan_and_implement(
+        self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig
+    ):
+        """When last_successful_phase is 'implement', skip plan+implement, run review+deliver."""
+        save_config(tmp_repo, config)
+        existing_log = RunLog(
+            run_id="r-resume2", prompt="Add feature", status=RunStatus.FAILED,
+            branch_name="colonyos/add_feature", prd_rel="cOS_prds/prd.md",
+            task_rel="cOS_tasks/tasks.md",
+            phases=[
+                _fake_phase_result(Phase.PLAN),
+                _fake_phase_result(Phase.IMPLEMENT),
+            ],
+        )
+
+        mock_run.side_effect = [
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        resume_from = {
+            "log": existing_log,
+            "branch_name": "colonyos/add_feature",
+            "prd_rel": "cOS_prds/prd.md",
+            "task_rel": "cOS_tasks/tasks.md",
+            "last_successful_phase": "implement",
+        }
+
+        log = run(
+            "Add feature", repo_root=tmp_repo, config=config,
+            resume_from=resume_from,
+        )
+
+        assert log.status == RunStatus.COMPLETED
+        # Plan mock should NOT have been called for plan or implement
+        # mock_run calls: decision + deliver = 2
+        assert mock_run.call_count == 2
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_resume_after_review_failure_reruns_review_loop(
+        self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig
+    ):
+        """When review/fix failed, re-enter the review loop from the top."""
+        save_config(tmp_repo, config)
+        existing_log = RunLog(
+            run_id="r-resume3", prompt="Add feature", status=RunStatus.FAILED,
+            branch_name="colonyos/add_feature", prd_rel="cOS_prds/prd.md",
+            task_rel="cOS_tasks/tasks.md",
+            phases=[
+                _fake_phase_result(Phase.PLAN),
+                _fake_phase_result(Phase.IMPLEMENT),
+                _fake_phase_result(Phase.REVIEW, success=False),
+            ],
+        )
+
+        mock_run.side_effect = [
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        resume_from = {
+            "log": existing_log,
+            "branch_name": "colonyos/add_feature",
+            "prd_rel": "cOS_prds/prd.md",
+            "task_rel": "cOS_tasks/tasks.md",
+            "last_successful_phase": "implement",
+        }
+
+        log = run(
+            "Add feature", repo_root=tmp_repo, config=config,
+            resume_from=resume_from,
+        )
+
+        assert log.status == RunStatus.COMPLETED
+        assert mock_parallel.call_count == 1  # Review was re-entered
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_log_continuity_preserves_original_phases(
+        self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig
+    ):
+        """Resumed log has both original and new phases, written to same file."""
+        save_config(tmp_repo, config)
+        original_plan = _fake_phase_result(Phase.PLAN)
+        existing_log = RunLog(
+            run_id="r-continuity", prompt="Add feature", status=RunStatus.FAILED,
+            branch_name="colonyos/add_feature", prd_rel="cOS_prds/prd.md",
+            task_rel="cOS_tasks/tasks.md",
+            phases=[original_plan],
+        )
+        _save_run_log(tmp_repo, existing_log)
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        resume_from = {
+            "log": existing_log,
+            "branch_name": "colonyos/add_feature",
+            "prd_rel": "cOS_prds/prd.md",
+            "task_rel": "cOS_tasks/tasks.md",
+            "last_successful_phase": "plan",
+        }
+
+        log = run(
+            "Add feature", repo_root=tmp_repo, config=config,
+            resume_from=resume_from,
+        )
+
+        assert log.phases[0] is original_plan  # Original phase preserved
+        assert len(log.phases) > 1  # New phases appended
+
+        # Verify the JSON file has all phases
+        log_path = tmp_repo / ".colonyos" / "runs" / "r-continuity.json"
+        data = json.loads(log_path.read_text(encoding="utf-8"))
+        assert len(data["phases"]) == len(log.phases)
+        assert data["status"] == "completed"
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_resume_after_decision_runs_only_deliver(
+        self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig
+    ):
+        """When last_successful_phase is 'decision', only deliver runs."""
+        save_config(tmp_repo, config)
+        existing_log = RunLog(
+            run_id="r-decision", prompt="Add feature", status=RunStatus.FAILED,
+            branch_name="colonyos/add_feature", prd_rel="cOS_prds/prd.md",
+            task_rel="cOS_tasks/tasks.md",
+            phases=[
+                _fake_phase_result(Phase.PLAN),
+                _fake_phase_result(Phase.IMPLEMENT),
+                _approve_review_result(),
+                PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                            duration_ms=50, session_id="s",
+                            artifacts={"result": "VERDICT: GO"}),
+            ],
+        )
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.DELIVER),
+        ]
+
+        resume_from = {
+            "log": existing_log,
+            "branch_name": "colonyos/add_feature",
+            "prd_rel": "cOS_prds/prd.md",
+            "task_rel": "cOS_tasks/tasks.md",
+            "last_successful_phase": "decision",
+        }
+
+        log = run(
+            "Add feature", repo_root=tmp_repo, config=config,
+            resume_from=resume_from,
+        )
+
+        assert log.status == RunStatus.COMPLETED
+        assert mock_run.call_count == 1  # Only deliver
+        assert mock_parallel.call_count == 0  # No reviews
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_run_sets_resume_fields_in_log(
+        self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig
+    ):
+        """Normal (non-resume) runs persist branch_name, prd_rel, task_rel."""
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        assert log.branch_name is not None
+        assert log.prd_rel is not None
+        assert log.task_rel is not None
+
+        # Verify persisted in JSON
+        runs_dir = tmp_repo / ".colonyos" / "runs"
+        log_files = list(runs_dir.glob("*.json"))
+        assert len(log_files) == 1
+        data = json.loads(log_files[0].read_text(encoding="utf-8"))
+        assert data["branch_name"] == log.branch_name
+        assert data["prd_rel"] == log.prd_rel
+        assert data["task_rel"] == log.task_rel

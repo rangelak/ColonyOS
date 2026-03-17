@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
-from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
 
+import click
 from claude_agent_sdk import AgentDefinition
 
 from colonyos.agent import run_phase_sync, run_phases_parallel_sync
 from colonyos.config import ColonyConfig, runs_dir_path
 from colonyos.models import Persona, Phase, PhaseResult, RunLog, RunStatus
-from colonyos.naming import planning_names, proposal_names, slugify
+from colonyos.naming import generate_timestamp, planning_names, proposal_names, slugify
 
 
 def _log(msg: str) -> None:
@@ -21,8 +22,7 @@ def _log(msg: str) -> None:
 
 def _build_run_id(prompt: str) -> str:
     digest = sha1(prompt.strip().encode()).hexdigest()[:10]
-    ts = datetime.now().strftime("%Y%m%d%H%M%S")
-    return f"run-{ts}-{digest}"
+    return f"run-{generate_timestamp()}-{digest}"
 
 
 def _load_instruction(name: str) -> str:
@@ -398,6 +398,12 @@ def _save_run_log(repo_root: Path, log: RunLog) -> Path:
     runs = runs_dir_path(repo_root)
     runs.mkdir(parents=True, exist_ok=True)
     log_path = runs / f"{log.run_id}.json"
+    # Derive last_successful_phase from the log's phases list
+    last_successful_phase: str | None = None
+    for p in log.phases:
+        if p.success:
+            last_successful_phase = p.phase.value
+
     log_path.write_text(
         json.dumps(
             {
@@ -407,6 +413,10 @@ def _save_run_log(repo_root: Path, log: RunLog) -> Path:
                 "total_cost_usd": log.total_cost_usd,
                 "started_at": log.started_at,
                 "finished_at": log.finished_at,
+                "branch_name": log.branch_name,
+                "prd_rel": log.prd_rel,
+                "task_rel": log.task_rel,
+                "last_successful_phase": last_successful_phase,
                 "phases": [
                     {
                         "phase": p.phase.value,
@@ -426,6 +436,109 @@ def _save_run_log(repo_root: Path, log: RunLog) -> Path:
     return log_path
 
 
+def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
+    """Load a RunLog from its JSON file in .colonyos/runs/."""
+    log_path = runs_dir_path(repo_root) / f"{run_id}.json"
+    if not log_path.exists():
+        raise click.ClickException(f"Run log not found: {log_path}")
+    try:
+        data = json.loads(log_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"Corrupted run log: {log_path}: {exc}")
+
+    phases = []
+    for p in data.get("phases", []):
+        phases.append(PhaseResult(
+            phase=Phase(p["phase"]),
+            success=p["success"],
+            cost_usd=p.get("cost_usd"),
+            duration_ms=p.get("duration_ms", 0),
+            session_id=p.get("session_id", ""),
+            error=p.get("error"),
+        ))
+
+    return RunLog(
+        run_id=data["run_id"],
+        prompt=data["prompt"],
+        status=RunStatus(data["status"]),
+        phases=phases,
+        total_cost_usd=data.get("total_cost_usd", 0.0),
+        started_at=data.get("started_at", ""),
+        finished_at=data.get("finished_at"),
+        branch_name=data.get("branch_name"),
+        prd_rel=data.get("prd_rel"),
+        task_rel=data.get("task_rel"),
+    )
+
+
+def _validate_resume_preconditions(repo_root: Path, log: RunLog) -> None:
+    """Validate that a run log is eligible for resumption."""
+    if log.status != RunStatus.FAILED:
+        raise click.ClickException(
+            f"Cannot resume run with status '{log.status.value}'. "
+            f"Only failed runs can be resumed."
+        )
+
+    if not log.branch_name:
+        raise click.ClickException(
+            "Run log missing branch_name. This run is not resumable."
+        )
+
+    # Check branch exists locally
+    result = subprocess.run(
+        ["git", "branch", "--list", log.branch_name],
+        capture_output=True, text=True, cwd=repo_root,
+    )
+    if not result.stdout.strip():
+        raise click.ClickException(
+            f"Branch '{log.branch_name}' not found locally. "
+            f"Cannot resume without the branch."
+        )
+
+    if not log.prd_rel:
+        raise click.ClickException(
+            "Run log missing prd_rel. This run is not resumable."
+        )
+    if not (repo_root / log.prd_rel).exists():
+        raise click.ClickException(
+            f"PRD file not found: {log.prd_rel}"
+        )
+
+    if not log.task_rel:
+        raise click.ClickException(
+            "Run log missing task_rel. This run is not resumable."
+        )
+    if not (repo_root / log.task_rel).exists():
+        raise click.ClickException(
+            f"Task file not found: {log.task_rel}"
+        )
+
+
+def _compute_next_phase(last_successful_phase: str | None) -> str | None:
+    """Map last_successful_phase to the next phase to resume from.
+
+    Returns the next phase name, or None if nothing to resume.
+    """
+    mapping = {
+        "plan": "implement",
+        "implement": "review",
+        "review": "review",
+        "fix": "review",
+        "decision": "deliver",
+    }
+    return mapping.get(last_successful_phase)
+
+
+# Phases that should be skipped based on last_successful_phase
+_SKIP_MAP: dict[str, set[str]] = {
+    "plan": {"plan"},
+    "implement": {"plan", "implement"},
+    "review": {"plan", "implement"},
+    "fix": {"plan", "implement"},
+    "decision": {"plan", "implement", "review"},
+}
+
+
 def run(
     prompt: str,
     *,
@@ -433,20 +546,40 @@ def run(
     config: ColonyConfig,
     plan_only: bool = False,
     from_prd: str | None = None,
+    resume_from: dict | None = None,
 ) -> RunLog:
     """Execute the full orchestration loop: plan -> implement -> review -> deliver."""
-    run_id = _build_run_id(prompt)
-    log = RunLog(run_id=run_id, prompt=prompt, status=RunStatus.RUNNING)
+    # --- Resume mode ---
+    if resume_from:
+        log = resume_from["log"]
+        branch_name = resume_from["branch_name"]
+        prd_rel = resume_from["prd_rel"]
+        task_rel = resume_from["task_rel"]
+        last_successful = resume_from["last_successful_phase"]
+        skip_phases = _SKIP_MAP.get(last_successful, set())
+        next_phase = _compute_next_phase(last_successful)
+        log.status = RunStatus.RUNNING
+        _log(f"Resuming from phase: {next_phase}")
+    else:
+        run_id = _build_run_id(prompt)
+        log = RunLog(run_id=run_id, prompt=prompt, status=RunStatus.RUNNING)
+        skip_phases: set[str] = set()
 
-    slug = slugify(prompt)
-    names = planning_names(prompt)
-    branch_name = f"{config.branch_prefix}{slug}"
+        slug = slugify(prompt)
+        names = planning_names(prompt)
+        branch_name = f"{config.branch_prefix}{slug}"
 
-    prd_rel = f"{config.prds_dir}/{names.prd_filename}"
-    task_rel = f"{config.tasks_dir}/{names.task_filename}"
+        prd_rel = f"{config.prds_dir}/{names.prd_filename}"
+        task_rel = f"{config.tasks_dir}/{names.task_filename}"
+
+    log.branch_name = branch_name
+    log.prd_rel = prd_rel
+    log.task_rel = task_rel
 
     # --- Phase 1: Plan ---
-    if from_prd:
+    if "plan" in skip_phases:
+        _log("Skipping plan phase (already completed in previous run)")
+    elif from_prd:
         _log(f"Skipping plan phase, using existing PRD: {from_prd}")
         prd_rel = from_prd
         prd_stem = Path(from_prd).stem
@@ -485,27 +618,32 @@ def run(
         return log
 
     # --- Phase 2: Implement ---
-    _log("=== Phase 2: Implement ===")
-    system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name)
-    impl_result = run_phase_sync(
-        Phase.IMPLEMENT,
-        user,
-        cwd=repo_root,
-        system_prompt=system,
-        model=config.model,
-        budget_usd=config.budget.per_phase,
-    )
-    log.phases.append(impl_result)
+    if "implement" in skip_phases:
+        _log("Skipping implement phase (already completed in previous run)")
+    else:
+        _log("=== Phase 2: Implement ===")
+        system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name)
+        impl_result = run_phase_sync(
+            Phase.IMPLEMENT,
+            user,
+            cwd=repo_root,
+            system_prompt=system,
+            model=config.model,
+            budget_usd=config.budget.per_phase,
+        )
+        log.phases.append(impl_result)
 
-    if not impl_result.success:
-        log.status = RunStatus.FAILED
-        log.mark_finished()
-        _save_run_log(repo_root, log)
-        _log(f"Implement phase failed: {impl_result.error}")
-        return log
+        if not impl_result.success:
+            log.status = RunStatus.FAILED
+            log.mark_finished()
+            _save_run_log(repo_root, log)
+            _log(f"Implement phase failed: {impl_result.error}")
+            return log
 
     # --- Phase 3: Review/Fix Loop ---
-    if config.phases.review:
+    if "review" in skip_phases:
+        _log("Skipping review phase (already completed in previous run)")
+    elif config.phases.review:
         reviewers = _reviewer_personas(config)
         if not reviewers:
             _log("No reviewer personas configured, skipping review phase")
