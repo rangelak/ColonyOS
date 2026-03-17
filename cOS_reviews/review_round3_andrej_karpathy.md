@@ -1,21 +1,53 @@
 # Review by Andrej Karpathy (Round 3)
 
-Good — OSError handling is tested in `test_orchestrator.py`. Now I have everything I need for a comprehensive review.
+I now have a comprehensive picture of the implementation. Let me compile my review.
+
+---
+
+## Review: Per-Phase Model Override Configuration
+
+**Reviewer**: Andrej Karpathy  
+**Branch**: `colonyos/add_per_phase_model_override_configuration_to_colonyos_currently_config_yaml_has`
+
+### Checklist Assessment
+
+- [x] **FR-1**: `phase_models: dict[str, str]` on `ColonyConfig` ✓
+- [x] **FR-2**: `VALID_MODELS: frozenset` ✓
+- [x] **FR-3**: `get_model(phase)` with fallback ✓
+- [x] **FR-4**: Parse `phase_models` from YAML ✓
+- [x] **FR-5**: Validate model values at load time ✓
+- [x] **FR-6**: Validate phase keys against `Phase` enum ✓
+- [x] **FR-7**: Serialize `phase_models` only when non-empty ✓
+- [x] **FR-8**: `model: str | None = None` on `PhaseResult` ✓
+- [x] **FR-9**: Populate `PhaseResult.model` in all 3 return paths of `run_phase()` ✓
+- [x] **FR-10**: All `config.model` → `config.get_model(Phase.XXX)` in orchestrator (22 call sites, 0 remaining `config.model` references) ✓
+- [x] **FR-11**: All `ui.phase_header()` calls pass per-phase model ✓
+- [x] **FR-12**: No changes needed to `ui.py` ✓
+- [x] **FR-13**: Model preset selection in interactive init ✓
+- [x] **FR-14**: Quick mode defaults to cost-optimized ✓
+- [x] **FR-15**: Persist `phase_models` in generated config ✓
+- [x] **FR-16**: `ModelUsageRow` dataclass ✓
+- [x] **FR-17**: `compute_model_usage()` ✓
+- [x] **FR-18**: `model_usage` on `StatsResult` ✓
+- [x] **FR-19**: `render_model_usage()` integrated into `render_dashboard()` ✓
+- [x] **FR-20**: `model` in PhaseResult serialization, backward-compatible with `.get("model")` → `None` ✓
+
+**Tests**: 361 passed, 0 failed  
+**Remaining `config.model`** in orchestrator: 0  
+**No TODOs or placeholder code**  
+**No new dependencies**
 
 ---
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/orchestrator.py]: Clean implementation of `run_verify_loop()` following existing patterns (budget guard mirrors review loop, subprocess usage mirrors git operations). The verify gate is correctly wired between implement and review at line 952-960.
-- [src/colonyos/orchestrator.py]: `_compute_next_phase()` correctly maps `"implement" → "verify"` and `"verify" → "review"`. `_SKIP_MAP` correctly does NOT skip verify on resume (re-running a $0 subprocess is the right call).
-- [src/colonyos/orchestrator.py]: `_run_verify_command()` handles all three failure modes: non-zero exit, `TimeoutExpired`, and `OSError`. Output truncation uses tail (last 4000 chars) per PRD spec — correct since test summaries appear at the end.
-- [src/colonyos/config.py]: `VerificationConfig` dataclass follows the `BudgetConfig`/`PhasesConfig` pattern exactly. `save_config()` conditionally writes the verification section only when non-default values exist — clean YAML hygiene.
-- [src/colonyos/init.py]: `_detect_test_command()` checks in the correct priority order (Makefile → package.json → pytest → Cargo). Interactive mode asks for verify command after budget prompts. Quick mode auto-detects. Both paths covered by tests.
-- [src/colonyos/instructions/verify_fix.md]: Well-structured prompt template. The explicit "do NOT rewrite from scratch" instruction is important — without it, the model would likely regenerate everything, wasting tokens and introducing regressions.
-- [tests/test_verify.py]: 17 dedicated tests covering: subprocess args, success/failure/timeout paths, output truncation, prompt building, the full verify loop (skip, first-try pass, retry-then-pass, exhausted retries, budget guard, zero-cost accounting, artifact storage). Good coverage.
-- [src/colonyos/models.py]: `Phase.VERIFY = "verify"` added to enum — single line change, minimal blast radius.
-- [src/colonyos/orchestrator.py]: Minor observation: `run_verify_loop` returns `None` unconditionally (pipeline always proceeds to review per FR-16). This is the right design — the verify gate is a best-effort quality improvement, not a hard gate. But the return type annotation is implicit; an explicit `-> None` is already present on line 336.
+- [src/colonyos/init.py]: The Cost-optimized preset omits `decision: "haiku"` that the PRD specifies ("haiku for decision/learn/deliver"). Instead, decision falls back to the global `sonnet` default. This is actually a *better* choice than the PRD — the implementation correctly identifies decision as a `_SAFETY_CRITICAL_PHASES` member and keeps it at sonnet. The PRD's own Open Questions section (#2) acknowledged this concern. This is a thoughtful deviation.
+- [src/colonyos/config.py]: The `_SAFETY_CRITICAL_PHASES` warning for haiku on review/decision/fix is a good addition not explicitly required by the PRD. It uses `logger.warning()` which is non-blocking — exactly the right level of guardrail. A stochastic model producing a "ship it" review on haiku could be catastrophic in a pipeline running with `bypassPermissions`.
+- [src/colonyos/config.py]: `get_model()` is a clean one-liner (`phase_models.get(phase.value, self.model)`) — the right level of simplicity for a precedence rule. No over-engineering.
+- [src/colonyos/stats.py]: The `<legacy>` sentinel for old run logs without a `model` field is a clean backward-compat choice. It surfaces in the dashboard so users can see which data predates the feature rather than silently lumping it with a default model.
+- [src/colonyos/init.py]: The Cost-optimized preset uses `model: "sonnet"` as the global default with only `implement: "opus"` overridden upward. This is the right design — default to the cheaper model and override upward for capability-hungry phases, rather than defaulting to opus and overriding downward everywhere. It means adding a new phase in the future gets sonnet by default, not opus.
+- [tests/]: Comprehensive test coverage across all layers — config validation (invalid models, invalid phases, round-trip), model propagation through orchestrator, stats aggregation, init presets. 222+ new test lines in test_config.py alone.
 
 SYNTHESIS:
-This is a textbook example of how to add a new pipeline stage to an LLM orchestration system. The key architectural insight — that a $0 subprocess can save $5-10 of wasted reviewer spend — is sound, and the implementation follows through cleanly. The verification gate is a *deterministic* feedback loop (test output) feeding into a *stochastic* agent (implement retry), which is exactly the right way to compose these systems: use cheap, reliable signals to steer expensive, unreliable ones. The prompt template in `verify_fix.md` treats the retry prompt as a program — it has structured context injection, explicit behavioral constraints ("do NOT rewrite from scratch"), and attempt tracking. The `shell=True` usage is correctly noted as acceptable given the agent already runs with `bypassPermissions`. The one thing I'd eventually want to see is structured output from the verify command (e.g., JSON test results) rather than raw text truncation, but for v1 the 4000-char tail is pragmatic and correct. All 203 tests pass, the code follows existing conventions perfectly, and backward compatibility is preserved when `verify_command` is null. Ship it.
+This is a well-executed feature that treats the model routing configuration with the rigor of a program, not a setting. The key design decisions are correct: fail-fast validation at config load time (not phase execution time — catching a typo 30 minutes into a run would be infuriating), a hardcoded allowlist over arbitrary strings (V1 is the right time for constraints, not flexibility), and the single-method `get_model()` resolution that makes the precedence rule trivially auditable. The safety-critical phase warning is exactly the right intervention — it doesn't block the user but makes the cost/risk tradeoff legible. The one deviation from the PRD (keeping decision at sonnet instead of haiku in the cost-optimized preset) is a case where the implementation is smarter than the spec, which is the correct direction for disagreements to flow. The structured output from the model — `PhaseResult.model` — creates a clean data trail that makes the stats dashboard possible without any heuristics. Clean work.

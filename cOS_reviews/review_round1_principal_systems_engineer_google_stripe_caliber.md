@@ -1,43 +1,49 @@
 # Review by Principal Systems Engineer (Google/Stripe caliber) (Round 1)
 
-All 485 tests pass. Now I have everything I need for the review.
+Here is my review:
 
 ---
 
-## Review: `colonyos stats` — Principal Systems Engineer Perspective
+## Review: Per-Phase Model Override Configuration
 
 ### Completeness Assessment
 
-| PRD Requirement | Status | Notes |
+| Requirement | Status | Notes |
 |---|---|---|
-| FR-1: Run Summary Panel | ✅ | Total runs, completed, failed, in-progress, rates, cost |
-| FR-2: Cost Breakdown by Phase | ✅ | Per-phase with total, avg, %, None costs excluded |
-| FR-3: Phase Failure Hotspots | ✅ | Sorted by failure rate desc |
-| FR-4: Review Loop Efficiency | ✅ | Contiguous block counting, first-pass rate |
-| FR-5: Duration Stats | ✅ | Per-phase avg + wall-clock total |
-| FR-6: Recent Trend Display | ✅ | ✓/✗ timeline with cost |
-| FR-7: `--last N` filtering | ✅ | Implemented and tested |
-| FR-7: `--phase <name>` filtering | ✅ | Phase detail table rendered |
-| FR-8: Graceful edge cases | ✅ | Empty dir, corrupted JSON, None costs, in-progress runs |
-| Architecture: data/render separation | ✅ | Clean dataclass boundary |
+| FR-1: `phase_models` field on `ColonyConfig` | ✅ | `dict[str, str]`, default empty dict |
+| FR-2: `VALID_MODELS` constant | ✅ | `frozenset({"opus", "sonnet", "haiku"})` |
+| FR-3: `get_model(phase)` method | ✅ | Clean single-line fallback logic |
+| FR-4: Parse `phase_models` in `load_config()` | ✅ | Via `raw.get("phase_models", {})` |
+| FR-5: Validate model values at load time | ✅ | Both top-level and per-phase |
+| FR-6: Validate phase keys | ✅ | Against `Phase` enum values |
+| FR-7: Serialize only when non-empty | ✅ | Conditional in `save_config()` |
+| FR-8: `model` field on `PhaseResult` | ✅ | `str | None = None` |
+| FR-9: Populate in agent | ✅ | All three return paths covered |
+| FR-10: Replace `config.model` in orchestrator | ✅ | Zero `config.model` references remain |
+| FR-11: Update `phase_header()` calls | ✅ | All call sites updated |
+| FR-12: No UI changes needed | ✅ | Confirmed |
+| FR-13: Preset selection in interactive init | ✅ | Quality-first / Cost-optimized |
+| FR-14: Quick mode defaults to cost-optimized | ✅ | |
+| FR-15: Persist `phase_models` | ✅ | |
+| FR-16-19: Stats model usage | ✅ | `ModelUsageRow`, `compute_model_usage()`, rendering |
+| FR-20: Run log serialization | ✅ | Backward-compatible with `None` default |
 
-### Quality Findings
-
-All tasks marked complete. 65 stats-specific tests pass. 485 total tests pass with no regressions.
+All tasks in the task file are marked complete. All 20 functional requirements are implemented.
 
 ---
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/stats.py:248-254]: Import of `datetime` inside a loop body (`compute_duration_stats`). This is a minor inefficiency — the import is executed on every run iteration rather than once at module level. Not a correctness bug, but it's the kind of thing that signals hasty implementation. Move to top-level imports.
-- [src/colonyos/stats.py:108-112]: `filter_runs` accepts a `phase` parameter but ignores it entirely (docstring says "Phase filtering is handled at compute time"). The dead parameter is confusing — either remove it from the signature or document why it exists as a forward-looking API contract. The CLI passes `phase=phase` to this function, which does nothing.
-- [src/colonyos/stats.py]: `load_run_logs` globs `run-*.json` then checks `if f.name.startswith("loop_state_")` — this guard is unreachable since `loop_state_*.json` never matches the `run-*.json` glob. Dead code.
-- [src/colonyos/cli.py, src/colonyos/github.py, src/colonyos/orchestrator.py, src/colonyos/ui.py, src/colonyos/models.py]: The branch includes substantial unrelated changes (GitHub issue integration, `--issue` flag, agent tool display refactoring, `source_issue` model fields). These are not part of the stats PRD and inflate the diff. This increases the blast radius of a rollback — if the stats feature needs to be reverted, unrelated GitHub issue support would also be lost. These should have been on separate branches.
-- [src/colonyos/stats.py]: No logging. When this command is debugging corrupted runs at 3am, the only signal is a stderr `print()`. Consider using the `logging` module consistently so operators can adjust verbosity.
-- [tests/test_stats.py]: Good coverage of computation and rendering, but no CLI integration test for the `--phase` flag producing actual phase detail output (only tests the compute layer). The `test_cli.py` additions would verify this, but I note the CLI tests are part of the unrelated changes batch.
+- [src/colonyos/config.py]: Validation is fail-fast at load time — catches typos in both model names and phase keys before any budget is spent. This is the correct design. The `VALID_MODELS` frozenset makes it a one-line change to add new models.
+- [src/colonyos/config.py]: `get_model()` is a clean 1-line method with obvious precedence (phase-specific → global fallback). No ambiguity, no hidden state.
+- [src/colonyos/agent.py]: All three `PhaseResult` return paths (success, error, no-result) now populate `model`. This means stats will always have model attribution even for failed phases — critical for cost debugging at 3am.
+- [src/colonyos/orchestrator.py]: Complete replacement of all `config.model` references. Zero stale references remain (verified via grep). The mechanical nature of this change (same pattern applied ~22 times) reduces risk of subtle bugs.
+- [src/colonyos/orchestrator.py]: Run log serialization includes `model` field, and deserialization uses `.get("model")` with `None` default — old logs load cleanly. No migration needed.
+- [src/colonyos/stats.py]: `compute_model_usage()` gracefully handles `None` model (maps to "unknown") — backward compat with pre-feature run logs works correctly.
+- [src/colonyos/init.py]: The `MODEL_PRESETS` dict is a clean data structure. The cost-optimized preset correctly keeps `implement` at opus while downgrading mechanical phases. Quick mode defaulting to cost-optimized is a reasonable choice (FR-14).
+- [tests/]: 121 new lines in test_config, 35 in test_models, 84 in test_stats, 62 in test_init — comprehensive coverage of validation, fallback, round-trip, backward compat, and rendering. 514 tests pass with zero failures.
+- [src/colonyos/init.py]: Minor observation: the PRD's Open Question #1 about quick mode defaulting to cost-optimized vs quality-first was resolved in favor of cost-optimized. This changes the default `model` from `sonnet` to `opus` (with phase overrides), which is a behavioral change for existing `--quick` users. The test at line 208 confirms this is intentional.
 
 SYNTHESIS:
-The stats feature itself is well-architected. The data/render separation is clean and will trivially support `--json` in the future. The computation functions are pure, independently testable, and correctly handle the edge cases called out in the PRD (empty dirs, None costs, corrupted files, in-progress runs). The review round counting algorithm correctly treats contiguous review blocks as a single round, which is the right abstraction for parallel reviewers. Test coverage is thorough at 65 tests covering every compute function and every render function.
-
-My primary concern is operational, not functional: the branch carries ~1,500 lines of unrelated GitHub issue integration code alongside the ~1,100 lines of stats code. This violates the principle of minimal blast radius — a revert of this branch would collateral-damage the issue feature. The three minor code-quality findings (dead parameter, dead guard, loop-body import) are trivial to fix but none are blocking. The implementation is solid, the tests pass, and the feature meets its PRD. Approve with the recommendation to split unrelated features into separate branches going forward.
+This is a clean, well-scoped implementation. The design makes the right tradeoffs: fail-fast validation catches config errors before budget is burned, the single `get_model()` method provides an unambiguous precedence rule that's trivial to reason about, and backward compatibility is preserved at every layer (config loading, run log deserialization, stats computation). The orchestrator changes are mechanical but thorough — every `config.model` reference has been replaced, and the agent layer populates `model` on all exit paths including failures, which means you can always trace which model ran a phase from the run log. The stats integration is clean and handles legacy logs gracefully. Test coverage is comprehensive across validation edge cases, serialization round-trips, and backward compatibility. No secrets, no TODOs, no unnecessary dependencies. Ship it.

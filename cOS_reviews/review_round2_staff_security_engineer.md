@@ -1,22 +1,56 @@
 # Review by Staff Security Engineer (Round 2)
 
-I now have a thorough understanding of the implementation. Here is my review:
+Now I have a thorough understanding of the implementation. Here's my review:
 
 ---
+
+## Staff Security Engineer Review
+
+### Checklist Assessment
+
+**Completeness:**
+- [x] All functional requirements FR-1 through FR-20 are implemented
+- [x] All 8 task groups marked complete in the task file
+- [x] No placeholder or TODO code remains
+
+**Quality:**
+- [x] All 219 tests pass (0.52s)
+- [x] Code follows existing project conventions (`.get()` patterns, conditional serialization)
+- [x] No unnecessary dependencies added
+- [x] Unrelated changes present (this branch carries 3 features — github, stats, model overrides) — but the model override commits are clean
+
+**Safety:**
+- [x] No secrets or credentials in committed code
+- [x] No destructive database operations
+- [x] Error handling present (fail-fast validation at config load time)
+
+### Security-Specific Findings
+
+**[src/colonyos/config.py]**: **GOOD** — `_SAFETY_CRITICAL_PHASES` warning when haiku is assigned to review/decision/fix. However, this is **only a warning**, not a block. Given that `run_phase` in `agent.py:52` runs with `permission_mode="bypassPermissions"`, a user assigning `haiku` to the `review` or `decision` phase means a less capable model is making safety-critical judgment calls about code that will be executed with full permissions. The PRD explicitly marked "minimum model floor" as a non-goal, and the warning is a reasonable V1 compromise, but this remains a latent risk.
+
+**[src/colonyos/config.py]**: **GOOD** — `VALID_MODELS` is a hardcoded `frozenset` allowlist. This is the right approach for V1 — it prevents injection of arbitrary model strings that could cause unexpected behavior downstream. Validation happens at `load_config()` time (fail-fast), not at phase execution time.
+
+**[src/colonyos/config.py]**: **GOOD** — Phase keys are validated against `Phase` enum values, preventing injection of arbitrary keys into `phase_models`. The dict is parsed via `yaml.safe_load()` (no arbitrary code execution from YAML).
+
+**[src/colonyos/init.py]**: **GOOD** — The cost-optimized preset correctly assigns `sonnet` (not `haiku`) to `decision`, `review`, and `fix` phases. This shows awareness of the security concern. `learn` and `deliver` get `haiku`, which is appropriate for mechanical tasks.
+
+**[src/colonyos/agent.py]**: **GOOD** — `PhaseResult.model` is populated on all three return paths (success, subprocess error, no-result error). This ensures audit trail completeness — you can always trace which model made which decision.
+
+**[src/colonyos/orchestrator.py]**: **GOOD** — The `model` field is serialized in run log JSON (`_save_run_log`) and deserialized with backward-compatible `.get("model")` defaulting to `None`. This provides auditability — you can retroactively check which model ran each phase in every historical run.
+
+**[src/colonyos/init.py]**: **MINOR CONCERN** — Quick mode defaults to cost-optimized preset without any user confirmation. PRD Open Question #1 flagged this tension. For automated/CI setups, this silently changes the model assignment. Not a security vulnerability per se, but reduces the quality of safety-critical phases from whatever the user's existing config had to sonnet.
+
+**[Branch hygiene]**: **NOTE** — This branch carries changes from 3 features (GitHub integration, stats, model overrides). The model override changes themselves are clean and isolated to their commits, but the combined diff makes auditing harder. Future runs should use single-purpose branches.
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/orchestrator.py]: **Bash tool in review/decision phases (pre-existing, acknowledged)** — Reviewers and the decision gate get `["Read", "Glob", "Grep", "Bash"]` which is consistent with the pipeline (FR-16) but means a malicious instruction template could use Bash to exfiltrate secrets (e.g., `curl` env vars to an external endpoint, `cat ~/.ssh/id_rsa`). The PRD acknowledges this in Open Question #2 and defers it. Acceptable for v1, but this is the single highest-risk surface in the entire tool.
-- [src/colonyos/orchestrator.py]: **Fix agent has unrestricted tool access** — `run_phase_sync(Phase.FIX, ...)` does not pass `allowed_tools`, meaning the fix agent gets the default full tool set. This is consistent with FR-20 ("same as pipeline fix phase") and is expected since fixes need write access, but worth noting for audit purposes.
-- [src/colonyos/orchestrator.py]: **`subprocess.run` calls use list args, not shell=True** — Good. Both `validate_branch_exists()` and `_get_branch_diff()` pass commands as lists, not strings, preventing shell injection through branch names like `; rm -rf /`. This is the correct pattern.
-- [src/colonyos/orchestrator.py]: **Branch name flows into `git diff` and `git branch --list` without sanitization beyond remote-ref check** — The `--` separator in `git branch --list --` prevents option injection. The `git diff base...branch` call does not use `--`, but since `subprocess.run` uses a list (no shell), the risk is minimal. A pathologically named branch could still cause unexpected git behavior, but this is a low-severity concern.
-- [src/colonyos/instructions/fix_standalone.md]: **Fix template instructs agent to commit changes** — Line 45 says "Commit all fixes on branch `{branch_name}`". This is the expected behavior when `--fix` is used (not `--no-fix`), and the fix loop is opt-out by default (`no_fix=False` in the function signature — wait, let me verify)... Actually checking the PRD: FR-5 says "Default behavior: fix loop runs if any reviewer requests changes." The CLI defaults `--no-fix` to `is_flag=True` (off by default), so fixes DO run by default. The PRD says "Review-only by default (no branch mutation); fixes require explicit `--fix` flag" in Goal #5, but FR-5 contradicts this by saying the default runs fixes. The implementation follows FR-5 (fixes run unless `--no-fix`). This is a PRD internal inconsistency, not an implementation bug.
-- [src/colonyos/cli.py]: **No `--fix` flag, only `--no-fix`** — FR-5 defines `--no-fix` to skip fixes, and Goal #5 mentions an explicit `--fix` flag. The implementation uses `--no-fix` only, which is consistent with FR-5's default (fix runs unless told not to). This is fine but the PRD's Goal #5 language is misleading.
-- [src/colonyos/orchestrator.py]: **No RunLog created** — Correct per FR-32. Cost tracking uses `PhaseResult` objects and a running `total_cost` counter. This means there's no persistent audit trail of what the agent did beyond the review artifacts saved to disk. For auditability, the saved artifacts (per-persona review files + summary) provide a reasonable paper trail.
-- [src/colonyos/orchestrator.py]: **OSError handling in `_get_branch_diff`** — Properly catches `OSError` and returns empty string rather than crashing. Good defensive practice.
-- [tests/test_standalone_review.py]: **902 lines of comprehensive tests** — Covers branch validation (including remote ref rejection, feature/ branches), diff extraction/truncation, prompt building, parallel execution, artifact filenames, budget enforcement, fix phase failure, decision gate, CLI flags, and exit codes. Test quality is solid.
-- [src/colonyos/instructions/review_standalone.md]: **No secrets in templates** — Instruction templates contain only structural prompts with format placeholders. No credentials or sensitive data.
+- [src/colonyos/config.py]: Safety-critical phase warning for haiku is informational only (log warning), not enforced as a block. This is per-PRD (non-goal), but means a user can silently assign haiku to review/decision phases that run with bypassPermissions. Acceptable for V1, should revisit.
+- [src/colonyos/config.py]: VALID_MODELS allowlist and fail-fast validation at load time is well-implemented — prevents arbitrary string injection and catches typos early.
+- [src/colonyos/agent.py]: Model field populated on all PhaseResult return paths — provides complete audit trail of which model made which decision.
+- [src/colonyos/orchestrator.py]: Run log serialization includes model field with backward-compatible deserialization — enables retrospective auditing.
+- [src/colonyos/init.py]: Cost-optimized preset correctly keeps sonnet for safety-critical phases (review, decision, fix), only assigns haiku to mechanical phases (learn, deliver).
+- [src/colonyos/init.py]: Quick mode silently defaults to cost-optimized preset — may surprise users expecting uniform model assignment in automated setups.
 
 SYNTHESIS:
-From a security perspective, this implementation is well-constructed for v1. The subprocess calls avoid shell injection by using list arguments. Branch validation rejects remote-style refs and uses `--` to prevent option injection. Error handling is present throughout. The biggest security concern — Bash tool access for reviewers enabling arbitrary command execution — is a pre-existing architectural issue that affects the entire pipeline, not just this feature, and is correctly documented as a deferred open question in the PRD. The fix agent's unrestricted tool access is expected and gated behind the `--no-fix` opt-out flag. The absence of a RunLog means we lack a centralized audit trail, but the per-round review artifacts saved to disk provide reasonable traceability of what each persona evaluated and concluded. No secrets are committed, no destructive operations are unguarded, and the 309 passing tests provide good coverage of the security-relevant paths (branch validation, budget exhaustion, fix failure graceful degradation). I approve with the standing recommendation to revisit Bash tool access for reviewers as a priority follow-up.
+From a security perspective, this implementation is well-executed for a V1 feature. The key security properties are: (1) a hardcoded model allowlist prevents arbitrary string injection, (2) fail-fast validation catches misconfigurations before budget is burned, (3) the model field in PhaseResult creates a complete audit trail, and (4) safety-critical phases get a logged warning when downgraded to haiku. The primary residual risk is that warnings for haiku on safety-critical phases are non-blocking — a user can still assign haiku to the review/decision phases that run with `bypassPermissions`, which could reduce the quality of security judgments. The PRD explicitly scoped enforcement as a non-goal, and the cost-optimized preset correctly avoids this pitfall. The implementation adds no new dependencies, introduces no credential handling, and follows existing code patterns faithfully. I recommend approval with a note to revisit enforcement of minimum model floors for safety-critical phases in V2.
