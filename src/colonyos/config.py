@@ -12,7 +12,7 @@ CONFIG_FILE = "config.yaml"
 RUNS_DIR = "runs"
 
 DEFAULTS = {
-    "model": "claude-sonnet-4-20250514",
+    "model": "sonnet",
     "budget": {"per_phase": 5.0, "per_run": 15.0},
     "phases": {"plan": True, "implement": True, "deliver": True},
     "branch_prefix": "colonyos/",
@@ -38,7 +38,7 @@ class PhasesConfig:
 class ColonyConfig:
     project: ProjectInfo | None = None
     personas: list[Persona] = field(default_factory=list)
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "sonnet"
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     phases: PhasesConfig = field(default_factory=PhasesConfig)
     branch_prefix: str = "colonyos/"

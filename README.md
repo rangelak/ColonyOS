@@ -101,7 +101,7 @@ personas:
     expertise: "User research, prioritization"
     perspective: "Thinks about user value and shipping incrementally"
 
-model: claude-sonnet-4-20250514
+model: opus
 budget:
   per_phase: 5.00       # USD per Claude Code session
   per_run: 15.00        # USD total cap for a full run

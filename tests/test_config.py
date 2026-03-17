@@ -21,7 +21,7 @@ def tmp_repo(tmp_path: Path) -> Path:
 class TestLoadConfig:
     def test_returns_defaults_when_no_config(self, tmp_repo: Path):
         config = load_config(tmp_repo)
-        assert config.model == "claude-sonnet-4-20250514"
+        assert config.model == "sonnet"
         assert config.budget.per_phase == 5.0
         assert config.budget.per_run == 15.0
         assert config.phases.plan is True

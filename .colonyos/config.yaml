@@ -24,10 +24,10 @@ personas:
     expertise: "Supply chain security, secrets management, least privilege, sandboxing"
     perspective: "This tool runs arbitrary code in people's repos with full permissions. What stops a bad instruction template from exfiltrating secrets? How do we audit what the agent did? What's the principle of least privilege for each phase?"
 
-model: claude-opus-4-6-20260316
+model: opus
 budget:
-  per_phase: 5.0
-  per_run: 15.0
+  per_phase: 10.0
+  per_run: 50.0
 phases:
   plan: true
   implement: true
