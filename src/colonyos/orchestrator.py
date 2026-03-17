@@ -537,6 +537,8 @@ def run(
         if review_agents:
             _log(f"  {len(review_agents)} persona subagents configured for review")
 
+        review_tools = ["Read", "Glob", "Grep", "Bash"]
+
         # Per-task reviews
         for i, task_desc in enumerate(parent_tasks):
             _log(f"  Reviewing task {i + 1}/{len(parent_tasks)}: {task_desc[:60]}")
@@ -551,6 +553,7 @@ def run(
                 model=config.model,
                 budget_usd=config.budget.per_phase,
                 agents=review_agents,
+                allowed_tools=review_tools + (["Agent"] if review_agents else []),
             )
 
             # Save per-task review artifact
@@ -587,6 +590,7 @@ def run(
             model=config.model,
             budget_usd=config.budget.per_phase,
             agents=review_agents,
+            allowed_tools=review_tools + (["Agent"] if review_agents else []),
         )
 
         # Save final review artifact
