@@ -12,7 +12,7 @@ from claude_agent_sdk import AgentDefinition
 
 from colonyos.agent import run_phase_sync, run_phases_parallel_sync
 from colonyos.config import ColonyConfig, runs_dir_path
-from colonyos.models import Persona, Phase, PhaseResult, RunLog, RunStatus
+from colonyos.models import Persona, Phase, PhaseResult, ResumeState, RunLog, RunStatus
 from colonyos.naming import generate_timestamp, planning_names, proposal_names, slugify
 
 
@@ -394,7 +394,7 @@ def _save_review_artifact(
     return path
 
 
-def _save_run_log(repo_root: Path, log: RunLog) -> Path:
+def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Path:
     runs = runs_dir_path(repo_root)
     runs.mkdir(parents=True, exist_ok=True)
     log_path = runs / f"{log.run_id}.json"
@@ -403,6 +403,19 @@ def _save_run_log(repo_root: Path, log: RunLog) -> Path:
     for p in log.phases:
         if p.success:
             last_successful_phase = p.phase.value
+
+    # Load existing resume_events if re-saving the same file
+    resume_events: list[str] = []
+    if log_path.exists():
+        try:
+            existing_data = json.loads(log_path.read_text(encoding="utf-8"))
+            resume_events = existing_data.get("resume_events", [])
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    if resumed:
+        from datetime import datetime, timezone
+        resume_events.append(datetime.now(timezone.utc).isoformat())
 
     log_path.write_text(
         json.dumps(
@@ -417,6 +430,7 @@ def _save_run_log(repo_root: Path, log: RunLog) -> Path:
                 "prd_rel": log.prd_rel,
                 "task_rel": log.task_rel,
                 "last_successful_phase": last_successful_phase,
+                "resume_events": resume_events,
                 "phases": [
                     {
                         "phase": p.phase.value,
@@ -436,9 +450,35 @@ def _save_run_log(repo_root: Path, log: RunLog) -> Path:
     return log_path
 
 
+def _validate_run_id(run_id: str) -> None:
+    """Validate that run_id contains no path traversal characters."""
+    if not run_id:
+        raise click.ClickException("Run ID must not be empty.")
+    if "/" in run_id or "\\" in run_id or ".." in run_id:
+        raise click.ClickException(
+            f"Invalid run ID: {run_id!r}. "
+            "Run IDs must not contain path separators or '..' sequences."
+        )
+
+
+def _validate_rel_path(repo_root: Path, rel_path: str, label: str) -> None:
+    """Validate that a relative path does not escape the repo root."""
+    resolved = (repo_root / rel_path).resolve()
+    repo_resolved = repo_root.resolve()
+    if not str(resolved).startswith(str(repo_resolved) + "/") and resolved != repo_resolved:
+        raise click.ClickException(
+            f"{label} path escapes repository root: {rel_path!r}"
+        )
+
+
 def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
     """Load a RunLog from its JSON file in .colonyos/runs/."""
+    _validate_run_id(run_id)
     log_path = runs_dir_path(repo_root) / f"{run_id}.json"
+    # Verify resolved path is under the runs directory
+    runs_dir = runs_dir_path(repo_root).resolve()
+    if not str(log_path.resolve()).startswith(str(runs_dir) + "/"):
+        raise click.ClickException(f"Invalid run ID: {run_id!r}")
     if not log_path.exists():
         raise click.ClickException(f"Run log not found: {log_path}")
     try:
@@ -446,29 +486,42 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
     except json.JSONDecodeError as exc:
         raise click.ClickException(f"Corrupted run log: {log_path}: {exc}")
 
-    phases = []
-    for p in data.get("phases", []):
-        phases.append(PhaseResult(
-            phase=Phase(p["phase"]),
-            success=p["success"],
-            cost_usd=p.get("cost_usd"),
-            duration_ms=p.get("duration_ms", 0),
-            session_id=p.get("session_id", ""),
-            error=p.get("error"),
-        ))
+    try:
+        phases = []
+        for p in data.get("phases", []):
+            phases.append(PhaseResult(
+                phase=Phase(p["phase"]),
+                success=p["success"],
+                cost_usd=p.get("cost_usd"),
+                duration_ms=p.get("duration_ms", 0),
+                session_id=p.get("session_id", ""),
+                error=p.get("error"),
+            ))
 
-    return RunLog(
-        run_id=data["run_id"],
-        prompt=data["prompt"],
-        status=RunStatus(data["status"]),
-        phases=phases,
-        total_cost_usd=data.get("total_cost_usd", 0.0),
-        started_at=data.get("started_at", ""),
-        finished_at=data.get("finished_at"),
-        branch_name=data.get("branch_name"),
-        prd_rel=data.get("prd_rel"),
-        task_rel=data.get("task_rel"),
-    )
+        log = RunLog(
+            run_id=data["run_id"],
+            prompt=data["prompt"],
+            status=RunStatus(data["status"]),
+            phases=phases,
+            total_cost_usd=data.get("total_cost_usd", 0.0),
+            started_at=data.get("started_at", ""),
+            finished_at=data.get("finished_at"),
+            branch_name=data.get("branch_name"),
+            prd_rel=data.get("prd_rel"),
+            task_rel=data.get("task_rel"),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise click.ClickException(
+            f"Invalid run log schema in {log_path}: {exc}"
+        )
+
+    # Validate relative paths don't escape repo root
+    if log.prd_rel:
+        _validate_rel_path(repo_root, log.prd_rel, "prd_rel")
+    if log.task_rel:
+        _validate_rel_path(repo_root, log.task_rel, "task_rel")
+
+    return log
 
 
 def _validate_resume_preconditions(repo_root: Path, log: RunLog) -> None:
@@ -484,9 +537,9 @@ def _validate_resume_preconditions(repo_root: Path, log: RunLog) -> None:
             "Run log missing branch_name. This run is not resumable."
         )
 
-    # Check branch exists locally
+    # Check branch exists locally (-- terminates option parsing for safety)
     result = subprocess.run(
-        ["git", "branch", "--list", log.branch_name],
+        ["git", "branch", "--list", "--", log.branch_name],
         capture_output=True, text=True, cwd=repo_root,
     )
     if not result.stdout.strip():
@@ -539,6 +592,34 @@ _SKIP_MAP: dict[str, set[str]] = {
 }
 
 
+def prepare_resume(repo_root: Path, run_id: str) -> ResumeState:
+    """Load and validate a failed run for resumption.
+
+    This is the public API for resume preparation, used by the CLI.
+    Returns a ResumeState with all data needed to resume the run.
+    """
+    log = _load_run_log(repo_root, run_id)
+    _validate_resume_preconditions(repo_root, log)
+
+    last_successful_phase = None
+    for p in log.phases:
+        if p.success:
+            last_successful_phase = p.phase.value
+
+    if last_successful_phase is None:
+        raise click.ClickException(
+            "No successful phases found in run log. Nothing to resume from."
+        )
+
+    return ResumeState(
+        log=log,
+        branch_name=log.branch_name,  # type: ignore[arg-type]
+        prd_rel=log.prd_rel,  # type: ignore[arg-type]
+        task_rel=log.task_rel,  # type: ignore[arg-type]
+        last_successful_phase=last_successful_phase,
+    )
+
+
 def run(
     prompt: str,
     *,
@@ -546,20 +627,24 @@ def run(
     config: ColonyConfig,
     plan_only: bool = False,
     from_prd: str | None = None,
-    resume_from: dict | None = None,
+    resume_from: ResumeState | None = None,
 ) -> RunLog:
     """Execute the full orchestration loop: plan -> implement -> review -> deliver."""
+    is_resume = resume_from is not None
+
     # --- Resume mode ---
     if resume_from:
-        log = resume_from["log"]
-        branch_name = resume_from["branch_name"]
-        prd_rel = resume_from["prd_rel"]
-        task_rel = resume_from["task_rel"]
-        last_successful = resume_from["last_successful_phase"]
+        log = resume_from.log
+        branch_name = resume_from.branch_name
+        prd_rel = resume_from.prd_rel
+        task_rel = resume_from.task_rel
+        last_successful = resume_from.last_successful_phase
         skip_phases = _SKIP_MAP.get(last_successful, set())
         next_phase = _compute_next_phase(last_successful)
         log.status = RunStatus.RUNNING
         _log(f"Resuming from phase: {next_phase}")
+        # Record resume event for audit trail
+        _save_run_log(repo_root, log, resumed=True)
     else:
         run_id = _build_run_id(prompt)
         log = RunLog(run_id=run_id, prompt=prompt, status=RunStatus.RUNNING)

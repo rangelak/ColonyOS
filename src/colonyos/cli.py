@@ -13,8 +13,7 @@ from colonyos.models import RunLog, RunStatus
 from colonyos.orchestrator import (
     run as run_orchestrator,
     run_ceo,
-    _load_run_log,
-    _validate_resume_preconditions,
+    prepare_resume,
 )
 
 
@@ -89,28 +88,13 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
         sys.exit(1)
 
     if resume_run_id:
-        existing_log = _load_run_log(repo_root, resume_run_id)
-        _validate_resume_preconditions(repo_root, existing_log)
-
-        # Derive last_successful_phase
-        last_successful_phase = None
-        for p in existing_log.phases:
-            if p.success:
-                last_successful_phase = p.phase.value
-
-        resume_from = {
-            "log": existing_log,
-            "branch_name": existing_log.branch_name,
-            "prd_rel": existing_log.prd_rel,
-            "task_rel": existing_log.task_rel,
-            "last_successful_phase": last_successful_phase,
-        }
+        resume_state = prepare_resume(repo_root, resume_run_id)
 
         log = run_orchestrator(
-            existing_log.prompt,
+            resume_state.log.prompt,
             repo_root=repo_root,
             config=config,
-            resume_from=resume_from,
+            resume_from=resume_state,
         )
     else:
         effective_prompt = prompt or f"Implement the PRD at {from_prd}"

@@ -237,7 +237,7 @@ class TestResumeFlag:
         assert mock_orch.call_count == 1
         call_kwargs = mock_orch.call_args.kwargs
         assert call_kwargs["resume_from"] is not None
-        assert call_kwargs["resume_from"]["last_successful_phase"] == "plan"
+        assert call_kwargs["resume_from"].last_successful_phase == "plan"
 
 
 class TestStatusResumable:

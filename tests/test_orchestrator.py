@@ -6,9 +6,10 @@ import click
 import pytest
 
 from colonyos.config import ColonyConfig, BudgetConfig, PhasesConfig, save_config
-from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, RunLog, RunStatus
+from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, ResumeState, RunLog, RunStatus
 from colonyos.orchestrator import (
     run,
+    prepare_resume,
     _format_personas_block,
     _build_persona_agents,
     _build_fix_prompt,
@@ -942,17 +943,17 @@ class TestResumeFromRun:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        resume_from = {
-            "log": existing_log,
-            "branch_name": "colonyos/add_feature",
-            "prd_rel": "cOS_prds/prd.md",
-            "task_rel": "cOS_tasks/tasks.md",
-            "last_successful_phase": "plan",
-        }
+        resume_state = ResumeState(
+            log=existing_log,
+            branch_name="colonyos/add_feature",
+            prd_rel="cOS_prds/prd.md",
+            task_rel="cOS_tasks/tasks.md",
+            last_successful_phase="plan",
+        )
 
         log = run(
             "Add feature", repo_root=tmp_repo, config=config,
-            resume_from=resume_from,
+            resume_from=resume_state,
         )
 
         assert log.status == RunStatus.COMPLETED
@@ -987,17 +988,17 @@ class TestResumeFromRun:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        resume_from = {
-            "log": existing_log,
-            "branch_name": "colonyos/add_feature",
-            "prd_rel": "cOS_prds/prd.md",
-            "task_rel": "cOS_tasks/tasks.md",
-            "last_successful_phase": "implement",
-        }
+        resume_state = ResumeState(
+            log=existing_log,
+            branch_name="colonyos/add_feature",
+            prd_rel="cOS_prds/prd.md",
+            task_rel="cOS_tasks/tasks.md",
+            last_successful_phase="implement",
+        )
 
         log = run(
             "Add feature", repo_root=tmp_repo, config=config,
-            resume_from=resume_from,
+            resume_from=resume_state,
         )
 
         assert log.status == RunStatus.COMPLETED
@@ -1031,17 +1032,17 @@ class TestResumeFromRun:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        resume_from = {
-            "log": existing_log,
-            "branch_name": "colonyos/add_feature",
-            "prd_rel": "cOS_prds/prd.md",
-            "task_rel": "cOS_tasks/tasks.md",
-            "last_successful_phase": "implement",
-        }
+        resume_state = ResumeState(
+            log=existing_log,
+            branch_name="colonyos/add_feature",
+            prd_rel="cOS_prds/prd.md",
+            task_rel="cOS_tasks/tasks.md",
+            last_successful_phase="implement",
+        )
 
         log = run(
             "Add feature", repo_root=tmp_repo, config=config,
-            resume_from=resume_from,
+            resume_from=resume_state,
         )
 
         assert log.status == RunStatus.COMPLETED
@@ -1072,17 +1073,17 @@ class TestResumeFromRun:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        resume_from = {
-            "log": existing_log,
-            "branch_name": "colonyos/add_feature",
-            "prd_rel": "cOS_prds/prd.md",
-            "task_rel": "cOS_tasks/tasks.md",
-            "last_successful_phase": "plan",
-        }
+        resume_state = ResumeState(
+            log=existing_log,
+            branch_name="colonyos/add_feature",
+            prd_rel="cOS_prds/prd.md",
+            task_rel="cOS_tasks/tasks.md",
+            last_successful_phase="plan",
+        )
 
         log = run(
             "Add feature", repo_root=tmp_repo, config=config,
-            resume_from=resume_from,
+            resume_from=resume_state,
         )
 
         assert log.phases[0] is original_plan  # Original phase preserved
@@ -1119,17 +1120,17 @@ class TestResumeFromRun:
             _fake_phase_result(Phase.DELIVER),
         ]
 
-        resume_from = {
-            "log": existing_log,
-            "branch_name": "colonyos/add_feature",
-            "prd_rel": "cOS_prds/prd.md",
-            "task_rel": "cOS_tasks/tasks.md",
-            "last_successful_phase": "decision",
-        }
+        resume_state = ResumeState(
+            log=existing_log,
+            branch_name="colonyos/add_feature",
+            prd_rel="cOS_prds/prd.md",
+            task_rel="cOS_tasks/tasks.md",
+            last_successful_phase="decision",
+        )
 
         log = run(
             "Add feature", repo_root=tmp_repo, config=config,
-            resume_from=resume_from,
+            resume_from=resume_state,
         )
 
         assert log.status == RunStatus.COMPLETED
@@ -1167,3 +1168,184 @@ class TestResumeFromRun:
         assert data["branch_name"] == log.branch_name
         assert data["prd_rel"] == log.prd_rel
         assert data["task_rel"] == log.task_rel
+
+
+class TestRunIdValidation:
+    """Path traversal protection for run_id in _load_run_log."""
+
+    def test_rejects_path_traversal_dotdot(self, tmp_repo: Path):
+        with pytest.raises(click.ClickException, match="must not contain"):
+            _load_run_log(tmp_repo, "../../etc/passwd")
+
+    def test_rejects_forward_slash(self, tmp_repo: Path):
+        with pytest.raises(click.ClickException, match="must not contain"):
+            _load_run_log(tmp_repo, "foo/bar")
+
+    def test_rejects_backslash(self, tmp_repo: Path):
+        with pytest.raises(click.ClickException, match="must not contain"):
+            _load_run_log(tmp_repo, "foo\\bar")
+
+    def test_rejects_empty_run_id(self, tmp_repo: Path):
+        with pytest.raises(click.ClickException, match="must not be empty"):
+            _load_run_log(tmp_repo, "")
+
+    def test_accepts_valid_run_id(self, tmp_repo: Path):
+        """Valid run IDs with hyphens, underscores, dots should work."""
+        # This should raise "not found" rather than "invalid"
+        with pytest.raises(click.ClickException, match="Run log not found"):
+            _load_run_log(tmp_repo, "run-20260101-abc123")
+
+
+class TestRelPathValidation:
+    """Path containment validation for prd_rel and task_rel."""
+
+    def test_rejects_prd_rel_escaping_repo(self, tmp_repo: Path):
+        runs_dir = tmp_repo / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "escape.json").write_text(json.dumps({
+            "run_id": "escape", "prompt": "test", "status": "failed",
+            "phases": [], "total_cost_usd": 0.0,
+            "prd_rel": "../../etc/passwd",
+            "task_rel": "cOS_tasks/tasks.md",
+        }), encoding="utf-8")
+        with pytest.raises(click.ClickException, match="escapes repository root"):
+            _load_run_log(tmp_repo, "escape")
+
+    def test_rejects_task_rel_escaping_repo(self, tmp_repo: Path):
+        runs_dir = tmp_repo / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "escape2.json").write_text(json.dumps({
+            "run_id": "escape2", "prompt": "test", "status": "failed",
+            "phases": [], "total_cost_usd": 0.0,
+            "prd_rel": "cOS_prds/prd.md",
+            "task_rel": "../../../etc/shadow",
+        }), encoding="utf-8")
+        with pytest.raises(click.ClickException, match="escapes repository root"):
+            _load_run_log(tmp_repo, "escape2")
+
+
+class TestSchemaValidation:
+    """Schema validation for corrupted run log JSON."""
+
+    def test_missing_required_field_raises(self, tmp_repo: Path):
+        runs_dir = tmp_repo / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        # Missing 'prompt' field
+        (runs_dir / "bad-schema.json").write_text(json.dumps({
+            "run_id": "bad-schema", "status": "failed",
+            "phases": [],
+        }), encoding="utf-8")
+        with pytest.raises(click.ClickException, match="Invalid run log schema"):
+            _load_run_log(tmp_repo, "bad-schema")
+
+    def test_invalid_phase_value_raises(self, tmp_repo: Path):
+        runs_dir = tmp_repo / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "bad-phase.json").write_text(json.dumps({
+            "run_id": "bad-phase", "prompt": "test", "status": "failed",
+            "phases": [{"phase": "nonexistent", "success": True}],
+        }), encoding="utf-8")
+        with pytest.raises(click.ClickException, match="Invalid run log schema"):
+            _load_run_log(tmp_repo, "bad-phase")
+
+    def test_invalid_status_value_raises(self, tmp_repo: Path):
+        runs_dir = tmp_repo / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "bad-status.json").write_text(json.dumps({
+            "run_id": "bad-status", "prompt": "test", "status": "invalid_status",
+            "phases": [],
+        }), encoding="utf-8")
+        with pytest.raises(click.ClickException, match="Invalid run log schema"):
+            _load_run_log(tmp_repo, "bad-status")
+
+
+class TestGitBranchArgTermination:
+    """Verify -- argument termination in git branch --list call."""
+
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_git_branch_uses_double_dash(self, mock_subprocess, tmp_repo: Path):
+        log = RunLog(
+            run_id="r1", prompt="test", status=RunStatus.FAILED,
+            branch_name="--delete", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
+        )
+        mock_subprocess.return_value = MagicMock(stdout="  --delete\n")
+        (tmp_repo / "cOS_prds" / "prd.md").write_text("# PRD", encoding="utf-8")
+        (tmp_repo / "cOS_tasks" / "tasks.md").write_text("# Tasks", encoding="utf-8")
+        _validate_resume_preconditions(tmp_repo, log)
+        # Verify the subprocess call includes -- before branch name
+        call_args = mock_subprocess.call_args[0][0]
+        assert call_args == ["git", "branch", "--list", "--", "--delete"]
+
+
+class TestResumeAuditTrail:
+    """Resume events are recorded in the run log JSON."""
+
+    def test_resume_events_recorded(self, tmp_repo: Path):
+        log = RunLog(
+            run_id="r-audit", prompt="test", status=RunStatus.FAILED,
+            branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
+        )
+        # First save (no resume)
+        _save_run_log(tmp_repo, log)
+        data = json.loads((tmp_repo / ".colonyos" / "runs" / "r-audit.json").read_text())
+        assert data.get("resume_events", []) == []
+
+        # Save with resumed=True
+        _save_run_log(tmp_repo, log, resumed=True)
+        data = json.loads((tmp_repo / ".colonyos" / "runs" / "r-audit.json").read_text())
+        assert len(data["resume_events"]) == 1
+        assert isinstance(data["resume_events"][0], str)  # ISO timestamp
+
+    def test_multiple_resume_events_accumulate(self, tmp_repo: Path):
+        log = RunLog(
+            run_id="r-multi", prompt="test", status=RunStatus.FAILED,
+            branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
+        )
+        _save_run_log(tmp_repo, log)
+        _save_run_log(tmp_repo, log, resumed=True)
+        _save_run_log(tmp_repo, log, resumed=True)
+        data = json.loads((tmp_repo / ".colonyos" / "runs" / "r-multi.json").read_text())
+        assert len(data["resume_events"]) == 2
+
+
+class TestPrepareResume:
+    """Tests for the public prepare_resume() function."""
+
+    def test_returns_resume_state(self, tmp_repo: Path):
+        log = RunLog(
+            run_id="r-prep", prompt="test", status=RunStatus.FAILED,
+            branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
+            phases=[_fake_phase_result(Phase.PLAN)],
+        )
+        _save_run_log(tmp_repo, log)
+        (tmp_repo / "cOS_prds" / "prd.md").write_text("# PRD", encoding="utf-8")
+        (tmp_repo / "cOS_tasks" / "tasks.md").write_text("# Tasks", encoding="utf-8")
+
+        with patch("colonyos.orchestrator.subprocess.run") as mock_sub:
+            mock_sub.return_value = MagicMock(stdout="  feat/x\n")
+            state = prepare_resume(tmp_repo, "r-prep")
+
+        assert isinstance(state, ResumeState)
+        assert state.branch_name == "feat/x"
+        assert state.prd_rel == "cOS_prds/prd.md"
+        assert state.task_rel == "cOS_tasks/tasks.md"
+        assert state.last_successful_phase == "plan"
+
+    def test_raises_on_no_successful_phases(self, tmp_repo: Path):
+        log = RunLog(
+            run_id="r-nosuccess", prompt="test", status=RunStatus.FAILED,
+            branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
+            phases=[_fake_phase_result(Phase.PLAN, success=False)],
+        )
+        _save_run_log(tmp_repo, log)
+        (tmp_repo / "cOS_prds" / "prd.md").write_text("# PRD", encoding="utf-8")
+        (tmp_repo / "cOS_tasks" / "tasks.md").write_text("# Tasks", encoding="utf-8")
+
+        with patch("colonyos.orchestrator.subprocess.run") as mock_sub:
+            mock_sub.return_value = MagicMock(stdout="  feat/x\n")
+            with pytest.raises(click.ClickException, match="No successful phases"):
+                prepare_resume(tmp_repo, "r-nosuccess")
+
+    def test_rejects_path_traversal(self, tmp_repo: Path):
+        with pytest.raises(click.ClickException, match="must not contain"):
+            prepare_resume(tmp_repo, "../../etc/passwd")

@@ -58,6 +58,17 @@ class PhaseResult:
 
 
 @dataclass
+class ResumeState:
+    """Typed container for resume-from parameters passed to the orchestrator."""
+
+    log: "RunLog"
+    branch_name: str
+    prd_rel: str
+    task_rel: str
+    last_successful_phase: str
+
+
+@dataclass
 class RunLog:
     run_id: str
     prompt: str
