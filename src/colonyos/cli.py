@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
 
 from colonyos import __version__
 from colonyos.config import load_config, runs_dir_path
+from colonyos.doctor import run_doctor_checks
 from colonyos.init import run_init
-from colonyos.models import LoopState, RunLog, RunStatus
+from colonyos.models import LoopState, LoopStatus, RunLog, RunStatus
+from colonyos.naming import generate_timestamp
 from colonyos.orchestrator import (
     run as run_orchestrator,
     run_ceo,
@@ -46,89 +51,6 @@ def _print_run_summary(log: RunLog) -> None:
 # ---------------------------------------------------------------------------
 # Doctor
 # ---------------------------------------------------------------------------
-
-def run_doctor_checks(repo_root: Path) -> list[tuple[str, bool, str]]:
-    """Run all prerequisite checks and return a list of (name, passed, fix_hint).
-
-    This is extracted as a reusable function so ``colonyos init`` can call it
-    as a pre-check.
-    """
-    results: list[tuple[str, bool, str]] = []
-
-    # 1. Python >= 3.11
-    py_ok = sys.version_info.major >= 3 and sys.version_info.minor >= 11
-    results.append((
-        "Python ≥ 3.11",
-        py_ok,
-        f"Current: {sys.version_info.major}.{sys.version_info.minor}. "
-        "Install Python 3.11+: https://www.python.org/downloads/"
-    ))
-
-    # 2. claude CLI reachable
-    try:
-        subprocess.run(
-            ["claude", "--version"],
-            capture_output=True, text=True, timeout=10,
-        )
-        results.append(("Claude Code CLI", True, ""))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        results.append((
-            "Claude Code CLI",
-            False,
-            "Install Claude Code: npm install -g @anthropic-ai/claude-code",
-        ))
-
-    # 3. git reachable
-    try:
-        subprocess.run(
-            ["git", "--version"],
-            capture_output=True, text=True, timeout=10,
-        )
-        results.append(("Git", True, ""))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        results.append(("Git", False, "Install Git: https://git-scm.com/downloads"))
-
-    # 4. gh auth status
-    try:
-        gh = subprocess.run(
-            ["gh", "auth", "status"],
-            capture_output=True, text=True, timeout=10,
-        )
-        gh_ok = gh.returncode == 0
-        results.append((
-            "GitHub CLI auth",
-            gh_ok,
-            "Run: gh auth login (install: https://cli.github.com/)" if not gh_ok else "",
-        ))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        results.append((
-            "GitHub CLI auth",
-            False,
-            "Install GitHub CLI: https://cli.github.com/ then run: gh auth login",
-        ))
-
-    # 5. Config file (soft check)
-    config_path = repo_root / ".colonyos" / "config.yaml"
-    if config_path.exists():
-        try:
-            import yaml
-            yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            results.append(("ColonyOS config", True, ""))
-        except Exception:
-            results.append((
-                "ColonyOS config",
-                False,
-                f"Config file at {config_path} is invalid YAML. "
-                "Run `colonyos init` to regenerate.",
-            ))
-    else:
-        results.append((
-            "ColonyOS config",
-            False,
-            "No config found. Run `colonyos init` to set up.",
-        ))
-
-    return results
 
 
 @click.group()
@@ -187,6 +109,7 @@ def init(
         project_name=project_name,
         project_description=project_description,
         project_stack=project_stack,
+        doctor_check=True,
     )
 
 
@@ -250,24 +173,184 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
 # ---------------------------------------------------------------------------
 
 def _save_loop_state(repo_root: Path, state: LoopState) -> Path:
-    """Persist loop state to .colonyos/runs/loop_state_{loop_id}.json."""
+    """Persist loop state atomically to .colonyos/runs/loop_state_{loop_id}.json.
+
+    Writes to a temporary file in the same directory then renames, so a
+    crash mid-write cannot leave a truncated checkpoint file.
+    """
     runs_dir = runs_dir_path(repo_root)
     runs_dir.mkdir(parents=True, exist_ok=True)
     path = runs_dir / f"loop_state_{state.loop_id}.json"
-    path.write_text(json.dumps(state.to_dict(), indent=2), encoding="utf-8")
+    fd, tmp_path_str = tempfile.mkstemp(
+        dir=str(runs_dir), suffix=".tmp", prefix="loop_state_",
+    )
+    try:
+        os.write(fd, json.dumps(state.to_dict(), indent=2).encode("utf-8"))
+        os.close(fd)
+        os.replace(tmp_path_str, str(path))
+    except BaseException:
+        os.close(fd) if not os.get_inheritable(fd) else None  # pragma: no cover
+        Path(tmp_path_str).unlink(missing_ok=True)
+        raise
     return path
 
 
 def _load_latest_loop_state(repo_root: Path) -> LoopState | None:
-    """Load the most recent loop state file, or None if none exists."""
+    """Load the most recent loop state file, or None if none exists.
+
+    Sorts by file modification time rather than relying on filename ordering,
+    so the result is correct regardless of naming scheme changes.
+    """
     runs_dir = runs_dir_path(repo_root)
     if not runs_dir.exists():
         return None
-    files = sorted(runs_dir.glob("loop_state_*.json"), reverse=True)
+    files = sorted(
+        runs_dir.glob("loop_state_*.json"),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
     if not files:
         return None
     data = json.loads(files[0].read_text(encoding="utf-8"))
     return LoopState.from_dict(data)
+
+
+def _touch_heartbeat(repo_root: Path) -> None:
+    """Touch the heartbeat file to signal activity in the auto loop."""
+    heartbeat_path = runs_dir_path(repo_root) / "heartbeat"
+    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat_path.touch()
+
+
+# ---------------------------------------------------------------------------
+# Auto command — helper functions
+# ---------------------------------------------------------------------------
+
+def _init_or_resume_loop(
+    repo_root: Path,
+    resume_loop: bool,
+    loop_count: int,
+) -> tuple[LoopState, int, int, float]:
+    """Initialise a new loop or resume an existing one.
+
+    Returns (loop_state, start_iteration, loop_count, aggregate_cost).
+    """
+    if resume_loop:
+        loop_state = _load_latest_loop_state(repo_root)
+        if loop_state is None:
+            click.echo("No loop state file found to resume.", err=True)
+            sys.exit(1)
+
+        start_iteration = loop_state.current_iteration + 1
+        loop_count = loop_state.total_iterations
+        aggregate_cost = loop_state.aggregate_cost_usd
+        loop_state.status = LoopStatus.RUNNING
+        click.echo(
+            f"Resuming loop {loop_state.loop_id} from iteration "
+            f"{start_iteration}/{loop_count} "
+            f"(${aggregate_cost:.4f} spent so far)"
+        )
+        return loop_state, start_iteration, loop_count, aggregate_cost
+
+    loop_id = f"loop-{generate_timestamp()}"
+    loop_state = LoopState(
+        loop_id=loop_id,
+        total_iterations=loop_count,
+    )
+    return loop_state, 1, loop_count, 0.0
+
+
+def _compute_elapsed_hours(
+    loop_state: LoopState,
+    session_start: float,
+) -> float:
+    """Compute total elapsed hours accounting for prior session time.
+
+    When resuming, uses the original ``start_time_iso`` from the persisted
+    state so that the time cap applies to *total* loop duration, not just
+    the current session.
+    """
+    original_start = datetime.fromisoformat(loop_state.start_time_iso)
+    now = datetime.now(timezone.utc)
+    return (now - original_start).total_seconds() / 3600.0
+
+
+def _run_single_iteration(
+    *,
+    iteration: int,
+    repo_root: Path,
+    config,
+    loop_state: LoopState,
+    aggregate_cost: float,
+    no_confirm: bool,
+    propose_only: bool,
+) -> tuple[float, bool]:
+    """Execute one iteration of the auto loop.
+
+    Returns (updated_aggregate_cost, completed).
+    ``completed`` is True when the iteration finished with a successful
+    orchestrator run, False otherwise (CEO failure, propose-only, or
+    pipeline failure — all of which allow the loop to continue).
+    """
+    _touch_heartbeat(repo_root)
+
+    prompt, ceo_result = run_ceo(repo_root, config)
+    aggregate_cost += ceo_result.cost_usd or 0
+
+    if not ceo_result.success:
+        click.echo("CEO phase failed.", err=True)
+        if ceo_result.error:
+            click.echo(f"Error: {ceo_result.error}", err=True)
+        loop_state.current_iteration = iteration
+        loop_state.aggregate_cost_usd = aggregate_cost
+        loop_state.failed_run_ids.append(f"ceo-fail-iter-{iteration}")
+        _save_loop_state(repo_root, loop_state)
+        return aggregate_cost, False
+
+    click.echo(f"\n{'=' * 60}")
+    click.echo("CEO Proposal:")
+    click.echo(f"{'=' * 60}")
+    click.echo(prompt)
+    click.echo(f"{'=' * 60}")
+
+    if propose_only:
+        click.echo("\nPropose-only mode: proposal saved, pipeline not triggered.")
+        loop_state.current_iteration = iteration
+        loop_state.aggregate_cost_usd = aggregate_cost
+        _save_loop_state(repo_root, loop_state)
+        return aggregate_cost, False
+
+    if not (no_confirm or config.auto_approve):
+        if not click.confirm("\nProceed with this feature?", default=False):
+            click.echo("Proposal rejected. Exiting.")
+            sys.exit(0)
+
+    log = run_orchestrator(
+        prompt,
+        repo_root=repo_root,
+        config=config,
+    )
+    aggregate_cost += log.total_cost_usd
+
+    log.phases.insert(0, ceo_result)
+    log.total_cost_usd = sum(
+        p.cost_usd for p in log.phases if p.cost_usd is not None
+    )
+
+    _print_run_summary(log)
+
+    loop_state.current_iteration = iteration
+    loop_state.aggregate_cost_usd = aggregate_cost
+
+    if log.status == RunStatus.FAILED:
+        loop_state.failed_run_ids.append(log.run_id)
+        _save_loop_state(repo_root, loop_state)
+        click.echo(f"  Iteration {iteration} failed. Continuing to next iteration...")
+        return aggregate_cost, False
+
+    loop_state.completed_run_ids.append(log.run_id)
+    _save_loop_state(repo_root, loop_state)
+    return aggregate_cost, True
 
 
 # ---------------------------------------------------------------------------
@@ -304,46 +387,22 @@ def auto(
     effective_max_hours = max_hours if max_hours is not None else config.budget.max_duration_hours
     effective_max_budget = max_budget if max_budget is not None else config.budget.max_total_usd
 
-    # --- Resume loop ---
-    start_iteration = 1
-    loop_state: LoopState | None = None
+    loop_state, start_iteration, loop_count, aggregate_cost = _init_or_resume_loop(
+        repo_root, resume_loop, loop_count,
+    )
 
-    if resume_loop:
-        loop_state = _load_latest_loop_state(repo_root)
-        if loop_state is None:
-            click.echo("No loop state file found to resume.", err=True)
-            sys.exit(1)
-
-        start_iteration = loop_state.current_iteration + 1
-        loop_count = loop_state.total_iterations
-        aggregate_cost = loop_state.aggregate_cost_usd
-        loop_id = loop_state.loop_id
-        loop_state.status = "running"
-        click.echo(
-            f"Resuming loop {loop_id} from iteration {start_iteration}/{loop_count} "
-            f"(${aggregate_cost:.4f} spent so far)"
-        )
-    else:
-        aggregate_cost = 0.0
-        from colonyos.naming import generate_timestamp
-        loop_id = f"loop-{generate_timestamp()}"
-        loop_state = LoopState(
-            loop_id=loop_id,
-            total_iterations=loop_count,
-        )
-
-    loop_start_time = time.time()
+    session_start = time.time()
     completed_iterations = 0
 
     for iteration in range(start_iteration, loop_count + 1):
-        # --- Time cap check ---
-        elapsed_hours = (time.time() - loop_start_time) / 3600.0
+        # --- Time cap check (total elapsed across all sessions) ---
+        elapsed_hours = _compute_elapsed_hours(loop_state, session_start)
         if elapsed_hours >= effective_max_hours:
             click.echo(
                 f"\nTime limit reached ({elapsed_hours:.1f}h / {effective_max_hours:.1f}h). "
                 f"Duration cap hit. Stopping autonomous loop."
             )
-            loop_state.status = "interrupted"
+            loop_state.status = LoopStatus.INTERRUPTED
             _save_loop_state(repo_root, loop_state)
             break
 
@@ -354,7 +413,7 @@ def auto(
                 f"Stopping autonomous loop.",
                 err=True,
             )
-            loop_state.status = "interrupted"
+            loop_state.status = LoopStatus.INTERRUPTED
             _save_loop_state(repo_root, loop_state)
             break
 
@@ -366,88 +425,33 @@ def auto(
         if iteration > 1:
             config = load_config(repo_root)
 
-        prompt, ceo_result = run_ceo(repo_root, config)
-        aggregate_cost += ceo_result.cost_usd or 0
-
-        if not ceo_result.success:
-            click.echo("CEO phase failed.", err=True)
-            if ceo_result.error:
-                click.echo(f"Error: {ceo_result.error}", err=True)
-            # Continue on failure instead of sys.exit(1)
-            loop_state.current_iteration = iteration
-            loop_state.aggregate_cost_usd = aggregate_cost
-            loop_state.failed_run_ids.append(f"ceo-fail-iter-{iteration}")
-            _save_loop_state(repo_root, loop_state)
-            continue
-
-        click.echo(f"\n{'=' * 60}")
-        click.echo("CEO Proposal:")
-        click.echo(f"{'=' * 60}")
-        click.echo(prompt)
-        click.echo(f"{'=' * 60}")
-
-        if propose_only:
-            click.echo("\nPropose-only mode: proposal saved, pipeline not triggered.")
-            loop_state.current_iteration = iteration
-            loop_state.aggregate_cost_usd = aggregate_cost
-            _save_loop_state(repo_root, loop_state)
-            continue
-
-        if not (no_confirm or config.auto_approve):
-            if not click.confirm("\nProceed with this feature?", default=False):
-                click.echo("Proposal rejected. Exiting.")
-                sys.exit(0)
-
-        if aggregate_cost >= effective_max_budget:
-            click.echo(
-                f"\nBudget limit reached (${aggregate_cost:.2f} / ${effective_max_budget:.2f}). "
-                f"Stopping autonomous loop.",
-                err=True,
-            )
-            loop_state.status = "interrupted"
-            _save_loop_state(repo_root, loop_state)
-            break
-
-        log = run_orchestrator(
-            prompt,
+        aggregate_cost, completed = _run_single_iteration(
+            iteration=iteration,
             repo_root=repo_root,
             config=config,
-        )
-        aggregate_cost += log.total_cost_usd
-
-        log.phases.insert(0, ceo_result)
-        log.total_cost_usd = sum(
-            p.cost_usd for p in log.phases if p.cost_usd is not None
+            loop_state=loop_state,
+            aggregate_cost=aggregate_cost,
+            no_confirm=no_confirm,
+            propose_only=propose_only,
         )
 
-        _print_run_summary(log)
+        if completed:
+            completed_iterations += 1
 
-        # Update loop state
-        loop_state.current_iteration = iteration
-        loop_state.aggregate_cost_usd = aggregate_cost
-
-        if log.status == RunStatus.FAILED:
-            loop_state.failed_run_ids.append(log.run_id)
-            _save_loop_state(repo_root, loop_state)
-            # Continue to next iteration instead of exiting
-            click.echo(f"  Iteration {iteration} failed. Continuing to next iteration...")
-            continue
-
-        loop_state.completed_run_ids.append(log.run_id)
-        completed_iterations += 1
-        _save_loop_state(repo_root, loop_state)
-
+        # --- Post-iteration budget cap check ---
         if aggregate_cost >= effective_max_budget:
             click.echo(
                 f"\nBudget limit reached (${aggregate_cost:.2f} / ${effective_max_budget:.2f}). "
                 f"Stopping autonomous loop.",
                 err=True,
             )
+            loop_state.status = LoopStatus.INTERRUPTED
+            _save_loop_state(repo_root, loop_state)
             break
 
     # Mark loop completed if we finished all iterations
-    if loop_state.current_iteration >= loop_count and loop_state.status == "running":
-        loop_state.status = "completed"
+    if loop_state.current_iteration >= loop_count and loop_state.status == LoopStatus.RUNNING:
+        loop_state.status = LoopStatus.COMPLETED
     _save_loop_state(repo_root, loop_state)
 
     if loop_count > 1:
@@ -494,8 +498,7 @@ def status(limit: int) -> None:
         # Heartbeat staleness check
         heartbeat = runs_dir / "heartbeat"
         if heartbeat.exists():
-            import os
-            age_seconds = time.time() - os.path.getmtime(heartbeat)
+            age_seconds = time.time() - heartbeat.stat().st_mtime
             if age_seconds > 300:  # 5 minutes
                 click.echo(
                     f"\n  ⚠ Warning: Heartbeat file is stale "

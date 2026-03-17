@@ -1,5 +1,7 @@
 import json
+import os
 import time
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -7,9 +9,12 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
-from colonyos.cli import app
+from colonyos.cli import app, _save_loop_state, _load_latest_loop_state
 from colonyos.config import ColonyConfig, BudgetConfig, save_config
-from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, RunLog, RunStatus
+from colonyos.models import (
+    LoopState, LoopStatus, Persona, Phase, PhaseResult,
+    ProjectInfo, RunLog, RunStatus,
+)
 from colonyos.persona_packs import PACKS
 
 
@@ -187,11 +192,11 @@ class TestAuto:
 
         calls = iter([("", fake_fail), ("Build webhooks.", fake_ok)])
 
+        # Patch _compute_elapsed_hours to return 0 so time cap doesn't fire
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
              patch("colonyos.cli.run_ceo", side_effect=lambda *a, **k: next(calls)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log), \
-             patch("colonyos.cli.time") as mock_time:
-            mock_time.time.return_value = 0.0
+             patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
             result = runner.invoke(app, ["auto", "--no-confirm", "--loop", "2"])
 
         assert result.exit_code == 0
@@ -216,7 +221,9 @@ class TestInitWithPacks:
             "15.0",                  # budget per run
         ])
 
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.doctor.subprocess.run", return_value=MagicMock(returncode=0)), \
+             patch("colonyos.doctor.sys.version_info", type("V", (), {"major": 3, "minor": 12})()):
             result = runner.invoke(app, ["init"], input=user_input)
 
         assert result.exit_code == 0, result.output
@@ -390,8 +397,8 @@ class TestDoctor:
         fake_vi = type("V", (), {"major": 3, "minor": 12})()
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli.subprocess.run", side_effect=fake_subprocess), \
-             patch("colonyos.cli.sys.version_info", fake_vi):
+             patch("colonyos.doctor.subprocess.run", side_effect=fake_subprocess), \
+             patch("colonyos.doctor.sys.version_info", fake_vi):
             result = runner.invoke(app, ["doctor"])
 
         assert result.exit_code == 0
@@ -405,8 +412,8 @@ class TestDoctor:
         fake_vi = type("V", (), {"major": 3, "minor": 12})()
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli.subprocess.run", side_effect=fake_subprocess), \
-             patch("colonyos.cli.sys.version_info", fake_vi):
+             patch("colonyos.doctor.subprocess.run", side_effect=fake_subprocess), \
+             patch("colonyos.doctor.sys.version_info", fake_vi):
             result = runner.invoke(app, ["doctor"])
 
         assert result.exit_code == 1
@@ -420,8 +427,8 @@ class TestDoctor:
         fake_vi = type("V", (), {"major": 3, "minor": 12})()
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli.subprocess.run", side_effect=fake_subprocess), \
-             patch("colonyos.cli.sys.version_info", fake_vi):
+             patch("colonyos.doctor.subprocess.run", side_effect=fake_subprocess), \
+             patch("colonyos.doctor.sys.version_info", fake_vi):
             result = runner.invoke(app, ["doctor"])
 
         assert result.exit_code == 1
@@ -433,8 +440,8 @@ class TestDoctor:
         fake_vi = type("V", (), {"major": 3, "minor": 12})()
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli.subprocess.run", side_effect=fake_subprocess), \
-             patch("colonyos.cli.sys.version_info", fake_vi):
+             patch("colonyos.doctor.subprocess.run", side_effect=fake_subprocess), \
+             patch("colonyos.doctor.sys.version_info", fake_vi):
             result = runner.invoke(app, ["doctor"])
 
         assert "✓" in result.output
@@ -446,8 +453,8 @@ class TestDoctor:
         fake_vi = type("V", (), {"major": 3, "minor": 9})()
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli.subprocess.run", side_effect=fake_subprocess), \
-             patch("colonyos.cli.sys.version_info", fake_vi):
+             patch("colonyos.doctor.subprocess.run", side_effect=fake_subprocess), \
+             patch("colonyos.doctor.sys.version_info", fake_vi):
             result = runner.invoke(app, ["doctor"])
 
         assert result.exit_code == 1
@@ -461,8 +468,8 @@ class TestDoctor:
         fake_vi = type("V", (), {"major": 3, "minor": 12})()
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli.subprocess.run", side_effect=fake_subprocess), \
-             patch("colonyos.cli.sys.version_info", fake_vi):
+             patch("colonyos.doctor.subprocess.run", side_effect=fake_subprocess), \
+             patch("colonyos.doctor.sys.version_info", fake_vi):
             result = runner.invoke(app, ["doctor"])
 
         assert "config" in result.output.lower()
@@ -558,13 +565,11 @@ class TestAutoLoopCap:
             call_count += 1
             return ("Build webhooks.", fake_ceo_result)
 
-        # Use a very small max-hours with patched time
+        # Mock _compute_elapsed_hours to return a value beyond the cap
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
              patch("colonyos.cli.run_ceo", side_effect=mock_run_ceo), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log), \
-             patch("colonyos.cli.time") as mock_time:
-            # Simulate that time has elapsed past the cap
-            mock_time.time.side_effect = [0.0, 999999.0, 999999.0, 999999.0]
+             patch("colonyos.cli._compute_elapsed_hours", return_value=999.0):
             result = runner.invoke(app, [
                 "auto", "--no-confirm", "--loop", "5", "--max-hours", "0.001",
             ])
@@ -591,8 +596,7 @@ class TestAutoLoopCap:
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log), \
-             patch("colonyos.cli.time") as mock_time:
-            mock_time.time.return_value = 0.0
+             patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
             result = runner.invoke(app, [
                 "auto", "--no-confirm", "--loop", "5", "--max-budget", "1.0",
             ])
@@ -632,8 +636,7 @@ class TestAutoLoopCap:
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", side_effect=mock_orchestrator), \
-             patch("colonyos.cli.time") as mock_time:
-            mock_time.time.return_value = 0.0
+             patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
             result = runner.invoke(app, [
                 "auto", "--no-confirm", "--loop", "2",
             ])
@@ -660,8 +663,7 @@ class TestAutoLoopCap:
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log), \
-             patch("colonyos.cli.time") as mock_time:
-            mock_time.time.return_value = 0.0
+             patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
             result = runner.invoke(app, [
                 "auto", "--no-confirm", "--loop", "2",
             ])
@@ -679,13 +681,13 @@ class TestAutoLoopCap:
         runs_dir = tmp_path / ".colonyos" / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create a loop state file
+        # Create a loop state file with timezone-aware ISO timestamp
         loop_state = {
             "loop_id": "loop-test-123",
             "current_iteration": 2,
             "total_iterations": 5,
             "aggregate_cost_usd": 0.05,
-            "start_time_iso": "2026-01-01T00:00:00",
+            "start_time_iso": "2026-01-01T00:00:00+00:00",
             "completed_run_ids": ["run-1", "run-2"],
             "failed_run_ids": [],
             "status": "interrupted",
@@ -708,8 +710,7 @@ class TestAutoLoopCap:
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log), \
-             patch("colonyos.cli.time") as mock_time:
-            mock_time.time.return_value = 0.0
+             patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
             result = runner.invoke(app, [
                 "auto", "--no-confirm", "--resume-loop",
             ])
@@ -730,7 +731,7 @@ class TestStatusLoopAwareness:
             "current_iteration": 3,
             "total_iterations": 10,
             "aggregate_cost_usd": 1.50,
-            "start_time_iso": "2026-01-01T00:00:00",
+            "start_time_iso": "2026-01-01T00:00:00+00:00",
             "completed_run_ids": ["r1", "r2", "r3"],
             "failed_run_ids": [],
             "status": "completed",
@@ -760,7 +761,7 @@ class TestStatusLoopAwareness:
             "current_iteration": 1,
             "total_iterations": 10,
             "aggregate_cost_usd": 0.0,
-            "start_time_iso": "2026-01-01T00:00:00",
+            "start_time_iso": "2026-01-01T00:00:00+00:00",
             "completed_run_ids": [],
             "failed_run_ids": [],
             "status": "running",
@@ -769,7 +770,6 @@ class TestStatusLoopAwareness:
             json.dumps(loop_state), encoding="utf-8"
         )
 
-        import os
         # Set mtime to 10 minutes ago
         old_time = time.time() - 600
         os.utime(heartbeat, (old_time, old_time))
@@ -779,3 +779,204 @@ class TestStatusLoopAwareness:
 
         assert result.exit_code == 0
         assert "stale" in result.output.lower() or "warning" in result.output.lower()
+
+
+class TestLoopStateAtomicWrite:
+    """Tests for atomic loop state persistence."""
+
+    def test_save_creates_valid_json(self, tmp_path: Path):
+        state = LoopState(
+            loop_id="loop-atomic-test",
+            total_iterations=5,
+            current_iteration=2,
+            aggregate_cost_usd=1.0,
+        )
+        path = _save_loop_state(tmp_path, state)
+        assert path.exists()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["loop_id"] == "loop-atomic-test"
+        assert data["current_iteration"] == 2
+
+    def test_save_no_temp_files_left_behind(self, tmp_path: Path):
+        state = LoopState(loop_id="loop-clean", total_iterations=3)
+        _save_loop_state(tmp_path, state)
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        tmp_files = list(runs_dir.glob("*.tmp"))
+        assert len(tmp_files) == 0
+
+
+class TestLoadLatestLoopStateMtime:
+    """Tests for mtime-based loop state loading."""
+
+    def test_loads_most_recently_modified(self, tmp_path: Path):
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write older file
+        older = runs_dir / "loop_state_loop-aaa.json"
+        older.write_text(json.dumps({
+            "loop_id": "loop-aaa", "current_iteration": 1,
+            "total_iterations": 5, "status": "interrupted",
+            "start_time_iso": "2026-01-01T00:00:00+00:00",
+        }), encoding="utf-8")
+
+        # Make it old
+        old_time = time.time() - 3600
+        os.utime(older, (old_time, old_time))
+
+        # Write newer file
+        newer = runs_dir / "loop_state_loop-zzz.json"
+        newer.write_text(json.dumps({
+            "loop_id": "loop-zzz", "current_iteration": 3,
+            "total_iterations": 10, "status": "running",
+            "start_time_iso": "2026-01-01T00:00:00+00:00",
+        }), encoding="utf-8")
+
+        result = _load_latest_loop_state(tmp_path)
+        assert result is not None
+        assert result.loop_id == "loop-zzz"
+
+
+class TestLoopStatusEnum:
+    """Tests for LoopStatus enum usage."""
+
+    def test_loop_state_uses_enum(self):
+        state = LoopState(loop_id="test", total_iterations=1)
+        assert state.status == LoopStatus.RUNNING
+        assert isinstance(state.status, LoopStatus)
+
+    def test_to_dict_serializes_enum_value(self):
+        state = LoopState(
+            loop_id="test", total_iterations=1,
+            status=LoopStatus.INTERRUPTED,
+        )
+        d = state.to_dict()
+        assert d["status"] == "interrupted"
+
+    def test_from_dict_deserializes_to_enum(self):
+        d = {
+            "loop_id": "test", "total_iterations": 1,
+            "status": "completed",
+            "start_time_iso": "2026-01-01T00:00:00+00:00",
+        }
+        state = LoopState.from_dict(d)
+        assert state.status == LoopStatus.COMPLETED
+        assert isinstance(state.status, LoopStatus)
+
+    def test_from_dict_unknown_status_defaults_to_running(self):
+        d = {
+            "loop_id": "test", "total_iterations": 1,
+            "status": "unknown_status",
+            "start_time_iso": "2026-01-01T00:00:00+00:00",
+        }
+        state = LoopState.from_dict(d)
+        assert state.status == LoopStatus.RUNNING
+
+
+class TestResumeLoopTimeCap:
+    """Tests that --resume-loop uses total elapsed time, not just session time."""
+
+    def test_resume_accounts_for_prior_session_time(self, runner: CliRunner, tmp_path: Path):
+        """Resumed loop that started 10 hours ago with a 1-hour cap should stop immediately."""
+        _make_config(tmp_path)
+        (tmp_path / "cOS_proposals").mkdir(exist_ok=True)
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Loop started 10 hours ago
+        old_start = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
+        loop_state = {
+            "loop_id": "loop-old",
+            "current_iteration": 2,
+            "total_iterations": 10,
+            "aggregate_cost_usd": 0.05,
+            "start_time_iso": old_start,
+            "completed_run_ids": ["run-1", "run-2"],
+            "failed_run_ids": [],
+            "status": "interrupted",
+        }
+        (runs_dir / "loop_state_loop-old.json").write_text(
+            json.dumps(loop_state), encoding="utf-8"
+        )
+
+        # With a 1-hour cap, the resumed loop should stop immediately
+        # because ~10 hours have already elapsed
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, [
+                "auto", "--no-confirm", "--resume-loop", "--max-hours", "1.0",
+            ])
+
+        assert "time limit" in result.output.lower() or "duration" in result.output.lower()
+
+
+class TestInitDoctorPreCheck:
+    """Tests that colonyos init runs doctor checks as first action (FR-4)."""
+
+    def test_init_runs_doctor_by_default(self, runner: CliRunner, tmp_path: Path):
+        """colonyos init should run doctor checks and refuse on hard failures."""
+        def fake_checks(repo_root):
+            return [
+                ("Python ≥ 3.11", True, ""),
+                ("Claude Code CLI", False, "Install claude"),
+                ("Git", True, ""),
+                ("GitHub CLI auth", True, ""),
+                ("ColonyOS config", False, "Run init"),
+            ]
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.doctor.run_doctor_checks", fake_checks):
+            result = runner.invoke(app, ["init", "--quick", "--name", "Test"])
+
+        # Should fail because Claude Code CLI is missing
+        assert result.exit_code != 0
+        assert "prerequisite" in result.output.lower()
+
+    def test_init_proceeds_when_doctor_passes(self, runner: CliRunner, tmp_path: Path):
+        """colonyos init should proceed normally when all hard prereqs pass."""
+        def fake_checks(repo_root):
+            return [
+                ("Python ≥ 3.11", True, ""),
+                ("Claude Code CLI", True, ""),
+                ("Git", True, ""),
+                ("GitHub CLI auth", True, ""),
+                ("ColonyOS config", False, "Run init"),
+            ]
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.doctor.run_doctor_checks", fake_checks):
+            result = runner.invoke(app, [
+                "init", "--quick", "--name", "Test",
+                "--description", "test", "--stack", "Python",
+            ])
+
+        assert result.exit_code == 0
+        assert "Config saved" in result.output
+
+
+class TestHeartbeatInAutoLoop:
+    """Tests that the auto loop touches the heartbeat at each iteration."""
+
+    def test_heartbeat_touched_during_iteration(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        (tmp_path / "cOS_proposals").mkdir(exist_ok=True)
+
+        fake_ceo_result = PhaseResult(
+            phase=Phase.CEO, success=True, cost_usd=0.01,
+            duration_ms=100, session_id="s",
+            artifacts={"result": "### Feature Request\nBuild webhooks."},
+        )
+        fake_log = RunLog(
+            run_id="run-test", prompt="Build webhooks.",
+            status=RunStatus.COMPLETED, phases=[],
+            total_cost_usd=0.01,
+        )
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
+             patch("colonyos.cli.run_orchestrator", return_value=fake_log), \
+             patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
+            result = runner.invoke(app, ["auto", "--no-confirm"])
+
+        assert result.exit_code == 0
+        heartbeat = tmp_path / ".colonyos" / "runs" / "heartbeat"
+        assert heartbeat.exists()

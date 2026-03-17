@@ -22,6 +22,12 @@ class RunStatus(str, Enum):
     FAILED = "failed"
 
 
+class LoopStatus(str, Enum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    INTERRUPTED = "interrupted"
+
+
 @dataclass(frozen=True)
 class Persona:
     role: str
@@ -104,7 +110,7 @@ class LoopState:
     )
     completed_run_ids: list[str] = field(default_factory=list)
     failed_run_ids: list[str] = field(default_factory=list)
-    status: str = "running"  # running | completed | interrupted
+    status: LoopStatus = LoopStatus.RUNNING
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -115,11 +121,16 @@ class LoopState:
             "start_time_iso": self.start_time_iso,
             "completed_run_ids": list(self.completed_run_ids),
             "failed_run_ids": list(self.failed_run_ids),
-            "status": self.status,
+            "status": self.status.value,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LoopState:
+        raw_status = data.get("status", "running")
+        try:
+            status = LoopStatus(raw_status)
+        except ValueError:
+            status = LoopStatus.RUNNING
         return cls(
             loop_id=data["loop_id"],
             current_iteration=data.get("current_iteration", 0),
@@ -128,5 +139,5 @@ class LoopState:
             start_time_iso=data.get("start_time_iso", ""),
             completed_run_ids=list(data.get("completed_run_ids", [])),
             failed_run_ids=list(data.get("failed_run_ids", [])),
-            status=data.get("status", "running"),
+            status=status,
         )

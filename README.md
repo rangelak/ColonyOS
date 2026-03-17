@@ -34,8 +34,7 @@ It orchestrates Claude agent sessions via the [Claude Agent SDK](https://docs.an
 
 **ColonyOS builds itself.** The pipeline runs on its own codebase — every feature, fix, and review you see in this repo was proposed, implemented, and shipped by ColonyOS agents.
 
-<!-- TODO: Replace with actual asciinema/VHS terminal recording -->
-<!-- <p align="center"><a href="https://asciinema.org/a/XXXXX"><img src="https://asciinema.org/a/XXXXX.svg" alt="ColonyOS demo" width="700"/></a></p> -->
+<!-- Terminal recording placeholder — will be added in a future release -->
 
 ## Zero to PR
 

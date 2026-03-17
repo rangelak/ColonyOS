@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from colonyos.models import LoopState
+from colonyos.models import LoopState, LoopStatus
 
 
 class TestLoopState:
@@ -22,7 +22,7 @@ class TestLoopState:
         assert state.aggregate_cost_usd == 0.0
         assert state.completed_run_ids == []
         assert state.failed_run_ids == []
-        assert state.status == "running"
+        assert state.status == LoopStatus.RUNNING
 
     def test_to_dict(self):
         state = LoopState(
@@ -32,7 +32,7 @@ class TestLoopState:
             aggregate_cost_usd=1.50,
             completed_run_ids=["r1", "r2"],
             failed_run_ids=["r3"],
-            status="running",
+            status=LoopStatus.RUNNING,
         )
         d = state.to_dict()
         assert d["loop_id"] == "loop-123"
@@ -68,7 +68,7 @@ class TestLoopState:
             aggregate_cost_usd=10.0,
             completed_run_ids=["r1"],
             failed_run_ids=["r2"],
-            status="interrupted",
+            status=LoopStatus.INTERRUPTED,
         )
         d = state.to_dict()
         restored = LoopState.from_dict(d)

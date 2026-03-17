@@ -134,22 +134,18 @@ def run_init(
     pack with default config values.  ``project_name``, ``project_description``,
     and ``project_stack`` supply the required project info in quick mode.
     """
-    # --- Doctor pre-check (opt-in) ---
+    # --- Doctor pre-check ---
     if doctor_check:
-        try:
-            from colonyos.cli import run_doctor_checks
-        except ImportError:
-            run_doctor_checks = None  # type: ignore[assignment]
+        from colonyos.doctor import run_doctor_checks
 
-        if run_doctor_checks is not None:
-            checks = run_doctor_checks(repo_root)
-            hard_prereqs = {"Python ≥ 3.11", "Claude Code CLI", "Git"}
-            failures = [name for name, ok, _ in checks if not ok and name in hard_prereqs]
-            if failures:
-                raise click.ClickException(
-                    f"Missing prerequisite(s): {', '.join(failures)}. "
-                    f"Run `colonyos doctor` for details."
-                )
+        checks = run_doctor_checks(repo_root)
+        hard_prereqs = {"Python ≥ 3.11", "Claude Code CLI", "Git"}
+        failures = [name for name, ok, _ in checks if not ok and name in hard_prereqs]
+        if failures:
+            raise click.ClickException(
+                f"Missing prerequisite(s): {', '.join(failures)}. "
+                f"Run `colonyos doctor` for details."
+            )
 
     existing = load_config(repo_root)
 

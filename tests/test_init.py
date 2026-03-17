@@ -241,7 +241,7 @@ class TestDoctorPreCheck:
                 ("GitHub CLI auth", True, ""),
             ]
 
-        with patch("colonyos.cli.run_doctor_checks", fake_checks):
+        with patch("colonyos.doctor.run_doctor_checks", fake_checks):
             with pytest.raises(click.ClickException, match="prerequisite"):
                 run_init(
                     tmp_path,
