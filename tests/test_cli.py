@@ -219,6 +219,8 @@ class TestInitWithPacks:
             "sonnet",                # model
             "5.0",                   # budget per phase
             "15.0",                  # budget per run
+            "",                      # verify command (skip)
+            "",                      # extra trailing newline
         ])
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \

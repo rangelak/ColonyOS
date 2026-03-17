@@ -12,11 +12,13 @@ from colonyos.orchestrator import (
     prepare_resume,
     detect_base_branch,
     run_review_loop,
+    run_verify_loop,
     validate_review_preconditions,
     _build_persona_standalone_review_prompt,
     _build_review_run_id,
     _build_standalone_decision_prompt,
     _build_standalone_fix_prompt,
+    _build_verify_fix_prompt,
     _format_personas_block,
     _build_persona_agents,
     _build_fix_prompt,
@@ -28,9 +30,11 @@ from colonyos.orchestrator import (
     _build_persona_review_prompt,
     _extract_review_verdict,
     _collect_review_findings,
+    _run_verify_command,
     _save_run_log,
     _validate_resume_preconditions,
     _compute_next_phase,
+    _SKIP_MAP,
     _validate_branch_name,
 )
 
@@ -103,7 +107,7 @@ class TestPhaseReviewEnum:
 
     def test_phase_ordering(self):
         phases = list(Phase)
-        assert phases == [Phase.CEO, Phase.PLAN, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.DELIVER]
+        assert phases == [Phase.CEO, Phase.PLAN, Phase.IMPLEMENT, Phase.VERIFY, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.DELIVER]
 
     def test_fix_phase_exists(self):
         assert Phase.FIX == "fix"
@@ -909,8 +913,8 @@ class TestComputeNextPhase:
     def test_plan_to_implement(self):
         assert _compute_next_phase("plan") == "implement"
 
-    def test_implement_to_review(self):
-        assert _compute_next_phase("implement") == "review"
+    def test_implement_to_verify(self):
+        assert _compute_next_phase("implement") == "verify"
 
     def test_review_to_review(self):
         assert _compute_next_phase("review") == "review"
@@ -1814,3 +1818,43 @@ class TestBranchNameValidation:
         )
         assert result is not None
         assert "Must not start with '-'" in result
+
+
+class TestComputeNextPhaseVerify:
+    def test_implement_maps_to_verify(self):
+        assert _compute_next_phase("implement") == "verify"
+
+    def test_verify_maps_to_review(self):
+        assert _compute_next_phase("verify") == "review"
+
+
+class TestSkipMapVerify:
+    def test_verify_skips_plan_and_implement(self):
+        assert _SKIP_MAP["verify"] == {"plan", "implement"}
+
+
+class TestBuildVerifyFixPrompt:
+    def test_returns_tuple(self, config):
+        from colonyos.config import VerificationConfig
+        config.verification = VerificationConfig(
+            verify_command="pytest", max_verify_retries=2,
+        )
+        system, user = _build_verify_fix_prompt(
+            config, "cOS_prds/prd.md", "cOS_tasks/tasks.md",
+            "colonyos/feat", "FAILED", 1,
+        )
+        assert isinstance(system, str)
+        assert isinstance(user, str)
+
+    def test_system_includes_prd_path(self, config):
+        from colonyos.config import VerificationConfig
+        config.verification = VerificationConfig(
+            verify_command="pytest", max_verify_retries=2,
+        )
+        system, _ = _build_verify_fix_prompt(
+            config, "cOS_prds/prd.md", "cOS_tasks/tasks.md",
+            "colonyos/feat", "err output", 1,
+        )
+        assert "cOS_prds/prd.md" in system
+        assert "cOS_tasks/tasks.md" in system
+        assert "err output" in system

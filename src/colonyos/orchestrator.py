@@ -657,6 +657,171 @@ def _build_fix_prompt(
     return system, user
 
 
+_VERIFY_TRUNCATE_LIMIT = 4000
+
+
+def _run_verify_command(cmd: str, cwd: Path, timeout: int) -> tuple[bool, str, int]:
+    """Run a verification command via subprocess.
+
+    Returns (passed, output, exit_code). Output is truncated to last 4000 chars.
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=timeout,
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if len(output) > _VERIFY_TRUNCATE_LIMIT:
+            output = output[-_VERIFY_TRUNCATE_LIMIT:]
+        return result.returncode == 0, output, result.returncode
+    except subprocess.TimeoutExpired:
+        return False, f"Verify command timed out after {timeout} seconds", -1
+
+
+def _build_verify_fix_prompt(
+    config: ColonyConfig,
+    prd_rel: str,
+    task_rel: str,
+    branch_name: str,
+    test_output: str,
+    verify_attempt: int,
+) -> tuple[str, str]:
+    """Build the system/user prompt for an implement retry after verification failure."""
+    template = _load_instruction("verify_fix.md")
+
+    system = _format_base(config) + "\n\n" + template.format(
+        prd_path=prd_rel,
+        task_path=task_rel,
+        branch_name=branch_name,
+        test_output=test_output,
+        verify_attempt=verify_attempt,
+        max_verify_retries=config.verification.max_verify_retries,
+    )
+
+    user = (
+        f"The test command failed after implementation on branch `{branch_name}`. "
+        f"Fix the failing tests. The PRD is at `{prd_rel}` and the task file is at `{task_rel}`. "
+        f"This is verify attempt {verify_attempt} of {config.verification.max_verify_retries}."
+    )
+    return system, user
+
+
+def run_verify_loop(
+    repo_root: Path,
+    config: ColonyConfig,
+    log: RunLog,
+    prd_rel: str,
+    task_rel: str,
+    branch_name: str,
+    *,
+    verbose: bool = False,
+    quiet: bool = False,
+) -> bool:
+    """Run the verification gate: verify command + implement retry loop.
+
+    Returns True if verification passed (or was skipped), False if retries exhausted.
+    """
+    verify_cfg = config.verification
+    if not verify_cfg.verify_command:
+        return True
+
+    def _make_ui() -> "PhaseUI | NullUI | None":
+        if quiet:
+            return None
+        return PhaseUI(verbose=verbose)
+
+    for attempt in range(verify_cfg.max_verify_retries + 1):
+        # Run verify command
+        verify_ui = _make_ui()
+        if verify_ui is not None:
+            verify_ui.phase_header(
+                "Verify", 0.0, config.model,
+                extra=verify_cfg.verify_command,
+            )
+        else:
+            _log(f"=== Verify (attempt {attempt + 1}) ===")
+
+        passed, output, exit_code = _run_verify_command(
+            verify_cfg.verify_command, repo_root, verify_cfg.verify_timeout,
+        )
+
+        # Log verify attempt
+        log.phases.append(PhaseResult(
+            phase=Phase.VERIFY,
+            success=passed,
+            cost_usd=0.0,
+            artifacts={"test_output": output, "exit_code": str(exit_code)},
+        ))
+
+        if passed:
+            if verify_ui is not None:
+                verify_ui.phase_complete(cost=0.0, turns=0, duration_ms=0)
+            else:
+                _log("  Tests passed")
+            return True
+
+        # Verification failed
+        if verify_ui is None:
+            _log(f"  Tests failed (exit code {exit_code})")
+
+        # Check if we have retries left
+        if attempt >= verify_cfg.max_verify_retries:
+            _log(
+                f"  All {verify_cfg.max_verify_retries} verify retries exhausted. "
+                "Proceeding to review."
+            )
+            break
+
+        # Budget guard before implement retry
+        cost_so_far = sum(
+            p.cost_usd for p in log.phases if p.cost_usd is not None
+        )
+        remaining = config.budget.per_run - cost_so_far
+        if remaining < config.budget.per_phase:
+            _log(
+                f"  Budget exhausted ({remaining:.2f} remaining). "
+                "Stopping verify retries."
+            )
+            break
+
+        # Run implement retry with failure context
+        retry_num = attempt + 1
+        _log(f"  Retrying implement (attempt {retry_num}/{verify_cfg.max_verify_retries})...")
+
+        impl_ui = _make_ui()
+        if impl_ui is not None:
+            impl_ui.phase_header(
+                f"Implement (verify retry {retry_num})",
+                config.budget.per_phase,
+                config.model,
+                branch_name,
+            )
+
+        system, user = _build_verify_fix_prompt(
+            config, prd_rel, task_rel, branch_name, output, retry_num,
+        )
+        impl_result = run_phase_sync(
+            Phase.IMPLEMENT,
+            user,
+            cwd=repo_root,
+            system_prompt=system,
+            model=config.model,
+            budget_usd=config.budget.per_phase,
+            ui=impl_ui,
+        )
+        log.phases.append(impl_result)
+
+        if not impl_result.success:
+            _log(f"  Implement retry failed: {impl_result.error}")
+            break
+
+    return False
+
+
 def _build_deliver_prompt(
     config: ColonyConfig,
     prd_path: str,
@@ -981,7 +1146,8 @@ def _compute_next_phase(last_successful_phase: str | None) -> str | None:
     """
     mapping = {
         "plan": "implement",
-        "implement": "review",
+        "implement": "verify",
+        "verify": "review",
         "review": "review",
         "fix": "review",
         "decision": "deliver",
@@ -993,6 +1159,7 @@ def _compute_next_phase(last_successful_phase: str | None) -> str | None:
 _SKIP_MAP: dict[str, set[str]] = {
     "plan": {"plan"},
     "implement": {"plan", "implement"},
+    "verify": {"plan", "implement"},
     "review": {"plan", "implement"},
     "fix": {"plan", "implement"},
     "decision": {"plan", "implement", "review"},
@@ -1158,6 +1325,17 @@ def run(
             if impl_ui is None:
                 _log(f"Implement phase failed: {impl_result.error}")
             return log
+
+    # --- Phase 2.5: Verification Gate ---
+    _touch_heartbeat(repo_root)
+    if "verify" in skip_phases:
+        _log("Skipping verify phase (already completed in previous run)")
+    elif config.verification.verify_command:
+        run_verify_loop(
+            repo_root, config, log, prd_rel, task_rel, branch_name,
+            verbose=verbose, quiet=quiet,
+        )
+        _save_run_log(repo_root, log, resumed=is_resume)
 
     # --- Phase 3: Review/Fix Loop ---
     _touch_heartbeat(repo_root)

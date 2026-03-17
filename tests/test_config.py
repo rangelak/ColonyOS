@@ -8,6 +8,7 @@ from colonyos.config import (
     BudgetConfig,
     DEFAULTS,
     PhasesConfig,
+    VerificationConfig,
     load_config,
     save_config,
 )
@@ -388,3 +389,87 @@ class TestBudgetConfigLongRunning:
     def test_defaults_dict_has_new_fields(self):
         assert DEFAULTS["budget"]["max_duration_hours"] == 8.0
         assert DEFAULTS["budget"]["max_total_usd"] == 500.0
+
+
+class TestVerificationConfig:
+    def test_default_verification_config(self):
+        vc = VerificationConfig()
+        assert vc.verify_command is None
+        assert vc.max_verify_retries == 2
+        assert vc.verify_timeout == 300
+
+    def test_defaults_when_no_config(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.verification.verify_command is None
+        assert config.verification.max_verify_retries == 2
+        assert config.verification.verify_timeout == 300
+
+    def test_loads_verification_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "verification": {
+                    "verify_command": "pytest",
+                    "max_verify_retries": 3,
+                    "verify_timeout": 600,
+                }
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.verification.verify_command == "pytest"
+        assert config.verification.max_verify_retries == 3
+        assert config.verification.verify_timeout == 600
+
+    def test_defaults_when_verification_section_missing(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "sonnet"}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.verification.verify_command is None
+        assert config.verification.max_verify_retries == 2
+
+    def test_save_config_writes_verification(self, tmp_repo: Path):
+        original = ColonyConfig(
+            verification=VerificationConfig(
+                verify_command="npm test",
+                max_verify_retries=1,
+                verify_timeout=120,
+            ),
+        )
+        save_config(tmp_repo, original)
+        config_path = tmp_repo / ".colonyos" / "config.yaml"
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert raw["verification"]["verify_command"] == "npm test"
+        assert raw["verification"]["max_verify_retries"] == 1
+        assert raw["verification"]["verify_timeout"] == 120
+
+    def test_save_config_omits_verification_when_no_command(self, tmp_repo: Path):
+        original = ColonyConfig()
+        save_config(tmp_repo, original)
+        config_path = tmp_repo / ".colonyos" / "config.yaml"
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "verification" not in raw
+
+    def test_roundtrip(self, tmp_repo: Path):
+        original = ColonyConfig(
+            verification=VerificationConfig(
+                verify_command="pytest -x",
+                max_verify_retries=3,
+                verify_timeout=180,
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.verification.verify_command == "pytest -x"
+        assert loaded.verification.max_verify_retries == 3
+        assert loaded.verification.verify_timeout == 180
+
+    def test_defaults_dict_has_verification(self):
+        assert DEFAULTS["verification"]["verify_command"] is None
+        assert DEFAULTS["verification"]["max_verify_retries"] == 2
+        assert DEFAULTS["verification"]["verify_timeout"] == 300

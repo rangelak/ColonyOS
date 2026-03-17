@@ -13,6 +13,7 @@ class Phase(str, Enum):
     CEO = "ceo"
     PLAN = "plan"
     IMPLEMENT = "implement"
+    VERIFY = "verify"
     REVIEW = "review"
     DECISION = "decision"
     FIX = "fix"
