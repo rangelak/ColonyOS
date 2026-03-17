@@ -1213,3 +1213,52 @@ class TestPrintReviewSummary:
         # Should show round 2 verdict (approve), not round 1 (request-changes)
         assert len(reviewer_verdicts) == 1
         assert reviewer_verdicts[0] == ("Engineer", "approve")
+
+
+class TestReviewCommandNonQuiet:
+    """Test the non-quiet code path in the review CLI command.
+
+    This exercises the Phase.REVIEW reference in cli.py that is only
+    evaluated when log.phases is non-empty (the non-quiet path).
+    """
+
+    def test_non_quiet_review_renders_summary_with_populated_phases(
+        self, runner: CliRunner, tmp_path: Path,
+    ):
+        """Verify Phase.REVIEW is resolved at runtime (non-quiet path)."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[Persona(role="Engineer", expertise="Backend", perspective="Scale", reviewer=True)],
+        )
+        save_config(tmp_path, config)
+        (tmp_path / "cOS_reviews").mkdir(exist_ok=True)
+
+        review_phase = PhaseResult(
+            phase=Phase.REVIEW,
+            success=True,
+            cost_usd=0.01,
+            duration_ms=100,
+            session_id="s1",
+            artifacts={"result": "VERDICT: approve\nFINDINGS:\n- None\nSYNTHESIS: all good"},
+        )
+
+        def _populate_log_side_effect(
+            repo_root, config, branch, log, **kwargs,
+        ):
+            log.phases.append(review_phase)
+            return "GO"
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.detect_base_branch", return_value="main"), \
+             patch("colonyos.cli.validate_review_preconditions", return_value=None), \
+             patch("colonyos.cli.run_review_loop", side_effect=_populate_log_side_effect), \
+             patch("colonyos.cli._print_review_summary") as mock_summary:
+            result = runner.invoke(app, ["review", "feat/test"])
+
+        assert result.exit_code == 0
+        # _print_review_summary should have been called with per-reviewer verdicts
+        mock_summary.assert_called_once()
+        call_args = mock_summary.call_args
+        reviewer_verdicts = call_args[0][1]  # second positional arg
+        assert len(reviewer_verdicts) == 1
+        assert reviewer_verdicts[0][1] == "approve"

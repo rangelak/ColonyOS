@@ -1,19 +1,19 @@
 # Review by Principal Systems Engineer (Google/Stripe caliber) (Round 2)
 
+I now have a comprehensive view. Here is my review:
+
 ---
-
-## Review Complete
-
-**198 tests pass**, no TODOs, no secrets, no linter errors.
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/orchestrator.py]: `_SKIP_MAP` relies on implicit invariant that deliver is never skip-guarded; a clarifying comment would help
-- [src/colonyos/orchestrator.py]: `_save_run_log` read-modify-write on `resume_events` is fine for single-process but worth noting for future concurrency
-- [src/colonyos/models.py]: `ResumeState` dataclass is a good improvement over the PRD's `dict` specification
-- [src/colonyos/orchestrator.py]: Path traversal protection (`_validate_run_id`, `_validate_rel_path`, `--` termination) is excellent security hardening
-- [tests/test_orchestrator.py]: Comprehensive test coverage including security edge cases (path traversal, branch name injection)
+- [src/colonyos/orchestrator.py]: **Behavioral change to existing pipeline**: The refactored `run_review_loop()` hardcodes `review_tools = ["Read", "Glob", "Grep"]`, removing `"Bash"` from the reviewer and decision gate tool sets. The original `orchestrator.run()` allowed `["Read", "Glob", "Grep", "Bash"]` for both reviewers and the decision gate. This is arguably a security improvement (reviewers should be read-only assessors), and the test was updated to match, but this is an undocumented behavioral change to the existing pipeline — not just the new command. Should be called out in commit message or changelog.
+- [src/colonyos/orchestrator.py]: **`detect_base_branch()` called at pipeline runtime**: When `orchestrator.run()` calls `run_review_loop()`, it now calls `detect_base_branch(repo_root)` to pass the `base_branch` parameter. In the pipeline path with a PRD, the base branch was never previously needed for the review prompt (it uses `_build_persona_review_prompt` which doesn't take `base_branch`). This is harmless but adds a subprocess call that wasn't there before — low risk.
+- [src/colonyos/cli.py]: **Verdict extraction in CLI relies on positional alignment**: Lines computing `reviewer_verdicts` index into `reviewers[i]` matching against `last_round[i]`. This assumes the parallel review always returns results in the same order as `_reviewer_personas()`. This is correct given `run_phases_parallel_sync` preserves order (it uses `asyncio.gather`), but the assumption is implicit and fragile if the parallel runner ever changes.
+- [src/colonyos/cli.py]: **`_extract_review_verdict` and `_reviewer_personas` imported inside function body**: These are imported at call-time inside the `review()` function rather than at module top. This works but is inconsistent with the top-of-file imports pattern used elsewhere.
+- [src/colonyos/orchestrator.py]: **Branch name validation regex allows `~` and `^`**: The regex `_BRANCH_NAME_RE` allows tilde and caret (`~^`), which are valid in git refspecs but could be surprising (e.g., `HEAD~1` would pass validation as a "branch name"). This is actually needed since `HEAD~1` is used as a fallback base branch, so the validation is correctly permissive — just worth noting.
+- [src/colonyos/instructions/review_standalone.md]: Template instructs reviewer to run `git diff {base_branch}...{branch_name}` but reviewers only have `["Read", "Glob", "Grep"]` tools — no `Bash` to run git commands. Reviewers would need to use the `Grep`/`Read` tools to examine changed files instead. The instruction is misleading but Claude agents may still find the files via Read/Glob. Minor inconsistency.
+- [src/colonyos/instructions/decision_standalone.md]: Same issue — template says "Examine the actual code changes on the branch (`git diff {base_branch}...{branch_name}`)" but the decision gate agent also lacks Bash access.
 
 SYNTHESIS:
-This is a well-executed implementation that meets all PRD requirements with several valuable extras (audit trail, path traversal protection, typed ResumeState). The phase-skip logic is correct and tested across all phase boundaries. The error messages are clear and actionable — if this fails at 3am, the operator will know exactly what to fix. The run log continuity is properly maintained with both in-memory object reuse and on-disk JSON persistence. The only structural concern is that the branch carries several unrelated features (CEO, fix loop, decision gate), but the resume-specific changes are clean, well-isolated, and thoroughly tested. Ship it.
+This is a well-executed extraction and extension. The core architectural decision — pulling the review/fix/decision loop into a reusable `run_review_loop()` function — is sound and eliminates code duplication cleanly. The PRD requirements (FR-1 through FR-30) are fully implemented: CLI command with all options, base branch detection, standalone prompt templates, pre-flight validation, artifact naming, run logging, summary table, and exit codes. The test coverage is thorough (204 tests pass, covering argument parsing, precondition validation, prompt construction, artifact naming, loop behavior, branch name injection defense, and exit codes). The branch name validation with `_validate_branch_name()` is a good defense-in-depth measure against command injection that goes beyond the PRD requirements. The one substantive concern is the instruction templates telling agents to run `git diff` when they no longer have Bash access — this creates a minor disconnect where the agent may struggle to discover changed files, though Read/Glob should suffice. The removal of Bash from reviewer tools is a net security improvement but is a behavioral change to the existing pipeline that should be explicitly documented. Overall, this is production-ready with only minor rough edges.

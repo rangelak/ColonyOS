@@ -1,22 +1,33 @@
 # Review by Linus Torvalds (Round 2)
 
-I've now completed a thorough review of the entire implementation. Here is my assessment:
+The import succeeds because `Phase` isn't needed at import time — it's referenced inside the function body. The bug will manifest at runtime when someone runs `colonyos review feat/branch` without `-q` (the non-quiet path).
+
+Now let me compile my findings:
 
 ---
 
-VERDICT: approve
+I've completed a thorough review of the implementation. Here's my assessment:
+
+---
+
+## Review Assessment
+
+### What was done well:
+1. **Clean extraction** — `run_review_loop()` was cleanly pulled out of the monolithic `orchestrator.run()` into a reusable function. The data structures are right, and both code paths (pipeline and standalone) share the same loop. This is the correct architecture.
+2. **Branch name validation** — `_validate_branch_name()` with regex and `-` prefix rejection is proper defense-in-depth against flag injection into git commands. Good security hygiene.
+3. **Pre-flight checks** — All three checks (branch exists, non-empty diff, clean working tree for `--fix`) are simple, correct, and testable.
+4. **Instruction templates** — Well-structured, using the same `VERDICT:` output format, making parsing uniform.
+5. **Test coverage** — Comprehensive unit tests for the new functions: `detect_base_branch`, `validate_review_preconditions`, `_build_review_run_id`, standalone prompt builders, `run_review_loop`, artifact naming, CLI argument parsing, and exit codes. 204 tests, all passing.
+
+### Findings:
+
+VERDICT: request-changes
 
 FINDINGS:
-- [src/colonyos/models.py]: Clean addition of `ResumeState` dataclass and three optional fields to `RunLog`. The `ResumeState` is properly typed — no dict-passing nonsense. Good.
-- [src/colonyos/orchestrator.py]: `_validate_run_id()` and `_validate_rel_path()` provide path traversal protection. The `--` terminator in the `git branch --list` call prevents branch names like `--delete` from being interpreted as flags. This is the kind of defensive coding I actually like seeing.
-- [src/colonyos/orchestrator.py]: `_SKIP_MAP` and `_compute_next_phase` are simple, obvious data structures that make the resume logic trivially understandable. No clever abstractions, just a dict. The right approach.
-- [src/colonyos/orchestrator.py]: `_save_run_log()` now has a `resumed: bool` parameter and reads back the existing file to preserve `resume_events`. The import of `datetime` inside the `if resumed:` block (line ~633) is slightly ugly but harmless — it avoids polluting the top-level imports since the module already removed the `datetime` import when it switched to `generate_timestamp()`.
-- [src/colonyos/orchestrator.py]: `prepare_resume()` is a clean public API that the CLI calls — separating validation from execution. The `# type: ignore[arg-type]` comments on lines ~819-821 are necessary because `_validate_resume_preconditions` already validated these aren't `None`, but mypy can't see through that. Acceptable.
-- [src/colonyos/cli.py]: Mutual exclusivity check is straightforward — `if resume_run_id: if prompt or plan_only or from_prd: error`. Simple and correct.
-- [src/colonyos/cli.py]: `[resumable]` tag logic in `status` command uses `.get()` for backward compatibility with old logs that lack the new fields. Exactly right.
-- [src/colonyos/orchestrator.py]: The `run()` function's phase-skip logic is implemented as simple `if "plan" in skip_phases:` guards wrapping each phase block. It's readable, if a bit verbose. But verbose and obvious beats clever and compact.
-- [tests/test_orchestrator.py]: 198 tests passing. Comprehensive coverage of resume state persistence, phase skip logic, validation preconditions, log continuity, path traversal, schema validation, git argument termination, and audit trails. The test classes are well-organized with clear names mapping back to task numbers.
-- [src/colonyos/orchestrator.py]: The `_load_run_log` function properly handles both the `run_id` validation and the resolved path check, providing defense in depth. Good.
+- [src/colonyos/cli.py:381]: **BUG — Missing import: `Phase` not imported but used at runtime.** Line 381 references `Phase.REVIEW` in the list comprehension `[pr for pr in log.phases if pr.phase == Phase.REVIEW]`. `Phase` is NOT in the `from colonyos.models import ...` on line 18. This will raise a `NameError` at runtime when a user runs `colonyos review <branch>` without `-q`. The tests all mock `run_review_loop` and pass `-q`, so this code path is never exercised. This is a real, ship-blocking bug.
+- [src/colonyos/cli.py:376]: **Code smell — Deferred import of symbols already available.** `_extract_review_verdict` and `_reviewer_personas` are imported at function scope via `from colonyos.orchestrator import ...` despite the module already having a top-level `from colonyos.orchestrator import (...)` block. These should be in the top-level import, not hidden inside the function body. This is the kind of lazy import pattern that hides import problems and makes the code harder to grep.
+- [src/colonyos/cli.py:375-389]: **Fragile reviewer-to-verdict mapping.** The code assumes `last_round[i]` corresponds to `reviewers[i]` — i.e., that parallel review results come back in the same order as the input. If `run_phases_parallel_sync` ever reorders results (as many parallel executors do), this mapping silently produces wrong per-persona verdicts. The review results should carry the persona identity, not rely on positional correlation. Not blocking for v1 since the current parallel runner preserves order, but it's a latent bug.
+- [src/colonyos/cli.py:375-389]: **Duplicated logic.** The verdict-extraction-per-reviewer logic in `cli.py` duplicates what's already available in `orchestrator.py` (`_extract_review_verdict`, `_collect_review_findings`). This logic belongs in `run_review_loop()` which should return the per-persona verdicts alongside the overall verdict, not force the CLI to re-parse artifacts.
 
 SYNTHESIS:
-This is a well-executed implementation that does exactly what the PRD says and nothing more. The data structures are right — `ResumeState` as a typed dataclass instead of a loose dict, `_SKIP_MAP` as a simple dict literal instead of some over-engineered state machine. The security considerations are solid: path traversal protection on run IDs and relative paths, `--` termination on the git subprocess call, resolved path containment checks. The phase-skip logic is straightforward conditional guards rather than some "clever" generic skip framework. The test coverage is thorough, hitting all the edge cases: missing branches, missing files, wrong statuses, path traversal attempts, corrupted JSON, and the actual phase-skipping behavior. All 198 tests pass. The code follows existing project conventions. The branch includes unrelated work (CEO phase, parallel reviews, fix loop), but the resume feature itself is clean and self-contained within the larger diff. Ship it.
+The architecture is fundamentally sound — extracting `run_review_loop()` was the right call, the templates are clean, the pre-flight validation is thorough, and the test coverage is extensive. But there's a ship-blocking `NameError` bug from a missing `Phase` import in `cli.py` that will crash every non-quiet standalone review at runtime. The tests don't catch it because they mock too aggressively and always pass `-q`. Fix the import, move the deferred imports to the top level, and ideally have `run_review_loop()` return the per-persona verdicts so the CLI doesn't have to re-derive them with fragile positional indexing. The missing import is the only hard blocker; the rest is code quality that can be addressed in a follow-up.

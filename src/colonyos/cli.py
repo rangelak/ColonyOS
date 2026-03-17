@@ -15,7 +15,7 @@ from colonyos import __version__
 from colonyos.config import ColonyConfig, load_config, runs_dir_path
 from colonyos.doctor import run_doctor_checks
 from colonyos.init import run_init
-from colonyos.models import LoopState, LoopStatus, RunLog, RunStatus
+from colonyos.models import LoopState, LoopStatus, Phase, RunLog, RunStatus
 from colonyos.naming import generate_timestamp
 from colonyos.orchestrator import (
     _touch_heartbeat,
@@ -26,6 +26,8 @@ from colonyos.orchestrator import (
     prepare_resume,
     validate_review_preconditions,
     _build_review_run_id,
+    _extract_review_verdict,
+    _reviewer_personas,
     _save_run_log,
 )
 
@@ -373,7 +375,6 @@ def review(
     )
 
     # Compute per-reviewer verdicts for the LAST review round
-    from colonyos.orchestrator import _extract_review_verdict, _reviewer_personas
     reviewers = _reviewer_personas(config)
     num_reviewers = len(reviewers)
     # Collect all REVIEW phase results, then take only the last round
