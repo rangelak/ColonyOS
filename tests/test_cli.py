@@ -1066,3 +1066,141 @@ class TestHeartbeatInAutoLoop:
         assert heartbeat.exists()
 
 
+# ---------------------------------------------------------------------------
+# GitHub issue CLI integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunIssueFlag:
+    def test_no_prompt_no_issue_error(self, runner: CliRunner) -> None:
+        result = runner.invoke(app, ["run"])
+        assert result.exit_code != 0
+
+    def test_issue_with_from_prd_error(self, runner: CliRunner, tmp_path: Path) -> None:
+        _make_config(tmp_path)
+        prd_file = tmp_path / "prd.md"
+        prd_file.write_text("# PRD", encoding="utf-8")
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["run", "--issue", "42", "--from-prd", str(prd_file)])
+        assert result.exit_code != 0
+        assert "cannot be combined" in result.output
+
+    def test_issue_bare_number(self, runner: CliRunner, tmp_path: Path) -> None:
+        _make_config(tmp_path)
+        fake_log = RunLog(
+            run_id="run-test", prompt="test", status=RunStatus.COMPLETED, phases=[],
+        )
+        from colonyos.github import GitHubIssue
+        fake_issue = GitHubIssue(
+            number=42, title="Add dark mode", body="Need it",
+            url="https://github.com/org/repo/issues/42", state="open",
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.github.fetch_issue", return_value=fake_issue) as mock_fetch, \
+             patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            result = runner.invoke(app, ["run", "--issue", "42"])
+
+        assert result.exit_code == 0
+        # Verify source_issue was passed through
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs["source_issue"] == 42
+        assert call_kwargs["source_issue_url"] == "https://github.com/org/repo/issues/42"
+
+    def test_issue_url(self, runner: CliRunner, tmp_path: Path) -> None:
+        _make_config(tmp_path)
+        fake_log = RunLog(
+            run_id="run-test", prompt="test", status=RunStatus.COMPLETED, phases=[],
+        )
+        from colonyos.github import GitHubIssue
+        fake_issue = GitHubIssue(
+            number=7, title="Bug", body="Fix it",
+            url="https://github.com/org/repo/issues/7", state="open",
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.github.fetch_issue", return_value=fake_issue), \
+             patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            result = runner.invoke(app, ["run", "--issue", "https://github.com/org/repo/issues/7"])
+
+        assert result.exit_code == 0
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs["source_issue"] == 7
+
+    def test_issue_with_additional_prompt(self, runner: CliRunner, tmp_path: Path) -> None:
+        _make_config(tmp_path)
+        fake_log = RunLog(
+            run_id="run-test", prompt="test", status=RunStatus.COMPLETED, phases=[],
+        )
+        from colonyos.github import GitHubIssue
+        fake_issue = GitHubIssue(
+            number=42, title="Add dark mode", body="Need it",
+            url="https://github.com/org/repo/issues/42", state="open",
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.github.fetch_issue", return_value=fake_issue), \
+             patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            result = runner.invoke(app, ["run", "--issue", "42", "Focus on backend"])
+
+        assert result.exit_code == 0
+        prompt = mock_run.call_args[0][0]  # positional arg
+        assert "Additional Context" in prompt
+        assert "Focus on backend" in prompt
+
+    def test_issue_gh_error(self, runner: CliRunner, tmp_path: Path) -> None:
+        _make_config(tmp_path)
+        import click as _click
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.github.fetch_issue", side_effect=_click.ClickException("Issue #999 not found")):
+            result = runner.invoke(app, ["run", "--issue", "999"])
+        assert result.exit_code != 0
+        assert "not found" in result.output
+
+    def test_issue_with_resume_error(self, runner: CliRunner, tmp_path: Path) -> None:
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["run", "--issue", "42", "--resume", "r-1"])
+        assert result.exit_code != 0
+
+
+class TestStatusSourceIssue:
+    def test_shows_issue_in_status(self, runner: CliRunner, tmp_path: Path) -> None:
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        log_data = {
+            "run_id": "run-issue-test",
+            "prompt": "Add dark mode",
+            "status": "completed",
+            "total_cost_usd": 0.5,
+            "source_issue": 42,
+            "source_issue_url": "https://github.com/org/repo/issues/42",
+            "phases": [],
+        }
+        (runs_dir / "run-issue-test.json").write_text(
+            json.dumps(log_data), encoding="utf-8",
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0
+        assert "#42" in result.output
+        assert "https://github.com/org/repo/issues/42" in result.output
+
+    def test_no_issue_no_tag(self, runner: CliRunner, tmp_path: Path) -> None:
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        log_data = {
+            "run_id": "run-no-issue",
+            "prompt": "Add feature",
+            "status": "completed",
+            "total_cost_usd": 0.1,
+            "phases": [],
+        }
+        (runs_dir / "run-no-issue.json").write_text(
+            json.dumps(log_data), encoding="utf-8",
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0
+        assert "#" not in result.output or "run-no-issue" in result.output
+
+

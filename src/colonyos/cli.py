@@ -217,20 +217,30 @@ def init(
 @click.option("--plan-only", is_flag=True, help="Stop after PRD + task generation.")
 @click.option("--from-prd", type=click.Path(exists=True), help="Skip planning, implement an existing PRD.")
 @click.option("--resume", "resume_run_id", default=None, help="Resume a failed run from its last successful phase.")
+@click.option("--issue", "issue_ref", default=None, help="GitHub issue number or URL to use as the prompt source.")
 @click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
 @click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
-def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, verbose: bool, quiet: bool) -> None:
+def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool) -> None:
     """Run the autonomous agent loop for a feature prompt."""
-    # Mutual exclusivity check
+    # Mutual exclusivity checks
     if resume_run_id:
-        if prompt or plan_only or from_prd:
+        if prompt or plan_only or from_prd or issue_ref:
             click.echo(
-                "Error: --resume cannot be combined with a prompt, --plan-only, or --from-prd.",
+                "Error: --resume cannot be combined with a prompt, --plan-only, --from-prd, or --issue.",
                 err=True,
             )
             sys.exit(1)
-    elif not prompt and not from_prd:
-        click.echo("Error: provide a prompt or --from-prd path.", err=True)
+
+    if issue_ref:
+        if from_prd:
+            click.echo(
+                "Error: --issue cannot be combined with --from-prd.",
+                err=True,
+            )
+            sys.exit(1)
+
+    if not resume_run_id and not issue_ref and not prompt and not from_prd:
+        click.echo("Error: provide a prompt, --from-prd path, or --issue.", err=True)
         sys.exit(1)
 
     repo_root = _find_repo_root()
@@ -255,7 +265,28 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             quiet=quiet,
         )
     else:
-        effective_prompt = prompt or f"Implement the PRD at {from_prd}"
+        source_issue: int | None = None
+        source_issue_url: str | None = None
+
+        if issue_ref:
+            from colonyos.github import (
+                fetch_issue,
+                format_issue_as_prompt,
+                parse_issue_ref,
+            )
+
+            number = parse_issue_ref(issue_ref)
+            issue = fetch_issue(number, repo_root)
+            source_issue = issue.number
+            source_issue_url = issue.url
+
+            issue_prompt = format_issue_as_prompt(issue)
+            if prompt:
+                effective_prompt = issue_prompt + f"\n\n## Additional Context\n\n{prompt}"
+            else:
+                effective_prompt = issue_prompt
+        else:
+            effective_prompt = prompt or f"Implement the PRD at {from_prd}"
 
         log = run_orchestrator(
             effective_prompt,
@@ -265,6 +296,8 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             from_prd=from_prd,
             verbose=verbose,
             quiet=quiet,
+            source_issue=source_issue,
+            source_issue_url=source_issue_url,
         )
 
     _print_run_summary(log)
@@ -786,10 +819,17 @@ def status(limit: int) -> None:
                 ):
                     resumable_tag = " [resumable]"
 
+                issue_tag = ""
+                si = data.get("source_issue")
+                si_url = data.get("source_issue_url")
+                if si:
+                    issue_tag = f"#{si} {si_url or ''} "
+
                 click.echo(
                     f"  {data.get('run_id', '?'):40s} "
                     f"{status_val:10s}{resumable_tag} "
                     f"${cost:>7.4f}  "
+                    f"{issue_tag}"
                     f"{prompt_preview}"
                 )
             except (json.JSONDecodeError, KeyError):

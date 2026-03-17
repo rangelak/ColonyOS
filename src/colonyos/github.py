@@ -1,0 +1,250 @@
+"""GitHub issue fetching, parsing, and formatting for ColonyOS.
+
+Uses the ``gh`` CLI (validated by ``doctor.py``) for all GitHub API
+interactions — no new Python dependencies required.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import click
+
+logger = logging.getLogger(__name__)
+
+# Matches full GitHub issue URLs like https://github.com/owner/repo/issues/42
+_ISSUE_URL_RE = re.compile(
+    r"https?://github\.com/[^/]+/[^/]+/issues/(\d+)"
+)
+
+# Maximum characters for the combined comments section
+_COMMENTS_CHAR_CAP = 8_000
+
+# Maximum number of comments to include
+_MAX_COMMENTS = 5
+
+
+@dataclass(frozen=True)
+class GitHubIssue:
+    """Represents a GitHub issue fetched via the ``gh`` CLI."""
+
+    number: int
+    title: str
+    body: str
+    labels: list[str] = field(default_factory=list)
+    comments: list[str] = field(default_factory=list)
+    state: str = "open"
+    url: str = ""
+
+
+def parse_issue_ref(ref: str) -> int:
+    """Extract the issue number from a bare integer or full GitHub URL.
+
+    Raises :class:`ValueError` for invalid formats.
+    """
+    ref = ref.strip()
+
+    # Try bare integer first
+    if ref.isdigit():
+        num = int(ref)
+        if num <= 0:
+            raise ValueError(f"Issue number must be positive, got {num}")
+        return num
+
+    # Try full URL
+    match = _ISSUE_URL_RE.search(ref)
+    if match:
+        return int(match.group(1))
+
+    raise ValueError(
+        f"Invalid issue reference: {ref!r}. "
+        "Accepted formats: 42, https://github.com/owner/repo/issues/42"
+    )
+
+
+def fetch_issue(issue_ref: str | int, repo_root: Path) -> GitHubIssue:
+    """Fetch a single issue via ``gh issue view``.
+
+    Parameters
+    ----------
+    issue_ref:
+        Either a bare issue number (int or str) or a full GitHub URL.
+    repo_root:
+        Repository root directory (used as ``cwd`` for ``gh``).
+
+    Returns
+    -------
+    GitHubIssue
+
+    Raises
+    ------
+    click.ClickException
+        On ``gh`` errors (auth failure, issue not found, network error).
+    """
+    if isinstance(issue_ref, str):
+        number = parse_issue_ref(issue_ref)
+    else:
+        number = issue_ref
+
+    try:
+        result = subprocess.run(
+            [
+                "gh", "issue", "view", str(number),
+                "--json", "number,title,body,labels,comments,state,url",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=repo_root,
+        )
+    except FileNotFoundError:
+        raise click.ClickException(
+            "GitHub CLI (gh) not found. Run `colonyos doctor` to check prerequisites."
+        )
+    except subprocess.TimeoutExpired:
+        raise click.ClickException(
+            f"Timed out fetching issue #{number}. Check your network connection."
+        )
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        if "not found" in stderr.lower() or "could not resolve" in stderr.lower():
+            raise click.ClickException(
+                f"Issue #{number} not found in this repository."
+            )
+        raise click.ClickException(
+            f"Failed to fetch issue #{number}: {stderr}. "
+            "Run `colonyos doctor` to check GitHub CLI auth."
+        )
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(
+            f"Failed to parse GitHub CLI output for issue #{number}: {exc}"
+        )
+
+    labels = [lbl.get("name", "") for lbl in data.get("labels", [])]
+    raw_comments = data.get("comments", [])
+    comments = [c.get("body", "") for c in raw_comments if c.get("body")]
+
+    issue = GitHubIssue(
+        number=data.get("number", number),
+        title=data.get("title", ""),
+        body=data.get("body", "") or "",
+        labels=labels,
+        comments=comments,
+        state=data.get("state", "open").lower(),
+        url=data.get("url", ""),
+    )
+
+    if issue.state == "closed":
+        click.echo(
+            f"Warning: Issue #{issue.number} is closed. Proceeding anyway.",
+            err=True,
+        )
+
+    return issue
+
+
+def format_issue_as_prompt(issue: GitHubIssue) -> str:
+    """Build a structured prompt string from a :class:`GitHubIssue`.
+
+    The output is wrapped in ``<github_issue>`` delimiters with a preamble
+    instructing the agent to treat it as a feature description.
+    """
+    parts: list[str] = []
+
+    parts.append(
+        "The following GitHub issue is the source feature description. "
+        "Treat it as the primary specification for this task."
+    )
+    parts.append("")
+    parts.append("<github_issue>")
+    parts.append(f"# #{issue.number}: {issue.title}")
+    parts.append("")
+
+    if issue.body:
+        parts.append(issue.body)
+        parts.append("")
+
+    if issue.labels:
+        label_str = ", ".join(f"`{lbl}`" for lbl in issue.labels)
+        parts.append(f"**Labels:** {label_str}")
+        parts.append("")
+
+    # Include up to _MAX_COMMENTS comments, capped at _COMMENTS_CHAR_CAP total
+    if issue.comments:
+        parts.append("## Comments")
+        parts.append("")
+        total_chars = 0
+        for i, comment in enumerate(issue.comments[:_MAX_COMMENTS]):
+            if total_chars + len(comment) > _COMMENTS_CHAR_CAP:
+                remaining = _COMMENTS_CHAR_CAP - total_chars
+                if remaining > 0:
+                    parts.append(f"**Comment {i + 1}:**")
+                    parts.append(comment[:remaining] + "\n\n[... truncated]")
+                else:
+                    parts.append(f"[... {len(issue.comments) - i} more comments truncated]")
+                break
+            parts.append(f"**Comment {i + 1}:**")
+            parts.append(comment)
+            parts.append("")
+            total_chars += len(comment)
+
+    parts.append("</github_issue>")
+
+    return "\n".join(parts)
+
+
+def fetch_open_issues(
+    repo_root: Path,
+    limit: int = 20,
+) -> list[GitHubIssue]:
+    """Fetch open issues for CEO context.
+
+    This is **non-blocking** — all errors are caught and logged, returning
+    an empty list on failure.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh", "issue", "list",
+                "--json", "number,title,labels,state",
+                "--limit", str(limit),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=repo_root,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Failed to fetch open issues: %s", exc)
+        return []
+
+    if result.returncode != 0:
+        logger.warning("gh issue list failed: %s", result.stderr.strip())
+        return []
+
+    try:
+        items = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse gh issue list output")
+        return []
+
+    issues: list[GitHubIssue] = []
+    for item in items:
+        labels = [lbl.get("name", "") for lbl in item.get("labels", [])]
+        issues.append(GitHubIssue(
+            number=item.get("number", 0),
+            title=item.get("title", ""),
+            body="",
+            labels=labels,
+            state=item.get("state", "open").lower(),
+        ))
+    return issues
