@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -7,11 +8,17 @@ import yaml
 
 from colonyos.models import Persona, Phase, ProjectInfo
 
+logger = logging.getLogger(__name__)
+
 CONFIG_DIR = ".colonyos"
 CONFIG_FILE = "config.yaml"
 RUNS_DIR = "runs"
 
 VALID_MODELS: frozenset[str] = frozenset({"opus", "sonnet", "haiku"})
+
+# Phases that serve as safety gates and should not be downgraded to
+# lightweight models without explicit awareness of the trade-off.
+_SAFETY_CRITICAL_PHASES: frozenset[str] = frozenset({"review", "decision", "fix"})
 
 DEFAULTS = {
     "model": "sonnet",
@@ -126,7 +133,9 @@ def load_config(repo_root: Path) -> ColonyConfig:
     model_val = raw.get("model", DEFAULTS["model"])
     if model_val not in VALID_MODELS:
         raise ValueError(
-            f"Invalid model '{model_val}'. Valid options: {sorted(VALID_MODELS)}"
+            f"Invalid model '{model_val}'. Valid options: {sorted(VALID_MODELS)}. "
+            f"Note: use short names (e.g. 'opus') not full model IDs "
+            f"(e.g. 'claude-opus-4-20250514')."
         )
 
     # Parse and validate phase_models
@@ -141,7 +150,19 @@ def load_config(repo_root: Path) -> ColonyConfig:
         if model_name not in VALID_MODELS:
             raise ValueError(
                 f"Invalid model '{model_name}' for phase '{phase_key}' in phase_models. "
-                f"Valid options: {sorted(VALID_MODELS)}"
+                f"Valid options: {sorted(VALID_MODELS)}. "
+                f"Note: use short names (e.g. 'opus') not full model IDs "
+                f"(e.g. 'claude-opus-4-20250514')."
+            )
+
+    # Warn when lightweight models are assigned to safety-critical phases
+    for phase_key, model_name in phase_models_raw.items():
+        if phase_key in _SAFETY_CRITICAL_PHASES and model_name == "haiku":
+            logger.warning(
+                "Phase '%s' is assigned model 'haiku'. This phase serves as a "
+                "safety gate in the pipeline — using a lightweight model may "
+                "reduce review quality. Consider using 'sonnet' or 'opus'.",
+                phase_key,
             )
 
     return ColonyConfig(

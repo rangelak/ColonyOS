@@ -3,6 +3,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+import logging
+
 from colonyos.config import (
     ColonyConfig,
     BudgetConfig,
@@ -10,6 +12,7 @@ from colonyos.config import (
     LearningsConfig,
     PhasesConfig,
     VALID_MODELS,
+    _SAFETY_CRITICAL_PHASES,
     load_config,
     save_config,
 )
@@ -540,5 +543,103 @@ class TestPhaseModels:
     def test_backward_compat_no_config(self, tmp_repo: Path):
         config = load_config(tmp_repo)
         assert config.phase_models == {}
+
+    def test_warns_when_haiku_assigned_to_review(self, tmp_repo: Path, caplog):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "model": "sonnet",
+                "phase_models": {"review": "haiku"},
+            }),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            config = load_config(tmp_repo)
+        assert config.phase_models == {"review": "haiku"}
+        assert "safety gate" in caplog.text
+        assert "'review'" in caplog.text
+
+    def test_warns_when_haiku_assigned_to_decision(self, tmp_repo: Path, caplog):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "model": "sonnet",
+                "phase_models": {"decision": "haiku"},
+            }),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            load_config(tmp_repo)
+        assert "'decision'" in caplog.text
+
+    def test_warns_when_haiku_assigned_to_fix(self, tmp_repo: Path, caplog):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "model": "sonnet",
+                "phase_models": {"fix": "haiku"},
+            }),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            load_config(tmp_repo)
+        assert "'fix'" in caplog.text
+
+    def test_no_warning_when_haiku_assigned_to_learn(self, tmp_repo: Path, caplog):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "model": "sonnet",
+                "phase_models": {"learn": "haiku"},
+            }),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            load_config(tmp_repo)
+        assert "safety gate" not in caplog.text
+
+    def test_no_warning_when_sonnet_assigned_to_review(self, tmp_repo: Path, caplog):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "model": "sonnet",
+                "phase_models": {"review": "sonnet"},
+            }),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            load_config(tmp_repo)
+        assert "safety gate" not in caplog.text
+
+    def test_safety_critical_phases_constant(self):
+        assert _SAFETY_CRITICAL_PHASES == frozenset({"review", "decision", "fix"})
+
+    def test_invalid_model_error_mentions_short_names(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "claude-opus-4-20250514"}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="short names"):
+            load_config(tmp_repo)
+
+    def test_invalid_phase_model_error_mentions_short_names(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "model": "sonnet",
+                "phase_models": {"implement": "claude-opus-4-20250514"},
+            }),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="short names"):
+            load_config(tmp_repo)
 
 

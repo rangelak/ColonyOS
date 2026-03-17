@@ -23,13 +23,13 @@ MODEL_PRESETS: dict[str, dict[str, str | dict[str, str]]] = {
         "phase_models": {},
     },
     "Cost-optimized": {
-        "model": "opus",
+        "model": "sonnet",
         "phase_models": {
             "plan": "sonnet",
             "implement": "opus",
             "review": "sonnet",
             "fix": "sonnet",
-            "decision": "haiku",
+            "decision": "sonnet",
             "learn": "haiku",
             "deliver": "haiku",
         },

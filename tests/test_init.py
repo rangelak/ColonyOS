@@ -208,7 +208,7 @@ class TestQuickInit:
 
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert raw["project"]["name"] == "TestProject"
-        assert raw["model"] == "opus"
+        assert raw["model"] == "sonnet"
 
     def test_quick_prints_next_step(self, tmp_path: Path, capsys):
         with patch("colonyos.init.click") as mock_click:
@@ -264,10 +264,12 @@ class TestModelPresets:
 
     def test_cost_optimized_preset_has_phase_overrides(self):
         preset = MODEL_PRESETS["Cost-optimized"]
-        assert preset["model"] == "opus"
+        assert preset["model"] == "sonnet"
         assert preset["phase_models"]["implement"] == "opus"
         assert preset["phase_models"]["deliver"] == "haiku"
         assert preset["phase_models"]["learn"] == "haiku"
+        # Decision phase should NOT use haiku — it's a safety-critical gate
+        assert preset["phase_models"]["decision"] == "sonnet"
 
     def test_quick_init_uses_cost_optimized(self, tmp_path: Path):
         config = run_init(
@@ -278,7 +280,7 @@ class TestModelPresets:
             project_stack="Python",
         )
         assert config.phase_models == dict(MODEL_PRESETS["Cost-optimized"]["phase_models"])
-        assert config.model == "opus"
+        assert config.model == "sonnet"
 
     def test_interactive_quality_first_preset(self, tmp_path: Path):
         with patch("colonyos.init.click") as mock_click, \
@@ -312,6 +314,6 @@ class TestModelPresets:
             config = run_init(tmp_path)
 
         assert config.phase_models == dict(MODEL_PRESETS["Cost-optimized"]["phase_models"])
-        assert config.model == "opus"
+        assert config.model == "sonnet"
 
 
