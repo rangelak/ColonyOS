@@ -14,403 +14,10 @@ from colonyos.agent import run_phase_sync, run_phases_parallel_sync
 from colonyos.config import ColonyConfig, runs_dir_path
 from colonyos.models import Persona, Phase, PhaseResult, ResumeState, RunLog, RunStatus
 from colonyos.naming import generate_timestamp, planning_names, proposal_names, slugify
-from colonyos.ui import NullUI, PhaseUI, make_reviewer_prefix, print_reviewer_legend
-
-# ---------------------------------------------------------------------------
-# Branch name validation
-# ---------------------------------------------------------------------------
-
-_BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9_./~^-]+$")
+from colonyos.ui import NullUI, PhaseUI
 
 
-def _validate_branch_name(name: str) -> str | None:
-    """Validate a branch name for safe use in git commands.
-
-    Returns an error message if invalid, or None if OK.
-    Rejects names starting with ``-`` (could be interpreted as flags),
-    containing ``..`` (path traversal in git), or using characters
-    outside the safe set ``[A-Za-z0-9_./-]``.
-    """
-    if not name:
-        return "Branch name must not be empty."
-    if name.startswith("-"):
-        return f"Invalid branch name: {name!r}. Must not start with '-'."
-    if ".." in name:
-        return f"Invalid branch name: {name!r}. Must not contain '..'."
-    if not _BRANCH_NAME_RE.match(name):
-        return f"Invalid branch name: {name!r}. Contains disallowed characters."
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Base-branch detection & pre-flight validation
-# ---------------------------------------------------------------------------
-
-
-def detect_base_branch(repo_root: Path, override: str | None = None) -> str:
-    """Auto-detect the base branch for a review.
-
-    Checks (in order): explicit *override*, ``main``, ``master``,
-    then falls back to ``HEAD~1``.
-    """
-    if override:
-        return override
-
-    for candidate in ("main", "master"):
-        result = subprocess.run(
-            ["git", "rev-parse", "--verify", candidate],
-            capture_output=True,
-            text=True,
-            cwd=repo_root,
-        )
-        if result.returncode == 0:
-            return candidate
-
-    return "HEAD~1"
-
-
-def validate_review_preconditions(
-    repo_root: Path,
-    branch: str,
-    base_branch: str,
-    fix_enabled: bool,
-) -> str | None:
-    """Validate that a standalone review can proceed.
-
-    Returns an error message string if validation fails, or ``None`` if OK.
-    """
-    # 0. Validate branch name format (defense-in-depth against flag injection)
-    branch_err = _validate_branch_name(branch)
-    if branch_err:
-        return branch_err
-    base_err = _validate_branch_name(base_branch)
-    if base_err:
-        return base_err
-
-    # 1. Branch exists locally
-    result = subprocess.run(
-        ["git", "rev-parse", "--verify", branch],
-        capture_output=True,
-        text=True,
-        cwd=repo_root,
-    )
-    if result.returncode != 0:
-        return f"Branch '{branch}' not found locally."
-
-    # 2. Non-empty diff against base
-    diff_result = subprocess.run(
-        ["git", "diff", "--stat", f"{base_branch}...{branch}"],
-        capture_output=True,
-        text=True,
-        cwd=repo_root,
-    )
-    if not diff_result.stdout.strip():
-        return f"No changes to review on branch {branch} against {base_branch}."
-
-    # 3. Clean working tree when --fix is used
-    if fix_enabled:
-        status_result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            cwd=repo_root,
-        )
-        if status_result.stdout.strip():
-            return (
-                "Working tree has uncommitted changes. "
-                "Commit or stash them before using --fix."
-            )
-
-    return None
-
-
-def build_review_run_id(branch_name: str) -> str:
-    """Generate a run ID for standalone review runs."""
-    digest = sha1(branch_name.strip().encode()).hexdigest()[:10]
-    return f"review-{generate_timestamp()}-{digest}"
-
-
-# ---------------------------------------------------------------------------
-# Standalone prompt builders
-# ---------------------------------------------------------------------------
-
-
-def _build_persona_standalone_review_prompt(
-    persona: Persona,
-    config: ColonyConfig,
-    branch_name: str,
-    base_branch: str,
-) -> tuple[str, str]:
-    """Build a review prompt for a single persona WITHOUT a PRD."""
-    review_template = _load_instruction("review_standalone.md")
-
-    system = _format_base(config) + "\n\n" + review_template.format(
-        reviewer_role=persona.role,
-        reviewer_expertise=persona.expertise,
-        reviewer_perspective=persona.perspective,
-        branch_name=branch_name,
-        base_branch=base_branch,
-    )
-
-    user = (
-        f"Review the implementation on branch `{branch_name}` against base "
-        f"`{base_branch}`. Assess the entire implementation holistically from "
-        f"your perspective as {persona.role}."
-    )
-    return system, user
-
-
-def _build_standalone_fix_prompt(
-    config: ColonyConfig,
-    branch_name: str,
-    base_branch: str,
-    findings_text: str,
-    fix_iteration: int,
-) -> tuple[str, str]:
-    """Build a fix prompt for PRD-less fix iterations."""
-    fix_template = _load_instruction("fix_standalone.md")
-
-    system = _format_base(config) + "\n\n" + fix_template.format(
-        branch_name=branch_name,
-        base_branch=base_branch,
-        reviews_dir=config.reviews_dir,
-        findings_text=findings_text,
-        fix_iteration=fix_iteration,
-        max_fix_iterations=config.max_fix_iterations,
-    )
-
-    user = (
-        f"Fix the issues identified by reviewers for branch `{branch_name}`. "
-        f"This is fix iteration {fix_iteration} of {config.max_fix_iterations}."
-    )
-    return system, user
-
-
-def _build_standalone_decision_prompt(
-    config: ColonyConfig,
-    branch_name: str,
-    base_branch: str,
-) -> tuple[str, str]:
-    """Build a decision gate prompt WITHOUT a PRD."""
-    decision_template = _load_instruction("decision_standalone.md")
-
-    system = _format_base(config) + "\n\n" + decision_template.format(
-        branch_name=branch_name,
-        base_branch=base_branch,
-        reviews_dir=config.reviews_dir,
-    )
-
-    user = (
-        f"Review all artifacts for the implementation on branch `{branch_name}` "
-        f"and make a GO / NO-GO decision. "
-        f"Review artifacts are in `{config.reviews_dir}/`."
-    )
-    return system, user
-
-
-# ---------------------------------------------------------------------------
-# Reusable review/fix/decision loop
-# ---------------------------------------------------------------------------
-
-
-def run_review_loop(
-    repo_root: Path,
-    config: ColonyConfig,
-    branch_name: str,
-    log: RunLog,
-    *,
-    prd_rel: str | None = None,
-    task_rel: str | None = None,
-    base_branch: str = "main",
-    enable_fix: bool = True,
-    artifact_prefix: str = "",
-    verbose: bool = False,
-    quiet: bool = False,
-) -> str:
-    """Run the review/fix/decision loop and return the overall verdict.
-
-    This is the shared core used by both ``orchestrator.run()`` (pipeline
-    mode) and the standalone ``colonyos review`` command.
-
-    Returns one of: ``"approve"``, ``"request-changes"``, ``"GO"``,
-    ``"NO-GO"``, or ``"UNKNOWN"``.
-    """
-
-    def _make_ui(prefix: str = "") -> "PhaseUI | NullUI | None":
-        if quiet:
-            return None
-        return PhaseUI(verbose=verbose, prefix=prefix)
-
-    reviewers = reviewer_personas(config)
-    if not reviewers:
-        _log("No reviewer personas configured, skipping review phase")
-        return "approve"
-
-    review_header_ui = _make_ui()
-    if review_header_ui is not None:
-        review_header_ui.phase_header(
-            f"Review ({len(reviewers)} reviewers)",
-            config.budget.per_phase,
-            config.model,
-        )
-        print_reviewer_legend([(i, p.role) for i, p in enumerate(reviewers)])
-    else:
-        _log(f"=== Review ({len(reviewers)} reviewers) ===")
-
-    review_tools = ["Read", "Glob", "Grep", "Bash"]
-    last_findings: list[tuple[str, str]] = []
-    branch_slug = slugify(branch_name)
-
-    for iteration in range(config.max_fix_iterations + 1):
-        # Budget guard
-        cost_so_far = sum(
-            p.cost_usd for p in log.phases if p.cost_usd is not None
-        )
-        remaining = config.budget.per_run - cost_so_far
-        if remaining < config.budget.per_phase:
-            _log(
-                f"Review loop: budget exhausted "
-                f"({remaining:.2f} remaining). Stopping reviews."
-            )
-            break
-
-        _log(f"  Review round {iteration + 1}/{config.max_fix_iterations + 1}")
-
-        review_calls = []
-        for i, persona in enumerate(reviewers):
-            if prd_rel:
-                sys_prompt, usr_prompt = _build_persona_review_prompt(
-                    persona, config, prd_rel, branch_name
-                )
-            else:
-                sys_prompt, usr_prompt = _build_persona_standalone_review_prompt(
-                    persona, config, branch_name, base_branch
-                )
-            persona_ui = _make_ui(prefix=make_reviewer_prefix(persona.role, i))
-            review_calls.append(dict(
-                phase=Phase.REVIEW,
-                prompt=usr_prompt,
-                cwd=repo_root,
-                system_prompt=sys_prompt,
-                model=config.model,
-                budget_usd=config.budget.per_phase,
-                allowed_tools=review_tools,
-                ui=persona_ui,
-            ))
-
-        results = run_phases_parallel_sync(review_calls)
-
-        # Save each persona's review artifact
-        for persona, result in zip(reviewers, results):
-            p_slug = _persona_slug(persona.role)
-            text = result.artifacts.get("result", "")
-            if artifact_prefix:
-                fname = f"review_{artifact_prefix}{branch_slug}_round{iteration + 1}_{p_slug}.md"
-            else:
-                fname = f"review_round{iteration + 1}_{p_slug}.md"
-            _save_review_artifact(
-                repo_root,
-                config.reviews_dir,
-                fname,
-                f"# Review by {persona.role} (Round {iteration + 1})\n\n{text}",
-            )
-            log.phases.append(result)
-
-        last_findings = _collect_review_findings(results, reviewers)
-
-        if not last_findings:
-            _log("  All reviewers approve")
-            break
-
-        _log(
-            f"  {len(last_findings)} reviewer(s) requested changes: "
-            + ", ".join(role for role, _ in last_findings)
-        )
-
-        if enable_fix and iteration < config.max_fix_iterations:
-            findings_text = "\n\n---\n\n".join(
-                f"### {role}\n\n{text}" for role, text in last_findings
-            )
-            if prd_rel and task_rel:
-                fix_system, fix_user = _build_fix_prompt(
-                    config, prd_rel, task_rel, branch_name,
-                    findings_text, iteration + 1,
-                )
-            else:
-                fix_system, fix_user = _build_standalone_fix_prompt(
-                    config, branch_name, base_branch,
-                    findings_text, iteration + 1,
-                )
-            fix_ui = _make_ui()
-            if fix_ui is not None:
-                fix_ui.phase_header(
-                    f"Fix (iteration {iteration + 1})",
-                    config.budget.per_phase,
-                    config.model,
-                )
-            else:
-                _log(f"  Running fix agent (iteration {iteration + 1})...")
-            fix_result = run_phase_sync(
-                Phase.FIX,
-                fix_user,
-                cwd=repo_root,
-                system_prompt=fix_system,
-                model=config.model,
-                budget_usd=config.budget.per_phase,
-                ui=fix_ui,
-            )
-            log.phases.append(fix_result)
-            if not fix_result.success:
-                if fix_ui is None:
-                    _log(f"  Fix phase failed: {fix_result.error}")
-                break
-        else:
-            # No fix to apply; re-reviewing won't change anything
-            break
-
-    # --- Decision Gate ---
-    decision_ui = _make_ui()
-    if decision_ui is not None:
-        decision_ui.phase_header("Decision Gate", config.budget.per_phase, config.model)
-    else:
-        _log("=== Decision Gate ===")
-
-    if prd_rel:
-        system, user = _build_decision_prompt(config, prd_rel, branch_name)
-    else:
-        system, user = _build_standalone_decision_prompt(config, branch_name, base_branch)
-
-    decision_result = run_phase_sync(
-        Phase.DECISION,
-        user,
-        cwd=repo_root,
-        system_prompt=system,
-        model=config.model,
-        budget_usd=config.budget.per_phase,
-        allowed_tools=["Read", "Glob", "Grep"],
-        ui=decision_ui,
-    )
-    log.phases.append(decision_result)
-
-    verdict_text = decision_result.artifacts.get("result", "")
-    verdict = _extract_verdict(verdict_text)
-    _log(f"  Decision: {verdict}")
-
-    if artifact_prefix:
-        decision_fname = f"decision_{artifact_prefix}{branch_slug}.md"
-    else:
-        decision_fname = f"decision_{branch_slug}.md"
-    _save_review_artifact(
-        repo_root,
-        config.reviews_dir,
-        decision_fname,
-        f"# Decision Gate\n\nVerdict: **{verdict}**\n\n{verdict_text}",
-    )
-
-    return verdict
-
-
-def touch_heartbeat(repo_root: Path) -> None:
+def _touch_heartbeat(repo_root: Path) -> None:
     """Touch the heartbeat file to signal the orchestrator is alive."""
     heartbeat_path = runs_dir_path(repo_root) / "heartbeat"
     heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
@@ -545,7 +152,7 @@ def _build_implement_prompt(
     return system, user
 
 
-def reviewer_personas(config: ColonyConfig) -> list[Persona]:
+def _reviewer_personas(config: ColonyConfig) -> list[Persona]:
     """Return only personas that have reviewer=True."""
     return [p for p in config.personas if p.reviewer]
 
@@ -580,7 +187,7 @@ _REVIEW_VERDICT_RE = re.compile(
 )
 
 
-def extract_review_verdict(result_text: str) -> str:
+def _extract_review_verdict(result_text: str) -> str:
     """Extract VERDICT: approve or VERDICT: request-changes from review output."""
     match = _REVIEW_VERDICT_RE.search(result_text)
     return match.group(1).lower() if match else "request-changes"
@@ -594,7 +201,7 @@ def _collect_review_findings(
     findings: list[tuple[str, str]] = []
     for persona, result in zip(reviewers, results):
         text = result.artifacts.get("result", "")
-        verdict = extract_review_verdict(text)
+        verdict = _extract_review_verdict(text)
         if verdict == "request-changes":
             findings.append((persona.role, text))
     return findings
@@ -656,6 +263,10 @@ def _build_fix_prompt(
     )
     return system, user
 
+
+# ---------------------------------------------------------------------------
+# Verification gate
+# ---------------------------------------------------------------------------
 
 _VERIFY_TRUNCATE_LIMIT = 4000
 
@@ -826,6 +437,11 @@ def run_verify_loop(
     return
 
 
+# ---------------------------------------------------------------------------
+# Deliver, CEO, and other prompt builders
+# ---------------------------------------------------------------------------
+
+
 def _build_deliver_prompt(
     config: ColonyConfig,
     prd_path: str,
@@ -970,7 +586,7 @@ def _save_review_artifact(
     return path
 
 
-def save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Path:
+def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Path:
     runs = runs_dir_path(repo_root)
     runs.mkdir(parents=True, exist_ok=True)
     log_path = runs / f"{log.run_id}.json"
@@ -1212,7 +828,7 @@ def run(
     verbose: bool = False,
     quiet: bool = False,
 ) -> RunLog:
-    """Execute the full orchestration loop: plan -> implement -> review -> deliver."""
+    """Execute the full orchestration loop: plan -> implement -> verify -> review -> deliver."""
 
     def _make_ui(prefix: str = "") -> PhaseUI | NullUI | None:
         if quiet:
@@ -1233,7 +849,7 @@ def run(
         log.status = RunStatus.RUNNING
         _log(f"Resuming from phase: {next_phase}")
         # Record resume event for audit trail
-        save_run_log(repo_root, log, resumed=True)
+        _save_run_log(repo_root, log, resumed=True)
     else:
         run_id = _build_run_id(prompt)
         log = RunLog(run_id=run_id, prompt=prompt, status=RunStatus.RUNNING)
@@ -1251,7 +867,7 @@ def run(
     log.task_rel = task_rel
 
     # --- Phase 1: Plan ---
-    touch_heartbeat(repo_root)
+    _touch_heartbeat(repo_root)
     if "plan" in skip_phases:
         _log("Skipping plan phase (already completed in previous run)")
     elif from_prd:
@@ -1291,7 +907,7 @@ def run(
         if not plan_result.success:
             log.status = RunStatus.FAILED
             log.mark_finished()
-            save_run_log(repo_root, log)
+            _save_run_log(repo_root, log)
             if plan_ui is None:
                 _log(f"Plan phase failed: {plan_result.error}")
             return log
@@ -1299,12 +915,12 @@ def run(
     if plan_only:
         log.status = RunStatus.COMPLETED
         log.mark_finished()
-        save_run_log(repo_root, log)
+        _save_run_log(repo_root, log)
         _log("Plan-only mode: stopping after plan phase.")
         return log
 
     # --- Phase 2: Implement ---
-    touch_heartbeat(repo_root)
+    _touch_heartbeat(repo_root)
     if "implement" in skip_phases:
         _log("Skipping implement phase (already completed in previous run)")
     else:
@@ -1328,13 +944,13 @@ def run(
         if not impl_result.success:
             log.status = RunStatus.FAILED
             log.mark_finished()
-            save_run_log(repo_root, log)
+            _save_run_log(repo_root, log)
             if impl_ui is None:
                 _log(f"Implement phase failed: {impl_result.error}")
             return log
 
     # --- Phase 2.5: Verification Gate ---
-    touch_heartbeat(repo_root)
+    _touch_heartbeat(repo_root)
     if "verify" in skip_phases:
         _log("Skipping verify phase (already completed in previous run)")
     elif config.verification.verify_command:
@@ -1342,38 +958,165 @@ def run(
             repo_root, config, log, prd_rel, task_rel, branch_name,
             verbose=verbose, quiet=quiet,
         )
-        save_run_log(repo_root, log, resumed=is_resume)
+        _save_run_log(repo_root, log, resumed=is_resume)
 
     # --- Phase 3: Review/Fix Loop ---
-    touch_heartbeat(repo_root)
+    _touch_heartbeat(repo_root)
     if "review" in skip_phases:
         _log("Skipping review phase (already completed in previous run)")
     elif config.phases.review:
-        verdict = run_review_loop(
-            repo_root,
-            config,
-            branch_name,
-            log,
-            prd_rel=prd_rel,
-            task_rel=task_rel,
-            base_branch=detect_base_branch(repo_root),
-            enable_fix=True,
-            verbose=verbose,
-            quiet=quiet,
-        )
+        reviewers = _reviewer_personas(config)
+        if not reviewers:
+            _log("No reviewer personas configured, skipping review phase")
+        else:
+            review_header_ui = _make_ui()
+            if review_header_ui is not None:
+                review_header_ui.phase_header(
+                    f"Review ({len(reviewers)} reviewers)",
+                    config.budget.per_phase,
+                    config.model,
+                )
+            else:
+                _log(f"=== Phase 3: Review ({len(reviewers)} reviewers) ===")
+            review_tools = ["Read", "Glob", "Grep", "Bash"]
+            last_findings: list[tuple[str, str]] = []
 
-        if verdict == "NO-GO":
-            log.status = RunStatus.FAILED
-            log.mark_finished()
-            save_run_log(repo_root, log)
-            _log("Decision gate: NO-GO. Pipeline stopped before deliver.")
-            return log
+            for iteration in range(config.max_fix_iterations + 1):
+                # Budget guard
+                cost_so_far = sum(
+                    p.cost_usd for p in log.phases if p.cost_usd is not None
+                )
+                remaining = config.budget.per_run - cost_so_far
+                if remaining < config.budget.per_phase:
+                    _log(
+                        f"Review loop: budget exhausted "
+                        f"({remaining:.2f} remaining). Stopping reviews."
+                    )
+                    break
 
-        if verdict == "UNKNOWN":
-            _log("  Warning: could not parse verdict, proceeding with caution")
+                _log(f"  Review round {iteration + 1}/{config.max_fix_iterations + 1}")
+
+                review_calls = []
+                for persona in reviewers:
+                    sys_prompt, usr_prompt = _build_persona_review_prompt(
+                        persona, config, prd_rel, branch_name
+                    )
+                    persona_ui = _make_ui(prefix=f"[{persona.role}] ")
+                    review_calls.append(dict(
+                        phase=Phase.REVIEW,
+                        prompt=usr_prompt,
+                        cwd=repo_root,
+                        system_prompt=sys_prompt,
+                        model=config.model,
+                        budget_usd=config.budget.per_phase,
+                        allowed_tools=review_tools,
+                        ui=persona_ui,
+                    ))
+
+                results = run_phases_parallel_sync(review_calls)
+
+                # Save each persona's review artifact
+                for persona, result in zip(reviewers, results):
+                    p_slug = _persona_slug(persona.role)
+                    text = result.artifacts.get("result", "")
+                    fname = f"review_round{iteration + 1}_{p_slug}.md"
+                    _save_review_artifact(
+                        repo_root,
+                        config.reviews_dir,
+                        fname,
+                        f"# Review by {persona.role} (Round {iteration + 1})\n\n{text}",
+                    )
+                    log.phases.append(result)
+
+                last_findings = _collect_review_findings(results, reviewers)
+
+                if not last_findings:
+                    _log("  All reviewers approve")
+                    break
+
+                _log(
+                    f"  {len(last_findings)} reviewer(s) requested changes: "
+                    + ", ".join(role for role, _ in last_findings)
+                )
+
+                if iteration < config.max_fix_iterations:
+                    findings_text = "\n\n---\n\n".join(
+                        f"### {role}\n\n{text}" for role, text in last_findings
+                    )
+                    fix_system, fix_user = _build_fix_prompt(
+                        config,
+                        prd_rel,
+                        task_rel,
+                        branch_name,
+                        findings_text,
+                        iteration + 1,
+                    )
+                    fix_ui = _make_ui()
+                    if fix_ui is not None:
+                        fix_ui.phase_header(
+                            f"Fix (iteration {iteration + 1})",
+                            config.budget.per_phase,
+                            config.model,
+                        )
+                    else:
+                        _log(f"  Running fix agent (iteration {iteration + 1})...")
+                    fix_result = run_phase_sync(
+                        Phase.FIX,
+                        fix_user,
+                        cwd=repo_root,
+                        system_prompt=fix_system,
+                        model=config.model,
+                        budget_usd=config.budget.per_phase,
+                        ui=fix_ui,
+                    )
+                    log.phases.append(fix_result)
+                    if not fix_result.success:
+                        if fix_ui is None:
+                            _log(f"  Fix phase failed: {fix_result.error}")
+                        break
+
+            # --- Decision Gate ---
+            decision_ui = _make_ui()
+            if decision_ui is not None:
+                decision_ui.phase_header("Decision Gate", config.budget.per_phase, config.model)
+            else:
+                _log("=== Decision Gate ===")
+            system, user = _build_decision_prompt(config, prd_rel, branch_name)
+            decision_result = run_phase_sync(
+                Phase.DECISION,
+                user,
+                cwd=repo_root,
+                system_prompt=system,
+                model=config.model,
+                budget_usd=config.budget.per_phase,
+                allowed_tools=["Read", "Glob", "Grep", "Bash"],
+                ui=decision_ui,
+            )
+            log.phases.append(decision_result)
+
+            verdict_text = decision_result.artifacts.get("result", "")
+            verdict = _extract_verdict(verdict_text)
+            _log(f"  Decision: {verdict}")
+
+            _save_review_artifact(
+                repo_root,
+                config.reviews_dir,
+                f"decision_{slugify(prompt)}.md",
+                f"# Decision Gate\n\nVerdict: **{verdict}**\n\n{verdict_text}",
+            )
+
+            if verdict == "NO-GO":
+                log.status = RunStatus.FAILED
+                log.mark_finished()
+                _save_run_log(repo_root, log)
+                _log("Decision gate: NO-GO. Pipeline stopped before deliver.")
+                return log
+
+            if verdict == "UNKNOWN":
+                _log("  Warning: could not parse verdict, proceeding with caution")
 
     # --- Deliver Phase ---
-    touch_heartbeat(repo_root)
+    _touch_heartbeat(repo_root)
     if config.phases.deliver:
         deliver_ui = _make_ui()
         if deliver_ui is not None:
@@ -1396,13 +1139,13 @@ def run(
         if not deliver_result.success:
             log.status = RunStatus.FAILED
             log.mark_finished()
-            save_run_log(repo_root, log)
+            _save_run_log(repo_root, log)
             if deliver_ui is None:
                 _log(f"Deliver phase failed: {deliver_result.error}")
             return log
 
     log.status = RunStatus.COMPLETED
     log.mark_finished()
-    save_run_log(repo_root, log)
+    _save_run_log(repo_root, log)
     _log(f"Run complete. Total cost: ${log.total_cost_usd:.4f}")
     return log

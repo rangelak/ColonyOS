@@ -15,20 +15,13 @@ from colonyos import __version__
 from colonyos.config import ColonyConfig, load_config, runs_dir_path
 from colonyos.doctor import run_doctor_checks
 from colonyos.init import run_init
-from colonyos.models import LoopState, LoopStatus, Phase, RunLog, RunStatus
+from colonyos.models import LoopState, LoopStatus, RunLog, RunStatus
 from colonyos.naming import generate_timestamp
 from colonyos.orchestrator import (
-    touch_heartbeat,
-    detect_base_branch,
+    _touch_heartbeat,
     run as run_orchestrator,
     run_ceo,
-    run_review_loop,
     prepare_resume,
-    validate_review_preconditions,
-    build_review_run_id,
-    extract_review_verdict,
-    reviewer_personas,
-    save_run_log,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,8 +106,6 @@ def _show_welcome() -> None:
     right.append("    Check prerequisites\n")
     right.append("  run", style="green")
     right.append("       Run the agent pipeline\n")
-    right.append("  review", style="green")
-    right.append("    Review any branch\n")
     right.append("  auto", style="green")
     right.append("      CEO \u2192 full pipeline\n")
     right.append("  status", style="green")
@@ -278,137 +269,6 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
 
 
 # ---------------------------------------------------------------------------
-# Review command
-# ---------------------------------------------------------------------------
-
-
-def _print_review_summary(
-    log: RunLog,
-    reviewer_verdicts: list[tuple[str, str]],
-    overall_verdict: str,
-) -> None:
-    """Print a rich summary table for a standalone review."""
-    from rich.console import Console
-    from rich.table import Table
-
-    console = Console()
-
-    table = Table(title="Review Summary", show_header=True)
-    table.add_column("Reviewer", style="cyan")
-    table.add_column("Verdict", style="bold")
-
-    for role, verdict in reviewer_verdicts:
-        style = "green" if verdict == "approve" else "red"
-        table.add_row(role, f"[{style}]{verdict}[/{style}]")
-
-    table.add_section()
-    overall_style = "green" if overall_verdict in ("GO", "approve") else "red"
-    table.add_row(
-        "Overall Decision",
-        f"[{overall_style} bold]{overall_verdict}[/{overall_style} bold]",
-    )
-
-    console.print()
-    console.print(table)
-
-    _print_run_summary(log)
-
-
-@app.command()
-@click.argument("branch")
-@click.option("--prd", "prd_path", default=None, type=click.Path(exists=True), help="Path to a PRD file for context.")
-@click.option("--fix", "fix_enabled", is_flag=True, help="Enable fix loop for issues found by reviewers.")
-@click.option("--base", "base_branch", default=None, help="Override auto-detected base branch.")
-@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
-@click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
-def review(
-    branch: str,
-    prd_path: str | None,
-    fix_enabled: bool,
-    base_branch: str | None,
-    verbose: bool,
-    quiet: bool,
-) -> None:
-    """Review any branch with multi-persona AI reviewers."""
-    repo_root = _find_repo_root()
-    config = load_config(repo_root)
-
-    if not config.project:
-        click.echo(
-            "No ColonyOS config found. Run `colonyos init` first.",
-            err=True,
-        )
-        sys.exit(1)
-
-    # Detect base branch
-    detected_base = detect_base_branch(repo_root, override=base_branch)
-
-    # Pre-flight checks
-    error = validate_review_preconditions(repo_root, branch, detected_base, fix_enabled)
-    if error:
-        click.echo(f"Error: {error}", err=True)
-        sys.exit(1)
-
-    # Build run log
-    run_id = build_review_run_id(branch)
-    log = RunLog(
-        run_id=run_id,
-        prompt=f"review:{branch}",
-        status=RunStatus.RUNNING,
-    )
-    log.branch_name = branch
-    log.prd_rel = prd_path
-
-    # Run the review loop
-    verdict = run_review_loop(
-        repo_root,
-        config,
-        branch,
-        log,
-        prd_rel=prd_path,
-        task_rel=None,
-        base_branch=detected_base,
-        enable_fix=fix_enabled,
-        artifact_prefix="standalone_",
-        verbose=verbose,
-        quiet=quiet,
-    )
-
-    # Compute per-reviewer verdicts for the LAST review round
-    reviewers = reviewer_personas(config)
-    num_reviewers = len(reviewers)
-    # Collect all REVIEW phase results, then take only the last round
-    all_review_results = [
-        pr for pr in log.phases if pr.phase == Phase.REVIEW
-    ]
-    # The last round's results are the final num_reviewers entries
-    last_round = all_review_results[-num_reviewers:] if num_reviewers else []
-    reviewer_verdicts: list[tuple[str, str]] = []
-    for i, phase_result in enumerate(last_round):
-        text = phase_result.artifacts.get("result", "")
-        rv = extract_review_verdict(text)
-        reviewer_verdicts.append((reviewers[i].role, rv))
-
-    # Finalize log
-    if verdict in ("NO-GO", "request-changes"):
-        log.status = RunStatus.FAILED
-    else:
-        log.status = RunStatus.COMPLETED
-    log.mark_finished()
-    save_run_log(repo_root, log)
-
-    # Print summary
-    if not quiet:
-        _print_review_summary(log, reviewer_verdicts, verdict)
-    else:
-        _print_run_summary(log)
-
-    # Exit codes: 0 = approve/GO, 1 = request-changes/NO-GO
-    if verdict in ("NO-GO", "request-changes", "UNKNOWN"):
-        sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
 # Loop state helpers
 # ---------------------------------------------------------------------------
 
@@ -534,7 +394,7 @@ def _run_single_iteration(
     """
     from colonyos.ui import NullUI, PhaseUI
 
-    touch_heartbeat(repo_root)
+    _touch_heartbeat(repo_root)
 
     ceo_ui: PhaseUI | NullUI | None = None
     if not quiet:
