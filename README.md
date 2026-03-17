@@ -2,7 +2,7 @@
 
 Autonomous agent loop that turns prompts into shipped PRs.
 
-ColonyOS is a CLI tool that orchestrates [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions to plan and implement features in any repository — with full codebase awareness. You give it a feature prompt, it generates a PRD, breaks it into tasks, implements the code, and opens a pull request. No hand-holding required.
+ColonyOS is a CLI tool that orchestrates Claude agent sessions via the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agent-sdk) to plan and implement features in any repository — with full codebase awareness. You give it a feature prompt, it generates a PRD, breaks it into tasks, implements the code, and opens a pull request. No hand-holding required.
 
 ## How It Works
 
@@ -21,7 +21,7 @@ Each phase is isolated with its own budget cap. If a phase fails, the run stops 
 ## Prerequisites
 
 - **Python 3.11+**
-- **Claude Code CLI** — installed and authenticated (`claude --version` should work)
+- **Claude Code CLI** — installed and authenticated (`claude --version` should work). The Agent SDK uses it under the hood.
 - **Git** — the target repo must be a git repository
 - **GitHub CLI** (`gh`) — for the deliver phase to open PRs
 
@@ -137,7 +137,7 @@ src/colonyos/
   cli.py            # Click CLI entry point
   init.py           # Interactive persona workshop
   orchestrator.py   # Phase chaining: plan -> implement -> deliver
-  agent.py          # Claude Code SDK wrapper
+  agent.py          # Claude Agent SDK wrapper
   config.py         # .colonyos/config.yaml loader
   models.py         # Persona, PhaseResult, RunLog
   naming.py         # Deterministic timestamped filenames

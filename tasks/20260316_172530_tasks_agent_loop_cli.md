@@ -12,7 +12,7 @@
 - `src/colonyos/config.py` - .colonyos/config.yaml loader with defaults
 - `src/colonyos/models.py` - WorkItem, PhaseResult, RunLog dataclasses
 - `src/colonyos/naming.py` - Deterministic timestamped filename generation
-- `src/colonyos/agent.py` - Claude Code SDK wrapper (run_phase)
+- `src/colonyos/agent.py` - Claude Agent SDK wrapper (run_phase)
 - `src/colonyos/orchestrator.py` - Phase chaining: plan -> implement -> deliver
 - `src/colonyos/instructions/base.md` - Base repo conventions instructions
 - `src/colonyos/instructions/plan.md` - Plan phase instructions
@@ -76,3 +76,10 @@
 
 - [x] 9.0 Write documentation
   - [x] 9.1 Write README.md: what, quickstart, architecture, config reference, prerequisites
+
+- [x] 10.0 Migrate from claude-code-sdk to claude-agent-sdk
+  - [x] 10.1 Replace `claude-code-sdk` (0.0.25) with `claude-agent-sdk` (0.1.49) in deps
+  - [x] 10.2 Rewrite `agent.py` to use `ClaudeAgentOptions` and native message types
+  - [x] 10.3 Remove workarounds for `MessageParseError` / missing `ResultMessage`
+  - [x] 10.4 Verify end-to-end with smoke test (cost, duration, result all populated)
+  - [x] 10.5 Update README and task docs to reference Agent SDK
