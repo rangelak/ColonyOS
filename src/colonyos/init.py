@@ -167,6 +167,7 @@ def run_init(repo_root: Path, *, personas_only: bool = False) -> ColonyConfig:
             tasks_dir=existing.tasks_dir,
             reviews_dir=existing.reviews_dir,
             proposals_dir=existing.proposals_dir,
+            ceo_persona=existing.ceo_persona,
             vision=vision,
         )
 

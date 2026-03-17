@@ -26,9 +26,14 @@ class ReviewNames:
     final_review_filename: str
 
 
-def slugify(value: str) -> str:
+MAX_SLUG_LEN = 80
+
+
+def slugify(value: str, *, max_len: int = MAX_SLUG_LEN) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", value.lower())
     slug = re.sub(r"_+", "_", slug).strip("_")
+    if len(slug) > max_len:
+        slug = slug[:max_len].rstrip("_")
     return slug or "untitled"
 
 

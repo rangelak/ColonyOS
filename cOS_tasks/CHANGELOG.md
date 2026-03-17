@@ -1,5 +1,25 @@
 # Changelog
 
+## 20260317_150000 — Address persona review findings + decision gate
+
+Addressed all CRITICAL/HIGH findings from the 7-persona review of the CEO stage.
+Added a decision gate between review and deliver that gives a GO/NO-GO verdict.
+
+**Fixes:**
+- `src/colonyos/naming.py` — Truncate slugs to 80 chars max (fixes OSError: File name too long)
+- `src/colonyos/orchestrator.py` — `_extract_feature_prompt` uses case-insensitive regex, handles ### terminators, strips code fences
+- `src/colonyos/orchestrator.py` — Proposal only saved on success; removed "save your proposal" from CEO prompt
+- `src/colonyos/cli.py` — CEO phase recorded in RunLog; `_print_run_summary` helper extracted; success check before display
+- `src/colonyos/cli.py` — `--loop` capped at 10 iterations with aggregate budget enforcement via `per_run`
+- `src/colonyos/cli.py` — `--plan-only` renamed to `--propose-only` on `auto` command
+- `src/colonyos/init.py` — Preserves `ceo_persona` when re-running init
+
+**New features:**
+- `src/colonyos/instructions/decision.md` — Decision gate instruction template
+- `src/colonyos/orchestrator.py` — `_build_decision_prompt`, `_extract_verdict`, wired between review and deliver
+- `src/colonyos/models.py` — `Phase.DECISION` enum value
+- Pipeline now: plan → implement → review → **decision gate** → deliver
+
 ## 20260317_100000 — Add iconic personas + parallel subagent Q&A
 
 Added Steve Jobs, Jony Ive, Linus Torvalds, and Andrej Karpathy as personas.

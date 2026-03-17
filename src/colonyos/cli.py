@@ -9,7 +9,7 @@ import click
 from colonyos import __version__
 from colonyos.config import load_config, runs_dir_path
 from colonyos.init import run_init
-from colonyos.models import RunStatus
+from colonyos.models import RunLog, RunStatus
 from colonyos.orchestrator import run as run_orchestrator, run_ceo
 
 
@@ -20,6 +20,24 @@ def _find_repo_root() -> Path:
         if (parent / ".git").exists():
             return parent
     return cwd
+
+
+def _print_run_summary(log: RunLog) -> None:
+    """Print a formatted run summary to stdout."""
+    click.echo(f"\n{'=' * 60}")
+    click.echo(f"Run: {log.run_id}")
+    click.echo(f"Status: {log.status.value}")
+    click.echo(f"Total cost: ${log.total_cost_usd:.4f}")
+    for phase in log.phases:
+        status = "ok" if phase.success else "FAILED"
+        click.echo(
+            f"  {phase.phase.value}: {status} "
+            f"(${phase.cost_usd or 0:.4f}, {phase.duration_ms}ms)"
+        )
+    click.echo(f"{'=' * 60}")
+
+
+MAX_LOOP_ITERATIONS = 10
 
 
 @click.group()
@@ -66,17 +84,7 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None) -> None:
         from_prd=from_prd,
     )
 
-    click.echo(f"\n{'=' * 60}")
-    click.echo(f"Run: {log.run_id}")
-    click.echo(f"Status: {log.status.value}")
-    click.echo(f"Total cost: ${log.total_cost_usd:.4f}")
-    for phase in log.phases:
-        status = "ok" if phase.success else "FAILED"
-        click.echo(
-            f"  {phase.phase.value}: {status} "
-            f"(${phase.cost_usd or 0:.4f}, {phase.duration_ms}ms)"
-        )
-    click.echo(f"{'=' * 60}")
+    _print_run_summary(log)
 
     if log.status == RunStatus.FAILED:
         sys.exit(1)
@@ -84,9 +92,9 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None) -> None:
 
 @app.command()
 @click.option("--no-confirm", is_flag=True, help="Skip human approval checkpoint.")
-@click.option("--plan-only", is_flag=True, help="Generate CEO proposal only, don't run pipeline.")
+@click.option("--propose-only", is_flag=True, help="Generate CEO proposal only, don't run pipeline.")
 @click.option("--loop", "loop_count", type=int, default=1, help="Number of autonomous iterations.")
-def auto(no_confirm: bool, plan_only: bool, loop_count: int) -> None:
+def auto(no_confirm: bool, propose_only: bool, loop_count: int) -> None:
     """Autonomously decide what to build next and run the pipeline."""
     repo_root = _find_repo_root()
     config = load_config(repo_root)
@@ -98,17 +106,33 @@ def auto(no_confirm: bool, plan_only: bool, loop_count: int) -> None:
         )
         sys.exit(1)
 
+    if loop_count > MAX_LOOP_ITERATIONS:
+        click.echo(
+            f"Error: --loop capped at {MAX_LOOP_ITERATIONS} iterations.",
+            err=True,
+        )
+        sys.exit(1)
+
+    aggregate_cost = 0.0
+    budget_limit = config.budget.per_run
+
     for iteration in range(1, loop_count + 1):
         if loop_count > 1:
             click.echo(f"\n{'=' * 60}")
             click.echo(f"Autonomous iteration {iteration}/{loop_count}")
             click.echo(f"{'=' * 60}")
 
-        # Reload config each iteration to pick up changes from prior iterations
         if iteration > 1:
             config = load_config(repo_root)
 
         prompt, ceo_result = run_ceo(repo_root, config)
+        aggregate_cost += ceo_result.cost_usd or 0
+
+        if not ceo_result.success:
+            click.echo("CEO phase failed.", err=True)
+            if ceo_result.error:
+                click.echo(f"Error: {ceo_result.error}", err=True)
+            sys.exit(1)
 
         click.echo(f"\n{'=' * 60}")
         click.echo("CEO Proposal:")
@@ -116,12 +140,8 @@ def auto(no_confirm: bool, plan_only: bool, loop_count: int) -> None:
         click.echo(prompt)
         click.echo(f"{'=' * 60}")
 
-        if not ceo_result.success:
-            click.echo("CEO phase failed.", err=True)
-            sys.exit(1)
-
-        if plan_only:
-            click.echo("\nPlan-only mode: proposal saved, pipeline not triggered.")
+        if propose_only:
+            click.echo("\nPropose-only mode: proposal saved, pipeline not triggered.")
             continue
 
         if not no_confirm:
@@ -129,26 +149,41 @@ def auto(no_confirm: bool, plan_only: bool, loop_count: int) -> None:
                 click.echo("Proposal rejected. Exiting.")
                 sys.exit(0)
 
+        if aggregate_cost >= budget_limit:
+            click.echo(
+                f"\nBudget limit reached (${aggregate_cost:.2f} / ${budget_limit:.2f}). "
+                f"Stopping autonomous loop.",
+                err=True,
+            )
+            sys.exit(1)
+
         log = run_orchestrator(
             prompt,
             repo_root=repo_root,
             config=config,
         )
+        aggregate_cost += log.total_cost_usd
 
-        click.echo(f"\n{'=' * 60}")
-        click.echo(f"Run: {log.run_id}")
-        click.echo(f"Status: {log.status.value}")
-        click.echo(f"Total cost: ${log.total_cost_usd:.4f}")
-        for phase in log.phases:
-            status_str = "ok" if phase.success else "FAILED"
-            click.echo(
-                f"  {phase.phase.value}: {status_str} "
-                f"(${phase.cost_usd or 0:.4f}, {phase.duration_ms}ms)"
-            )
-        click.echo(f"{'=' * 60}")
+        log.phases.insert(0, ceo_result)
+        log.total_cost_usd = sum(
+            p.cost_usd for p in log.phases if p.cost_usd is not None
+        )
+
+        _print_run_summary(log)
 
         if log.status == RunStatus.FAILED:
             sys.exit(1)
+
+        if aggregate_cost >= budget_limit:
+            click.echo(
+                f"\nBudget limit reached (${aggregate_cost:.2f} / ${budget_limit:.2f}). "
+                f"Stopping autonomous loop.",
+                err=True,
+            )
+            break
+
+    if loop_count > 1:
+        click.echo(f"\nCompleted {loop_count} iterations. Total spend: ${aggregate_cost:.4f}")
 
 
 @app.command()

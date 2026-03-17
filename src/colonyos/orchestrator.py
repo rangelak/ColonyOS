@@ -213,6 +213,34 @@ def _build_review_prompt(
     return system, user
 
 
+def _build_decision_prompt(
+    config: ColonyConfig,
+    prd_path: str,
+    branch_name: str,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the decision gate."""
+    decision_template = _load_instruction("decision.md")
+
+    system = _format_base(config) + "\n\n" + decision_template.format(
+        prd_path=prd_path,
+        branch_name=branch_name,
+        reviews_dir=config.reviews_dir,
+    )
+
+    user = (
+        f"Review all artifacts for the implementation on branch `{branch_name}` "
+        f"and make a GO / NO-GO decision. "
+        f"The PRD is at `{prd_path}`. Review artifacts are in `{config.reviews_dir}/`."
+    )
+    return system, user
+
+
+def _extract_verdict(result_text: str) -> str:
+    """Extract VERDICT: GO or VERDICT: NO-GO from decision output."""
+    match = re.search(r"VERDICT:\s*(GO|NO-GO)", result_text, re.IGNORECASE)
+    return match.group(1).upper() if match else "UNKNOWN"
+
+
 def _build_deliver_prompt(
     config: ColonyConfig,
     prd_path: str,
@@ -263,7 +291,7 @@ def _build_ceo_prompt(
 
     user = (
         "Analyze this project and propose the single most impactful feature to build next. "
-        f"Save your proposal to `{config.proposals_dir}/{proposal_filename}`."
+        "Output your proposal in the format described in the instructions."
     )
     return system, user
 
@@ -292,36 +320,38 @@ def run_ceo(
         allowed_tools=["Read", "Glob", "Grep"],
     )
 
-    # Extract the proposal from the result
     proposal_text = result.artifacts.get("result", "")
 
-    # Save the proposal artifact
-    proposals_dir = repo_root / config.proposals_dir
-    proposals_dir.mkdir(parents=True, exist_ok=True)
-    proposal_path = proposals_dir / proposal_filename
-    proposal_path.write_text(proposal_text, encoding="utf-8")
+    if result.success and proposal_text:
+        proposals_dir = repo_root / config.proposals_dir
+        proposals_dir.mkdir(parents=True, exist_ok=True)
+        proposal_path = proposals_dir / proposal_filename
+        proposal_path.write_text(proposal_text, encoding="utf-8")
 
-    # Extract the feature request portion for use as the pipeline prompt
-    prompt = _extract_feature_prompt(proposal_text)
+    prompt = _extract_feature_prompt(proposal_text) if result.success else ""
 
     return prompt, result
 
 
+_FEATURE_REQUEST_RE = re.compile(
+    r"^#{2,3}\s+feature\s+request\s*$", re.IGNORECASE | re.MULTILINE
+)
+_NEXT_SECTION_RE = re.compile(r"^#{2,3}\s+", re.MULTILINE)
+_CODE_FENCE_RE = re.compile(r"^```.*$", re.MULTILINE)
+
+
 def _extract_feature_prompt(proposal_text: str) -> str:
     """Extract the feature request section from a CEO proposal."""
-    # Look for the "### Feature Request" section
-    marker = "### Feature Request"
-    idx = proposal_text.find(marker)
-    if idx != -1:
-        prompt = proposal_text[idx + len(marker):].strip()
-        # If there's another section after, cut it off
-        next_section = prompt.find("\n## ")
-        if next_section != -1:
-            prompt = prompt[:next_section].strip()
-        if prompt:
-            return prompt
+    match = _FEATURE_REQUEST_RE.search(proposal_text)
+    if match:
+        body = proposal_text[match.end():].strip()
+        next_match = _NEXT_SECTION_RE.search(body)
+        if next_match:
+            body = body[:next_match.start()].strip()
+        body = _CODE_FENCE_RE.sub("", body).strip()
+        if body:
+            return body
 
-    # Fallback: use the whole proposal text
     return proposal_text.strip() or "No proposal generated."
 
 
@@ -548,9 +578,46 @@ def run(
             _log(f"Review phase failed (holistic): {final_review_result.error}")
             return log
 
-    # --- Phase 4: Deliver ---
+    # --- Decision Gate ---
+    if config.phases.review:
+        _log("=== Decision Gate ===")
+        system, user = _build_decision_prompt(config, prd_rel, branch_name)
+        decision_result = run_phase_sync(
+            Phase.DECISION,
+            user,
+            cwd=repo_root,
+            system_prompt=system,
+            model=config.model,
+            budget_usd=config.budget.per_phase,
+            allowed_tools=["Read", "Glob", "Grep", "Bash"],
+        )
+        log.phases.append(decision_result)
+
+        verdict_text = decision_result.artifacts.get("result", "")
+        verdict = _extract_verdict(verdict_text)
+        _log(f"  Decision: {verdict}")
+
+        decision_artifact = f"# Decision Gate\n\nVerdict: **{verdict}**\n\n{verdict_text}"
+        _save_review_artifact(
+            repo_root,
+            config.reviews_dir,
+            r_names.final_review_filename.replace("review_final", "decision"),
+            decision_artifact,
+        )
+
+        if verdict == "NO-GO":
+            log.status = RunStatus.FAILED
+            log.mark_finished()
+            _save_run_log(repo_root, log)
+            _log("Decision gate: NO-GO. Pipeline stopped before deliver.")
+            return log
+
+        if verdict == "UNKNOWN":
+            _log("  Warning: could not parse verdict, proceeding with caution")
+
+    # --- Deliver Phase ---
     if config.phases.deliver:
-        phase_num = 4 if config.phases.review else 3
+        phase_num = 5 if config.phases.review else 3
         _log(f"=== Phase {phase_num}: Deliver ===")
         system, user = _build_deliver_prompt(config, prd_rel, branch_name)
         deliver_result = run_phase_sync(

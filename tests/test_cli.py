@@ -60,7 +60,7 @@ class TestAuto:
         assert result.exit_code != 0
         assert "colonyos init" in result.output
 
-    def test_plan_only_mode(self, runner: CliRunner, tmp_path: Path):
+    def test_propose_only_mode(self, runner: CliRunner, tmp_path: Path):
         _make_config(tmp_path)
         (tmp_path / "cOS_proposals").mkdir(exist_ok=True)
 
@@ -75,10 +75,10 @@ class TestAuto:
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_result)):
-            result = runner.invoke(app, ["auto", "--plan-only"])
+            result = runner.invoke(app, ["auto", "--propose-only"])
 
         assert result.exit_code == 0
-        assert "Plan-only mode" in result.output
+        assert "Propose-only mode" in result.output
 
     def test_no_confirm_triggers_pipeline(self, runner: CliRunner, tmp_path: Path):
         _make_config(tmp_path)

@@ -58,7 +58,7 @@ class TestPhaseReviewEnum:
 
     def test_phase_ordering(self):
         phases = list(Phase)
-        assert phases == [Phase.CEO, Phase.PLAN, Phase.IMPLEMENT, Phase.REVIEW, Phase.DELIVER]
+        assert phases == [Phase.CEO, Phase.PLAN, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.DELIVER]
 
 
 class TestFormatPersonasBlock:
@@ -221,25 +221,20 @@ class TestRun:
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_full_run_success_with_review(self, mock_run, tmp_repo: Path, config: ColonyConfig):
         save_config(tmp_repo, config)
-        # Create a task file with parent tasks
-        task_dir = tmp_repo / "cOS_tasks"
-        # We need the task file to exist for the review phase to parse it
-        # The run function builds the task path dynamically, so we mock instead
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),  # per-task review (for "Full implementation review")
+            _fake_phase_result(Phase.REVIEW),  # per-task review
             _fake_phase_result(Phase.REVIEW),  # final holistic review
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
         ]
 
         log = run("Add tests", repo_root=tmp_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
-        # plan + implement + review(final) + deliver = 4 phases in log
-        # (per-task reviews with no task file produce 1 task + 1 holistic = 2 review calls)
-        assert mock_run.call_count == 5
+        assert mock_run.call_count == 6
 
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_review_phase_skipped_when_disabled(self, mock_run, tmp_repo: Path, config: ColonyConfig):
@@ -279,8 +274,6 @@ class TestRun:
         """Review phase parses parent tasks from the task file."""
         save_config(tmp_repo, config)
 
-        # We need to create the task file at the path the orchestrator will look for
-        # The task_rel is built from slugify(prompt) + planning_names
         from colonyos.naming import planning_names
         names = planning_names("Add auth feature")
         task_file = tmp_repo / config.tasks_dir / names.task_filename
@@ -299,14 +292,14 @@ class TestRun:
             _fake_phase_result(Phase.REVIEW),  # task 1 review
             _fake_phase_result(Phase.REVIEW),  # task 2 review
             _fake_phase_result(Phase.REVIEW),  # final holistic review
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
         ]
 
         log = run("Add auth feature", repo_root=tmp_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
-        # 2 per-task + 1 holistic = 3 review calls; plus plan + implement + deliver = 6
-        assert mock_run.call_count == 6
+        assert mock_run.call_count == 7
 
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_review_saves_artifacts(self, mock_run, tmp_repo: Path, config: ColonyConfig):
@@ -317,6 +310,7 @@ class TestRun:
             _fake_phase_result(Phase.IMPLEMENT),
             _fake_phase_result(Phase.REVIEW),  # per-task
             _fake_phase_result(Phase.REVIEW),  # final holistic
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
         ]
 
@@ -325,12 +319,12 @@ class TestRun:
         reviews_dir = tmp_repo / config.reviews_dir
         assert reviews_dir.exists()
         review_files = list(reviews_dir.glob("*.md"))
-        assert len(review_files) == 2  # 1 per-task + 1 final
+        assert len(review_files) == 3  # 1 per-task + 1 final + 1 decision
 
-        # Check that files have expected name patterns
         filenames = {f.name for f in review_files}
         assert any("review_task_1" in f for f in filenames)
         assert any("review_final" in f for f in filenames)
+        assert any("decision" in f for f in filenames)
 
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_review_persona_agents_passed(self, mock_run, tmp_repo: Path, config: ColonyConfig):
@@ -341,12 +335,12 @@ class TestRun:
             _fake_phase_result(Phase.IMPLEMENT),
             _fake_phase_result(Phase.REVIEW),  # per-task
             _fake_phase_result(Phase.REVIEW),  # final holistic
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
         ]
 
         run("Add tests", repo_root=tmp_repo, config=config)
 
-        # The 3rd call (index 2) is the first review phase call
         review_call = mock_run.call_args_list[2]
         assert review_call.kwargs.get("agents") is not None
         assert "engineer" in review_call.kwargs["agents"]
@@ -394,6 +388,7 @@ class TestRun:
             _fake_phase_result(Phase.IMPLEMENT),
             _fake_phase_result(Phase.REVIEW),  # per-task
             _fake_phase_result(Phase.REVIEW),  # final holistic
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
         ]
 
@@ -414,6 +409,7 @@ class TestRun:
             _fake_phase_result(Phase.IMPLEMENT),
             _fake_phase_result(Phase.REVIEW),
             _fake_phase_result(Phase.REVIEW),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
         ]
 
@@ -423,3 +419,22 @@ class TestRun:
         assert runs_dir.exists()
         log_files = list(runs_dir.glob("*.json"))
         assert len(log_files) == 1
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_decision_nogo_stops_pipeline(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+        """Decision gate NO-GO verdict prevents delivery."""
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            _fake_phase_result(Phase.REVIEW),
+            _fake_phase_result(Phase.REVIEW),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: NO-GO\n\nToo many issues."}),
+        ]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        assert log.status == RunStatus.FAILED
+        phase_types = [p.phase for p in log.phases]
+        assert Phase.DELIVER not in phase_types
+        assert Phase.DECISION in phase_types
