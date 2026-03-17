@@ -241,6 +241,35 @@ def _extract_verdict(result_text: str) -> str:
     return match.group(1).upper() if match else "UNKNOWN"
 
 
+def _build_fix_prompt(
+    config: ColonyConfig,
+    prd_path: str,
+    task_path: str,
+    branch_name: str,
+    decision_text: str,
+    fix_iteration: int,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the fix phase."""
+    fix_template = _load_instruction("fix.md")
+
+    system = _format_base(config) + "\n\n" + fix_template.format(
+        prd_path=prd_path,
+        task_path=task_path,
+        branch_name=branch_name,
+        reviews_dir=config.reviews_dir,
+        decision_text=decision_text,
+        fix_iteration=fix_iteration,
+        max_fix_iterations=config.max_fix_iterations,
+    )
+
+    user = (
+        f"Fix the issues identified in the decision gate for branch `{branch_name}`. "
+        f"This is fix iteration {fix_iteration} of {config.max_fix_iterations}. "
+        f"The PRD is at `{prd_path}` and the task file is at `{task_path}`."
+    )
+    return system, user
+
+
 def _build_deliver_prompt(
     config: ColonyConfig,
     prd_path: str,
@@ -605,7 +634,138 @@ def run(
             decision_artifact,
         )
 
-        if verdict == "NO-GO":
+        if verdict == "NO-GO" and config.max_fix_iterations > 0:
+            fix_succeeded = False
+            for fix_i in range(1, config.max_fix_iterations + 1):
+                # Budget guard
+                cost_so_far = sum(
+                    p.cost_usd for p in log.phases if p.cost_usd is not None
+                )
+                remaining = config.budget.per_run - cost_so_far
+                if remaining < config.budget.per_phase:
+                    _log(
+                        f"Fix loop: budget exhausted "
+                        f"({remaining:.2f} remaining). Pipeline failed."
+                    )
+                    break
+
+                _log(
+                    f"=== Fix Iteration {fix_i}/{config.max_fix_iterations} ==="
+                )
+
+                # Run fix phase
+                fix_system, fix_user = _build_fix_prompt(
+                    config,
+                    prd_rel,
+                    task_rel,
+                    branch_name,
+                    verdict_text,
+                    fix_i,
+                )
+                fix_result = run_phase_sync(
+                    Phase.FIX,
+                    fix_user,
+                    cwd=repo_root,
+                    system_prompt=fix_system,
+                    model=config.model,
+                    budget_usd=config.budget.per_phase,
+                )
+                log.phases.append(fix_result)
+
+                if not fix_result.success:
+                    _log(f"Fix phase failed: {fix_result.error}")
+                    break
+
+                # Re-run holistic review
+                _log("  Re-running holistic review...")
+                fix_review_system, fix_review_user = _build_review_prompt(
+                    config,
+                    prd_rel,
+                    branch_name,
+                    "Final holistic review: assess the entire implementation against the PRD, "
+                    "covering cross-cutting concerns (security, performance, architecture, UX).",
+                )
+                review_agents = (
+                    _build_review_persona_agents(config.personas) or None
+                )
+                fix_review_result = run_phase_sync(
+                    Phase.REVIEW,
+                    fix_review_user,
+                    cwd=repo_root,
+                    system_prompt=fix_review_system,
+                    model=config.model,
+                    budget_usd=config.budget.per_phase,
+                    agents=review_agents,
+                )
+
+                # Save fix-iteration review artifact
+                fix_review_text = fix_review_result.artifacts.get("result", "")
+                _save_review_artifact(
+                    repo_root,
+                    config.reviews_dir,
+                    f"review_final_fix{fix_i}.md",
+                    f"# Fix Iteration {fix_i} — Holistic Review\n\n{fix_review_text}",
+                )
+                log.phases.append(fix_review_result)
+
+                if not fix_review_result.success:
+                    _log(
+                        f"Review phase failed during fix iteration {fix_i}: "
+                        f"{fix_review_result.error}"
+                    )
+                    break
+
+                # Re-run decision gate
+                fix_dec_system, fix_dec_user = _build_decision_prompt(
+                    config, prd_rel, branch_name
+                )
+                fix_decision_result = run_phase_sync(
+                    Phase.DECISION,
+                    fix_dec_user,
+                    cwd=repo_root,
+                    system_prompt=fix_dec_system,
+                    model=config.model,
+                    budget_usd=config.budget.per_phase,
+                    allowed_tools=["Read", "Glob", "Grep", "Bash"],
+                )
+                log.phases.append(fix_decision_result)
+
+                verdict_text = fix_decision_result.artifacts.get("result", "")
+                verdict = _extract_verdict(verdict_text)
+                _log(f"  Decision: {verdict}")
+
+                # Save fix-iteration decision artifact
+                fix_dec_artifact = (
+                    f"# Decision Gate (Fix Iteration {fix_i})\n\n"
+                    f"Verdict: **{verdict}**\n\n{verdict_text}"
+                )
+                _save_review_artifact(
+                    repo_root,
+                    config.reviews_dir,
+                    f"decision_fix{fix_i}.md",
+                    fix_dec_artifact,
+                )
+
+                if verdict == "GO":
+                    _log(
+                        f"Fix iteration {fix_i}: resolved NO-GO. "
+                        "Proceeding to deliver."
+                    )
+                    fix_succeeded = True
+                    break
+
+            if not fix_succeeded:
+                if verdict != "GO":
+                    _log(
+                        f"Fix loop: all {config.max_fix_iterations} iterations "
+                        "exhausted. Pipeline failed."
+                    )
+                log.status = RunStatus.FAILED
+                log.mark_finished()
+                _save_run_log(repo_root, log)
+                return log
+
+        elif verdict == "NO-GO":
             log.status = RunStatus.FAILED
             log.mark_finished()
             _save_run_log(repo_root, log)

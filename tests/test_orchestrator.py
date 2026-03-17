@@ -12,6 +12,7 @@ from colonyos.orchestrator import (
     _build_persona_agents,
     _build_review_persona_agents,
     _build_review_prompt,
+    _build_fix_prompt,
     _build_run_id,
     _parse_parent_tasks,
     _persona_slug,
@@ -58,7 +59,11 @@ class TestPhaseReviewEnum:
 
     def test_phase_ordering(self):
         phases = list(Phase)
-        assert phases == [Phase.CEO, Phase.PLAN, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.DELIVER]
+        assert phases == [Phase.CEO, Phase.PLAN, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.DELIVER]
+
+    def test_fix_phase_exists(self):
+        assert Phase.FIX == "fix"
+        assert Phase.FIX.value == "fix"
 
 
 class TestFormatPersonasBlock:
@@ -422,7 +427,8 @@ class TestRun:
 
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_decision_nogo_stops_pipeline(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        """Decision gate NO-GO verdict prevents delivery."""
+        """Decision gate NO-GO verdict prevents delivery when max_fix_iterations=0."""
+        config.max_fix_iterations = 0
         save_config(tmp_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
@@ -438,3 +444,264 @@ class TestRun:
         phase_types = [p.phase for p in log.phases]
         assert Phase.DELIVER not in phase_types
         assert Phase.DECISION in phase_types
+
+
+class TestBuildFixPrompt:
+    def test_returns_tuple(self):
+        config = ColonyConfig(max_fix_iterations=2)
+        result = _build_fix_prompt(
+            config, "prd.md", "tasks.md", "feat/branch",
+            "VERDICT: NO-GO\n\nUnresolved Issues:\n- Bug in auth", 1,
+        )
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+    def test_system_contains_base_and_fix(self):
+        config = ColonyConfig(max_fix_iterations=2)
+        system, _ = _build_fix_prompt(
+            config, "prd.md", "tasks.md", "feat/branch",
+            "VERDICT: NO-GO", 1,
+        )
+        # Base instructions
+        assert "ColonyOS" in system
+        # Fix template content
+        assert "Fix Phase" in system
+        assert "fix iteration 1 of 2" in system.lower()
+
+    def test_system_embeds_decision_text(self):
+        config = ColonyConfig(max_fix_iterations=3)
+        decision = "VERDICT: NO-GO\n\nUnresolved Issues:\n- Missing tests"
+        system, _ = _build_fix_prompt(
+            config, "prd.md", "tasks.md", "branch", decision, 2,
+        )
+        assert "Missing tests" in system
+        assert "NO-GO" in system
+
+    def test_user_prompt_contains_context(self):
+        config = ColonyConfig(max_fix_iterations=2)
+        _, user = _build_fix_prompt(
+            config, "cOS_prds/prd.md", "cOS_tasks/tasks.md",
+            "feat/fix", "verdict text", 1,
+        )
+        assert "feat/fix" in user
+        assert "cOS_prds/prd.md" in user
+        assert "iteration 1" in user
+
+    def test_includes_reviews_dir(self):
+        config = ColonyConfig(reviews_dir="my_reviews", max_fix_iterations=2)
+        system, _ = _build_fix_prompt(
+            config, "prd.md", "tasks.md", "branch", "text", 1,
+        )
+        assert "my_reviews" in system
+
+
+class TestFixLoop:
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_nogo_fix_go_delivers(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+        """NO-GO -> fix -> review -> GO -> deliver (success path)."""
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            _fake_phase_result(Phase.REVIEW),   # per-task
+            _fake_phase_result(Phase.REVIEW),   # holistic
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: NO-GO\n\nIssues found."}),
+            # Fix iteration 1
+            _fake_phase_result(Phase.FIX),      # fix
+            _fake_phase_result(Phase.REVIEW),   # holistic re-review
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            # Deliver
+            _fake_phase_result(Phase.DELIVER),
+        ]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        assert log.status == RunStatus.COMPLETED
+        phase_types = [p.phase for p in log.phases]
+        assert Phase.FIX in phase_types
+        assert Phase.DELIVER in phase_types
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_max_iterations_exhausted(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+        """NO-GO -> fix -> NO-GO -> fix -> NO-GO -> fail."""
+        config.max_fix_iterations = 2
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            _fake_phase_result(Phase.REVIEW),
+            _fake_phase_result(Phase.REVIEW),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: NO-GO\n\nBad code."}),
+            # Fix iteration 1
+            _fake_phase_result(Phase.FIX),
+            _fake_phase_result(Phase.REVIEW),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: NO-GO\n\nStill bad."}),
+            # Fix iteration 2
+            _fake_phase_result(Phase.FIX),
+            _fake_phase_result(Phase.REVIEW),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: NO-GO\n\nStill bad."}),
+        ]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        assert log.status == RunStatus.FAILED
+        phase_types = [p.phase for p in log.phases]
+        assert Phase.DELIVER not in phase_types
+        assert phase_types.count(Phase.FIX) == 2
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_zero_max_iterations_failfast(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+        """max_fix_iterations=0 preserves fail-fast behavior."""
+        config.max_fix_iterations = 0
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            _fake_phase_result(Phase.REVIEW),
+            _fake_phase_result(Phase.REVIEW),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: NO-GO"}),
+        ]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        assert log.status == RunStatus.FAILED
+        phase_types = [p.phase for p in log.phases]
+        assert Phase.FIX not in phase_types
+        assert Phase.DELIVER not in phase_types
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_fix_iterations_in_runlog(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+        """Fix iterations appear as Phase.FIX in the run log."""
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            _fake_phase_result(Phase.REVIEW),
+            _fake_phase_result(Phase.REVIEW),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: NO-GO"}),
+            _fake_phase_result(Phase.FIX),
+            _fake_phase_result(Phase.REVIEW),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        fix_phases = [p for p in log.phases if p.phase == Phase.FIX]
+        assert len(fix_phases) == 1
+        assert fix_phases[0].success is True
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_unknown_verdict_no_fix_loop(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+        """UNKNOWN verdict does NOT trigger fix loop (proceeds to deliver)."""
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            _fake_phase_result(Phase.REVIEW),
+            _fake_phase_result(Phase.REVIEW),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "No clear verdict here."}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        assert log.status == RunStatus.COMPLETED
+        phase_types = [p.phase for p in log.phases]
+        assert Phase.FIX not in phase_types
+        assert Phase.DELIVER in phase_types
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_fix_phase_failure_fails_run(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+        """Phase failure during fix iteration fails the run."""
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            _fake_phase_result(Phase.REVIEW),
+            _fake_phase_result(Phase.REVIEW),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: NO-GO"}),
+            _fake_phase_result(Phase.FIX, success=False),  # fix fails
+        ]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        assert log.status == RunStatus.FAILED
+        phase_types = [p.phase for p in log.phases]
+        assert Phase.DELIVER not in phase_types
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_budget_exhaustion_stops_fix_loop(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+        """Fix loop stops when remaining per-run budget is insufficient."""
+        config.budget = BudgetConfig(per_phase=1.0, per_run=3.0)
+        save_config(tmp_repo, config)
+        # Each phase costs 1.0, so after plan(1)+impl(1)+review(1) = 3.0,
+        # we've used up the budget. But we have per-task + holistic + decision
+        # so let's use cost_usd values to exhaust budget.
+        mock_run.side_effect = [
+            PhaseResult(phase=Phase.PLAN, success=True, cost_usd=0.8,
+                        duration_ms=50, session_id="s", artifacts={"result": "done"}),
+            PhaseResult(phase=Phase.IMPLEMENT, success=True, cost_usd=0.8,
+                        duration_ms=50, session_id="s", artifacts={"result": "done"}),
+            PhaseResult(phase=Phase.REVIEW, success=True, cost_usd=0.5,
+                        duration_ms=50, session_id="s", artifacts={"result": "done"}),
+            PhaseResult(phase=Phase.REVIEW, success=True, cost_usd=0.5,
+                        duration_ms=50, session_id="s", artifacts={"result": "done"}),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.5,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: NO-GO"}),
+            # Budget: 3.0 - (0.8+0.8+0.5+0.5+0.5) = -0.1 -> insufficient
+        ]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        assert log.status == RunStatus.FAILED
+        phase_types = [p.phase for p in log.phases]
+        assert Phase.FIX not in phase_types
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_fix_saves_iteration_tagged_artifacts(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+        """Fix iteration review artifacts have iteration-tagged filenames."""
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            _fake_phase_result(Phase.REVIEW),
+            _fake_phase_result(Phase.REVIEW),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: NO-GO\n\nIssues."}),
+            _fake_phase_result(Phase.FIX),
+            _fake_phase_result(Phase.REVIEW),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+
+        run("Add feature", repo_root=tmp_repo, config=config)
+
+        reviews_dir = tmp_repo / config.reviews_dir
+        filenames = {f.name for f in reviews_dir.glob("*.md")}
+        assert "review_final_fix1.md" in filenames
+        assert "decision_fix1.md" in filenames

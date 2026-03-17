@@ -222,3 +222,38 @@ class TestSaveConfig:
         config_path = tmp_repo / ".colonyos" / "config.yaml"
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert raw["reviews_dir"] == "custom_reviews"
+
+
+class TestMaxFixIterations:
+    def test_default_value(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.max_fix_iterations == 2
+
+    def test_parsed_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"max_fix_iterations": 5}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.max_fix_iterations == 5
+
+    def test_zero_disables_fix_loop(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"max_fix_iterations": 0}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.max_fix_iterations == 0
+
+    def test_serialized_via_save_config(self, tmp_repo: Path):
+        original = ColonyConfig(max_fix_iterations=3)
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.max_fix_iterations == 3
+
+    def test_defaults_dict_has_max_fix_iterations(self):
+        assert DEFAULTS["max_fix_iterations"] == 2

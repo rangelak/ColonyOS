@@ -20,6 +20,7 @@ DEFAULTS = {
     "tasks_dir": "cOS_tasks",
     "reviews_dir": "cOS_reviews",
     "proposals_dir": "cOS_proposals",
+    "max_fix_iterations": 2,
 }
 
 
@@ -51,6 +52,7 @@ class ColonyConfig:
     proposals_dir: str = "cOS_proposals"
     ceo_persona: Persona | None = None
     vision: str = ""
+    max_fix_iterations: int = 2
 
 
 def _parse_personas(raw: list[dict]) -> list[Persona]:
@@ -116,6 +118,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         proposals_dir=raw.get("proposals_dir", DEFAULTS["proposals_dir"]),
         ceo_persona=_parse_persona(raw.get("ceo_persona")) if raw.get("ceo_persona") else None,
         vision=raw.get("vision", ""),
+        max_fix_iterations=int(raw.get("max_fix_iterations", DEFAULTS["max_fix_iterations"])),
     )
 
 
@@ -158,6 +161,8 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
     data["tasks_dir"] = config.tasks_dir
     data["reviews_dir"] = config.reviews_dir
     data["proposals_dir"] = config.proposals_dir
+
+    data["max_fix_iterations"] = config.max_fix_iterations
 
     if config.ceo_persona:
         data["ceo_persona"] = {
