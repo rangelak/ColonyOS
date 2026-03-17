@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from hashlib import sha1
@@ -11,7 +12,7 @@ from claude_agent_sdk import AgentDefinition
 from colonyos.agent import run_phase_sync
 from colonyos.config import ColonyConfig, runs_dir_path
 from colonyos.models import Persona, Phase, PhaseResult, RunLog, RunStatus
-from colonyos.naming import planning_names, slugify
+from colonyos.naming import planning_names, review_names, slugify
 
 
 def _log(msg: str) -> None:
@@ -30,6 +31,17 @@ def _load_instruction(name: str) -> str:
     if not path.exists():
         raise FileNotFoundError(f"Instruction template not found: {path}")
     return path.read_text(encoding="utf-8")
+
+
+def _format_base(config: ColonyConfig) -> str:
+    """Format the base instruction template with all config directories."""
+    base = _load_instruction("base.md")
+    return base.format(
+        prds_dir=config.prds_dir,
+        tasks_dir=config.tasks_dir,
+        reviews_dir=config.reviews_dir,
+        branch_prefix=config.branch_prefix,
+    )
 
 
 def _persona_slug(role: str) -> str:
@@ -52,6 +64,27 @@ def _build_persona_agents(personas: list[Persona]) -> dict[str, AgentDefinition]
                 "Answer every question from your unique perspective. Be opinionated, "
                 "specific, and grounded in the codebase you can see. Keep each answer "
                 "to 2-4 sentences."
+            ),
+            tools=["Read", "Glob", "Grep"],
+        )
+    return agents
+
+
+def _build_review_persona_agents(personas: list[Persona]) -> dict[str, AgentDefinition]:
+    """Build an AgentDefinition per persona for the review phase (read-only tools)."""
+    agents: dict[str, AgentDefinition] = {}
+    for p in personas:
+        key = _persona_slug(p.role)
+        agents[key] = AgentDefinition(
+            description=f"{p.role} — {p.expertise} (reviewer)",
+            prompt=(
+                f"You are {p.role}.\n"
+                f"Expertise: {p.expertise}\n"
+                f"Perspective: {p.perspective}\n\n"
+                "You are reviewing an implementation. Examine the code from your "
+                "unique perspective. Provide a structured review with a verdict "
+                "(approve or request-changes), specific findings with file paths, "
+                "and a synthesis paragraph."
             ),
             tools=["Read", "Glob", "Grep"],
         )
@@ -89,6 +122,31 @@ def _format_personas_block(personas: list[Persona]) -> str:
     return "\n".join(lines)
 
 
+def _format_review_personas_block(personas: list[Persona]) -> str:
+    """Build a persona listing for the review system prompt."""
+    if not personas:
+        return (
+            "No project personas are defined. Review from the perspectives of: "
+            "a senior engineer, a security engineer, and a product lead."
+        )
+
+    lines = [
+        "The following expert personas are available as subagents for review. "
+        "Delegate the review to ALL persona subagents IN PARALLEL (call all Agent "
+        "tools at once). Each persona has read-only access to the codebase and "
+        "will review from their unique perspective.\n"
+    ]
+    for p in personas:
+        key = _persona_slug(p.role)
+        lines.append(f"- **`{key}`**: {p.role} — {p.expertise}")
+    lines.append("")
+    lines.append(
+        "After collecting all persona reviews, consolidate them into a single "
+        "review document with sections for each persona."
+    )
+    return "\n".join(lines)
+
+
 def _build_plan_prompt(
     prompt: str,
     config: ColonyConfig,
@@ -96,14 +154,9 @@ def _build_plan_prompt(
     task_filename: str,
 ) -> tuple[str, str]:
     """Build the system prompt and user prompt for the plan phase."""
-    base = _load_instruction("base.md")
     plan_template = _load_instruction("plan.md")
 
-    system = base.format(
-        prds_dir=config.prds_dir,
-        tasks_dir=config.tasks_dir,
-        branch_prefix=config.branch_prefix,
-    ) + "\n\n" + plan_template.format(
+    system = _format_base(config) + "\n\n" + plan_template.format(
         personas_block=_format_personas_block(config.personas),
         prds_dir=config.prds_dir,
         tasks_dir=config.tasks_dir,
@@ -121,14 +174,9 @@ def _build_implement_prompt(
     task_path: str,
     branch_name: str,
 ) -> tuple[str, str]:
-    base = _load_instruction("base.md")
     impl_template = _load_instruction("implement.md")
 
-    system = base.format(
-        prds_dir=config.prds_dir,
-        tasks_dir=config.tasks_dir,
-        branch_prefix=config.branch_prefix,
-    ) + "\n\n" + impl_template.format(
+    system = _format_base(config) + "\n\n" + impl_template.format(
         prd_path=prd_path,
         task_path=task_path,
         branch_name=branch_name,
@@ -142,19 +190,37 @@ def _build_implement_prompt(
     return system, user
 
 
+def _build_review_prompt(
+    config: ColonyConfig,
+    prd_path: str,
+    branch_name: str,
+    task_description: str,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the review phase."""
+    review_template = _load_instruction("review.md")
+
+    system = _format_base(config) + "\n\n" + review_template.format(
+        persona_block=_format_review_personas_block(config.personas),
+        prd_path=prd_path,
+        branch_name=branch_name,
+        task_description=task_description,
+    )
+
+    user = (
+        f"Review the implementation on branch `{branch_name}` for the task: "
+        f"{task_description}\n\nPRD is at `{prd_path}`."
+    )
+    return system, user
+
+
 def _build_deliver_prompt(
     config: ColonyConfig,
     prd_path: str,
     branch_name: str,
 ) -> tuple[str, str]:
-    base = _load_instruction("base.md")
     deliver_template = _load_instruction("deliver.md")
 
-    system = base.format(
-        prds_dir=config.prds_dir,
-        tasks_dir=config.tasks_dir,
-        branch_prefix=config.branch_prefix,
-    ) + "\n\n" + deliver_template.format(
+    system = _format_base(config) + "\n\n" + deliver_template.format(
         prd_path=prd_path,
         branch_name=branch_name,
     )
@@ -164,6 +230,30 @@ def _build_deliver_prompt(
         f"feature described in `{prd_path}`."
     )
     return system, user
+
+
+def _parse_parent_tasks(task_content: str) -> list[str]:
+    """Extract parent task lines from a task file.
+
+    Parent tasks match the pattern: `- [ ] N.0 Title` or `- [x] N.0 Title`.
+    Returns the full task line text for each parent task.
+    """
+    pattern = re.compile(r"^- \[[ x]\] \d+\.0 .+", re.MULTILINE)
+    return pattern.findall(task_content)
+
+
+def _save_review_artifact(
+    repo_root: Path,
+    reviews_dir: str,
+    filename: str,
+    content: str,
+) -> Path:
+    """Save a review markdown file to the reviews directory."""
+    target_dir = repo_root / reviews_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / filename
+    path.write_text(content, encoding="utf-8")
+    return path
 
 
 def _save_run_log(repo_root: Path, log: RunLog) -> Path:
@@ -206,7 +296,7 @@ def run(
     plan_only: bool = False,
     from_prd: str | None = None,
 ) -> RunLog:
-    """Execute the full orchestration loop: plan -> implement -> deliver."""
+    """Execute the full orchestration loop: plan -> implement -> review -> deliver."""
     run_id = _build_run_id(prompt)
     log = RunLog(run_id=run_id, prompt=prompt, status=RunStatus.RUNNING)
 
@@ -276,9 +366,99 @@ def run(
         _log(f"Implement phase failed: {impl_result.error}")
         return log
 
-    # --- Phase 3: Deliver ---
+    # --- Phase 3: Review ---
+    if config.phases.review:
+        _log("=== Phase 3: Review ===")
+
+        # Read the task file to extract parent tasks
+        task_path = repo_root / task_rel
+        parent_tasks: list[str] = []
+        if task_path.exists():
+            task_content = task_path.read_text(encoding="utf-8")
+            parent_tasks = _parse_parent_tasks(task_content)
+
+        if not parent_tasks:
+            parent_tasks = ["Full implementation review"]
+
+        r_names = review_names(prompt, task_count=len(parent_tasks))
+        review_agents = _build_review_persona_agents(config.personas) or None
+        if review_agents:
+            _log(f"  {len(review_agents)} persona subagents configured for review")
+
+        # Per-task reviews
+        for i, task_desc in enumerate(parent_tasks):
+            _log(f"  Reviewing task {i + 1}/{len(parent_tasks)}: {task_desc[:60]}")
+            system, user_prompt = _build_review_prompt(
+                config, prd_rel, branch_name, task_desc
+            )
+            review_result = run_phase_sync(
+                Phase.REVIEW,
+                user_prompt,
+                cwd=repo_root,
+                system_prompt=system,
+                model=config.model,
+                budget_usd=config.budget.per_phase,
+                agents=review_agents,
+            )
+
+            # Save per-task review artifact
+            result_text = review_result.artifacts.get("result", "")
+            _save_review_artifact(
+                repo_root,
+                config.reviews_dir,
+                r_names.task_review_filenames[i],
+                f"# Task Review: {task_desc}\n\n{result_text}",
+            )
+
+            if not review_result.success:
+                log.phases.append(review_result)
+                log.status = RunStatus.FAILED
+                log.mark_finished()
+                _save_run_log(repo_root, log)
+                _log(f"Review phase failed on task {i + 1}: {review_result.error}")
+                return log
+
+        # Final holistic review
+        _log("  Running final holistic review...")
+        system, user_prompt = _build_review_prompt(
+            config,
+            prd_rel,
+            branch_name,
+            "Final holistic review: assess the entire implementation against the PRD, "
+            "covering cross-cutting concerns (security, performance, architecture, UX).",
+        )
+        final_review_result = run_phase_sync(
+            Phase.REVIEW,
+            user_prompt,
+            cwd=repo_root,
+            system_prompt=system,
+            model=config.model,
+            budget_usd=config.budget.per_phase,
+            agents=review_agents,
+        )
+
+        # Save final review artifact
+        final_text = final_review_result.artifacts.get("result", "")
+        _save_review_artifact(
+            repo_root,
+            config.reviews_dir,
+            r_names.final_review_filename,
+            f"# Final Holistic Review\n\n{final_text}",
+        )
+
+        log.phases.append(final_review_result)
+
+        if not final_review_result.success:
+            log.status = RunStatus.FAILED
+            log.mark_finished()
+            _save_run_log(repo_root, log)
+            _log(f"Review phase failed (holistic): {final_review_result.error}")
+            return log
+
+    # --- Phase 4: Deliver ---
     if config.phases.deliver:
-        _log("=== Phase 3: Deliver ===")
+        phase_num = 4 if config.phases.review else 3
+        _log(f"=== Phase {phase_num}: Deliver ===")
         system, user = _build_deliver_prompt(config, prd_rel, branch_name)
         deliver_result = run_phase_sync(
             Phase.DELIVER,
