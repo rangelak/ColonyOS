@@ -25,6 +25,16 @@ class Persona:
 
 
 @dataclass(frozen=True)
+class PersonaPack:
+    """A curated set of personas for a common project archetype."""
+
+    key: str
+    name: str
+    description: str
+    personas: tuple[Persona, ...]
+
+
+@dataclass(frozen=True)
 class ProjectInfo:
     name: str
     description: str

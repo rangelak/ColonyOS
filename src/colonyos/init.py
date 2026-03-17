@@ -14,6 +14,7 @@ from colonyos.config import (
     save_config,
 )
 from colonyos.models import Persona, ProjectInfo
+from colonyos.persona_packs import PACKS, get_pack
 
 
 def _prompt(text: str, default: str = "") -> str:
@@ -26,6 +27,41 @@ def collect_project_info() -> ProjectInfo:
     description = _prompt("Brief description (what does this project do?)")
     stack = _prompt("Tech stack (e.g. Python/FastAPI, React, PostgreSQL)")
     return ProjectInfo(name=name, description=description, stack=stack)
+
+
+def select_persona_pack() -> list[Persona] | None:
+    """Present a menu of prebuilt persona packs and return the selected personas.
+
+    Returns the list of Persona instances from the chosen pack, or None if
+    the user selects "Custom (define your own)".
+    """
+    click.echo("\n--- Persona Packs ---")
+    click.echo("Choose a prebuilt persona pack or define your own.\n")
+
+    for i, pack in enumerate(PACKS, 1):
+        click.echo(f"  {i}. {pack.name} — {pack.description}")
+    custom_index = len(PACKS) + 1
+    click.echo(f"  {custom_index}. Custom (define your own)")
+
+    choice = click.prompt(
+        "\nSelect a pack",
+        type=click.IntRange(1, custom_index),
+        default=1,
+    )
+
+    if choice == custom_index:
+        return None
+
+    pack = PACKS[choice - 1]
+
+    click.echo(f"\n  {pack.name}:")
+    for i, persona in enumerate(pack.personas, 1):
+        click.echo(f"    {i}. {persona.role} — {persona.expertise}")
+
+    if not click.confirm(f"\nUse these {len(pack.personas)} personas?", default=True):
+        return None
+
+    return list(pack.personas)
 
 
 def collect_personas(existing: list[Persona] | None = None) -> list[Persona]:
@@ -61,12 +97,30 @@ def collect_personas(existing: list[Persona] | None = None) -> list[Persona]:
     return personas
 
 
+def _collect_personas_with_packs(existing: list[Persona] | None = None) -> list[Persona]:
+    """Collect personas via pack selection, with optional custom additions.
+
+    First offers prebuilt packs; if a pack is selected, asks whether to add
+    custom personas on top. Falls back to the fully custom flow if the user
+    picks "Custom".
+    """
+    pack_personas = select_persona_pack()
+
+    if pack_personas is None:
+        return collect_personas(existing)
+
+    if click.confirm("Add custom personas on top?", default=False):
+        return collect_personas(existing=pack_personas)
+
+    return pack_personas
+
+
 def run_init(repo_root: Path, *, personas_only: bool = False) -> ColonyConfig:
     """Interactive init flow: collect project info + personas, save config."""
     existing = load_config(repo_root)
 
     if personas_only:
-        personas = collect_personas(existing.personas)
+        personas = _collect_personas_with_packs(existing.personas)
         config = ColonyConfig(
             project=existing.project,
             personas=personas,
@@ -79,7 +133,9 @@ def run_init(repo_root: Path, *, personas_only: bool = False) -> ColonyConfig:
         )
     else:
         project = collect_project_info()
-        personas = collect_personas(existing.personas if existing.personas else None)
+        personas = _collect_personas_with_packs(
+            existing.personas if existing.personas else None,
+        )
 
         click.echo("\n--- Configuration ---\n")
         model = _prompt("Model", default=existing.model)
