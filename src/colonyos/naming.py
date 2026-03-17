@@ -70,6 +70,27 @@ def review_names(
     )
 
 
+@dataclass(frozen=True)
+class ProposalNames:
+    timestamp: str
+    slug: str
+    proposal_filename: str
+
+
+def proposal_names(
+    feature_name: str,
+    *,
+    timestamp: str | None = None,
+) -> ProposalNames:
+    ts = timestamp or generate_timestamp()
+    slug = slugify(feature_name)
+    return ProposalNames(
+        timestamp=ts,
+        slug=slug,
+        proposal_filename=f"{ts}_proposal_{slug}.md",
+    )
+
+
 def task_filename_from_prd(prd_filename: str) -> str:
     match = PRD_FILENAME_RE.match(prd_filename)
     if not match:

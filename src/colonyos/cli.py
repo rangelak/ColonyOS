@@ -10,7 +10,7 @@ from colonyos import __version__
 from colonyos.config import load_config, runs_dir_path
 from colonyos.init import run_init
 from colonyos.models import RunStatus
-from colonyos.orchestrator import run as run_orchestrator
+from colonyos.orchestrator import run as run_orchestrator, run_ceo
 
 
 def _find_repo_root() -> Path:
@@ -80,6 +80,75 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None) -> None:
 
     if log.status == RunStatus.FAILED:
         sys.exit(1)
+
+
+@app.command()
+@click.option("--no-confirm", is_flag=True, help="Skip human approval checkpoint.")
+@click.option("--plan-only", is_flag=True, help="Generate CEO proposal only, don't run pipeline.")
+@click.option("--loop", "loop_count", type=int, default=1, help="Number of autonomous iterations.")
+def auto(no_confirm: bool, plan_only: bool, loop_count: int) -> None:
+    """Autonomously decide what to build next and run the pipeline."""
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+
+    if not config.project:
+        click.echo(
+            "No ColonyOS config found. Run `colonyos init` first.",
+            err=True,
+        )
+        sys.exit(1)
+
+    for iteration in range(1, loop_count + 1):
+        if loop_count > 1:
+            click.echo(f"\n{'=' * 60}")
+            click.echo(f"Autonomous iteration {iteration}/{loop_count}")
+            click.echo(f"{'=' * 60}")
+
+        # Reload config each iteration to pick up changes from prior iterations
+        if iteration > 1:
+            config = load_config(repo_root)
+
+        prompt, ceo_result = run_ceo(repo_root, config)
+
+        click.echo(f"\n{'=' * 60}")
+        click.echo("CEO Proposal:")
+        click.echo(f"{'=' * 60}")
+        click.echo(prompt)
+        click.echo(f"{'=' * 60}")
+
+        if not ceo_result.success:
+            click.echo("CEO phase failed.", err=True)
+            sys.exit(1)
+
+        if plan_only:
+            click.echo("\nPlan-only mode: proposal saved, pipeline not triggered.")
+            continue
+
+        if not no_confirm:
+            if not click.confirm("\nProceed with this feature?", default=False):
+                click.echo("Proposal rejected. Exiting.")
+                sys.exit(0)
+
+        log = run_orchestrator(
+            prompt,
+            repo_root=repo_root,
+            config=config,
+        )
+
+        click.echo(f"\n{'=' * 60}")
+        click.echo(f"Run: {log.run_id}")
+        click.echo(f"Status: {log.status.value}")
+        click.echo(f"Total cost: ${log.total_cost_usd:.4f}")
+        for phase in log.phases:
+            status_str = "ok" if phase.success else "FAILED"
+            click.echo(
+                f"  {phase.phase.value}: {status_str} "
+                f"(${phase.cost_usd or 0:.4f}, {phase.duration_ms}ms)"
+            )
+        click.echo(f"{'=' * 60}")
+
+        if log.status == RunStatus.FAILED:
+            sys.exit(1)
 
 
 @app.command()

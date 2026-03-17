@@ -12,7 +12,7 @@ from claude_agent_sdk import AgentDefinition
 from colonyos.agent import run_phase_sync
 from colonyos.config import ColonyConfig, runs_dir_path
 from colonyos.models import Persona, Phase, PhaseResult, RunLog, RunStatus
-from colonyos.naming import planning_names, review_names, slugify
+from colonyos.naming import planning_names, proposal_names, review_names, slugify
 
 
 def _log(msg: str) -> None:
@@ -230,6 +230,99 @@ def _build_deliver_prompt(
         f"feature described in `{prd_path}`."
     )
     return system, user
+
+
+DEFAULT_CEO_PERSONA = Persona(
+    role="Product CEO",
+    expertise="Product strategy, prioritization, user impact analysis",
+    perspective="What is the single most impactful feature to build next that advances the project's goals?",
+)
+
+
+def _build_ceo_prompt(
+    config: ColonyConfig,
+    proposal_filename: str,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the CEO phase."""
+    ceo_template = _load_instruction("ceo.md")
+    persona = config.ceo_persona or DEFAULT_CEO_PERSONA
+
+    system = ceo_template.format(
+        ceo_role=persona.role,
+        ceo_expertise=persona.expertise,
+        ceo_perspective=persona.perspective,
+        project_name=config.project.name if config.project else "Unknown",
+        project_description=config.project.description if config.project else "",
+        project_stack=config.project.stack if config.project else "",
+        vision=config.vision or "No vision statement configured.",
+        prds_dir=config.prds_dir,
+        tasks_dir=config.tasks_dir,
+        reviews_dir=config.reviews_dir,
+        proposals_dir=config.proposals_dir,
+    )
+
+    user = (
+        "Analyze this project and propose the single most impactful feature to build next. "
+        f"Save your proposal to `{config.proposals_dir}/{proposal_filename}`."
+    )
+    return system, user
+
+
+def run_ceo(
+    repo_root: Path,
+    config: ColonyConfig,
+) -> tuple[str, PhaseResult]:
+    """Run the CEO phase: analyze the project and propose the next feature.
+
+    Returns a tuple of (proposed_prompt, phase_result).
+    """
+    names = proposal_names("ceo_proposal")
+    proposal_filename = names.proposal_filename
+
+    system, user = _build_ceo_prompt(config, proposal_filename)
+
+    _log("=== CEO Phase ===")
+    result = run_phase_sync(
+        Phase.CEO,
+        user,
+        cwd=repo_root,
+        system_prompt=system,
+        model=config.model,
+        budget_usd=config.budget.per_phase,
+        allowed_tools=["Read", "Glob", "Grep"],
+    )
+
+    # Extract the proposal from the result
+    proposal_text = result.artifacts.get("result", "")
+
+    # Save the proposal artifact
+    proposals_dir = repo_root / config.proposals_dir
+    proposals_dir.mkdir(parents=True, exist_ok=True)
+    proposal_path = proposals_dir / proposal_filename
+    proposal_path.write_text(proposal_text, encoding="utf-8")
+
+    # Extract the feature request portion for use as the pipeline prompt
+    prompt = _extract_feature_prompt(proposal_text)
+
+    return prompt, result
+
+
+def _extract_feature_prompt(proposal_text: str) -> str:
+    """Extract the feature request section from a CEO proposal."""
+    # Look for the "### Feature Request" section
+    marker = "### Feature Request"
+    idx = proposal_text.find(marker)
+    if idx != -1:
+        prompt = proposal_text[idx + len(marker):].strip()
+        # If there's another section after, cut it off
+        next_section = prompt.find("\n## ")
+        if next_section != -1:
+            prompt = prompt[:next_section].strip()
+        if prompt:
+            return prompt
+
+    # Fallback: use the whole proposal text
+    return proposal_text.strip() or "No proposal generated."
 
 
 def _parse_parent_tasks(task_content: str) -> list[str]:

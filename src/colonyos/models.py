@@ -6,6 +6,7 @@ from enum import Enum
 
 
 class Phase(str, Enum):
+    CEO = "ceo"
     PLAN = "plan"
     IMPLEMENT = "implement"
     REVIEW = "review"

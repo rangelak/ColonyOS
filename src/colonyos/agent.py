@@ -28,11 +28,13 @@ async def run_phase(
     budget_usd: float = 5.0,
     max_turns: int | None = None,
     agents: dict[str, AgentDefinition] | None = None,
+    allowed_tools: list[str] | None = None,
 ) -> PhaseResult:
     """Run a single phase by invoking Claude Code with the given prompt and instructions."""
-    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
-    if agents:
-        allowed_tools.append("Agent")
+    if allowed_tools is None:
+        allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+        if agents:
+            allowed_tools.append("Agent")
 
     options = ClaudeAgentOptions(
         cwd=cwd,
@@ -99,6 +101,7 @@ def run_phase_sync(
     budget_usd: float = 5.0,
     max_turns: int | None = None,
     agents: dict[str, AgentDefinition] | None = None,
+    allowed_tools: list[str] | None = None,
 ) -> PhaseResult:
     """Synchronous wrapper around run_phase for use in non-async contexts."""
     return asyncio.run(
@@ -111,5 +114,6 @@ def run_phase_sync(
             budget_usd=budget_usd,
             max_turns=max_turns,
             agents=agents,
+            allowed_tools=allowed_tools,
         )
     )

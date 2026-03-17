@@ -6,6 +6,8 @@ import yaml
 from click.testing import CliRunner
 
 from colonyos.cli import app
+from colonyos.config import ColonyConfig, save_config
+from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, RunLog, RunStatus
 from colonyos.persona_packs import PACKS
 
 
@@ -42,6 +44,99 @@ class TestRun:
         assert "colonyos init" in result.output
 
 
+def _make_config(tmp_path: Path) -> ColonyConfig:
+    config = ColonyConfig(
+        project=ProjectInfo(name="Test", description="test", stack="Python"),
+        personas=[Persona(role="Engineer", expertise="Backend", perspective="Scale")],
+    )
+    save_config(tmp_path, config)
+    return config
+
+
+class TestAuto:
+    def test_no_config(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["auto"])
+        assert result.exit_code != 0
+        assert "colonyos init" in result.output
+
+    def test_plan_only_mode(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        (tmp_path / "cOS_proposals").mkdir(exist_ok=True)
+
+        fake_result = PhaseResult(
+            phase=Phase.CEO,
+            success=True,
+            cost_usd=0.01,
+            duration_ms=100,
+            session_id="s",
+            artifacts={"result": "### Feature Request\nBuild webhooks."},
+        )
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_result)):
+            result = runner.invoke(app, ["auto", "--plan-only"])
+
+        assert result.exit_code == 0
+        assert "Plan-only mode" in result.output
+
+    def test_no_confirm_triggers_pipeline(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        (tmp_path / "cOS_proposals").mkdir(exist_ok=True)
+
+        fake_ceo_result = PhaseResult(
+            phase=Phase.CEO, success=True, cost_usd=0.01,
+            duration_ms=100, session_id="s",
+            artifacts={"result": "### Feature Request\nBuild webhooks."},
+        )
+        fake_log = RunLog(
+            run_id="run-test",
+            prompt="Build webhooks.",
+            status=RunStatus.COMPLETED,
+            phases=[],
+        )
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
+             patch("colonyos.cli.run_orchestrator", return_value=fake_log):
+            result = runner.invoke(app, ["auto", "--no-confirm"])
+
+        assert result.exit_code == 0
+        assert "completed" in result.output
+
+    def test_user_rejects_proposal(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        (tmp_path / "cOS_proposals").mkdir(exist_ok=True)
+
+        fake_result = PhaseResult(
+            phase=Phase.CEO, success=True, cost_usd=0.01,
+            duration_ms=100, session_id="s",
+            artifacts={"result": "### Feature Request\nBuild webhooks."},
+        )
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_result)):
+            result = runner.invoke(app, ["auto"], input="n\n")
+
+        assert result.exit_code == 0
+        assert "rejected" in result.output.lower()
+
+    def test_ceo_failure_exits(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        (tmp_path / "cOS_proposals").mkdir(exist_ok=True)
+
+        fake_result = PhaseResult(
+            phase=Phase.CEO, success=False, error="Budget exceeded",
+        )
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.run_ceo", return_value=("", fake_result)):
+            result = runner.invoke(app, ["auto"])
+
+        assert result.exit_code != 0
+        assert "failed" in result.output.lower()
+
+
 class TestInitWithPacks:
     def test_init_with_prebuilt_pack(self, runner: CliRunner, tmp_path: Path):
         """E2E: colonyos init selecting a prebuilt pack produces correct config."""
@@ -54,6 +149,7 @@ class TestInitWithPacks:
             "1",                     # select pack 1 (Startup Team)
             "y",                     # confirm pack
             "n",                     # no custom additions
+            "",                      # vision (skip)
             "sonnet",                # model
             "5.0",                   # budget per phase
             "15.0",                  # budget per run

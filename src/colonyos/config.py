@@ -19,6 +19,7 @@ DEFAULTS = {
     "prds_dir": "cOS_prds",
     "tasks_dir": "cOS_tasks",
     "reviews_dir": "cOS_reviews",
+    "proposals_dir": "cOS_proposals",
 }
 
 
@@ -47,6 +48,9 @@ class ColonyConfig:
     prds_dir: str = "cOS_prds"
     tasks_dir: str = "cOS_tasks"
     reviews_dir: str = "cOS_reviews"
+    proposals_dir: str = "cOS_proposals"
+    ceo_persona: Persona | None = None
+    vision: str = ""
 
 
 def _parse_personas(raw: list[dict]) -> list[Persona]:
@@ -59,6 +63,16 @@ def _parse_personas(raw: list[dict]) -> list[Persona]:
         for p in raw
         if p.get("role")
     ]
+
+
+def _parse_persona(raw: dict) -> Persona | None:
+    if not raw.get("role"):
+        return None
+    return Persona(
+        role=raw.get("role", ""),
+        expertise=raw.get("expertise", ""),
+        perspective=raw.get("perspective", ""),
+    )
 
 
 def _parse_project(raw: dict) -> ProjectInfo | None:
@@ -99,6 +113,9 @@ def load_config(repo_root: Path) -> ColonyConfig:
         prds_dir=raw.get("prds_dir", DEFAULTS["prds_dir"]),
         tasks_dir=raw.get("tasks_dir", DEFAULTS["tasks_dir"]),
         reviews_dir=raw.get("reviews_dir", DEFAULTS["reviews_dir"]),
+        proposals_dir=raw.get("proposals_dir", DEFAULTS["proposals_dir"]),
+        ceo_persona=_parse_persona(raw.get("ceo_persona")) if raw.get("ceo_persona") else None,
+        vision=raw.get("vision", ""),
     )
 
 
@@ -140,6 +157,17 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
     data["prds_dir"] = config.prds_dir
     data["tasks_dir"] = config.tasks_dir
     data["reviews_dir"] = config.reviews_dir
+    data["proposals_dir"] = config.proposals_dir
+
+    if config.ceo_persona:
+        data["ceo_persona"] = {
+            "role": config.ceo_persona.role,
+            "expertise": config.ceo_persona.expertise,
+            "perspective": config.ceo_persona.perspective,
+        }
+
+    if config.vision:
+        data["vision"] = config.vision
 
     config_path = config_dir / CONFIG_FILE
     config_path.write_text(

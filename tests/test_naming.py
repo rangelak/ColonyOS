@@ -4,8 +4,10 @@ import pytest
 
 from colonyos.naming import (
     PlanningNames,
+    ProposalNames,
     ReviewNames,
     planning_names,
+    proposal_names,
     review_names,
     slugify,
     task_filename_from_prd,
@@ -77,6 +79,24 @@ class TestReviewNames:
         names = review_names("test", task_count=0, timestamp="20260101_000000")
         assert names.task_review_filenames == ()
         assert names.final_review_filename == "20260101_000000_review_final_test.md"
+
+
+class TestProposalNames:
+    def test_generates_filename(self):
+        names = proposal_names("Add webhooks", timestamp="20260317_120000")
+        assert names.timestamp == "20260317_120000"
+        assert names.slug == "add_webhooks"
+        assert names.proposal_filename == "20260317_120000_proposal_add_webhooks.md"
+
+    def test_auto_timestamp(self):
+        names = proposal_names("some proposal")
+        assert len(names.timestamp) == 15
+        assert names.proposal_filename.startswith(names.timestamp)
+
+    def test_frozen(self):
+        names = proposal_names("test", timestamp="20260101_000000")
+        with pytest.raises(AttributeError):
+            names.slug = "changed"
 
 
 class TestTaskFilenameFromPrd:

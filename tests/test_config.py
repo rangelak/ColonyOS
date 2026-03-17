@@ -113,6 +113,34 @@ class TestLoadConfig:
         assert config.tasks_dir == "tasks"
 
 
+    def test_loads_ceo_persona_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "ceo_persona": {
+                    "role": "Growth CEO",
+                    "expertise": "Growth hacking",
+                    "perspective": "Move the needle",
+                },
+                "vision": "Become #1 dev tool",
+                "proposals_dir": "custom_proposals",
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.ceo_persona is not None
+        assert config.ceo_persona.role == "Growth CEO"
+        assert config.vision == "Become #1 dev tool"
+        assert config.proposals_dir == "custom_proposals"
+
+    def test_defaults_for_new_fields(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.ceo_persona is None
+        assert config.vision == ""
+        assert config.proposals_dir == "cOS_proposals"
+
+
 class TestDefaults:
     def test_defaults_have_cos_prefix(self):
         assert DEFAULTS["prds_dir"] == "cOS_prds"
@@ -121,6 +149,9 @@ class TestDefaults:
 
     def test_defaults_have_review_phase(self):
         assert DEFAULTS["phases"]["review"] is True
+
+    def test_defaults_have_proposals_dir(self):
+        assert DEFAULTS["proposals_dir"] == "cOS_proposals"
 
 
 class TestSaveConfig:
@@ -159,6 +190,30 @@ class TestSaveConfig:
         save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.phases.review is False
+
+    def test_roundtrip_ceo_fields(self, tmp_repo: Path):
+        original = ColonyConfig(
+            ceo_persona=Persona(
+                role="Growth CEO",
+                expertise="Growth",
+                perspective="Metrics",
+            ),
+            vision="Build the best tool",
+            proposals_dir="my_proposals",
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.ceo_persona is not None
+        assert loaded.ceo_persona.role == "Growth CEO"
+        assert loaded.vision == "Build the best tool"
+        assert loaded.proposals_dir == "my_proposals"
+
+    def test_roundtrip_without_ceo_persona(self, tmp_repo: Path):
+        original = ColonyConfig(vision="Some vision")
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.ceo_persona is None
+        assert loaded.vision == "Some vision"
 
     def test_reviews_dir_persisted(self, tmp_repo: Path):
         original = ColonyConfig(reviews_dir="custom_reviews")

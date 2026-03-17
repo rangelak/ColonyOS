@@ -58,7 +58,7 @@ class TestPhaseReviewEnum:
 
     def test_phase_ordering(self):
         phases = list(Phase)
-        assert phases == [Phase.PLAN, Phase.IMPLEMENT, Phase.REVIEW, Phase.DELIVER]
+        assert phases == [Phase.CEO, Phase.PLAN, Phase.IMPLEMENT, Phase.REVIEW, Phase.DELIVER]
 
 
 class TestFormatPersonasBlock:

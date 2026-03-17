@@ -105,14 +105,12 @@ class TestRunInitReviewsDir:
         """run_init creates the reviews directory."""
         with patch("colonyos.init.click") as mock_click, \
              patch("colonyos.init._collect_personas_with_packs") as mock_personas:
-            mock_click.prompt.side_effect = ["TestApp", "A test app", "Python", "sonnet"]
+            mock_click.prompt.side_effect = [
+                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0
+            ]
             mock_click.echo = click.echo
             mock_personas.return_value = [
                 Persona(role="Engineer", expertise="Backend", perspective="Scale")
-            ]
-            # Budget prompts
-            mock_click.prompt.side_effect = [
-                "TestApp", "A test app", "Python", "sonnet", 5.0, 15.0
             ]
             config = run_init(tmp_path)
 
@@ -125,7 +123,7 @@ class TestRunInitReviewsDir:
         with patch("colonyos.init.click") as mock_click, \
              patch("colonyos.init._collect_personas_with_packs") as mock_personas:
             mock_click.prompt.side_effect = [
-                "TestApp", "A test app", "Python", "sonnet", 5.0, 15.0
+                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0
             ]
             mock_click.echo = click.echo
             mock_personas.return_value = [
@@ -147,7 +145,7 @@ class TestRunInitReviewsDir:
         with patch("colonyos.init.click") as mock_click, \
              patch("colonyos.init._collect_personas_with_packs") as mock_personas:
             mock_click.prompt.side_effect = [
-                "TestApp", "A test app", "Python", "sonnet", 5.0, 15.0
+                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0
             ]
             # Use real echo so we can capture stderr output
             mock_click.echo = click.echo
