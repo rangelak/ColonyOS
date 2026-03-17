@@ -64,6 +64,7 @@ class PhaseResult:
     cost_usd: float | None = None
     duration_ms: int = 0
     session_id: str = ""
+    model: str | None = None
     error: str | None = None
     artifacts: dict[str, str] = field(default_factory=dict)
 

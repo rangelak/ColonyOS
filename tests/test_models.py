@@ -7,7 +7,40 @@ from pathlib import Path
 
 import pytest
 
-from colonyos.models import LoopState, LoopStatus, Phase, RunLog, RunStatus
+from colonyos.models import LoopState, LoopStatus, Phase, PhaseResult, RunLog, RunStatus
+
+
+class TestPhaseResultModel:
+    def test_default_model_is_none(self):
+        result = PhaseResult(phase=Phase.IMPLEMENT, success=True)
+        assert result.model is None
+
+    def test_accepts_model_kwarg(self):
+        result = PhaseResult(phase=Phase.IMPLEMENT, success=True, model="opus")
+        assert result.model == "opus"
+
+    def test_backward_compat_old_serialized_data(self):
+        """Old PhaseResult dicts without 'model' should load gracefully."""
+        old_data = {
+            "phase": "implement",
+            "success": True,
+            "cost_usd": 1.5,
+            "duration_ms": 60000,
+            "session_id": "sess-123",
+            "error": None,
+            "artifacts": {},
+        }
+        result = PhaseResult(
+            phase=Phase(old_data["phase"]),
+            success=old_data["success"],
+            cost_usd=old_data.get("cost_usd"),
+            duration_ms=old_data.get("duration_ms", 0),
+            session_id=old_data.get("session_id", ""),
+            model=old_data.get("model"),
+            error=old_data.get("error"),
+        )
+        assert result.model is None
+        assert result.success is True
 
 
 class TestLoopState:

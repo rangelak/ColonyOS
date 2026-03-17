@@ -17,6 +17,26 @@ from colonyos.models import Persona, ProjectInfo
 from colonyos.persona_packs import PACKS, get_pack
 
 
+MODEL_PRESETS: dict[str, dict[str, str | dict[str, str]]] = {
+    "Quality-first": {
+        "model": "opus",
+        "phase_models": {},
+    },
+    "Cost-optimized": {
+        "model": "opus",
+        "phase_models": {
+            "plan": "sonnet",
+            "implement": "opus",
+            "review": "sonnet",
+            "fix": "sonnet",
+            "decision": "haiku",
+            "learn": "haiku",
+            "deliver": "haiku",
+        },
+    },
+}
+
+
 def _prompt(text: str, default: str = "") -> str:
     return click.prompt(text, default=default, show_default=bool(default))
 
@@ -164,10 +184,12 @@ def run_init(
         personas = list(PACKS[0].personas)
 
         from colonyos.config import DEFAULTS
+        cost_preset = MODEL_PRESETS["Cost-optimized"]
         config = ColonyConfig(
             project=project,
             personas=personas,
-            model=DEFAULTS["model"],
+            model=cost_preset["model"],
+            phase_models=dict(cost_preset["phase_models"]),
             budget=BudgetConfig(
                 per_phase=DEFAULTS["budget"]["per_phase"],
                 per_run=DEFAULTS["budget"]["per_run"],
@@ -211,7 +233,20 @@ def run_init(
         )
 
         click.echo("\n--- Configuration ---\n")
-        model = _prompt("Model", default=existing.model)
+
+        click.echo("Model presets:")
+        preset_names = list(MODEL_PRESETS.keys())
+        for i, name in enumerate(preset_names, 1):
+            click.echo(f"  {i}. {name}")
+        preset_choice = click.prompt(
+            "Select a model preset",
+            type=click.IntRange(1, len(preset_names)),
+            default=1,
+        )
+        chosen_preset = MODEL_PRESETS[preset_names[preset_choice - 1]]
+        model = chosen_preset["model"]
+        phase_models = dict(chosen_preset["phase_models"])
+
         budget_phase = click.prompt(
             "Budget per phase (USD)", default=existing.budget.per_phase, type=float
         )
@@ -223,6 +258,7 @@ def run_init(
             project=project,
             personas=personas,
             model=model,
+            phase_models=phase_models,
             budget=BudgetConfig(per_phase=budget_phase, per_run=budget_run),
             phases=PhasesConfig(),
             branch_prefix=existing.branch_prefix,

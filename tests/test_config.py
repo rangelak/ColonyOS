@@ -9,10 +9,11 @@ from colonyos.config import (
     DEFAULTS,
     LearningsConfig,
     PhasesConfig,
+    VALID_MODELS,
     load_config,
     save_config,
 )
-from colonyos.models import Persona, ProjectInfo
+from colonyos.models import Persona, Phase, ProjectInfo
 
 
 @pytest.fixture
@@ -53,7 +54,7 @@ class TestLoadConfig:
                         "perspective": "Thinks about scale",
                     }
                 ],
-                "model": "claude-opus-4-20250514",
+                "model": "opus",
                 "budget": {"per_phase": 10.0, "per_run": 30.0},
                 "phases": {"plan": True, "implement": True, "review": False, "deliver": False},
                 "branch_prefix": "feat/",
@@ -70,7 +71,7 @@ class TestLoadConfig:
         assert config.project.stack == "Python"
         assert len(config.personas) == 1
         assert config.personas[0].role == "Engineer"
-        assert config.model == "claude-opus-4-20250514"
+        assert config.model == "opus"
         assert config.budget.per_phase == 10.0
         assert config.phases.review is False
         assert config.phases.deliver is False
@@ -162,7 +163,7 @@ class TestSaveConfig:
             personas=[
                 Persona(role="Lead", expertise="Arch", perspective="Big picture", reviewer=True)
             ],
-            model="test-model",
+            model="opus",
             budget=BudgetConfig(per_phase=2.0, per_run=6.0),
             phases=PhasesConfig(plan=True, implement=False, review=True, deliver=True),
             branch_prefix="test/",
@@ -178,7 +179,7 @@ class TestSaveConfig:
         assert loaded.project.name == "MyApp"
         assert loaded.personas[0].role == "Lead"
         assert loaded.personas[0].reviewer is True
-        assert loaded.model == "test-model"
+        assert loaded.model == "opus"
         assert loaded.budget.per_phase == 2.0
         assert loaded.phases.implement is False
         assert loaded.phases.review is True
@@ -429,5 +430,115 @@ class TestLearningsConfig:
     def test_defaults_dict_has_learnings(self):
         assert DEFAULTS["learnings"]["enabled"] is True
         assert DEFAULTS["learnings"]["max_entries"] == 100
+
+
+class TestPhaseModels:
+    def test_valid_models_contains_expected_values(self):
+        assert VALID_MODELS == frozenset({"opus", "sonnet", "haiku"})
+
+    def test_get_model_returns_phase_specific(self):
+        config = ColonyConfig(model="sonnet", phase_models={"implement": "opus"})
+        assert config.get_model(Phase.IMPLEMENT) == "opus"
+
+    def test_get_model_falls_back_to_global(self):
+        config = ColonyConfig(model="sonnet", phase_models={"implement": "opus"})
+        assert config.get_model(Phase.PLAN) == "sonnet"
+
+    def test_get_model_falls_back_when_empty(self):
+        config = ColonyConfig(model="opus", phase_models={})
+        assert config.get_model(Phase.IMPLEMENT) == "opus"
+        assert config.get_model(Phase.REVIEW) == "opus"
+
+    def test_load_config_parses_phase_models(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "model": "sonnet",
+                "phase_models": {"implement": "opus", "deliver": "haiku"},
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.phase_models == {"implement": "opus", "deliver": "haiku"}
+
+    def test_load_config_defaults_to_empty_dict(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "sonnet"}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.phase_models == {}
+
+    def test_load_config_rejects_invalid_model_in_phase_models(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "model": "sonnet",
+                "phase_models": {"implement": "gpt4"},
+            }),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Invalid model 'gpt4'"):
+            load_config(tmp_repo)
+
+    def test_load_config_rejects_invalid_top_level_model(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "invalid-model"}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Invalid model 'invalid-model'"):
+            load_config(tmp_repo)
+
+    def test_load_config_rejects_invalid_phase_key(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "model": "sonnet",
+                "phase_models": {"nonexistent": "opus"},
+            }),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Invalid phase key 'nonexistent'"):
+            load_config(tmp_repo)
+
+    def test_save_config_serializes_phase_models_when_nonempty(self, tmp_repo: Path):
+        config = ColonyConfig(
+            model="sonnet",
+            phase_models={"implement": "opus", "deliver": "haiku"},
+        )
+        save_config(tmp_repo, config)
+        raw = yaml.safe_load(
+            (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert raw["phase_models"] == {"implement": "opus", "deliver": "haiku"}
+
+    def test_save_config_omits_phase_models_when_empty(self, tmp_repo: Path):
+        config = ColonyConfig(model="sonnet", phase_models={})
+        save_config(tmp_repo, config)
+        raw = yaml.safe_load(
+            (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert "phase_models" not in raw
+
+    def test_roundtrip_preserves_phase_models(self, tmp_repo: Path):
+        original = ColonyConfig(
+            model="sonnet",
+            phase_models={"implement": "opus", "review": "sonnet", "deliver": "haiku"},
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.phase_models == original.phase_models
+        assert loaded.model == "sonnet"
+
+    def test_backward_compat_no_config(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.phase_models == {}
 
 

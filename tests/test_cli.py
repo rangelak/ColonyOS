@@ -234,7 +234,7 @@ class TestInitWithPacks:
     def test_init_with_prebuilt_pack(self, runner: CliRunner, tmp_path: Path):
         """E2E: colonyos init selecting a prebuilt pack produces correct config."""
         # Simulate: project info, then pack selection (1=startup), confirm pack,
-        # no custom additions, then model/budget defaults
+        # no custom additions, then preset/budget defaults
         user_input = "\n".join([
             "TestProject",           # project name
             "A test project",        # description
@@ -243,7 +243,7 @@ class TestInitWithPacks:
             "y",                     # confirm pack
             "n",                     # no custom additions
             "",                      # vision (skip)
-            "sonnet",                # model
+            "1",                     # model preset (1=Quality-first)
             "5.0",                   # budget per phase
             "15.0",                  # budget per run
             "",                      # extra trailing newline
