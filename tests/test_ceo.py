@@ -28,10 +28,10 @@ def config() -> ColonyConfig:
     return ColonyConfig(
         project=ProjectInfo(name="TestApp", description="A test app", stack="Python"),
         personas=[
-            Persona(role="Engineer", expertise="Backend", perspective="Scale")
+            Persona(role="Engineer", expertise="Backend", perspective="Scale", reviewer=True)
         ],
         model="test-model",
-        budget=BudgetConfig(per_phase=1.0, per_run=3.0),
+        budget=BudgetConfig(per_phase=1.0, per_run=10.0),
         phases=PhasesConfig(),
     )
 
@@ -222,27 +222,27 @@ class TestRunCeo:
 
 
 class TestCeoIntegration:
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_full_flow_ceo_to_pipeline(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+    def test_full_flow_ceo_to_pipeline(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
         """CEO output feeds into the pipeline as a prompt string."""
         from colonyos.orchestrator import run as run_orchestrator
 
         ceo_result = _fake_ceo_result()
         plan_result = PhaseResult(phase=Phase.PLAN, success=True, cost_usd=0.01, duration_ms=100, session_id="s", artifacts={"result": "done"})
         impl_result = PhaseResult(phase=Phase.IMPLEMENT, success=True, cost_usd=0.01, duration_ms=100, session_id="s", artifacts={"result": "done"})
-        review_result = PhaseResult(phase=Phase.REVIEW, success=True, cost_usd=0.01, duration_ms=100, session_id="s", artifacts={"result": "done"})
+        approve_result = PhaseResult(phase=Phase.REVIEW, success=True, cost_usd=0.01, duration_ms=100, session_id="s", artifacts={"result": "VERDICT: approve\n\nFINDINGS:\n- None\n\nSYNTHESIS:\nLooks good."})
         decision_result = PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"})
         deliver_result = PhaseResult(phase=Phase.DELIVER, success=True, cost_usd=0.01, duration_ms=100, session_id="s", artifacts={"result": "done"})
 
         mock_run.side_effect = [
-            ceo_result,  # CEO phase
+            ceo_result,  # CEO phase (run_ceo)
             plan_result,
             impl_result,
-            review_result,  # per-task review
-            review_result,  # final holistic review
             decision_result,
             deliver_result,
         ]
+        mock_parallel.return_value = [approve_result]
 
         save_config(tmp_repo, config)
 

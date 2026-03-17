@@ -159,7 +159,7 @@ class TestSaveConfig:
         original = ColonyConfig(
             project=ProjectInfo(name="MyApp", description="desc", stack="Go"),
             personas=[
-                Persona(role="Lead", expertise="Arch", perspective="Big picture")
+                Persona(role="Lead", expertise="Arch", perspective="Big picture", reviewer=True)
             ],
             model="test-model",
             budget=BudgetConfig(per_phase=2.0, per_run=6.0),
@@ -176,6 +176,7 @@ class TestSaveConfig:
         assert loaded.project is not None
         assert loaded.project.name == "MyApp"
         assert loaded.personas[0].role == "Lead"
+        assert loaded.personas[0].reviewer is True
         assert loaded.model == "test-model"
         assert loaded.budget.per_phase == 2.0
         assert loaded.phases.implement is False
@@ -222,6 +223,48 @@ class TestSaveConfig:
         config_path = tmp_repo / ".colonyos" / "config.yaml"
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert raw["reviews_dir"] == "custom_reviews"
+
+
+class TestReviewerField:
+    def test_defaults_to_false(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "personas": [
+                    {"role": "Eng", "expertise": "x", "perspective": "y"},
+                ]
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.personas[0].reviewer is False
+
+    def test_parsed_when_true(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "personas": [
+                    {"role": "Eng", "expertise": "x", "perspective": "y", "reviewer": True},
+                ]
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.personas[0].reviewer is True
+
+    def test_roundtrip(self, tmp_repo: Path):
+        original = ColonyConfig(
+            personas=[
+                Persona(role="Reviewer", expertise="x", perspective="y", reviewer=True),
+                Persona(role="Planner", expertise="x", perspective="y", reviewer=False),
+            ],
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.personas[0].reviewer is True
+        assert loaded.personas[1].reviewer is False
 
 
 class TestMaxFixIterations:

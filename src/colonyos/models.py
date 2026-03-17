@@ -26,6 +26,7 @@ class Persona:
     role: str
     expertise: str
     perspective: str
+    reviewer: bool = False
 
 
 @dataclass(frozen=True)

@@ -14,8 +14,9 @@ ColonyOS runs four phases, each as a separate Claude agent session with full acc
 
 1. **Plan** — Explores your codebase, generates a PRD with clarifying Q&A from your defined personas (running as parallel subagents), and produces a task breakdown. Outputs go to `cOS_prds/` and `cOS_tasks/`.
 2. **Implement** — Creates a feature branch, writes tests first, then implements each task from the plan. Commits as it goes.
-3. **Review** — Each persona reviews the implementation in parallel, first per-task then a final holistic review. Review artifacts go to `cOS_reviews/`.
-4. **Deliver** — Pushes the branch and opens a pull request with a summary linking back to the PRD.
+3. **Review/Fix Loop** — Reviewer-tagged personas each run an independent, parallel, read-only review session. If any request changes, a dedicated fix agent (Staff+ Google Engineer identity) addresses findings, then reviewers re-run. Loop repeats up to `max_fix_iterations`. Review artifacts go to `cOS_reviews/`.
+4. **Decision Gate** — Reads all review artifacts and makes a GO/NO-GO verdict. NO-GO stops the pipeline before delivery.
+5. **Deliver** — Pushes the branch and opens a pull request with a summary linking back to the PRD.
 
 Each phase is isolated with its own budget cap. If a phase fails, the run stops and logs what happened.
 
@@ -69,7 +70,7 @@ Perspective: Thinks about attack surfaces and data exposure
 Config saved to .colonyos/config.yaml
 ```
 
-Personas shape how PRDs are written. During the plan phase, each persona runs as a parallel subagent answering clarifying questions from their unique perspective, giving diverse viewpoints grounded in your project's context.
+Personas shape how PRDs are written. During the plan phase, each persona runs as a parallel subagent answering clarifying questions from their unique perspective, giving diverse viewpoints grounded in your project's context. Personas with `reviewer: true` also participate in independent, parallel code reviews during the review phase.
 
 ## CLI Reference
 
@@ -98,9 +99,11 @@ personas:
   - role: "Senior Backend Engineer"
     expertise: "API design, database modeling, performance"
     perspective: "Thinks about scalability and data integrity"
+    reviewer: true        # participates in code reviews
   - role: "Product Lead"
     expertise: "User research, prioritization"
     perspective: "Thinks about user value and shipping incrementally"
+    # reviewer defaults to false — plan-phase only
 
 model: opus
 budget:
@@ -109,12 +112,14 @@ budget:
 phases:
   plan: true
   implement: true
-  review: true           # persona-driven review of each task + holistic review
+  review: true           # parallel per-persona reviews + fix loop
   deliver: true          # set false to skip PR creation
 branch_prefix: "colonyos/"
 prds_dir: "cOS_prds"
 tasks_dir: "cOS_tasks"
 reviews_dir: "cOS_reviews"
+proposals_dir: "cOS_proposals"
+max_fix_iterations: 2    # how many review→fix cycles before decision gate
 ```
 
 ## Output Structure
@@ -151,7 +156,10 @@ src/colonyos/
     base.md         # Repo conventions
     plan.md         # PRD + task generation
     implement.md    # Test-first implementation
-    review.md       # Self-review checklist
+    review.md       # Per-persona review with structured verdict
+    fix.md          # Staff+ engineer fix agent
+    decision.md     # GO/NO-GO decision gate
+    ceo.md          # Autonomous feature proposal
     deliver.md      # PR creation
 ```
 

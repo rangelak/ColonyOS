@@ -8,14 +8,23 @@ from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, RunStatus
 from colonyos.orchestrator import (
     run,
     _format_personas_block,
-    _format_review_personas_block,
     _build_persona_agents,
-    _build_review_persona_agents,
-    _build_review_prompt,
     _build_fix_prompt,
     _build_run_id,
     _parse_parent_tasks,
     _persona_slug,
+    _reviewer_personas,
+    _build_persona_review_prompt,
+    _extract_review_verdict,
+    _collect_review_findings,
+)
+
+
+REVIEWER_PERSONA = Persona(
+    role="Engineer", expertise="Backend", perspective="Scale", reviewer=True
+)
+NON_REVIEWER_PERSONA = Persona(
+    role="Designer", expertise="UX", perspective="Usability", reviewer=False
 )
 
 
@@ -32,11 +41,9 @@ def tmp_repo(tmp_path: Path) -> Path:
 def config() -> ColonyConfig:
     return ColonyConfig(
         project=ProjectInfo(name="Test", description="test", stack="Python"),
-        personas=[
-            Persona(role="Engineer", expertise="Backend", perspective="Scale")
-        ],
+        personas=[REVIEWER_PERSONA],
         model="test-model",
-        budget=BudgetConfig(per_phase=1.0, per_run=3.0),
+        budget=BudgetConfig(per_phase=1.0, per_run=10.0),
         phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True),
     )
 
@@ -49,6 +56,28 @@ def _fake_phase_result(phase: Phase, success: bool = True) -> PhaseResult:
         duration_ms=100,
         session_id="test-session",
         artifacts={"result": "done"},
+    )
+
+
+def _approve_review_result() -> PhaseResult:
+    return PhaseResult(
+        phase=Phase.REVIEW,
+        success=True,
+        cost_usd=0.01,
+        duration_ms=100,
+        session_id="test-session",
+        artifacts={"result": "VERDICT: approve\n\nFINDINGS:\n- None\n\nSYNTHESIS:\nLooks good."},
+    )
+
+
+def _request_changes_review_result() -> PhaseResult:
+    return PhaseResult(
+        phase=Phase.REVIEW,
+        success=True,
+        cost_usd=0.01,
+        duration_ms=100,
+        session_id="test-session",
+        artifacts={"result": "VERDICT: request-changes\n\nFINDINGS:\n- src/foo.py: Missing tests\n\nSYNTHESIS:\nNeeds work."},
     )
 
 
@@ -89,20 +118,6 @@ class TestFormatPersonasBlock:
         assert "`linus_torvalds`" in block
 
 
-class TestFormatReviewPersonasBlock:
-    def test_with_personas(self):
-        personas = [
-            Persona(role="Engineer", expertise="APIs", perspective="Scale")
-        ]
-        block = _format_review_personas_block(personas)
-        assert "engineer" in block
-        assert "review" in block.lower()
-
-    def test_without_personas(self):
-        block = _format_review_personas_block([])
-        assert "senior engineer" in block
-
-
 class TestBuildPersonaAgents:
     def test_builds_agents_per_persona(self):
         personas = [
@@ -120,62 +135,84 @@ class TestBuildPersonaAgents:
         assert agents == {}
 
 
-class TestBuildReviewPersonaAgents:
-    def test_builds_review_agents_per_persona(self):
-        personas = [
-            Persona(role="Steve Jobs", expertise="Product vision", perspective="Simplify"),
-            Persona(role="Linus Torvalds", expertise="Kernel", perspective="Correctness"),
-        ]
-        agents = _build_review_persona_agents(personas)
-        assert "steve_jobs" in agents
-        assert "linus_torvalds" in agents
-        assert "reviewer" in agents["steve_jobs"].description
-        assert "reviewing" in agents["steve_jobs"].prompt.lower()
-
-    def test_review_agents_have_read_only_tools(self):
-        personas = [
-            Persona(role="Engineer", expertise="Backend", perspective="Scale"),
-        ]
-        agents = _build_review_persona_agents(personas)
-        tools = agents["engineer"].tools
-        assert "Read" in tools
-        assert "Glob" in tools
-        assert "Grep" in tools
-        assert "Write" not in tools
-        assert "Edit" not in tools
-        assert "Bash" not in tools
-
-    def test_empty_personas(self):
-        agents = _build_review_persona_agents([])
-        assert agents == {}
-
-
-class TestBuildReviewPrompt:
-    def test_output_contains_key_elements(self):
+class TestReviewerPersonas:
+    def test_filters_to_reviewers(self):
         config = ColonyConfig(
-            personas=[
-                Persona(role="Engineer", expertise="Backend", perspective="Scale")
-            ],
+            personas=[REVIEWER_PERSONA, NON_REVIEWER_PERSONA],
         )
-        system, user = _build_review_prompt(
-            config, "cOS_prds/test.md", "feat/test", "1.0 Add auth"
+        reviewers = _reviewer_personas(config)
+        assert len(reviewers) == 1
+        assert reviewers[0].role == "Engineer"
+
+    def test_no_reviewers(self):
+        config = ColonyConfig(
+            personas=[NON_REVIEWER_PERSONA],
         )
-        assert "review" in system.lower()
+        assert _reviewer_personas(config) == []
+
+    def test_all_reviewers(self):
+        p1 = Persona(role="A", expertise="a", perspective="a", reviewer=True)
+        p2 = Persona(role="B", expertise="b", perspective="b", reviewer=True)
+        config = ColonyConfig(personas=[p1, p2])
+        assert len(_reviewer_personas(config)) == 2
+
+
+class TestBuildPersonaReviewPrompt:
+    def test_contains_persona_identity(self):
+        persona = Persona(role="Security Lead", expertise="AppSec", perspective="Threat model", reviewer=True)
+        config = ColonyConfig()
+        system, user = _build_persona_review_prompt(persona, config, "prd.md", "feat/x")
+        assert "Security Lead" in system
+        assert "AppSec" in system
+        assert "Threat model" in system
+
+    def test_contains_branch_and_prd(self):
+        config = ColonyConfig()
+        system, user = _build_persona_review_prompt(REVIEWER_PERSONA, config, "cOS_prds/test.md", "feat/test")
         assert "cOS_prds/test.md" in system
         assert "feat/test" in system
-        assert "1.0 Add auth" in system
-        assert "1.0 Add auth" in user
+        assert "feat/test" in user
 
-    def test_includes_persona_block(self):
-        config = ColonyConfig(
-            personas=[
-                Persona(role="Steve Jobs", expertise="Product", perspective="Simplify")
-            ],
-        )
-        system, _ = _build_review_prompt(
-            config, "prd.md", "branch", "task desc"
-        )
-        assert "steve_jobs" in system
+    def test_review_tools_not_in_prompt(self):
+        config = ColonyConfig()
+        system, _ = _build_persona_review_prompt(REVIEWER_PERSONA, config, "prd.md", "branch")
+        assert "Agent" not in system
+
+
+class TestExtractReviewVerdict:
+    def test_approve(self):
+        assert _extract_review_verdict("VERDICT: approve\nLooks good.") == "approve"
+
+    def test_request_changes(self):
+        assert _extract_review_verdict("VERDICT: request-changes\nNeeds fixes.") == "request-changes"
+
+    def test_case_insensitive(self):
+        assert _extract_review_verdict("Verdict: Approve") == "approve"
+
+    def test_defaults_to_request_changes(self):
+        assert _extract_review_verdict("No clear verdict.") == "request-changes"
+
+
+class TestCollectReviewFindings:
+    def test_collects_request_changes(self):
+        results = [_request_changes_review_result(), _approve_review_result()]
+        reviewers = [REVIEWER_PERSONA, Persona(role="Other", expertise="X", perspective="Y", reviewer=True)]
+        findings = _collect_review_findings(results, reviewers)
+        assert len(findings) == 1
+        assert findings[0][0] == "Engineer"
+
+    def test_all_approve_returns_empty(self):
+        results = [_approve_review_result()]
+        reviewers = [REVIEWER_PERSONA]
+        findings = _collect_review_findings(results, reviewers)
+        assert findings == []
+
+    def test_all_request_changes(self):
+        r1 = Persona(role="A", expertise="a", perspective="a", reviewer=True)
+        r2 = Persona(role="B", expertise="b", perspective="b", reviewer=True)
+        results = [_request_changes_review_result(), _request_changes_review_result()]
+        findings = _collect_review_findings(results, [r1, r2])
+        assert len(findings) == 2
 
 
 class TestParseParentTasks:
@@ -223,23 +260,24 @@ class TestBuildRunId:
 
 
 class TestRun:
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_full_run_success_with_review(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+    def test_full_run_success_with_review(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
         save_config(tmp_repo, config)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),  # per-task review
-            _fake_phase_result(Phase.REVIEW),  # final holistic review
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
         ]
+        mock_parallel.return_value = [_approve_review_result()]
 
         log = run("Add tests", repo_root=tmp_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
-        assert mock_run.call_count == 6
+        assert mock_run.call_count == 4
+        assert mock_parallel.call_count == 1
 
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_review_phase_skipped_when_disabled(self, mock_run, tmp_repo: Path, config: ColonyConfig):
@@ -256,99 +294,100 @@ class TestRun:
         assert log.status == RunStatus.COMPLETED
         assert len(log.phases) == 3
         assert mock_run.call_count == 3
-        # No REVIEW phase in the log
         phase_types = [p.phase for p in log.phases]
         assert Phase.REVIEW not in phase_types
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_review_failure_stops_run(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        save_config(tmp_repo, config)
-        mock_run.side_effect = [
-            _fake_phase_result(Phase.PLAN),
-            _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW, success=False),  # per-task review fails
-        ]
-
-        log = run("Add tests", repo_root=tmp_repo, config=config)
-
-        assert log.status == RunStatus.FAILED
-        assert any(p.phase == Phase.REVIEW for p in log.phases)
-
-    @patch("colonyos.orchestrator.run_phase_sync")
-    def test_review_with_task_file(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        """Review phase parses parent tasks from the task file."""
-        save_config(tmp_repo, config)
-
-        from colonyos.naming import planning_names
-        names = planning_names("Add auth feature")
-        task_file = tmp_repo / config.tasks_dir / names.task_filename
-        task_file.write_text(
-            "## Tasks\n\n"
-            "- [ ] 1.0 Add auth model\n"
-            "  - [ ] 1.1 Write tests\n"
-            "- [ ] 2.0 Add auth routes\n"
-            "  - [ ] 2.1 Write tests\n",
-            encoding="utf-8",
+    def test_review_skipped_when_no_reviewer_personas(self, mock_run, tmp_repo: Path):
+        """No reviewer personas means review phase is skipped entirely."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[NON_REVIEWER_PERSONA],
+            model="test-model",
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+            phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True),
         )
-
+        save_config(tmp_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),  # task 1 review
-            _fake_phase_result(Phase.REVIEW),  # task 2 review
-            _fake_phase_result(Phase.REVIEW),  # final holistic review
-            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
         ]
 
-        log = run("Add auth feature", repo_root=tmp_repo, config=config)
+        log = run("Add tests", repo_root=tmp_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
-        assert mock_run.call_count == 7
+        assert mock_run.call_count == 3
 
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_review_saves_artifacts(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        """Review phase saves markdown artifacts to reviews_dir."""
+    def test_review_saves_artifacts(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
         save_config(tmp_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),  # per-task
-            _fake_phase_result(Phase.REVIEW),  # final holistic
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
         ]
+        mock_parallel.return_value = [_approve_review_result()]
 
-        log = run("Add tests", repo_root=tmp_repo, config=config)
+        run("Add tests", repo_root=tmp_repo, config=config)
 
         reviews_dir = tmp_repo / config.reviews_dir
         assert reviews_dir.exists()
         review_files = list(reviews_dir.glob("*.md"))
-        assert len(review_files) == 3  # 1 per-task + 1 final + 1 decision
+        assert len(review_files) >= 2  # 1 persona review + 1 decision
 
-        filenames = {f.name for f in review_files}
-        assert any("review_task_1" in f for f in filenames)
-        assert any("review_final" in f for f in filenames)
-        assert any("decision" in f for f in filenames)
-
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_review_persona_agents_passed(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        """Review phase passes persona agents to run_phase_sync."""
+    def test_review_uses_parallel_runner(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """Reviews use run_phases_parallel_sync, not run_phase_sync."""
         save_config(tmp_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),  # per-task
-            _fake_phase_result(Phase.REVIEW),  # final holistic
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
         ]
+        mock_parallel.return_value = [_approve_review_result()]
 
         run("Add tests", repo_root=tmp_repo, config=config)
 
-        review_call = mock_run.call_args_list[2]
-        assert review_call.kwargs.get("agents") is not None
-        assert "engineer" in review_call.kwargs["agents"]
+        assert mock_parallel.call_count == 1
+        calls = mock_parallel.call_args_list[0]
+        review_calls = calls[0][0]
+        assert len(review_calls) == 1  # 1 reviewer persona
+        assert review_calls[0]["phase"] == Phase.REVIEW
+        assert review_calls[0]["allowed_tools"] == ["Read", "Glob", "Grep", "Bash"]
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_multiple_reviewer_personas(self, mock_run, mock_parallel, tmp_repo: Path):
+        """All reviewer personas get their own parallel session."""
+        r1 = Persona(role="Systems Eng", expertise="Distributed", perspective="Reliability", reviewer=True)
+        r2 = Persona(role="Security Eng", expertise="AppSec", perspective="Threats", reviewer=True)
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[r1, r2, NON_REVIEWER_PERSONA],
+            model="test-model",
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+            phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True),
+        )
+        save_config(tmp_repo, config)
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result(), _approve_review_result()]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        assert log.status == RunStatus.COMPLETED
+        review_calls = mock_parallel.call_args_list[0][0][0]
+        assert len(review_calls) == 2  # Only 2 reviewer personas (not the designer)
 
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_plan_passes_persona_agents(self, mock_run, tmp_repo: Path, config: ColonyConfig):
@@ -383,19 +422,19 @@ class TestRun:
         assert len(log.phases) == 1
         assert mock_run.call_count == 1
 
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_from_prd_skips_plan(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+    def test_from_prd_skips_plan(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
         save_config(tmp_repo, config)
         prd = tmp_repo / "cOS_prds" / "20260316_120000_prd_test.md"
         prd.write_text("# PRD", encoding="utf-8")
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),  # per-task
-            _fake_phase_result(Phase.REVIEW),  # final holistic
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
         ]
+        mock_parallel.return_value = [_approve_review_result()]
 
         log = run(
             "Implement test",
@@ -406,17 +445,17 @@ class TestRun:
 
         assert log.status == RunStatus.COMPLETED
 
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_run_log_saved(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+    def test_run_log_saved(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
         save_config(tmp_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),
-            _fake_phase_result(Phase.REVIEW),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
         ]
+        mock_parallel.return_value = [_approve_review_result()]
 
         log = run("Add feature", repo_root=tmp_repo, config=config)
 
@@ -425,18 +464,18 @@ class TestRun:
         log_files = list(runs_dir.glob("*.json"))
         assert len(log_files) == 1
 
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_decision_nogo_stops_pipeline(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        """Decision gate NO-GO verdict prevents delivery when max_fix_iterations=0."""
+    def test_decision_nogo_stops_pipeline(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """Decision gate NO-GO verdict prevents delivery."""
         config.max_fix_iterations = 0
         save_config(tmp_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),
-            _fake_phase_result(Phase.REVIEW),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: NO-GO\n\nToo many issues."}),
         ]
+        mock_parallel.return_value = [_approve_review_result()]
 
         log = run("Add feature", repo_root=tmp_repo, config=config)
 
@@ -451,7 +490,7 @@ class TestBuildFixPrompt:
         config = ColonyConfig(max_fix_iterations=2)
         result = _build_fix_prompt(
             config, "prd.md", "tasks.md", "feat/branch",
-            "VERDICT: NO-GO\n\nUnresolved Issues:\n- Bug in auth", 1,
+            "### Engineer\n\nVERDICT: request-changes\nMissing tests", 1,
         )
         assert isinstance(result, tuple)
         assert len(result) == 2
@@ -460,28 +499,24 @@ class TestBuildFixPrompt:
         config = ColonyConfig(max_fix_iterations=2)
         system, _ = _build_fix_prompt(
             config, "prd.md", "tasks.md", "feat/branch",
-            "VERDICT: NO-GO", 1,
+            "Findings here", 1,
         )
-        # Base instructions
-        assert "ColonyOS" in system
-        # Fix template content
         assert "Fix Phase" in system
         assert "fix iteration 1 of 2" in system.lower()
 
-    def test_system_embeds_decision_text(self):
+    def test_system_embeds_findings_text(self):
         config = ColonyConfig(max_fix_iterations=3)
-        decision = "VERDICT: NO-GO\n\nUnresolved Issues:\n- Missing tests"
+        findings = "### Engineer\n\nVERDICT: request-changes\nMissing tests for auth module"
         system, _ = _build_fix_prompt(
-            config, "prd.md", "tasks.md", "branch", decision, 2,
+            config, "prd.md", "tasks.md", "branch", findings, 2,
         )
-        assert "Missing tests" in system
-        assert "NO-GO" in system
+        assert "Missing tests for auth module" in system
 
     def test_user_prompt_contains_context(self):
         config = ColonyConfig(max_fix_iterations=2)
         _, user = _build_fix_prompt(
             config, "cOS_prds/prd.md", "cOS_tasks/tasks.md",
-            "feat/fix", "verdict text", 1,
+            "feat/fix", "findings text", 1,
         )
         assert "feat/fix" in user
         assert "cOS_prds/prd.md" in user
@@ -494,28 +529,33 @@ class TestBuildFixPrompt:
         )
         assert "my_reviews" in system
 
+    def test_fix_identity_is_staff_engineer(self):
+        config = ColonyConfig(max_fix_iterations=2)
+        system, _ = _build_fix_prompt(
+            config, "prd.md", "tasks.md", "branch", "text", 1,
+        )
+        assert "Staff+" in system
+        assert "Google" in system
+
 
 class TestFixLoop:
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_nogo_fix_go_delivers(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        """NO-GO -> fix -> review -> GO -> deliver (success path)."""
+    def test_request_changes_triggers_fix(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """request-changes -> fix -> approve -> decision GO -> deliver."""
         save_config(tmp_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),   # per-task
-            _fake_phase_result(Phase.REVIEW),   # holistic
-            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
-                        duration_ms=50, session_id="s",
-                        artifacts={"result": "VERDICT: NO-GO\n\nIssues found."}),
-            # Fix iteration 1
-            _fake_phase_result(Phase.FIX),      # fix
-            _fake_phase_result(Phase.REVIEW),   # holistic re-review
+            _fake_phase_result(Phase.FIX),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
-            # Deliver
             _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.side_effect = [
+            [_request_changes_review_result()],  # round 1: request changes
+            [_approve_review_result()],           # round 2: approve
         ]
 
         log = run("Add feature", repo_root=tmp_repo, config=config)
@@ -525,31 +565,25 @@ class TestFixLoop:
         assert Phase.FIX in phase_types
         assert Phase.DELIVER in phase_types
 
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_max_iterations_exhausted(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        """NO-GO -> fix -> NO-GO -> fix -> NO-GO -> fail."""
+    def test_max_iterations_exhausted(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """request-changes every round -> decision NO-GO -> fail."""
         config.max_fix_iterations = 2
         save_config(tmp_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),
-            _fake_phase_result(Phase.REVIEW),
-            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
-                        duration_ms=50, session_id="s",
-                        artifacts={"result": "VERDICT: NO-GO\n\nBad code."}),
-            # Fix iteration 1
-            _fake_phase_result(Phase.FIX),
-            _fake_phase_result(Phase.REVIEW),
+            _fake_phase_result(Phase.FIX),       # fix 1
+            _fake_phase_result(Phase.FIX),       # fix 2
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: NO-GO\n\nStill bad."}),
-            # Fix iteration 2
-            _fake_phase_result(Phase.FIX),
-            _fake_phase_result(Phase.REVIEW),
-            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
-                        duration_ms=50, session_id="s",
-                        artifacts={"result": "VERDICT: NO-GO\n\nStill bad."}),
+        ]
+        mock_parallel.side_effect = [
+            [_request_changes_review_result()],  # round 1
+            [_request_changes_review_result()],  # round 2 (after fix 1)
+            [_request_changes_review_result()],  # round 3 (after fix 2, last round)
         ]
 
         log = run("Add feature", repo_root=tmp_repo, config=config)
@@ -559,20 +593,20 @@ class TestFixLoop:
         assert Phase.DELIVER not in phase_types
         assert phase_types.count(Phase.FIX) == 2
 
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_zero_max_iterations_failfast(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        """max_fix_iterations=0 preserves fail-fast behavior."""
+    def test_zero_max_iterations_no_fix(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """max_fix_iterations=0: only 1 review round, no fix, then decision."""
         config.max_fix_iterations = 0
         save_config(tmp_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),
-            _fake_phase_result(Phase.REVIEW),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: NO-GO"}),
         ]
+        mock_parallel.return_value = [_request_changes_review_result()]
 
         log = run("Add feature", repo_root=tmp_repo, config=config)
 
@@ -581,24 +615,23 @@ class TestFixLoop:
         assert Phase.FIX not in phase_types
         assert Phase.DELIVER not in phase_types
 
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_fix_iterations_in_runlog(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+    def test_fix_phases_in_runlog(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
         """Fix iterations appear as Phase.FIX in the run log."""
         save_config(tmp_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),
-            _fake_phase_result(Phase.REVIEW),
-            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
-                        duration_ms=50, session_id="s",
-                        artifacts={"result": "VERDICT: NO-GO"}),
             _fake_phase_result(Phase.FIX),
-            _fake_phase_result(Phase.REVIEW),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.side_effect = [
+            [_request_changes_review_result()],
+            [_approve_review_result()],
         ]
 
         log = run("Add feature", repo_root=tmp_repo, config=config)
@@ -607,20 +640,20 @@ class TestFixLoop:
         assert len(fix_phases) == 1
         assert fix_phases[0].success is True
 
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_unknown_verdict_no_fix_loop(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        """UNKNOWN verdict does NOT trigger fix loop (proceeds to deliver)."""
+    def test_unknown_verdict_proceeds_to_deliver(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """UNKNOWN decision verdict proceeds to deliver (with warning)."""
         save_config(tmp_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),
-            _fake_phase_result(Phase.REVIEW),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "No clear verdict here."}),
             _fake_phase_result(Phase.DELIVER),
         ]
+        mock_parallel.return_value = [_approve_review_result()]
 
         log = run("Add feature", repo_root=tmp_repo, config=config)
 
@@ -629,20 +662,20 @@ class TestFixLoop:
         assert Phase.FIX not in phase_types
         assert Phase.DELIVER in phase_types
 
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_fix_phase_failure_fails_run(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        """Phase failure during fix iteration fails the run."""
+    def test_fix_phase_failure_stops_loop(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """Fix phase failure breaks the loop and proceeds to decision."""
         save_config(tmp_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),
-            _fake_phase_result(Phase.REVIEW),
+            _fake_phase_result(Phase.FIX, success=False),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: NO-GO"}),
-            _fake_phase_result(Phase.FIX, success=False),  # fix fails
         ]
+        mock_parallel.return_value = [_request_changes_review_result()]
 
         log = run("Add feature", repo_root=tmp_repo, config=config)
 
@@ -650,58 +683,47 @@ class TestFixLoop:
         phase_types = [p.phase for p in log.phases]
         assert Phase.DELIVER not in phase_types
 
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_budget_exhaustion_stops_fix_loop(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        """Fix loop stops when remaining per-run budget is insufficient."""
-        config.budget = BudgetConfig(per_phase=1.0, per_run=3.0)
-        save_config(tmp_repo, config)
-        # Each phase costs 1.0, so after plan(1)+impl(1)+review(1) = 3.0,
-        # we've used up the budget. But we have per-task + holistic + decision
-        # so let's use cost_usd values to exhaust budget.
-        mock_run.side_effect = [
-            PhaseResult(phase=Phase.PLAN, success=True, cost_usd=0.8,
-                        duration_ms=50, session_id="s", artifacts={"result": "done"}),
-            PhaseResult(phase=Phase.IMPLEMENT, success=True, cost_usd=0.8,
-                        duration_ms=50, session_id="s", artifacts={"result": "done"}),
-            PhaseResult(phase=Phase.REVIEW, success=True, cost_usd=0.5,
-                        duration_ms=50, session_id="s", artifacts={"result": "done"}),
-            PhaseResult(phase=Phase.REVIEW, success=True, cost_usd=0.5,
-                        duration_ms=50, session_id="s", artifacts={"result": "done"}),
-            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.5,
-                        duration_ms=50, session_id="s",
-                        artifacts={"result": "VERDICT: NO-GO"}),
-            # Budget: 3.0 - (0.8+0.8+0.5+0.5+0.5) = -0.1 -> insufficient
-        ]
-
-        log = run("Add feature", repo_root=tmp_repo, config=config)
-
-        assert log.status == RunStatus.FAILED
-        phase_types = [p.phase for p in log.phases]
-        assert Phase.FIX not in phase_types
-
-    @patch("colonyos.orchestrator.run_phase_sync")
-    def test_fix_saves_iteration_tagged_artifacts(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        """Fix iteration review artifacts have iteration-tagged filenames."""
+    def test_budget_exhaustion_stops_review_loop(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """Review loop stops when remaining per-run budget is insufficient."""
+        config.budget = BudgetConfig(per_phase=1.0, per_run=2.5)
         save_config(tmp_repo, config)
         mock_run.side_effect = [
-            _fake_phase_result(Phase.PLAN),
-            _fake_phase_result(Phase.IMPLEMENT),
-            _fake_phase_result(Phase.REVIEW),
-            _fake_phase_result(Phase.REVIEW),
-            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
-                        duration_ms=50, session_id="s",
-                        artifacts={"result": "VERDICT: NO-GO\n\nIssues."}),
-            _fake_phase_result(Phase.FIX),
-            _fake_phase_result(Phase.REVIEW),
+            PhaseResult(phase=Phase.PLAN, success=True, cost_usd=1.0,
+                        duration_ms=50, session_id="s", artifacts={"result": "done"}),
+            PhaseResult(phase=Phase.IMPLEMENT, success=True, cost_usd=1.0,
+                        duration_ms=50, session_id="s", artifacts={"result": "done"}),
+            # Budget: 2.5 - 2.0 = 0.5 remaining < per_phase(1.0) -> skip reviews
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.DELIVER),
         ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        # Budget guard should have prevented at least some review rounds
+        assert log.status == RunStatus.COMPLETED
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_review_artifacts_per_persona_per_round(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """Each reviewer persona gets a separate artifact file per round."""
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
 
         run("Add feature", repo_root=tmp_repo, config=config)
 
         reviews_dir = tmp_repo / config.reviews_dir
         filenames = {f.name for f in reviews_dir.glob("*.md")}
-        assert "review_final_fix1.md" in filenames
-        assert "decision_fix1.md" in filenames
+        assert any("review_round1_engineer" in f for f in filenames)

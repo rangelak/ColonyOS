@@ -89,7 +89,10 @@ def collect_personas(existing: list[Persona] | None = None) -> list[Persona]:
             "Perspective (what does this person think about?)",
             default="",
         )
-        personas.append(Persona(role=role, expertise=expertise, perspective=perspective))
+        is_reviewer = click.confirm(
+            "Should this persona participate in code reviews?", default=True
+        )
+        personas.append(Persona(role=role, expertise=expertise, perspective=perspective, reviewer=is_reviewer))
 
         if len(personas) >= 3 and not click.confirm("Add another persona?", default=len(personas) < 5):
             break

@@ -9,10 +9,10 @@ from pathlib import Path
 
 from claude_agent_sdk import AgentDefinition
 
-from colonyos.agent import run_phase_sync
+from colonyos.agent import run_phase_sync, run_phases_parallel_sync
 from colonyos.config import ColonyConfig, runs_dir_path
 from colonyos.models import Persona, Phase, PhaseResult, RunLog, RunStatus
-from colonyos.naming import planning_names, proposal_names, review_names, slugify
+from colonyos.naming import planning_names, proposal_names, slugify
 
 
 def _log(msg: str) -> None:
@@ -70,27 +70,6 @@ def _build_persona_agents(personas: list[Persona]) -> dict[str, AgentDefinition]
     return agents
 
 
-def _build_review_persona_agents(personas: list[Persona]) -> dict[str, AgentDefinition]:
-    """Build an AgentDefinition per persona for the review phase (read-only tools)."""
-    agents: dict[str, AgentDefinition] = {}
-    for p in personas:
-        key = _persona_slug(p.role)
-        agents[key] = AgentDefinition(
-            description=f"{p.role} — {p.expertise} (reviewer)",
-            prompt=(
-                f"You are {p.role}.\n"
-                f"Expertise: {p.expertise}\n"
-                f"Perspective: {p.perspective}\n\n"
-                "You are reviewing an implementation. Examine the code from your "
-                "unique perspective. Provide a structured review with a verdict "
-                "(approve or request-changes), specific findings with file paths, "
-                "and a synthesis paragraph."
-            ),
-            tools=["Read", "Glob", "Grep"],
-        )
-    return agents
-
-
 def _format_personas_block(personas: list[Persona]) -> str:
     """Build a persona listing for the plan system prompt.
 
@@ -118,31 +97,6 @@ def _format_personas_block(personas: list[Persona]) -> str:
     lines.append(
         "After collecting all persona responses, synthesize their answers "
         "into the PRD. Highlight areas of agreement and tension between personas."
-    )
-    return "\n".join(lines)
-
-
-def _format_review_personas_block(personas: list[Persona]) -> str:
-    """Build a persona listing for the review system prompt."""
-    if not personas:
-        return (
-            "No project personas are defined. Review from the perspectives of: "
-            "a senior engineer, a security engineer, and a product lead."
-        )
-
-    lines = [
-        "The following expert personas are available as subagents for review. "
-        "Delegate the review to ALL persona subagents IN PARALLEL (call all Agent "
-        "tools at once). Each persona has read-only access to the codebase and "
-        "will review from their unique perspective.\n"
-    ]
-    for p in personas:
-        key = _persona_slug(p.role)
-        lines.append(f"- **`{key}`**: {p.role} — {p.expertise}")
-    lines.append("")
-    lines.append(
-        "After collecting all persona reviews, consolidate them into a single "
-        "review document with sections for each persona."
     )
     return "\n".join(lines)
 
@@ -190,27 +144,59 @@ def _build_implement_prompt(
     return system, user
 
 
-def _build_review_prompt(
+def _reviewer_personas(config: ColonyConfig) -> list[Persona]:
+    """Return only personas that have reviewer=True."""
+    return [p for p in config.personas if p.reviewer]
+
+
+def _build_persona_review_prompt(
+    persona: Persona,
     config: ColonyConfig,
     prd_path: str,
     branch_name: str,
-    task_description: str,
 ) -> tuple[str, str]:
-    """Build the system prompt and user prompt for the review phase."""
+    """Build a review prompt for a single persona with identity baked in."""
     review_template = _load_instruction("review.md")
 
     system = _format_base(config) + "\n\n" + review_template.format(
-        persona_block=_format_review_personas_block(config.personas),
+        reviewer_role=persona.role,
+        reviewer_expertise=persona.expertise,
+        reviewer_perspective=persona.perspective,
         prd_path=prd_path,
         branch_name=branch_name,
-        task_description=task_description,
     )
 
     user = (
-        f"Review the implementation on branch `{branch_name}` for the task: "
-        f"{task_description}\n\nPRD is at `{prd_path}`."
+        f"Review the implementation on branch `{branch_name}` against the PRD at "
+        f"`{prd_path}`. Assess the entire implementation holistically from your "
+        f"perspective as {persona.role}."
     )
     return system, user
+
+
+_REVIEW_VERDICT_RE = re.compile(
+    r"VERDICT:\s*(approve|request-changes)", re.IGNORECASE
+)
+
+
+def _extract_review_verdict(result_text: str) -> str:
+    """Extract VERDICT: approve or VERDICT: request-changes from review output."""
+    match = _REVIEW_VERDICT_RE.search(result_text)
+    return match.group(1).lower() if match else "request-changes"
+
+
+def _collect_review_findings(
+    results: list[PhaseResult],
+    reviewers: list[Persona],
+) -> list[tuple[str, str]]:
+    """Parse review results and return (role, full_text) for those requesting changes."""
+    findings: list[tuple[str, str]] = []
+    for persona, result in zip(reviewers, results):
+        text = result.artifacts.get("result", "")
+        verdict = _extract_review_verdict(text)
+        if verdict == "request-changes":
+            findings.append((persona.role, text))
+    return findings
 
 
 def _build_decision_prompt(
@@ -246,7 +232,7 @@ def _build_fix_prompt(
     prd_path: str,
     task_path: str,
     branch_name: str,
-    decision_text: str,
+    findings_text: str,
     fix_iteration: int,
 ) -> tuple[str, str]:
     """Build the system prompt and user prompt for the fix phase."""
@@ -257,13 +243,13 @@ def _build_fix_prompt(
         task_path=task_path,
         branch_name=branch_name,
         reviews_dir=config.reviews_dir,
-        decision_text=decision_text,
+        findings_text=findings_text,
         fix_iteration=fix_iteration,
         max_fix_iterations=config.max_fix_iterations,
     )
 
     user = (
-        f"Fix the issues identified in the decision gate for branch `{branch_name}`. "
+        f"Fix the issues identified by reviewers for branch `{branch_name}`. "
         f"This is fix iteration {fix_iteration} of {config.max_fix_iterations}. "
         f"The PRD is at `{prd_path}` and the task file is at `{task_path}`."
     )
@@ -518,129 +504,17 @@ def run(
         _log(f"Implement phase failed: {impl_result.error}")
         return log
 
-    # --- Phase 3: Review ---
+    # --- Phase 3: Review/Fix Loop ---
     if config.phases.review:
-        _log("=== Phase 3: Review ===")
+        reviewers = _reviewer_personas(config)
+        if not reviewers:
+            _log("No reviewer personas configured, skipping review phase")
+        else:
+            _log(f"=== Phase 3: Review ({len(reviewers)} reviewers) ===")
+            review_tools = ["Read", "Glob", "Grep", "Bash"]
+            last_findings: list[tuple[str, str]] = []
 
-        # Read the task file to extract parent tasks
-        task_path = repo_root / task_rel
-        parent_tasks: list[str] = []
-        if task_path.exists():
-            task_content = task_path.read_text(encoding="utf-8")
-            parent_tasks = _parse_parent_tasks(task_content)
-
-        if not parent_tasks:
-            parent_tasks = ["Full implementation review"]
-
-        r_names = review_names(prompt, task_count=len(parent_tasks))
-        review_agents = _build_review_persona_agents(config.personas) or None
-        if review_agents:
-            _log(f"  {len(review_agents)} persona subagents configured for review")
-
-        review_tools = ["Read", "Glob", "Grep", "Bash"]
-
-        # Per-task reviews
-        for i, task_desc in enumerate(parent_tasks):
-            _log(f"  Reviewing task {i + 1}/{len(parent_tasks)}: {task_desc[:60]}")
-            system, user_prompt = _build_review_prompt(
-                config, prd_rel, branch_name, task_desc
-            )
-            review_result = run_phase_sync(
-                Phase.REVIEW,
-                user_prompt,
-                cwd=repo_root,
-                system_prompt=system,
-                model=config.model,
-                budget_usd=config.budget.per_phase,
-                agents=review_agents,
-                allowed_tools=review_tools + (["Agent"] if review_agents else []),
-            )
-
-            # Save per-task review artifact
-            result_text = review_result.artifacts.get("result", "")
-            _save_review_artifact(
-                repo_root,
-                config.reviews_dir,
-                r_names.task_review_filenames[i],
-                f"# Task Review: {task_desc}\n\n{result_text}",
-            )
-
-            if not review_result.success:
-                log.phases.append(review_result)
-                log.status = RunStatus.FAILED
-                log.mark_finished()
-                _save_run_log(repo_root, log)
-                _log(f"Review phase failed on task {i + 1}: {review_result.error}")
-                return log
-
-        # Final holistic review
-        _log("  Running final holistic review...")
-        system, user_prompt = _build_review_prompt(
-            config,
-            prd_rel,
-            branch_name,
-            "Final holistic review: assess the entire implementation against the PRD, "
-            "covering cross-cutting concerns (security, performance, architecture, UX).",
-        )
-        final_review_result = run_phase_sync(
-            Phase.REVIEW,
-            user_prompt,
-            cwd=repo_root,
-            system_prompt=system,
-            model=config.model,
-            budget_usd=config.budget.per_phase,
-            agents=review_agents,
-            allowed_tools=review_tools + (["Agent"] if review_agents else []),
-        )
-
-        # Save final review artifact
-        final_text = final_review_result.artifacts.get("result", "")
-        _save_review_artifact(
-            repo_root,
-            config.reviews_dir,
-            r_names.final_review_filename,
-            f"# Final Holistic Review\n\n{final_text}",
-        )
-
-        log.phases.append(final_review_result)
-
-        if not final_review_result.success:
-            log.status = RunStatus.FAILED
-            log.mark_finished()
-            _save_run_log(repo_root, log)
-            _log(f"Review phase failed (holistic): {final_review_result.error}")
-            return log
-
-    # --- Decision Gate ---
-    if config.phases.review:
-        _log("=== Decision Gate ===")
-        system, user = _build_decision_prompt(config, prd_rel, branch_name)
-        decision_result = run_phase_sync(
-            Phase.DECISION,
-            user,
-            cwd=repo_root,
-            system_prompt=system,
-            model=config.model,
-            budget_usd=config.budget.per_phase,
-            allowed_tools=["Read", "Glob", "Grep", "Bash"],
-        )
-        log.phases.append(decision_result)
-
-        verdict_text = decision_result.artifacts.get("result", "")
-        verdict = _extract_verdict(verdict_text)
-        _log(f"  Decision: {verdict}")
-
-        decision_artifact = f"# Decision Gate\n\nVerdict: **{verdict}**\n\n{verdict_text}"
-        _save_review_artifact(
-            repo_root,
-            config.reviews_dir,
-            r_names.final_review_filename.replace("review_final", "decision"),
-            decision_artifact,
-        )
-
-        if verdict == "NO-GO" and config.max_fix_iterations > 0:
-            fix_succeeded = False
-            for fix_i in range(1, config.max_fix_iterations + 1):
+            for iteration in range(config.max_fix_iterations + 1):
                 # Budget guard
                 cost_so_far = sum(
                     p.cost_usd for p in log.phases if p.cost_usd is not None
@@ -648,136 +522,114 @@ def run(
                 remaining = config.budget.per_run - cost_so_far
                 if remaining < config.budget.per_phase:
                     _log(
-                        f"Fix loop: budget exhausted "
-                        f"({remaining:.2f} remaining). Pipeline failed."
+                        f"Review loop: budget exhausted "
+                        f"({remaining:.2f} remaining). Stopping reviews."
                     )
+                    break
+
+                _log(f"  Review round {iteration + 1}/{config.max_fix_iterations + 1}")
+
+                review_calls = []
+                for persona in reviewers:
+                    sys_prompt, usr_prompt = _build_persona_review_prompt(
+                        persona, config, prd_rel, branch_name
+                    )
+                    review_calls.append(dict(
+                        phase=Phase.REVIEW,
+                        prompt=usr_prompt,
+                        cwd=repo_root,
+                        system_prompt=sys_prompt,
+                        model=config.model,
+                        budget_usd=config.budget.per_phase,
+                        allowed_tools=review_tools,
+                    ))
+
+                results = run_phases_parallel_sync(review_calls)
+
+                # Save each persona's review artifact
+                for persona, result in zip(reviewers, results):
+                    p_slug = _persona_slug(persona.role)
+                    text = result.artifacts.get("result", "")
+                    fname = f"review_round{iteration + 1}_{p_slug}.md"
+                    _save_review_artifact(
+                        repo_root,
+                        config.reviews_dir,
+                        fname,
+                        f"# Review by {persona.role} (Round {iteration + 1})\n\n{text}",
+                    )
+                    log.phases.append(result)
+
+                last_findings = _collect_review_findings(results, reviewers)
+
+                if not last_findings:
+                    _log("  All reviewers approve")
                     break
 
                 _log(
-                    f"=== Fix Iteration {fix_i}/{config.max_fix_iterations} ==="
+                    f"  {len(last_findings)} reviewer(s) requested changes: "
+                    + ", ".join(role for role, _ in last_findings)
                 )
 
-                # Run fix phase
-                fix_system, fix_user = _build_fix_prompt(
-                    config,
-                    prd_rel,
-                    task_rel,
-                    branch_name,
-                    verdict_text,
-                    fix_i,
-                )
-                fix_result = run_phase_sync(
-                    Phase.FIX,
-                    fix_user,
-                    cwd=repo_root,
-                    system_prompt=fix_system,
-                    model=config.model,
-                    budget_usd=config.budget.per_phase,
-                )
-                log.phases.append(fix_result)
-
-                if not fix_result.success:
-                    _log(f"Fix phase failed: {fix_result.error}")
-                    break
-
-                # Re-run holistic review
-                _log("  Re-running holistic review...")
-                fix_review_system, fix_review_user = _build_review_prompt(
-                    config,
-                    prd_rel,
-                    branch_name,
-                    "Final holistic review: assess the entire implementation against the PRD, "
-                    "covering cross-cutting concerns (security, performance, architecture, UX).",
-                )
-                review_agents = (
-                    _build_review_persona_agents(config.personas) or None
-                )
-                fix_review_result = run_phase_sync(
-                    Phase.REVIEW,
-                    fix_review_user,
-                    cwd=repo_root,
-                    system_prompt=fix_review_system,
-                    model=config.model,
-                    budget_usd=config.budget.per_phase,
-                    agents=review_agents,
-                )
-
-                # Save fix-iteration review artifact
-                fix_review_text = fix_review_result.artifacts.get("result", "")
-                _save_review_artifact(
-                    repo_root,
-                    config.reviews_dir,
-                    f"review_final_fix{fix_i}.md",
-                    f"# Fix Iteration {fix_i} — Holistic Review\n\n{fix_review_text}",
-                )
-                log.phases.append(fix_review_result)
-
-                if not fix_review_result.success:
-                    _log(
-                        f"Review phase failed during fix iteration {fix_i}: "
-                        f"{fix_review_result.error}"
+                if iteration < config.max_fix_iterations:
+                    findings_text = "\n\n---\n\n".join(
+                        f"### {role}\n\n{text}" for role, text in last_findings
                     )
-                    break
-
-                # Re-run decision gate
-                fix_dec_system, fix_dec_user = _build_decision_prompt(
-                    config, prd_rel, branch_name
-                )
-                fix_decision_result = run_phase_sync(
-                    Phase.DECISION,
-                    fix_dec_user,
-                    cwd=repo_root,
-                    system_prompt=fix_dec_system,
-                    model=config.model,
-                    budget_usd=config.budget.per_phase,
-                    allowed_tools=["Read", "Glob", "Grep", "Bash"],
-                )
-                log.phases.append(fix_decision_result)
-
-                verdict_text = fix_decision_result.artifacts.get("result", "")
-                verdict = _extract_verdict(verdict_text)
-                _log(f"  Decision: {verdict}")
-
-                # Save fix-iteration decision artifact
-                fix_dec_artifact = (
-                    f"# Decision Gate (Fix Iteration {fix_i})\n\n"
-                    f"Verdict: **{verdict}**\n\n{verdict_text}"
-                )
-                _save_review_artifact(
-                    repo_root,
-                    config.reviews_dir,
-                    f"decision_fix{fix_i}.md",
-                    fix_dec_artifact,
-                )
-
-                if verdict == "GO":
-                    _log(
-                        f"Fix iteration {fix_i}: resolved NO-GO. "
-                        "Proceeding to deliver."
+                    fix_system, fix_user = _build_fix_prompt(
+                        config,
+                        prd_rel,
+                        task_rel,
+                        branch_name,
+                        findings_text,
+                        iteration + 1,
                     )
-                    fix_succeeded = True
-                    break
-
-            if not fix_succeeded:
-                if verdict != "GO":
-                    _log(
-                        f"Fix loop: all {config.max_fix_iterations} iterations "
-                        "exhausted. Pipeline failed."
+                    _log(f"  Running fix agent (iteration {iteration + 1})...")
+                    fix_result = run_phase_sync(
+                        Phase.FIX,
+                        fix_user,
+                        cwd=repo_root,
+                        system_prompt=fix_system,
+                        model=config.model,
+                        budget_usd=config.budget.per_phase,
                     )
+                    log.phases.append(fix_result)
+                    if not fix_result.success:
+                        _log(f"  Fix phase failed: {fix_result.error}")
+                        break
+
+            # --- Decision Gate ---
+            _log("=== Decision Gate ===")
+            system, user = _build_decision_prompt(config, prd_rel, branch_name)
+            decision_result = run_phase_sync(
+                Phase.DECISION,
+                user,
+                cwd=repo_root,
+                system_prompt=system,
+                model=config.model,
+                budget_usd=config.budget.per_phase,
+                allowed_tools=["Read", "Glob", "Grep", "Bash"],
+            )
+            log.phases.append(decision_result)
+
+            verdict_text = decision_result.artifacts.get("result", "")
+            verdict = _extract_verdict(verdict_text)
+            _log(f"  Decision: {verdict}")
+
+            _save_review_artifact(
+                repo_root,
+                config.reviews_dir,
+                f"decision_{slugify(prompt)}.md",
+                f"# Decision Gate\n\nVerdict: **{verdict}**\n\n{verdict_text}",
+            )
+
+            if verdict == "NO-GO":
                 log.status = RunStatus.FAILED
                 log.mark_finished()
                 _save_run_log(repo_root, log)
+                _log("Decision gate: NO-GO. Pipeline stopped before deliver.")
                 return log
 
-        elif verdict == "NO-GO":
-            log.status = RunStatus.FAILED
-            log.mark_finished()
-            _save_run_log(repo_root, log)
-            _log("Decision gate: NO-GO. Pipeline stopped before deliver.")
-            return log
-
-        if verdict == "UNKNOWN":
-            _log("  Warning: could not parse verdict, proceeding with caution")
+            if verdict == "UNKNOWN":
+                _log("  Warning: could not parse verdict, proceeding with caution")
 
     # --- Deliver Phase ---
     if config.phases.deliver:

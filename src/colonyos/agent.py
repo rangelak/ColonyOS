@@ -117,3 +117,14 @@ def run_phase_sync(
             allowed_tools=allowed_tools,
         )
     )
+
+
+async def run_phases_parallel(calls: list[dict]) -> list[PhaseResult]:
+    """Run multiple phase calls concurrently via asyncio.gather."""
+    tasks = [run_phase(**c) for c in calls]
+    return list(await asyncio.gather(*tasks))
+
+
+def run_phases_parallel_sync(calls: list[dict]) -> list[PhaseResult]:
+    """Synchronous wrapper for run_phases_parallel."""
+    return asyncio.run(run_phases_parallel(calls))

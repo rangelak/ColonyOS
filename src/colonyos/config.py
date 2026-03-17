@@ -61,6 +61,7 @@ def _parse_personas(raw: list[dict]) -> list[Persona]:
             role=p.get("role", ""),
             expertise=p.get("expertise", ""),
             perspective=p.get("perspective", ""),
+            reviewer=bool(p.get("reviewer", False)),
         )
         for p in raw
         if p.get("role")
@@ -74,6 +75,7 @@ def _parse_persona(raw: dict) -> Persona | None:
         role=raw.get("role", ""),
         expertise=raw.get("expertise", ""),
         perspective=raw.get("perspective", ""),
+        reviewer=bool(raw.get("reviewer", False)),
     )
 
 
@@ -141,6 +143,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
                 "role": p.role,
                 "expertise": p.expertise,
                 "perspective": p.perspective,
+                "reviewer": p.reviewer,
             }
             for p in config.personas
         ]
