@@ -32,32 +32,26 @@ REVIEWER_COLORS = [
 ]
 
 
+def _reviewer_color(index: int) -> str:
+    return REVIEWER_COLORS[index % len(REVIEWER_COLORS)]
+
+
 def make_reviewer_prefix(role: str, index: int) -> str:
-    """Build a short, colored prefix tag for a reviewer.
-
-    Turns 'Principal Systems Engineer (Google/Stripe caliber)' into
-    something like '[bright_cyan]PSE[/bright_cyan] '.
-    """
-    color = REVIEWER_COLORS[index % len(REVIEWER_COLORS)]
-    tag = _abbreviate_role(role)
-    return f"[{color}]{tag}[/{color}] "
+    """Build a short numbered prefix like '[cyan]R1[/cyan] '."""
+    color = _reviewer_color(index)
+    return f"[{color}]R{index + 1}[/{color}] "
 
 
-def _abbreviate_role(role: str) -> str:
-    """Shorten a role to a compact tag.
-
-    'Staff Security Engineer' -> 'SSE'
-    'Andrej Karpathy'        -> 'Andrej'
-    'Linus Torvalds'         -> 'Linus'
-    """
-    words = role.strip().split()
-    if len(words) <= 2:
-        return words[0]
-    # Strip parenthetical qualifiers
-    clean = role.split("(")[0].strip().split()
-    if all(w[0].isupper() and len(w) > 2 for w in clean):
-        return "".join(w[0] for w in clean)
-    return clean[0]
+def print_reviewer_legend(reviewers: list[tuple[int, str]]) -> None:
+    """Print legend mapping R1..RN -> full role name before review starts."""
+    console.print()
+    for i, role in reviewers:
+        color = _reviewer_color(i)
+        console.print(
+            f"  [{color}]R{i + 1}[/{color}] {role}",
+            highlight=False,
+        )
+    console.print()
 
 TOOL_ARG_KEYS: dict[str, list[str]] = {
     "Read": ["file_path", "path"],

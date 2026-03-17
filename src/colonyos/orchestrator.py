@@ -14,7 +14,7 @@ from colonyos.agent import run_phase_sync, run_phases_parallel_sync
 from colonyos.config import ColonyConfig, runs_dir_path
 from colonyos.models import Persona, Phase, PhaseResult, ResumeState, RunLog, RunStatus
 from colonyos.naming import generate_timestamp, planning_names, proposal_names, slugify
-from colonyos.ui import NullUI, PhaseUI, make_reviewer_prefix
+from colonyos.ui import NullUI, PhaseUI, make_reviewer_prefix, print_reviewer_legend
 
 # ---------------------------------------------------------------------------
 # Branch name validation
@@ -253,6 +253,7 @@ def run_review_loop(
             config.budget.per_phase,
             config.model,
         )
+        print_reviewer_legend([(i, p.role) for i, p in enumerate(reviewers)])
     else:
         _log(f"=== Review ({len(reviewers)} reviewers) ===")
 
