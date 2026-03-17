@@ -16,6 +16,13 @@ from colonyos.models import Persona, Phase, PhaseResult, ResumeState, RunLog, Ru
 from colonyos.naming import generate_timestamp, planning_names, proposal_names, slugify
 
 
+def _touch_heartbeat(repo_root: Path) -> None:
+    """Touch the heartbeat file to signal the orchestrator is alive."""
+    heartbeat_path = runs_dir_path(repo_root) / "heartbeat"
+    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat_path.touch()
+
+
 def _log(msg: str) -> None:
     print(f"[colonyos] {msg}", file=sys.stderr, flush=True)
 
@@ -662,6 +669,7 @@ def run(
     log.task_rel = task_rel
 
     # --- Phase 1: Plan ---
+    _touch_heartbeat(repo_root)
     if "plan" in skip_phases:
         _log("Skipping plan phase (already completed in previous run)")
     elif from_prd:
@@ -703,6 +711,7 @@ def run(
         return log
 
     # --- Phase 2: Implement ---
+    _touch_heartbeat(repo_root)
     if "implement" in skip_phases:
         _log("Skipping implement phase (already completed in previous run)")
     else:
@@ -726,6 +735,7 @@ def run(
             return log
 
     # --- Phase 3: Review/Fix Loop ---
+    _touch_heartbeat(repo_root)
     if "review" in skip_phases:
         _log("Skipping review phase (already completed in previous run)")
     elif config.phases.review:
@@ -855,6 +865,7 @@ def run(
                 _log("  Warning: could not parse verdict, proceeding with caution")
 
     # --- Deliver Phase ---
+    _touch_heartbeat(repo_root)
     if config.phases.deliver:
         phase_num = 5 if config.phases.review else 3
         _log(f"=== Phase {phase_num}: Deliver ===")

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class Phase(str, Enum):
@@ -19,6 +23,12 @@ class RunStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class LoopStatus(str, Enum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    INTERRUPTED = "interrupted"
 
 
 @dataclass(frozen=True)
@@ -87,4 +97,54 @@ class RunLog:
         self.finished_at = datetime.now(timezone.utc).isoformat()
         self.total_cost_usd = sum(
             p.cost_usd for p in self.phases if p.cost_usd is not None
+        )
+
+
+@dataclass
+class LoopState:
+    """Persistent state for long-running autonomous loops."""
+
+    loop_id: str
+    total_iterations: int
+    current_iteration: int = 0
+    aggregate_cost_usd: float = 0.0
+    start_time_iso: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    completed_run_ids: list[str] = field(default_factory=list)
+    failed_run_ids: list[str] = field(default_factory=list)
+    status: LoopStatus = LoopStatus.RUNNING
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "loop_id": self.loop_id,
+            "current_iteration": self.current_iteration,
+            "total_iterations": self.total_iterations,
+            "aggregate_cost_usd": self.aggregate_cost_usd,
+            "start_time_iso": self.start_time_iso,
+            "completed_run_ids": list(self.completed_run_ids),
+            "failed_run_ids": list(self.failed_run_ids),
+            "status": self.status.value,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LoopState:
+        raw_status = data.get("status", "running")
+        try:
+            status = LoopStatus(raw_status)
+        except ValueError:
+            logger.warning(
+                "Unknown loop status %r in persisted state, defaulting to RUNNING",
+                raw_status,
+            )
+            status = LoopStatus.RUNNING
+        return cls(
+            loop_id=data["loop_id"],
+            current_iteration=data.get("current_iteration", 0),
+            total_iterations=data.get("total_iterations", 0),
+            aggregate_cost_usd=data.get("aggregate_cost_usd", 0.0),
+            start_time_iso=data.get("start_time_iso", ""),
+            completed_run_ids=list(data.get("completed_run_ids", [])),
+            failed_run_ids=list(data.get("failed_run_ids", [])),
+            status=status,
         )

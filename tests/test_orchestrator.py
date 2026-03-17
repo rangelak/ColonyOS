@@ -1349,3 +1349,31 @@ class TestPrepareResume:
     def test_rejects_path_traversal(self, tmp_repo: Path):
         with pytest.raises(click.ClickException, match="must not contain"):
             prepare_resume(tmp_repo, "../../etc/passwd")
+
+
+class TestHeartbeat:
+    """Task 6.1: Tests for heartbeat file."""
+
+    def test_heartbeat_created_at_phase_start(self, tmp_repo: Path):
+        from colonyos.orchestrator import _touch_heartbeat
+        heartbeat_path = tmp_repo / ".colonyos" / "runs" / "heartbeat"
+        assert not heartbeat_path.exists()
+        _touch_heartbeat(tmp_repo)
+        assert heartbeat_path.exists()
+
+    def test_heartbeat_path_is_correct(self, tmp_repo: Path):
+        from colonyos.orchestrator import _touch_heartbeat
+        _touch_heartbeat(tmp_repo)
+        heartbeat_path = tmp_repo / ".colonyos" / "runs" / "heartbeat"
+        assert heartbeat_path.exists()
+
+    def test_heartbeat_touch_updates_mtime(self, tmp_repo: Path):
+        import time
+        from colonyos.orchestrator import _touch_heartbeat
+        _touch_heartbeat(tmp_repo)
+        heartbeat_path = tmp_repo / ".colonyos" / "runs" / "heartbeat"
+        mtime1 = heartbeat_path.stat().st_mtime
+        time.sleep(0.05)
+        _touch_heartbeat(tmp_repo)
+        mtime2 = heartbeat_path.stat().st_mtime
+        assert mtime2 >= mtime1
