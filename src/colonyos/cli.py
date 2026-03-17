@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
-import subprocess
 import sys
 import tempfile
 import time
@@ -12,16 +12,19 @@ from pathlib import Path
 import click
 
 from colonyos import __version__
-from colonyos.config import load_config, runs_dir_path
+from colonyos.config import ColonyConfig, load_config, runs_dir_path
 from colonyos.doctor import run_doctor_checks
 from colonyos.init import run_init
 from colonyos.models import LoopState, LoopStatus, RunLog, RunStatus
 from colonyos.naming import generate_timestamp
 from colonyos.orchestrator import (
+    _touch_heartbeat,
     run as run_orchestrator,
     run_ceo,
     prepare_resume,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _find_repo_root() -> Path:
@@ -184,12 +187,18 @@ def _save_loop_state(repo_root: Path, state: LoopState) -> Path:
     fd, tmp_path_str = tempfile.mkstemp(
         dir=str(runs_dir), suffix=".tmp", prefix="loop_state_",
     )
+    fd_closed = False
     try:
         os.write(fd, json.dumps(state.to_dict(), indent=2).encode("utf-8"))
         os.close(fd)
+        fd_closed = True
         os.replace(tmp_path_str, str(path))
     except BaseException:
-        os.close(fd) if not os.get_inheritable(fd) else None  # pragma: no cover
+        if not fd_closed:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         Path(tmp_path_str).unlink(missing_ok=True)
         raise
     return path
@@ -213,13 +222,6 @@ def _load_latest_loop_state(repo_root: Path) -> LoopState | None:
         return None
     data = json.loads(files[0].read_text(encoding="utf-8"))
     return LoopState.from_dict(data)
-
-
-def _touch_heartbeat(repo_root: Path) -> None:
-    """Touch the heartbeat file to signal activity in the auto loop."""
-    heartbeat_path = runs_dir_path(repo_root) / "heartbeat"
-    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
-    heartbeat_path.touch()
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +264,6 @@ def _init_or_resume_loop(
 
 def _compute_elapsed_hours(
     loop_state: LoopState,
-    session_start: float,
 ) -> float:
     """Compute total elapsed hours accounting for prior session time.
 
@@ -279,7 +280,7 @@ def _run_single_iteration(
     *,
     iteration: int,
     repo_root: Path,
-    config,
+    config: ColonyConfig,
     loop_state: LoopState,
     aggregate_cost: float,
     no_confirm: bool,
@@ -391,12 +392,11 @@ def auto(
         repo_root, resume_loop, loop_count,
     )
 
-    session_start = time.time()
     completed_iterations = 0
 
     for iteration in range(start_iteration, loop_count + 1):
         # --- Time cap check (total elapsed across all sessions) ---
-        elapsed_hours = _compute_elapsed_hours(loop_state, session_start)
+        elapsed_hours = _compute_elapsed_hours(loop_state)
         if elapsed_hours >= effective_max_hours:
             click.echo(
                 f"\nTime limit reached ({elapsed_hours:.1f}h / {effective_max_hours:.1f}h). "

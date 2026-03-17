@@ -12,7 +12,6 @@
   <a href="https://pypi.org/project/colonyos/"><img src="https://img.shields.io/pypi/v/colonyos?color=blue" alt="PyPI version" /></a>
   <a href="https://github.com/rangelak/ColonyOS/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" /></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue" alt="Python 3.11+" /></a>
-  <img src="https://img.shields.io/badge/build-passing-brightgreen" alt="Build Status" />
 </p>
 
 <p align="center">
@@ -233,10 +232,11 @@ Every feature in this repo was proposed, planned, implemented, reviewed, and shi
 
 | Feature | PRD |
 |---------|-----|
-| Persona packs & pack selection | `cOS_prds/` |
-| Parallel per-persona code review | `cOS_prds/` |
-| Resume failed runs | `cOS_prds/` |
-| CEO autonomous proposals | `cOS_prds/` |
+| Persona packs & pack selection | `cOS_prds/20260317_083203_prd_we_should_be_able_to_offer_the_users_prebuilt_personas_when_they_initialize.md` |
+| Parallel per-persona code review | `cOS_prds/20260317_090603_prd_persona_review_phase_and_cos_directory_prefix.md` |
+| Review-driven fix loop | `cOS_prds/20260317_144239_prd_add_a_review_driven_fix_loop_to_the_orchestrator_pipeline_when_the_decision_gate.md` |
+| Resume failed runs | `cOS_prds/20260317_155508_prd_add_a_resume_run_id_flag_to_colonyos_run_that_resumes_a_previously_failed_run_fr.md` |
+| CEO autonomous proposals | `cOS_prds/20260317_133813_prd_autonomous_ceo_stage.md` |
 | Developer onboarding & long-running loops | `cOS_prds/20260317_163656_prd_i_want_this_to_be_super_easy_to_set_up_if_you_re_a_dev_you_should_be_able_to_be.md` |
 
 Check the `cOS_prds/` and `cOS_proposals/` directories for the full history.

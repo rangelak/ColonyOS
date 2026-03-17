@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class Phase(str, Enum):
@@ -130,6 +133,10 @@ class LoopState:
         try:
             status = LoopStatus(raw_status)
         except ValueError:
+            logger.warning(
+                "Unknown loop status %r in persisted state, defaulting to RUNNING",
+                raw_status,
+            )
             status = LoopStatus.RUNNING
         return cls(
             loop_id=data["loop_id"],

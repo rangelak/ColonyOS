@@ -9,7 +9,7 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
-from colonyos.cli import app, _save_loop_state, _load_latest_loop_state
+from colonyos.cli import app, _save_loop_state, _load_latest_loop_state, _compute_elapsed_hours
 from colonyos.config import ColonyConfig, BudgetConfig, save_config
 from colonyos.models import (
     LoopState, LoopStatus, Persona, Phase, PhaseResult,
@@ -804,6 +804,26 @@ class TestLoopStateAtomicWrite:
         tmp_files = list(runs_dir.glob("*.tmp"))
         assert len(tmp_files) == 0
 
+    def test_save_cleans_up_on_replace_failure(self, tmp_path: Path):
+        """When os.replace raises, the temp file should be removed and fd closed."""
+        state = LoopState(loop_id="loop-fail", total_iterations=3)
+        with patch("os.replace", side_effect=OSError("mock replace error")):
+            with pytest.raises(OSError, match="mock replace error"):
+                _save_loop_state(tmp_path, state)
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        tmp_files = list(runs_dir.glob("*.tmp"))
+        assert len(tmp_files) == 0
+
+    def test_save_cleans_up_on_write_failure(self, tmp_path: Path):
+        """When os.write raises, the fd should still be closed and temp removed."""
+        state = LoopState(loop_id="loop-write-fail", total_iterations=3)
+        with patch("os.write", side_effect=OSError("mock write error")):
+            with pytest.raises(OSError, match="mock write error"):
+                _save_loop_state(tmp_path, state)
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        tmp_files = list(runs_dir.glob("*.tmp"))
+        assert len(tmp_files) == 0
+
 
 class TestLoadLatestLoopStateMtime:
     """Tests for mtime-based loop state loading."""
@@ -871,6 +891,42 @@ class TestLoopStatusEnum:
         }
         state = LoopState.from_dict(d)
         assert state.status == LoopStatus.RUNNING
+
+    def test_from_dict_unknown_status_logs_warning(self):
+        import logging
+        d = {
+            "loop_id": "test", "total_iterations": 1,
+            "status": "garbage",
+            "start_time_iso": "2026-01-01T00:00:00+00:00",
+        }
+        with patch("colonyos.models.logger") as mock_logger:
+            LoopState.from_dict(d)
+            mock_logger.warning.assert_called_once()
+            assert "garbage" in str(mock_logger.warning.call_args)
+
+
+class TestComputeElapsedHours:
+    """Tests for _compute_elapsed_hours without the dead session_start parameter."""
+
+    def test_computes_from_loop_state_start_time(self):
+        start = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        state = LoopState(
+            loop_id="test-elapsed",
+            total_iterations=5,
+            start_time_iso=start,
+        )
+        hours = _compute_elapsed_hours(state)
+        assert 1.9 < hours < 2.1
+
+    def test_recent_start_returns_near_zero(self):
+        start = datetime.now(timezone.utc).isoformat()
+        state = LoopState(
+            loop_id="test-recent",
+            total_iterations=5,
+            start_time_iso=start,
+        )
+        hours = _compute_elapsed_hours(state)
+        assert hours < 0.01
 
 
 class TestResumeLoopTimeCap:
