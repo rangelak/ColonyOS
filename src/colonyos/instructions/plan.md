@@ -12,9 +12,9 @@ Before generating any planning artifacts, explore the repository:
 - Identify the tech stack, frameworks, and patterns in use
 - Note existing tests and how they're structured
 
-### Step 2: Generate Clarifying Questions & Answers
+### Step 2: Generate Clarifying Questions & Persona Q&A
 
-Generate 6-10 clarifying questions about the feature request. For each question, answer it from the perspective of the project personas defined below. Consider:
+Generate 6-10 clarifying questions about the feature request. Consider:
 
 - **Problem/Goal**: What problem does this solve?
 - **Scope**: What's in and out of scope?
@@ -23,6 +23,8 @@ Generate 6-10 clarifying questions about the feature request. For each question,
 - **Risk**: What could go wrong?
 
 {personas_block}
+
+**IMPORTANT**: When persona subagents are available, call ALL of them IN PARALLEL using the Agent tool. Pass the full list of clarifying questions to each persona. Do NOT call them one at a time — invoke all Agent tools in a single response so they execute concurrently.
 
 ### Step 3: Write the PRD
 

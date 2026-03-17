@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from claude_agent_sdk import (
+    AgentDefinition,
     ClaudeAgentOptions,
     ResultMessage,
     query,
@@ -26,8 +27,13 @@ async def run_phase(
     model: str | None = None,
     budget_usd: float = 5.0,
     max_turns: int | None = None,
+    agents: dict[str, AgentDefinition] | None = None,
 ) -> PhaseResult:
     """Run a single phase by invoking Claude Code with the given prompt and instructions."""
+    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+    if agents:
+        allowed_tools.append("Agent")
+
     options = ClaudeAgentOptions(
         cwd=cwd,
         system_prompt=system_prompt,
@@ -35,6 +41,8 @@ async def run_phase(
         max_turns=max_turns,
         max_budget_usd=budget_usd,
         permission_mode="bypassPermissions",
+        allowed_tools=allowed_tools,
+        agents=agents,
     )
 
     _log(f"Starting {phase.value} phase (budget=${budget_usd:.2f})...")
@@ -90,6 +98,7 @@ def run_phase_sync(
     model: str | None = None,
     budget_usd: float = 5.0,
     max_turns: int | None = None,
+    agents: dict[str, AgentDefinition] | None = None,
 ) -> PhaseResult:
     """Synchronous wrapper around run_phase for use in non-async contexts."""
     return asyncio.run(
@@ -101,5 +110,6 @@ def run_phase_sync(
             model=model,
             budget_usd=budget_usd,
             max_turns=max_turns,
+            agents=agents,
         )
     )
