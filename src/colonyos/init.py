@@ -130,6 +130,7 @@ def run_init(repo_root: Path, *, personas_only: bool = False) -> ColonyConfig:
             branch_prefix=existing.branch_prefix,
             prds_dir=existing.prds_dir,
             tasks_dir=existing.tasks_dir,
+            reviews_dir=existing.reviews_dir,
         )
     else:
         project = collect_project_info()
@@ -155,27 +156,43 @@ def run_init(repo_root: Path, *, personas_only: bool = False) -> ColonyConfig:
             branch_prefix=existing.branch_prefix,
             prds_dir=existing.prds_dir,
             tasks_dir=existing.tasks_dir,
+            reviews_dir=existing.reviews_dir,
         )
 
     config_path = save_config(repo_root, config)
 
     prds_dir = repo_root / config.prds_dir
     tasks_dir = repo_root / config.tasks_dir
+    reviews_dir = repo_root / config.reviews_dir
     prds_dir.mkdir(parents=True, exist_ok=True)
     tasks_dir.mkdir(parents=True, exist_ok=True)
+    reviews_dir.mkdir(parents=True, exist_ok=True)
+
+    # Warn if old non-prefixed directories exist alongside new cOS_ dirs
+    for old_name, new_name in [("prds", config.prds_dir), ("tasks", config.tasks_dir)]:
+        old_dir = repo_root / old_name
+        if old_dir.exists() and old_name != new_name:
+            click.echo(
+                f"Warning: old '{old_name}/' directory exists alongside '{new_name}/'. "
+                f"Consider migrating your files.",
+                err=True,
+            )
 
     gitignore = repo_root / ".gitignore"
-    runs_entry = ".colonyos/runs/"
+    entries_needed = [".colonyos/runs/", "cOS_*/"]
     if gitignore.exists():
         content = gitignore.read_text(encoding="utf-8")
-        if runs_entry not in content:
+        additions = [e for e in entries_needed if e not in content]
+        if additions:
             with gitignore.open("a", encoding="utf-8") as f:
-                f.write(f"\n{runs_entry}\n")
+                for entry in additions:
+                    f.write(f"\n{entry}")
+                f.write("\n")
     else:
-        gitignore.write_text(f"{runs_entry}\n", encoding="utf-8")
+        gitignore.write_text("\n".join(entries_needed) + "\n", encoding="utf-8")
 
     click.echo(f"\nConfig saved to {config_path}")
-    click.echo(f"Created {prds_dir}/ and {tasks_dir}/ directories")
+    click.echo(f"Created {prds_dir}/, {tasks_dir}/, and {reviews_dir}/ directories")
     click.echo(f"Defined {len(config.personas)} personas")
     click.echo("\nRun `colonyos run \"<feature>\"` to start building.")
 

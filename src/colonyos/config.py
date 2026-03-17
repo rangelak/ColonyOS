@@ -14,10 +14,11 @@ RUNS_DIR = "runs"
 DEFAULTS = {
     "model": "sonnet",
     "budget": {"per_phase": 5.0, "per_run": 15.0},
-    "phases": {"plan": True, "implement": True, "deliver": True},
+    "phases": {"plan": True, "implement": True, "review": True, "deliver": True},
     "branch_prefix": "colonyos/",
-    "prds_dir": "prds",
-    "tasks_dir": "tasks",
+    "prds_dir": "cOS_prds",
+    "tasks_dir": "cOS_tasks",
+    "reviews_dir": "cOS_reviews",
 }
 
 
@@ -31,6 +32,7 @@ class BudgetConfig:
 class PhasesConfig:
     plan: bool = True
     implement: bool = True
+    review: bool = True
     deliver: bool = True
 
 
@@ -42,8 +44,9 @@ class ColonyConfig:
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     phases: PhasesConfig = field(default_factory=PhasesConfig)
     branch_prefix: str = "colonyos/"
-    prds_dir: str = "prds"
-    tasks_dir: str = "tasks"
+    prds_dir: str = "cOS_prds"
+    tasks_dir: str = "cOS_tasks"
+    reviews_dir: str = "cOS_reviews"
 
 
 def _parse_personas(raw: list[dict]) -> list[Persona]:
@@ -89,11 +92,13 @@ def load_config(repo_root: Path) -> ColonyConfig:
         phases=PhasesConfig(
             plan=bool(phases_raw.get("plan", True)),
             implement=bool(phases_raw.get("implement", True)),
+            review=bool(phases_raw.get("review", True)),
             deliver=bool(phases_raw.get("deliver", True)),
         ),
         branch_prefix=raw.get("branch_prefix", DEFAULTS["branch_prefix"]),
         prds_dir=raw.get("prds_dir", DEFAULTS["prds_dir"]),
         tasks_dir=raw.get("tasks_dir", DEFAULTS["tasks_dir"]),
+        reviews_dir=raw.get("reviews_dir", DEFAULTS["reviews_dir"]),
     )
 
 
@@ -128,11 +133,13 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
     data["phases"] = {
         "plan": config.phases.plan,
         "implement": config.phases.implement,
+        "review": config.phases.review,
         "deliver": config.phases.deliver,
     }
     data["branch_prefix"] = config.branch_prefix
     data["prds_dir"] = config.prds_dir
     data["tasks_dir"] = config.tasks_dir
+    data["reviews_dir"] = config.reviews_dir
 
     config_path = config_dir / CONFIG_FILE
     config_path.write_text(

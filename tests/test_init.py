@@ -1,10 +1,12 @@
+from pathlib import Path
 from unittest.mock import patch, call
 
 import pytest
 import click
 
-from colonyos.models import Persona
-from colonyos.init import select_persona_pack, _collect_personas_with_packs
+from colonyos.config import ColonyConfig, save_config
+from colonyos.models import Persona, ProjectInfo
+from colonyos.init import select_persona_pack, _collect_personas_with_packs, run_init
 from colonyos.persona_packs import PACKS
 
 
@@ -96,3 +98,64 @@ class TestCollectPersonasWithPacks:
 
         mock_collect.assert_called_once_with(existing)
         assert result == existing
+
+
+class TestRunInitReviewsDir:
+    def test_creates_reviews_dir(self, tmp_path: Path):
+        """run_init creates the reviews directory."""
+        with patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+            mock_click.prompt.side_effect = ["TestApp", "A test app", "Python", "sonnet"]
+            mock_click.echo = click.echo
+            mock_personas.return_value = [
+                Persona(role="Engineer", expertise="Backend", perspective="Scale")
+            ]
+            # Budget prompts
+            mock_click.prompt.side_effect = [
+                "TestApp", "A test app", "Python", "sonnet", 5.0, 15.0
+            ]
+            config = run_init(tmp_path)
+
+        reviews_dir = tmp_path / config.reviews_dir
+        assert reviews_dir.exists()
+        assert reviews_dir.is_dir()
+
+    def test_gitignore_has_cos_pattern(self, tmp_path: Path):
+        """run_init adds cOS_*/ pattern to .gitignore."""
+        with patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+            mock_click.prompt.side_effect = [
+                "TestApp", "A test app", "Python", "sonnet", 5.0, 15.0
+            ]
+            mock_click.echo = click.echo
+            mock_personas.return_value = [
+                Persona(role="Engineer", expertise="Backend", perspective="Scale")
+            ]
+            run_init(tmp_path)
+
+        gitignore = tmp_path / ".gitignore"
+        assert gitignore.exists()
+        content = gitignore.read_text(encoding="utf-8")
+        assert "cOS_*/" in content
+        assert ".colonyos/runs/" in content
+
+    def test_warns_on_old_dirs(self, tmp_path: Path, capsys):
+        """run_init warns if old prds/ or tasks/ dirs exist alongside cOS_ dirs."""
+        (tmp_path / "prds").mkdir()
+        (tmp_path / "tasks").mkdir()
+
+        with patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+            mock_click.prompt.side_effect = [
+                "TestApp", "A test app", "Python", "sonnet", 5.0, 15.0
+            ]
+            # Use real echo so we can capture stderr output
+            mock_click.echo = click.echo
+            mock_personas.return_value = [
+                Persona(role="Engineer", expertise="Backend", perspective="Scale")
+            ]
+            run_init(tmp_path)
+
+        captured = capsys.readouterr()
+        assert "old 'prds/'" in captured.err
+        assert "old 'tasks/'" in captured.err

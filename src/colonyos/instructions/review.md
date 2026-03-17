@@ -2,6 +2,8 @@
 
 You are reviewing the implementation on branch `{branch_name}` against the PRD at `{prd_path}`.
 
+{persona_block}
+
 ## Review Checklist
 
 ### Completeness
@@ -21,18 +23,22 @@ You are reviewing the implementation on branch `{branch_name}` against the PRD a
 - [ ] No destructive database operations without safeguards
 - [ ] Error handling is present for failure cases
 
+## Task Under Review
+
+{task_description}
+
 ## Process
 
-1. Read the PRD requirements
+1. Read the PRD requirements at `{prd_path}`
 2. Review the git diff on the branch (`git diff main...HEAD`)
-3. Run the test suite
-4. Check each item on the review checklist
-5. If issues are found, fix them directly and commit
+3. Check each item on the review checklist from your unique perspective
+4. Produce a structured review with your verdict
 
-## Output
+## Output Format
 
-After review, provide a summary:
-- Requirements met: X/Y
-- Tests: pass/fail
-- Issues found and fixed: list
-- Remaining concerns: list (if any)
+Produce your review in exactly this format:
+
+- **Verdict**: approve | request-changes
+- **Findings**:
+  - [file path]: description of finding
+- **Synthesis**: A paragraph summarizing your overall assessment from your perspective.

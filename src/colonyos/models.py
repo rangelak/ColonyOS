@@ -8,6 +8,7 @@ from enum import Enum
 class Phase(str, Enum):
     PLAN = "plan"
     IMPLEMENT = "implement"
+    REVIEW = "review"
     DELIVER = "deliver"
 
 

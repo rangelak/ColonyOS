@@ -39,7 +39,9 @@ budget:
 phases:
   plan: true
   implement: true
+  review: true
   deliver: true
 branch_prefix: colonyos/
-prds_dir: prds
-tasks_dir: tasks
+prds_dir: cOS_prds
+tasks_dir: cOS_tasks
+reviews_dir: cOS_reviews

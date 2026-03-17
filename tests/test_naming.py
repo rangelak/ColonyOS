@@ -4,7 +4,9 @@ import pytest
 
 from colonyos.naming import (
     PlanningNames,
+    ReviewNames,
     planning_names,
+    review_names,
     slugify,
     task_filename_from_prd,
     generate_timestamp,
@@ -45,6 +47,36 @@ class TestPlanningNames:
         names = planning_names("test", timestamp="20260101_000000")
         with pytest.raises(AttributeError):
             names.slug = "changed"
+
+
+class TestReviewNames:
+    def test_generates_task_review_filenames(self):
+        names = review_names("Add auth", task_count=3, timestamp="20260317_090000")
+        assert names.timestamp == "20260317_090000"
+        assert names.slug == "add_auth"
+        assert len(names.task_review_filenames) == 3
+        assert names.task_review_filenames[0] == "20260317_090000_review_task_1_add_auth.md"
+        assert names.task_review_filenames[1] == "20260317_090000_review_task_2_add_auth.md"
+        assert names.task_review_filenames[2] == "20260317_090000_review_task_3_add_auth.md"
+
+    def test_generates_final_review_filename(self):
+        names = review_names("Add auth", task_count=2, timestamp="20260317_090000")
+        assert names.final_review_filename == "20260317_090000_review_final_add_auth.md"
+
+    def test_auto_timestamp(self):
+        names = review_names("feature", task_count=1)
+        assert len(names.timestamp) == 15
+        assert names.task_review_filenames[0].startswith(names.timestamp)
+
+    def test_frozen(self):
+        names = review_names("test", task_count=1, timestamp="20260101_000000")
+        with pytest.raises(AttributeError):
+            names.slug = "changed"
+
+    def test_zero_tasks(self):
+        names = review_names("test", task_count=0, timestamp="20260101_000000")
+        assert names.task_review_filenames == ()
+        assert names.final_review_filename == "20260101_000000_review_final_test.md"
 
 
 class TestTaskFilenameFromPrd:

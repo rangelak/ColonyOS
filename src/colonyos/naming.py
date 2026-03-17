@@ -18,6 +18,14 @@ class PlanningNames:
     task_filename: str
 
 
+@dataclass(frozen=True)
+class ReviewNames:
+    timestamp: str
+    slug: str
+    task_review_filenames: tuple[str, ...]
+    final_review_filename: str
+
+
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", value.lower())
     slug = re.sub(r"_+", "_", slug).strip("_")
@@ -40,6 +48,25 @@ def planning_names(
         slug=slug,
         prd_filename=f"{ts}_prd_{slug}.md",
         task_filename=f"{ts}_tasks_{slug}.md",
+    )
+
+
+def review_names(
+    feature_name: str,
+    *,
+    task_count: int,
+    timestamp: str | None = None,
+) -> ReviewNames:
+    ts = timestamp or generate_timestamp()
+    slug = slugify(feature_name)
+    task_filenames = tuple(
+        f"{ts}_review_task_{i}_{slug}.md" for i in range(1, task_count + 1)
+    )
+    return ReviewNames(
+        timestamp=ts,
+        slug=slug,
+        task_review_filenames=task_filenames,
+        final_review_filename=f"{ts}_review_final_{slug}.md",
     )
 
 

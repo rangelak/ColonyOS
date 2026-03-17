@@ -6,6 +6,7 @@ import yaml
 from colonyos.config import (
     ColonyConfig,
     BudgetConfig,
+    DEFAULTS,
     PhasesConfig,
     load_config,
     save_config,
@@ -26,9 +27,11 @@ class TestLoadConfig:
         assert config.budget.per_run == 15.0
         assert config.phases.plan is True
         assert config.phases.implement is True
+        assert config.phases.review is True
         assert config.phases.deliver is True
-        assert config.prds_dir == "prds"
-        assert config.tasks_dir == "tasks"
+        assert config.prds_dir == "cOS_prds"
+        assert config.tasks_dir == "cOS_tasks"
+        assert config.reviews_dir == "cOS_reviews"
         assert config.personas == []
         assert config.project is None
 
@@ -51,10 +54,11 @@ class TestLoadConfig:
                 ],
                 "model": "claude-opus-4-20250514",
                 "budget": {"per_phase": 10.0, "per_run": 30.0},
-                "phases": {"plan": True, "implement": True, "deliver": False},
+                "phases": {"plan": True, "implement": True, "review": False, "deliver": False},
                 "branch_prefix": "feat/",
                 "prds_dir": "docs/prds",
                 "tasks_dir": "docs/tasks",
+                "reviews_dir": "docs/reviews",
             }),
             encoding="utf-8",
         )
@@ -67,8 +71,10 @@ class TestLoadConfig:
         assert config.personas[0].role == "Engineer"
         assert config.model == "claude-opus-4-20250514"
         assert config.budget.per_phase == 10.0
+        assert config.phases.review is False
         assert config.phases.deliver is False
         assert config.prds_dir == "docs/prds"
+        assert config.reviews_dir == "docs/reviews"
 
     def test_ignores_personas_without_role(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
@@ -86,6 +92,36 @@ class TestLoadConfig:
         assert len(config.personas) == 1
         assert config.personas[0].role == "Valid"
 
+    def test_existing_config_without_review_fields_gets_defaults(self, tmp_repo: Path):
+        """Existing configs missing review/reviews_dir fields get defaults."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "model": "sonnet",
+                "phases": {"plan": True, "implement": True, "deliver": True},
+                "prds_dir": "prds",
+                "tasks_dir": "tasks",
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.phases.review is True
+        assert config.reviews_dir == "cOS_reviews"
+        # Existing explicit values preserved
+        assert config.prds_dir == "prds"
+        assert config.tasks_dir == "tasks"
+
+
+class TestDefaults:
+    def test_defaults_have_cos_prefix(self):
+        assert DEFAULTS["prds_dir"] == "cOS_prds"
+        assert DEFAULTS["tasks_dir"] == "cOS_tasks"
+        assert DEFAULTS["reviews_dir"] == "cOS_reviews"
+
+    def test_defaults_have_review_phase(self):
+        assert DEFAULTS["phases"]["review"] is True
+
 
 class TestSaveConfig:
     def test_roundtrip(self, tmp_repo: Path):
@@ -96,10 +132,11 @@ class TestSaveConfig:
             ],
             model="test-model",
             budget=BudgetConfig(per_phase=2.0, per_run=6.0),
-            phases=PhasesConfig(plan=True, implement=False, deliver=True),
+            phases=PhasesConfig(plan=True, implement=False, review=True, deliver=True),
             branch_prefix="test/",
             prds_dir="p",
             tasks_dir="t",
+            reviews_dir="r",
         )
 
         save_config(tmp_repo, original)
@@ -111,4 +148,22 @@ class TestSaveConfig:
         assert loaded.model == "test-model"
         assert loaded.budget.per_phase == 2.0
         assert loaded.phases.implement is False
+        assert loaded.phases.review is True
         assert loaded.prds_dir == "p"
+        assert loaded.reviews_dir == "r"
+
+    def test_roundtrip_review_disabled(self, tmp_repo: Path):
+        original = ColonyConfig(
+            phases=PhasesConfig(review=False),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.phases.review is False
+
+    def test_reviews_dir_persisted(self, tmp_repo: Path):
+        original = ColonyConfig(reviews_dir="custom_reviews")
+        save_config(tmp_repo, original)
+
+        config_path = tmp_repo / ".colonyos" / "config.yaml"
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert raw["reviews_dir"] == "custom_reviews"
