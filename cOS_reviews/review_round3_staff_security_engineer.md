@@ -1,37 +1,21 @@
 # Review by Staff Security Engineer (Round 3)
 
-Now I have a comprehensive view. Let me compile my review.
+All tasks are marked complete, all tests pass, no TODO/FIXME in source. Let me now write my review.
 
 ---
-
-## Security Review: Developer Onboarding, README Overhaul & Long-Running Autonomous Loops
-
-### Completeness Check
-
-All 23 functional requirements (FR-1 through FR-23) are implemented:
-- **FR-1–4**: `colonyos doctor` with all 5 checks, exit codes, and `init` pre-check ✓
-- **FR-5–6**: `--quick` flag with first persona pack, defaults, next-step message ✓
-- **FR-7–14**: README badges, Zero to PR, Built by ColonyOS, prerequisites, doctor reference, pipx, philosophy, collapsible Claude Code guide ✓
-- **FR-15–22**: Hard cap removed, `max_duration_hours`/`max_total_usd` in config, CLI flags, loop state persistence, `--resume-loop`, continue-on-failure, heartbeat ✓
-- **FR-23**: Status command shows loop summaries and heartbeat staleness ✓
-
-All 8 task groups marked complete in the task file. 257 tests pass.
-
-### Security Findings
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/doctor.py]: Doctor correctly does not cache or persist credentials — it only tests liveness via subprocess with 10-second timeouts. Good. However, `capture_output=True` silently discards stderr/stdout from `gh auth status`, which could contain token fragments in debug output. This is actually the correct behavior — we don't want to echo credential-adjacent output.
-- [src/colonyos/cli.py L186-203]: `_save_loop_state` uses atomic write (tempfile + os.replace) with proper fd cleanup on failure. This prevents truncated checkpoint files from corrupting loop state on crash. Well done.
-- [src/colonyos/cli.py L388-389]: Budget and time caps resolve via CLI flags > config > defaults chain. No way to disable caps entirely (setting 0 would trigger immediate exit, not bypass). This is the correct safety behavior — there is no "unlimited" mode.
-- [src/colonyos/cli.py L324-327]: The `no_confirm` flag and `auto_approve` config bypass the human approval checkpoint during loops. The PRD acknowledges this is by design, but combined with `bypassPermissions`, a malicious CEO prompt (or a model hallucination) could trigger arbitrary code execution across many iterations. The time/budget caps are the safety net here — they work, but they are reactive (stop after damage), not preventive.
-- [README.md]: A dedicated "Security Model" section now explicitly documents `bypassPermissions`, advising users to use budget caps and review PRs before merging. This addresses the informed-consent requirement from the PRD. Good.
-- [src/colonyos/init.py L258-269]: `.gitignore` is updated to include `.colonyos/runs/` and `cOS_*/`, preventing accidental commit of run logs (which may contain session IDs and cost data). Correct.
-- [src/colonyos/models.py]: `LoopState.from_dict` gracefully handles unknown `status` values by defaulting to `RUNNING` with a warning log. This prevents a corrupted or hand-edited loop state file from crashing the process.
-- [src/colonyos/config.py]: `save_config` writes YAML via `yaml.dump` without `yaml.safe_dump`. However, the data dict is constructed entirely from typed Python primitives (str, float, bool, list, dict) — no arbitrary objects are serialized. Loading uses `yaml.safe_load`. No deserialization risk.
-- [src/colonyos/orchestrator.py]: Heartbeat touches happen at phase boundaries only (not via background thread), which is the simpler and safer approach. A stuck agent within a phase won't update the heartbeat, so the 5-minute staleness check in `status` will correctly flag it.
-- [tests/]: No secrets, credentials, or API keys in test fixtures. Mock patterns correctly isolate subprocess calls.
+- [src/colonyos/orchestrator.py]: **POSITIVE — Bash tool removed from reviewer and decision-gate agents.** The `review_tools` list was hardened from `["Read", "Glob", "Grep", "Bash"]` to `["Read", "Glob", "Grep"]`, and the decision gate likewise lost Bash access. This is a significant least-privilege improvement — reviewer personas are read-only assessors and should never need shell access. Tests explicitly assert this (`test_review_tools_exclude_bash`, `test_decision_gate_tools_exclude_bash`).
+- [src/colonyos/orchestrator.py]: **POSITIVE — Branch name validation (defense-in-depth).** `_validate_branch_name()` rejects leading dashes (flag injection), `..` (path traversal), and shell metacharacters before any branch name is used in `subprocess.run` calls. Both the target branch and base branch are validated. This is exactly the right pattern for preventing argument injection in git commands.
+- [src/colonyos/orchestrator.py]: **POSITIVE — subprocess calls use list-form (no shell=True).** All `subprocess.run` invocations pass arguments as lists, not strings, preventing shell injection even if validation were bypassed. No `shell=True` anywhere.
+- [src/colonyos/orchestrator.py]: **NOTE — Fix agent has unrestricted tool access (no `allowed_tools` set).** The fix agent (both standalone and pipeline) runs without an explicit tool allowlist, meaning it gets default tools including Bash/Write/Edit. This is intentional — the fix agent needs to modify code — and the `--fix` flag is opt-in. The PRD explicitly defers tool restriction to a future `--ci` mode. Acceptable for v1 but should be revisited.
+- [src/colonyos/orchestrator.py]: **NOTE — `_build_review_run_id` uses SHA1 for branch hashing.** SHA1 is fine here — it's just for ID uniqueness, not security. The 10-char prefix is sufficient.
+- [src/colonyos/cli.py]: **POSITIVE — Pre-flight clean-tree check for `--fix`.** When `--fix` is enabled, the command verifies `git status --porcelain` is clean before proceeding, preventing the fix agent from silently including unrelated uncommitted changes.
+- [src/colonyos/instructions/fix_standalone.md]: No credential references, no instructions to fetch external resources, no exfiltration vectors. The template is properly scoped to the local repo.
+- [src/colonyos/instructions/review_standalone.md]: Includes "No secrets or credentials in committed code" in the review checklist — good practice for catching accidental secret commits.
+- [src/colonyos/cli.py]: **MINOR — Private functions exported from orchestrator.** `_extract_review_verdict`, `_reviewer_personas`, `_save_run_log` are underscore-prefixed private functions being imported into `cli.py`. This is a code-hygiene concern, not a security issue — these should ideally be public API or the verdict-extraction logic should live in `cli.py`. Not blocking.
 
 SYNTHESIS:
-From a supply-chain security and least-privilege perspective, this implementation is solid for its maturity level. The critical security controls are all present: budget caps cannot be disabled (only raised), time caps apply across resume sessions, loop state writes are atomic, credential-checking (`doctor`) is read-only and doesn't persist sensitive output, and the README now provides informed consent about the `bypassPermissions` trust model. The continue-on-failure behavior (FR-21) is implemented correctly — failed iterations are logged and skipped rather than retried, which prevents the "agent stuck in a destructive loop" scenario the PRD identified. The main residual risk is that `auto_approve: true` + `--no-confirm` + high budget caps allows extended unsupervised autonomous execution with full filesystem/git/GitHub permissions. The implemented caps are a necessary but not sufficient defense — they stop the bleeding but don't prevent the cut. For v1.0+, I'd recommend: (1) a per-iteration cost anomaly detector (flag iterations 10x the median), (2) file-path allow/deny lists for write operations, and (3) optional git-branch-per-iteration isolation. But for the current scope, the implementation meets the PRD requirements and the security considerations it prescribed. Approve.
+From a security perspective, this implementation is solid and represents a net improvement over the baseline. The most impactful change is the removal of Bash tool access from reviewer and decision-gate agents — these are read-only assessors that had no business having shell access, and this was correctly identified and hardened. The branch name validation is thorough defense-in-depth against argument injection, and all subprocess calls use the safe list-form. The fix agent retains full tool access by design (it needs to write code), but this is gated behind an explicit `--fix` opt-in flag with a clean-tree precondition. There are no secrets, credentials, or exfiltration vectors in the instruction templates. The audit trail via `RunLog` and review artifacts in `cOS_reviews/` provides reasonable observability into what the agent did. The only forward-looking concern is that the fix agent in `--fix` mode has unrestricted Bash access in a standalone review context, which should be restricted when the planned `--ci` mode is implemented. All 205 tests pass, including dedicated tests for the security-relevant behaviors (tool restrictions, branch name validation, flag injection rejection).

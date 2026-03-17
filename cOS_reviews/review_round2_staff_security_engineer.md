@@ -1,22 +1,69 @@
 # Review by Staff Security Engineer (Round 2)
 
-I now have a comprehensive understanding of the implementation. Let me compile my review.
+Confirmed. Here is my complete review:
 
 ---
 
-VERDICT: approve
+## Review: Staff Security Engineer Perspective
+
+### Completeness
+
+**All 8 task groups are marked complete and the implementation covers all PRD requirements:**
+
+- FR-1 through FR-6: CLI command registered with correct arguments/options ✅
+- FR-7/FR-8: Base branch detection with fallback chain ✅
+- FR-9 through FR-11: Standalone review template and prompt builder ✅
+- FR-12 through FR-14: `run_review_loop()` extracted and shared ✅
+- FR-15/FR-16: Standalone fix template ✅
+- FR-17 through FR-19: Artifact naming ✅
+- FR-20 through FR-23: Run logging with `review-` prefix ✅
+- FR-24/FR-25: Rich summary table ✅
+- FR-26/FR-27: Exit codes ✅
+- FR-28 through FR-30: Pre-flight checks ✅
+
+### Quality & Safety Findings
+
+**CRITICAL: Missing `Phase` import in `cli.py` (runtime crash)**
+
+`cli.py:381` references `Phase.REVIEW` but `Phase` is not imported at the top of the file. The import on line 18 is:
+```python
+from colonyos.models import LoopState, LoopStatus, RunLog, RunStatus
+```
+`Phase` is absent. This will cause a `NameError` at runtime **in every non-mocked execution** of the `review` command. The bug is latent in tests because all CLI tests mock `run_review_loop`, leaving `log.phases` empty — meaning the list comprehension body never executes and `Phase.REVIEW` is never evaluated. This is a **test coverage blind spot**: the tests pass but the production code path crashes.
+
+**POSITIVE: Strong input validation and least-privilege enforcement**
+
+1. **Branch name validation** (`_validate_branch_name`): Rejects names starting with `-` (flag injection), containing `..` (path traversal), or disallowed characters. Applied to both the target branch *and* the base branch. This is defense-in-depth against command injection via `subprocess.run(["git", ...])`.
+
+2. **Reviewer agents restricted to read-only tools**: `review_tools = ["Read", "Glob", "Grep"]` — no Bash, Write, or Edit. This correctly enforces the principle that reviewers are read-only assessors and cannot modify the repository or exfiltrate data via shell commands.
+
+3. **Decision gate agent also restricted to read-only tools**: `allowed_tools=["Read", "Glob", "Grep"]` in the decision gate call. Good.
+
+4. **Clean working tree check for `--fix`** (FR-30): Prevents the fix agent from silently including unrelated uncommitted changes. Sound safety measure.
+
+**CONCERN (Medium): Fix agent has unrestricted tool access**
+
+In `run_review_loop()` line 352-360, the fix phase call to `run_phase_sync(Phase.FIX, ...)` does **not** pass an `allowed_tools` parameter, meaning the fix agent gets the full default tool set including `Bash`. A crafted review finding (from a malicious instruction template or prompt injection in review output) could influence the fix agent to execute arbitrary shell commands. The PRD explicitly acknowledges this as deferred to a future `--ci` mode, and `--fix` is opt-in, so this is acceptable for v1 but should be documented as a known risk.
+
+**CONCERN (Low): No audit trail of tool permissions per phase**
+
+The run log records phase names, costs, and durations, but not which tool permissions were granted to each agent. For post-hoc security auditing ("did the fix agent have Bash access?"), you'd need to read the source code. A future enhancement could log `allowed_tools` per phase result.
+
+### Tests
+
+- **204 tests pass**, 0 failures
+- Good coverage of: base branch detection, precondition validation, prompt construction, artifact naming, exit codes, branch name validation, and the review loop mechanics
+- **Blind spot**: No integration-style test where `run_review_loop` actually populates `log.phases` before the verdict computation in the `review` CLI command. This is why the `Phase` import bug wasn't caught.
+
+---
+
+VERDICT: request-changes
 
 FINDINGS:
-- [src/colonyos/orchestrator.py:453-461]: **Good: Path traversal protection on run_id**. `_validate_run_id()` rejects `/`, `\`, and `..` in run IDs. Additionally, `_load_run_log()` at line 478-481 does a resolved-path containment check. This is defense-in-depth — well done.
-- [src/colonyos/orchestrator.py:464-471]: **Good: Relative path containment validation**. `_validate_rel_path()` verifies that `prd_rel` and `task_rel` from the JSON cannot escape the repo root via symlink or `..` traversal. This is critical because these paths are fed into agent instructions and the orchestrator trusts them.
-- [src/colonyos/orchestrator.py:540-543]: **Good: Git argument injection prevention**. The `--` terminator before `log.branch_name` in `["git", "branch", "--list", "--", log.branch_name]` prevents a malicious branch name like `--delete` from being interpreted as a flag. Tested explicitly in `TestGitBranchArgTermination`.
-- [src/colonyos/orchestrator.py:407-418]: **Good: Audit trail for resume events**. The `resume_events` list with ISO timestamps provides an audit trail of when a run was resumed. This enables post-incident investigation of abuse patterns.
-- [src/colonyos/orchestrator.py:527-533]: **Good: Status gating**. Only `FAILED` runs can be resumed — blocking resume of `RUNNING` (which could cause concurrent execution of the same run) or `COMPLETED` runs (which could re-execute deliver/push).
-- [src/colonyos/orchestrator.py:416-418]: **Minor: datetime import inside function**. The `from datetime import datetime, timezone` import at line 417 is inside the `if resumed:` block. This is a lazy import pattern — not a security issue, but `datetime` is already imported at module level in `models.py`. Consider importing at module level for consistency. Not blocking.
-- [src/colonyos/cli.py:69-75]: **Good: Mutual exclusivity enforcement**. `--resume` combined with `--plan-only`, `--from-prd`, or a prompt argument is rejected immediately. This prevents confusing state where resume semantics conflict with fresh-run semantics.
-- [src/colonyos/models.py:61-68]: **Good: Typed ResumeState dataclass**. Using a typed `ResumeState` rather than an untyped `dict` eliminates a class of bugs where dict keys are misspelled or missing. The PRD originally specified `dict | None` — this is a strict improvement.
-- [tests/test_orchestrator.py:1173-1278]: **Good: Comprehensive security test coverage**. Path traversal tests for run_id (dotdot, slash, backslash, empty), relative path escape tests for prd_rel/task_rel, git argument injection test, and schema validation tests for corrupted JSON. This is thorough.
-- [src/colonyos/orchestrator.py:397]: **Note: `resumed` flag as keyword-only argument**. The `resumed: bool = False` parameter on `_save_run_log` is keyword-only (via `*`), preventing accidental positional misuse. Good API design.
+- [src/colonyos/cli.py:381]: **CRITICAL**: `Phase` is used (`Phase.REVIEW`) but not imported from `colonyos.models`. This will cause a `NameError` at runtime in every real (non-mocked) execution of the `review` command. Fix: add `Phase` to the import on line 18.
+- [src/colonyos/cli.py:18]: Missing `Phase` in the import statement: `from colonyos.models import LoopState, LoopStatus, RunLog, RunStatus` should include `Phase`.
+- [tests/test_cli.py]: Test coverage blind spot — all `TestReviewCommand` tests mock `run_review_loop`, so `log.phases` is always empty and the `Phase.REVIEW` reference on line 381 is never evaluated. Need at least one test where `run_review_loop` side-effects populate `log.phases` to catch this class of bug.
+- [src/colonyos/orchestrator.py:352-360]: Fix agent (`run_phase_sync(Phase.FIX, ...)`) has no `allowed_tools` restriction — gets full tool access including Bash. Acceptable for v1 since `--fix` is opt-in, but should be documented as a known security boundary.
 
 SYNTHESIS:
-From a security perspective, this implementation is solid. The primary attack surface for `--resume` is the run log JSON file sitting on disk in `.colonyos/runs/`. An attacker who can write arbitrary JSON to that directory could inject malicious `prd_rel` or `task_rel` paths, or craft a `branch_name` that exploits git argument parsing. The implementation defends against all of these: path traversal in run IDs is blocked, relative paths are resolved and checked for containment within the repo root, and git commands use `--` argument termination. The `ResumeState` is a typed dataclass rather than an untyped dict, reducing the surface for key confusion bugs. The audit trail via `resume_events` timestamps is a good addition beyond what the PRD required — it enables forensic analysis of whether resume was abused to repeatedly re-trigger expensive phases. The only RUNNING status is correctly blocked to prevent concurrent execution races. All 198 tests pass, including dedicated security-focused test classes for path traversal, schema validation, and argument injection. No secrets, credentials, or exfiltration vectors were introduced. This is a well-defended feature from a supply chain and least-privilege perspective.
+From a security standpoint, this implementation demonstrates good security hygiene: branch name validation prevents flag injection and path traversal, reviewer and decision gate agents are properly constrained to read-only tools (least privilege), and the `--fix` opt-in with clean working tree check is a reasonable safety boundary. The architecture of extracting `run_review_loop()` as a shared function is sound. However, there is a critical `NameError` bug — `Phase` is referenced but never imported in `cli.py` — that will crash every real execution of the `review` command. The bug slipped through because the test suite mocks at too high a level, leaving this code path unexercised. This must be fixed before merge. The unrestricted tool access for the fix agent is a known, documented, and acceptable deferral for v1 but should be revisited before any CI/automated usage.
