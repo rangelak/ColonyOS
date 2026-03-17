@@ -1,5 +1,16 @@
 # Changelog
 
+## 20260317_215200 — Pre-commit hook for test suite
+
+Added a `pre-commit` hook that runs `pytest` before every commit to prevent
+regressions from being committed.
+
+**Created:**
+- `.pre-commit-config.yaml` — Local hook running `pytest --tb=short -q`
+
+**Modified:**
+- `pyproject.toml` — Added `[project.optional-dependencies] dev` with `pre-commit` and `pytest`
+
 ## 20260317_214623 — CEO Past-Work Context via CHANGELOG
 
 Moved `CHANGELOG.md` to the project root, backfilled 8 missing feature entries,

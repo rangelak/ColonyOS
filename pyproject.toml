@@ -24,6 +24,9 @@ where = ["src"]
 [tool.setuptools.package-data]
 colonyos = ["instructions/*.md"]
 
+[project.optional-dependencies]
+dev = ["pre-commit>=4.0", "pytest>=8.0"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
