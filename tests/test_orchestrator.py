@@ -10,8 +10,6 @@ from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, ResumeStat
 from colonyos.orchestrator import (
     run,
     prepare_resume,
-    run_verify_loop,
-    _build_verify_fix_prompt,
     _format_personas_block,
     _build_persona_agents,
     _build_fix_prompt,
@@ -19,11 +17,10 @@ from colonyos.orchestrator import (
     _load_run_log,
     _parse_parent_tasks,
     _persona_slug,
-    _reviewer_personas,
+    reviewer_personas,
     _build_persona_review_prompt,
-    _extract_review_verdict,
+    extract_review_verdict,
     _collect_review_findings,
-    _run_verify_command,
     _save_run_log,
     _validate_resume_preconditions,
     _compute_next_phase,
@@ -99,7 +96,7 @@ class TestPhaseReviewEnum:
 
     def test_phase_ordering(self):
         phases = list(Phase)
-        assert phases == [Phase.CEO, Phase.PLAN, Phase.IMPLEMENT, Phase.VERIFY, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.DELIVER]
+        assert phases == [Phase.CEO, Phase.PLAN, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.DELIVER]
 
     def test_fix_phase_exists(self):
         assert Phase.FIX == "fix"
@@ -151,7 +148,7 @@ class TestReviewerPersonas:
         config = ColonyConfig(
             personas=[REVIEWER_PERSONA, NON_REVIEWER_PERSONA],
         )
-        reviewers = _reviewer_personas(config)
+        reviewers = reviewer_personas(config)
         assert len(reviewers) == 1
         assert reviewers[0].role == "Engineer"
 
@@ -159,13 +156,13 @@ class TestReviewerPersonas:
         config = ColonyConfig(
             personas=[NON_REVIEWER_PERSONA],
         )
-        assert _reviewer_personas(config) == []
+        assert reviewer_personas(config) == []
 
     def test_all_reviewers(self):
         p1 = Persona(role="A", expertise="a", perspective="a", reviewer=True)
         p2 = Persona(role="B", expertise="b", perspective="b", reviewer=True)
         config = ColonyConfig(personas=[p1, p2])
-        assert len(_reviewer_personas(config)) == 2
+        assert len(reviewer_personas(config)) == 2
 
 
 class TestBuildPersonaReviewPrompt:
@@ -192,16 +189,16 @@ class TestBuildPersonaReviewPrompt:
 
 class TestExtractReviewVerdict:
     def test_approve(self):
-        assert _extract_review_verdict("VERDICT: approve\nLooks good.") == "approve"
+        assert extract_review_verdict("VERDICT: approve\nLooks good.") == "approve"
 
     def test_request_changes(self):
-        assert _extract_review_verdict("VERDICT: request-changes\nNeeds fixes.") == "request-changes"
+        assert extract_review_verdict("VERDICT: request-changes\nNeeds fixes.") == "request-changes"
 
     def test_case_insensitive(self):
-        assert _extract_review_verdict("Verdict: Approve") == "approve"
+        assert extract_review_verdict("Verdict: Approve") == "approve"
 
     def test_defaults_to_request_changes(self):
-        assert _extract_review_verdict("No clear verdict.") == "request-changes"
+        assert extract_review_verdict("No clear verdict.") == "request-changes"
 
 
 class TestCollectReviewFindings:
@@ -309,7 +306,7 @@ class TestRun:
         assert Phase.REVIEW not in phase_types
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_review_skipped_when_no__reviewer_personas(self, mock_run, tmp_repo: Path):
+    def test_review_skipped_when_noreviewer_personas(self, mock_run, tmp_repo: Path):
         """No reviewer personas means review phase is skipped entirely."""
         config = ColonyConfig(
             project=ProjectInfo(name="Test", description="test", stack="Python"),
@@ -373,7 +370,7 @@ class TestRun:
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_multiple__reviewer_personas(self, mock_run, mock_parallel, tmp_repo: Path):
+    def test_multiplereviewer_personas(self, mock_run, mock_parallel, tmp_repo: Path):
         """All reviewer personas get their own parallel session."""
         r1 = Persona(role="Systems Eng", expertise="Distributed", perspective="Reliability", reviewer=True)
         r2 = Persona(role="Security Eng", expertise="AppSec", perspective="Threats", reviewer=True)
@@ -905,8 +902,8 @@ class TestComputeNextPhase:
     def test_plan_to_implement(self):
         assert _compute_next_phase("plan") == "implement"
 
-    def test_implement_to_verify(self):
-        assert _compute_next_phase("implement") == "verify"
+    def test_implement_to_review(self):
+        assert _compute_next_phase("implement") == "review"
 
     def test_review_to_review(self):
         assert _compute_next_phase("review") == "review"
@@ -916,9 +913,6 @@ class TestComputeNextPhase:
 
     def test_decision_to_deliver(self):
         assert _compute_next_phase("decision") == "deliver"
-
-    def test_verify_to_review(self):
-        assert _compute_next_phase("verify") == "review"
 
     def test_unknown_returns_none(self):
         assert _compute_next_phase("unknown") is None
@@ -1386,157 +1380,3 @@ class TestHeartbeat:
         assert mtime2 >= mtime1
 
 
-class TestSkipMapVerify:
-    def test_verify_skips_plan_and_implement(self):
-        assert _SKIP_MAP["verify"] == {"plan", "implement"}
-
-
-class TestBuildVerifyFixPrompt:
-    def test_returns_tuple(self, config):
-        from colonyos.config import VerificationConfig
-        config.verification = VerificationConfig(
-            verify_command="pytest", max_verify_retries=2,
-        )
-        system, user = _build_verify_fix_prompt(
-            config, "cOS_prds/prd.md", "cOS_tasks/tasks.md",
-            "colonyos/feat", "FAILED", 1,
-        )
-        assert isinstance(system, str)
-        assert isinstance(user, str)
-
-    def test_system_includes_prd_path(self, config):
-        from colonyos.config import VerificationConfig
-        config.verification = VerificationConfig(
-            verify_command="pytest", max_verify_retries=2,
-        )
-        system, _ = _build_verify_fix_prompt(
-            config, "cOS_prds/prd.md", "cOS_tasks/tasks.md",
-            "colonyos/feat", "err output", 1,
-        )
-        assert "cOS_prds/prd.md" in system
-        assert "cOS_tasks/tasks.md" in system
-        assert "err output" in system
-
-
-class TestRunVerifyCommandOSError:
-    """_run_verify_command handles OSError (e.g. missing binary) gracefully."""
-
-    def test_missing_binary_returns_failure(self, tmp_path: Path):
-        """With shell=True, a missing binary returns exit code 127 (not OSError)."""
-        passed, output, exit_code = _run_verify_command(
-            "nonexistent_binary_that_does_not_exist_xyz", tmp_path, timeout=10,
-        )
-        assert not passed
-        assert exit_code == 127  # shell reports "command not found"
-
-    @patch("colonyos.orchestrator.subprocess.run", side_effect=OSError("No such file"))
-    def test_oserror_caught(self, mock_subprocess, tmp_path: Path):
-        passed, output, exit_code = _run_verify_command("bad_cmd", tmp_path, timeout=10)
-        assert not passed
-        assert exit_code == -1
-        assert "Failed to execute verify command" in output
-
-
-class TestRunCallsVerifyLoop:
-    """Integration test: run() calls run_verify_loop between implement and review."""
-
-    @patch("colonyos.orchestrator.run_verify_loop")
-    @patch("colonyos.orchestrator.run_phases_parallel_sync")
-    @patch("colonyos.orchestrator.run_phase_sync")
-    def test_verify_loop_called_when_configured(
-        self, mock_run, mock_parallel, mock_verify, tmp_repo: Path, config: ColonyConfig,
-    ):
-        from colonyos.config import VerificationConfig
-        config.verification = VerificationConfig(verify_command="pytest")
-        save_config(tmp_repo, config)
-
-        mock_run.side_effect = [
-            _fake_phase_result(Phase.PLAN),
-            _fake_phase_result(Phase.IMPLEMENT),
-            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
-                        duration_ms=50, session_id="s",
-                        artifacts={"result": "VERDICT: GO"}),
-            _fake_phase_result(Phase.DELIVER),
-        ]
-        mock_parallel.return_value = [_approve_review_result()]
-
-        log = run("Add tests", repo_root=tmp_repo, config=config)
-
-        assert log.status == RunStatus.COMPLETED
-        mock_verify.assert_called_once()
-        # Verify it was called with correct args
-        call_args = mock_verify.call_args
-        assert call_args[0][1] is config  # config
-        assert call_args[0][2] is log  # log
-
-    @patch("colonyos.orchestrator.run_verify_loop")
-    @patch("colonyos.orchestrator.run_phases_parallel_sync")
-    @patch("colonyos.orchestrator.run_phase_sync")
-    def test_verify_loop_not_called_when_no_command(
-        self, mock_run, mock_parallel, mock_verify, tmp_repo: Path, config: ColonyConfig,
-    ):
-        """run_verify_loop is not called when verify_command is not set."""
-        save_config(tmp_repo, config)
-
-        mock_run.side_effect = [
-            _fake_phase_result(Phase.PLAN),
-            _fake_phase_result(Phase.IMPLEMENT),
-            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
-                        duration_ms=50, session_id="s",
-                        artifacts={"result": "VERDICT: GO"}),
-            _fake_phase_result(Phase.DELIVER),
-        ]
-        mock_parallel.return_value = [_approve_review_result()]
-
-        log = run("Add tests", repo_root=tmp_repo, config=config)
-
-        assert log.status == RunStatus.COMPLETED
-        mock_verify.assert_not_called()
-
-    @patch("colonyos.orchestrator.run_verify_loop")
-    @patch("colonyos.orchestrator.run_phases_parallel_sync")
-    @patch("colonyos.orchestrator.run_phase_sync")
-    def test_verify_called_after_implement_before_review(
-        self, mock_run, mock_parallel, mock_verify, tmp_repo: Path, config: ColonyConfig,
-    ):
-        """Verify is called in the correct pipeline position: after implement, before review."""
-        from colonyos.config import VerificationConfig
-        config.verification = VerificationConfig(verify_command="pytest")
-        save_config(tmp_repo, config)
-
-        call_order = []
-
-        def track_run(*args, **kwargs):
-            phase = args[0] if args else kwargs.get("phase")
-            call_order.append(f"run_{phase.value}")
-            if phase == Phase.PLAN:
-                return _fake_phase_result(Phase.PLAN)
-            elif phase == Phase.IMPLEMENT:
-                return _fake_phase_result(Phase.IMPLEMENT)
-            elif phase == Phase.DECISION:
-                return PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
-                                   duration_ms=50, session_id="s",
-                                   artifacts={"result": "VERDICT: GO"})
-            elif phase == Phase.DELIVER:
-                return _fake_phase_result(Phase.DELIVER)
-            return _fake_phase_result(phase)
-
-        def track_verify(*args, **kwargs):
-            call_order.append("verify")
-
-        def track_parallel(*args, **kwargs):
-            call_order.append("review_parallel")
-            return [_approve_review_result()]
-
-        mock_run.side_effect = track_run
-        mock_verify.side_effect = track_verify
-        mock_parallel.side_effect = track_parallel
-
-        run("Add tests", repo_root=tmp_repo, config=config)
-
-        # Verify appears after implement and before review
-        assert "verify" in call_order
-        implement_idx = call_order.index("run_implement")
-        verify_idx = call_order.index("verify")
-        review_idx = call_order.index("review_parallel")
-        assert implement_idx < verify_idx < review_idx

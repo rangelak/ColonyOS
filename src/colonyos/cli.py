@@ -19,8 +19,8 @@ from colonyos.models import LoopState, LoopStatus, RunLog, RunStatus
 from colonyos.naming import generate_timestamp
 from colonyos.orchestrator import (
     _touch_heartbeat,
-    _validate_branch_exists,
-    _extract_review_verdict,
+    validate_branch_exists,
+    extract_review_verdict,
     run as run_orchestrator,
     run_ceo,
     run_standalone_review,
@@ -299,7 +299,7 @@ def _print_review_summary(
         last_round = review_results[-num_reviewers:]
         for persona, result in zip(reviewers, last_round):
             text = result.artifacts.get("result", "")
-            verdict = _extract_review_verdict(text)
+            verdict = extract_review_verdict(text)
             # Extract first finding line
             finding = ""
             for line in text.split("\n"):
@@ -340,24 +340,24 @@ def review(branch: str, base: str, no_fix: bool, decide: bool, verbose: bool, qu
         sys.exit(1)
 
     # Validate branches
-    ok, err = _validate_branch_exists(branch, repo_root)
+    ok, err = validate_branch_exists(branch, repo_root)
     if not ok:
         click.echo(f"Error: {err}", err=True)
         sys.exit(1)
 
-    ok, err = _validate_branch_exists(base, repo_root)
+    ok, err = validate_branch_exists(base, repo_root)
     if not ok:
         click.echo(f"Error: {err}", err=True)
         sys.exit(1)
 
-    from colonyos.orchestrator import _reviewer_personas
+    from colonyos.orchestrator import reviewer_personas
 
-    reviewers = _reviewer_personas(config)
+    reviewers = reviewer_personas(config)
     if not reviewers:
         click.echo("No reviewer personas configured. Add personas with reviewer=true to config.", err=True)
         sys.exit(1)
 
-    all_approved, phase_results, total_cost = run_standalone_review(
+    all_approved, phase_results, total_cost, decision_verdict = run_standalone_review(
         branch,
         base,
         repo_root,
@@ -368,7 +368,7 @@ def review(branch: str, base: str, no_fix: bool, decide: bool, verbose: bool, qu
         decide=decide,
     )
 
-    _print_review_summary(phase_results, reviewers, total_cost)
+    _print_review_summary(phase_results, reviewers, total_cost, decision_verdict=decision_verdict)
 
     if all_approved:
         sys.exit(0)

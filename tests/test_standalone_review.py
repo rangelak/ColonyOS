@@ -88,11 +88,11 @@ def _decision_nogo_result(cost: float = 0.01) -> PhaseResult:
 
 class TestValidateBranchExists:
     def test_existing_branch(self, tmp_path: Path):
-        from colonyos.orchestrator import _validate_branch_exists
+        from colonyos.orchestrator import validate_branch_exists
 
         with patch("colonyos.orchestrator.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="  my-branch\n")
-            ok, err = _validate_branch_exists("my-branch", tmp_path)
+            ok, err = validate_branch_exists("my-branch", tmp_path)
 
         assert ok is True
         assert err == ""
@@ -102,38 +102,38 @@ class TestValidateBranchExists:
         )
 
     def test_missing_branch(self, tmp_path: Path):
-        from colonyos.orchestrator import _validate_branch_exists
+        from colonyos.orchestrator import validate_branch_exists
 
         with patch("colonyos.orchestrator.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="")
-            ok, err = _validate_branch_exists("no-such-branch", tmp_path)
+            ok, err = validate_branch_exists("no-such-branch", tmp_path)
 
         assert ok is False
         assert "not found locally" in err
         assert "git fetch" in err
 
     def test_remote_ref_rejected(self, tmp_path: Path):
-        from colonyos.orchestrator import _validate_branch_exists
+        from colonyos.orchestrator import validate_branch_exists
 
-        ok, err = _validate_branch_exists("origin/feature", tmp_path)
+        ok, err = validate_branch_exists("origin/feature", tmp_path)
         assert ok is False
         assert "Remote-style ref" in err
         assert "git checkout feature" in err
 
     def test_upstream_ref_rejected(self, tmp_path: Path):
-        from colonyos.orchestrator import _validate_branch_exists
+        from colonyos.orchestrator import validate_branch_exists
 
-        ok, err = _validate_branch_exists("upstream/main", tmp_path)
+        ok, err = validate_branch_exists("upstream/main", tmp_path)
         assert ok is False
         assert "Remote-style ref" in err
 
     def test_branch_with_slash_not_remote(self, tmp_path: Path):
         """Branches like feature/foo should NOT be rejected."""
-        from colonyos.orchestrator import _validate_branch_exists
+        from colonyos.orchestrator import validate_branch_exists
 
         with patch("colonyos.orchestrator.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="  feature/foo\n")
-            ok, err = _validate_branch_exists("feature/foo", tmp_path)
+            ok, err = validate_branch_exists("feature/foo", tmp_path)
 
         assert ok is True
 
@@ -307,11 +307,12 @@ class TestRunStandaloneReview:
         config = _make_config(tmp_path)
         mock_parallel.return_value = [_approve_result(), _approve_result()]
 
-        all_approved, results, cost = run_standalone_review(
+        all_approved, results, cost, verdict = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True,
         )
 
         assert all_approved is True
+        assert verdict is None  # no --decide flag
         assert len(results) == 2
         assert cost > 0
         # Check artifacts saved
@@ -335,7 +336,7 @@ class TestRunStandaloneReview:
         ]
         mock_phase.return_value = _fix_result()
 
-        all_approved, results, cost = run_standalone_review(
+        all_approved, results, cost, _verdict = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True,
         )
 
@@ -351,7 +352,7 @@ class TestRunStandaloneReview:
         config = _make_config(tmp_path)
         mock_parallel.return_value = [_approve_result(), _request_changes_result()]
 
-        all_approved, results, cost = run_standalone_review(
+        all_approved, results, cost, _verdict = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True, no_fix=True,
         )
 
@@ -370,7 +371,7 @@ class TestRunStandaloneReview:
         # First round costs 0.10 total, exhausting the per_run budget
         mock_parallel.return_value = [_request_changes_result(cost=0.05), _request_changes_result(cost=0.05)]
 
-        all_approved, results, cost = run_standalone_review(
+        all_approved, results, cost, _verdict = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True,
         )
 
@@ -387,11 +388,12 @@ class TestRunStandaloneReview:
         mock_parallel.return_value = [_approve_result(), _approve_result()]
         mock_phase.return_value = _decision_go_result()
 
-        all_approved, results, cost = run_standalone_review(
+        all_approved, results, cost, verdict = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True, decide=True,
         )
 
         assert all_approved is True
+        assert verdict == "GO"
         assert mock_phase.called
         # Decision artifact saved
         reviews_dir = tmp_path / config.reviews_dir
@@ -408,11 +410,12 @@ class TestRunStandaloneReview:
         mock_parallel.return_value = [_approve_result(), _approve_result()]
         mock_phase.return_value = _decision_nogo_result()
 
-        all_approved, results, cost = run_standalone_review(
+        all_approved, results, cost, verdict = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True, decide=True,
         )
 
         assert all_approved is False
+        assert verdict == "NO-GO"
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator._get_branch_diff", return_value="diff")
@@ -440,7 +443,7 @@ class TestRunStandaloneReview:
             Persona(role="PM", expertise="Product", perspective="User", reviewer=False),
         ])
 
-        all_approved, results, cost = run_standalone_review(
+        all_approved, results, cost, _verdict = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True,
         )
 
@@ -457,7 +460,7 @@ class TestRunStandaloneReview:
         config = _make_config(tmp_path)
         mock_parallel.return_value = [_approve_result(), _approve_result()]
 
-        all_approved, results, cost = run_standalone_review(
+        all_approved, results, cost, _verdict = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True,
         )
 
@@ -599,7 +602,7 @@ class TestReviewCLI:
 
         _make_config(tmp_path)
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli._validate_branch_exists", return_value=(False, "Branch 'bad' not found locally. Try: git fetch && git checkout bad")):
+             patch("colonyos.cli.validate_branch_exists", return_value=(False, "Branch 'bad' not found locally. Try: git fetch && git checkout bad")):
             result = runner.invoke(app, ["review", "bad"])
 
         assert result.exit_code != 0
@@ -616,7 +619,7 @@ class TestReviewCLI:
             return False, f"Branch '{branch}' not found locally."
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli._validate_branch_exists", side_effect=mock_validate):
+             patch("colonyos.cli.validate_branch_exists", side_effect=mock_validate):
             result = runner.invoke(app, ["review", "feat", "--base", "nonexistent"])
 
         assert result.exit_code != 0
@@ -628,8 +631,8 @@ class TestReviewCLI:
         _make_config(tmp_path)
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli._validate_branch_exists", return_value=(True, "")), \
-             patch("colonyos.cli.run_standalone_review", return_value=(True, [_approve_result(), _approve_result()], 0.02)):
+             patch("colonyos.cli.validate_branch_exists", return_value=(True, "")), \
+             patch("colonyos.cli.run_standalone_review", return_value=(True, [_approve_result(), _approve_result()], 0.02, None)):
             result = runner.invoke(app, ["review", "feat"])
 
         assert result.exit_code == 0
@@ -640,8 +643,8 @@ class TestReviewCLI:
         _make_config(tmp_path)
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli._validate_branch_exists", return_value=(True, "")), \
-             patch("colonyos.cli.run_standalone_review", return_value=(False, [_request_changes_result()], 0.01)):
+             patch("colonyos.cli.validate_branch_exists", return_value=(True, "")), \
+             patch("colonyos.cli.run_standalone_review", return_value=(False, [_request_changes_result()], 0.01, None)):
             result = runner.invoke(app, ["review", "feat"])
 
         assert result.exit_code == 1
@@ -652,8 +655,8 @@ class TestReviewCLI:
         _make_config(tmp_path)
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli._validate_branch_exists", return_value=(True, "")), \
-             patch("colonyos.cli.run_standalone_review", return_value=(True, [], 0.0)) as mock_review:
+             patch("colonyos.cli.validate_branch_exists", return_value=(True, "")), \
+             patch("colonyos.cli.run_standalone_review", return_value=(True, [], 0.0, None)) as mock_review:
             runner.invoke(app, ["review", "feat", "--no-fix"])
 
         assert mock_review.call_args[1]["no_fix"] is True
@@ -664,8 +667,8 @@ class TestReviewCLI:
         _make_config(tmp_path)
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli._validate_branch_exists", return_value=(True, "")), \
-             patch("colonyos.cli.run_standalone_review", return_value=(True, [], 0.0)) as mock_review:
+             patch("colonyos.cli.validate_branch_exists", return_value=(True, "")), \
+             patch("colonyos.cli.run_standalone_review", return_value=(True, [], 0.0, None)) as mock_review:
             runner.invoke(app, ["review", "feat", "--base", "develop"])
 
         assert mock_review.call_args[0][1] == "develop"
@@ -676,8 +679,8 @@ class TestReviewCLI:
         _make_config(tmp_path)
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli._validate_branch_exists", return_value=(True, "")), \
-             patch("colonyos.cli.run_standalone_review", return_value=(True, [], 0.0)) as mock_review:
+             patch("colonyos.cli.validate_branch_exists", return_value=(True, "")), \
+             patch("colonyos.cli.run_standalone_review", return_value=(True, [], 0.0, None)) as mock_review:
             runner.invoke(app, ["review", "feat", "--decide"])
 
         assert mock_review.call_args[1]["decide"] is True
@@ -688,8 +691,8 @@ class TestReviewCLI:
         _make_config(tmp_path)
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli._validate_branch_exists", return_value=(True, "")), \
-             patch("colonyos.cli.run_standalone_review", return_value=(True, [], 0.0)) as mock_review:
+             patch("colonyos.cli.validate_branch_exists", return_value=(True, "")), \
+             patch("colonyos.cli.run_standalone_review", return_value=(True, [], 0.0, None)) as mock_review:
             runner.invoke(app, ["review", "feat", "-v"])
 
         assert mock_review.call_args[1]["verbose"] is True
@@ -700,8 +703,8 @@ class TestReviewCLI:
         _make_config(tmp_path)
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli._validate_branch_exists", return_value=(True, "")), \
-             patch("colonyos.cli.run_standalone_review", return_value=(True, [], 0.0)) as mock_review:
+             patch("colonyos.cli.validate_branch_exists", return_value=(True, "")), \
+             patch("colonyos.cli.run_standalone_review", return_value=(True, [], 0.0, None)) as mock_review:
             runner.invoke(app, ["review", "feat", "-q"])
 
         assert mock_review.call_args[1]["quiet"] is True
@@ -716,7 +719,7 @@ class TestReviewCLI:
         save_config(tmp_path, config)
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli._validate_branch_exists", return_value=(True, "")):
+             patch("colonyos.cli.validate_branch_exists", return_value=(True, "")):
             result = runner.invoke(app, ["review", "feat"])
 
         assert result.exit_code != 0
@@ -737,7 +740,7 @@ class TestExitCodeLogic:
         config = _make_config(tmp_path)
         mock_parallel.return_value = [_approve_result(), _approve_result()]
 
-        all_approved, _, _ = run_standalone_review(
+        all_approved, _, _, _ = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True,
         )
         assert all_approved is True
@@ -755,7 +758,7 @@ class TestExitCodeLogic:
         ]
         mock_phase.return_value = _fix_result()
 
-        all_approved, _, _ = run_standalone_review(
+        all_approved, _, _, _ = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True,
         )
         assert all_approved is True
@@ -768,7 +771,7 @@ class TestExitCodeLogic:
         config = _make_config(tmp_path)
         mock_parallel.return_value = [_approve_result(), _request_changes_result()]
 
-        all_approved, _, _ = run_standalone_review(
+        all_approved, _, _, _ = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True, no_fix=True,
         )
         assert all_approved is False
@@ -787,7 +790,7 @@ class TestExitCodeLogic:
         ]
         mock_phase.return_value = _fix_result()
 
-        all_approved, _, _ = run_standalone_review(
+        all_approved, _, _, _ = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True,
         )
         assert all_approved is False
@@ -802,7 +805,7 @@ class TestExitCodeLogic:
         mock_parallel.return_value = [_approve_result(), _approve_result()]
         mock_phase.return_value = _decision_go_result()
 
-        all_approved, _, _ = run_standalone_review(
+        all_approved, _, _, _ = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True, decide=True,
         )
         assert all_approved is True
@@ -817,7 +820,7 @@ class TestExitCodeLogic:
         mock_parallel.return_value = [_approve_result(), _approve_result()]
         mock_phase.return_value = _decision_nogo_result()
 
-        all_approved, _, _ = run_standalone_review(
+        all_approved, _, _, _ = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True, decide=True,
         )
         assert all_approved is False
@@ -845,7 +848,7 @@ class TestBudgetEnforcement:
             _request_changes_result(cost=0.05),
         ]
 
-        all_approved, results, cost = run_standalone_review(
+        all_approved, results, cost, _verdict = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True,
         )
 
@@ -865,7 +868,7 @@ class TestBudgetEnforcement:
         ]
         mock_phase.return_value = _fix_result(cost=0.05)
 
-        _, _, cost = run_standalone_review(
+        _, _, cost, _ = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True,
         )
 
@@ -891,7 +894,7 @@ class TestFixPhaseFailure:
             phase=Phase.FIX, success=False, cost_usd=0.01, error="Agent crash",
         )
 
-        all_approved, results, cost = run_standalone_review(
+        all_approved, results, cost, _verdict = run_standalone_review(
             "feat", "main", tmp_path, config, quiet=True,
         )
 
