@@ -267,6 +267,34 @@ class TestReviewerField:
         assert loaded.personas[1].reviewer is False
 
 
+class TestAutoApprove:
+    def test_defaults_to_false(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.auto_approve is False
+
+    def test_parsed_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"auto_approve": True}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.auto_approve is True
+
+    def test_roundtrip(self, tmp_repo: Path):
+        original = ColonyConfig(auto_approve=True)
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.auto_approve is True
+
+    def test_roundtrip_false(self, tmp_repo: Path):
+        original = ColonyConfig(auto_approve=False)
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.auto_approve is False
+
+
 class TestMaxFixIterations:
     def test_default_value(self, tmp_repo: Path):
         config = load_config(tmp_repo)

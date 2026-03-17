@@ -1,5 +1,19 @@
 # Changelog
 
+## 20260317_200000 — Auto-approve config + README rebrand
+
+Added `auto_approve` config setting for unattended CEO-driven runs and rebranded
+the README to position ColonyOS as a fully autonomous self-building pipeline.
+
+**Changes:**
+- `src/colonyos/config.py` — Added `auto_approve: bool` field to `ColonyConfig`, parsed from YAML, serialized back
+- `src/colonyos/cli.py` — `auto` command checks `config.auto_approve or no_confirm` to skip human confirmation
+- `.colonyos/config.yaml` — Added `auto_approve: true` (dogfood: this repo runs fully autonomous)
+- `README.md` — New tagline ("The fully autonomous AI pipeline that builds itself"), Mermaid pipeline diagrams, autonomous-first copy, expanded CLI reference
+- `assets/logo.png` — Added project logo
+- `tests/test_config.py` — Added `TestAutoApprove` class (default, parse, roundtrip)
+- `tests/test_cli.py` — Added tests for `auto_approve` config skipping confirmation and prompting when false
+
 ## 20260317_180000 — Review/fix loop redesign: per-persona parallel reviews + fix agent
 
 Replaced the monolithic subagent-based review with independent per-persona parallel

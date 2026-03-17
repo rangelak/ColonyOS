@@ -167,7 +167,7 @@ def auto(no_confirm: bool, propose_only: bool, loop_count: int) -> None:
             click.echo("\nPropose-only mode: proposal saved, pipeline not triggered.")
             continue
 
-        if not no_confirm:
+        if not (no_confirm or config.auto_approve):
             if not click.confirm("\nProceed with this feature?", default=False):
                 click.echo("Proposal rejected. Exiting.")
                 sys.exit(0)

@@ -53,6 +53,7 @@ class ColonyConfig:
     ceo_persona: Persona | None = None
     vision: str = ""
     max_fix_iterations: int = 2
+    auto_approve: bool = False
 
 
 def _parse_personas(raw: list[dict]) -> list[Persona]:
@@ -121,6 +122,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         ceo_persona=_parse_persona(raw.get("ceo_persona")) if raw.get("ceo_persona") else None,
         vision=raw.get("vision", ""),
         max_fix_iterations=int(raw.get("max_fix_iterations", DEFAULTS["max_fix_iterations"])),
+        auto_approve=bool(raw.get("auto_approve", False)),
     )
 
 
@@ -166,6 +168,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
     data["proposals_dir"] = config.proposals_dir
 
     data["max_fix_iterations"] = config.max_fix_iterations
+    data["auto_approve"] = config.auto_approve
 
     if config.ceo_persona:
         data["ceo_persona"] = {

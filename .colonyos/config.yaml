@@ -51,3 +51,4 @@ tasks_dir: cOS_tasks
 reviews_dir: cOS_reviews
 proposals_dir: cOS_proposals
 max_fix_iterations: 2
+auto_approve: true

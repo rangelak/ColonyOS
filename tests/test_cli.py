@@ -105,6 +105,49 @@ class TestAuto:
         assert result.exit_code == 0
         assert "completed" in result.output
 
+    def test_auto_approve_config_skips_confirmation(self, runner: CliRunner, tmp_path: Path):
+        config = _make_config(tmp_path)
+        config.auto_approve = True
+        save_config(tmp_path, config)
+        (tmp_path / "cOS_proposals").mkdir(exist_ok=True)
+
+        fake_ceo_result = PhaseResult(
+            phase=Phase.CEO, success=True, cost_usd=0.01,
+            duration_ms=100, session_id="s",
+            artifacts={"result": "### Feature Request\nBuild webhooks."},
+        )
+        fake_log = RunLog(
+            run_id="run-test", prompt="Build webhooks.",
+            status=RunStatus.COMPLETED, phases=[],
+        )
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
+             patch("colonyos.cli.run_orchestrator", return_value=fake_log):
+            result = runner.invoke(app, ["auto"])
+
+        assert result.exit_code == 0
+        assert "completed" in result.output
+        assert "Proceed with this feature?" not in result.output
+
+    def test_auto_approve_false_prompts_user(self, runner: CliRunner, tmp_path: Path):
+        config = _make_config(tmp_path)
+        config.auto_approve = False
+        save_config(tmp_path, config)
+        (tmp_path / "cOS_proposals").mkdir(exist_ok=True)
+
+        fake_result = PhaseResult(
+            phase=Phase.CEO, success=True, cost_usd=0.01,
+            duration_ms=100, session_id="s",
+            artifacts={"result": "### Feature Request\nBuild webhooks."},
+        )
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_result)):
+            result = runner.invoke(app, ["auto"], input="n\n")
+
+        assert "Proceed with this feature?" in result.output
+
     def test_user_rejects_proposal(self, runner: CliRunner, tmp_path: Path):
         _make_config(tmp_path)
         (tmp_path / "cOS_proposals").mkdir(exist_ok=True)

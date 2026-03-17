@@ -5,12 +5,13 @@
 <h1 align="center">ColonyOS</h1>
 
 <p align="center">
-  <strong>Autonomous agent loop that turns prompts into shipped PRs.</strong>
+  <strong>The fully autonomous AI pipeline that builds itself.</strong>
 </p>
 
 <p align="center">
   <a href="#quickstart">Quickstart</a> &middot;
   <a href="#how-it-works">How It Works</a> &middot;
+  <a href="#the-pipeline">The Pipeline</a> &middot;
   <a href="#cli-reference">CLI Reference</a> &middot;
   <a href="#configuration">Configuration</a> &middot;
   <a href="#architecture">Architecture</a>
@@ -18,32 +19,11 @@
 
 ---
 
-ColonyOS is a CLI tool that orchestrates Claude agent sessions via the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agent-sdk) to plan and implement features in any repository — with full codebase awareness. You give it a feature prompt, it generates a PRD, breaks it into tasks, implements the code, and opens a pull request. No hand-holding required.
+ColonyOS is an autonomous software engineering pipeline. A built-in CEO agent analyzes your codebase, decides what to build next, writes a PRD, implements the code, runs parallel expert reviews, fixes issues, and ships a pull request — all without human intervention.
 
-## How It Works
+It orchestrates Claude agent sessions via the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agent-sdk) with full codebase awareness. Point it at any repo and let it work.
 
-```
-colonyos run "Add Stripe billing integration"
-```
-
-ColonyOS runs five phases, each as a separate Claude agent session with full access to your repo:
-
-| # | Phase | What happens |
-|---|-------|-------------|
-| 1 | **Plan** | Explores your codebase, generates a PRD with clarifying Q&A from your defined personas (running as parallel subagents), and produces a task breakdown. Outputs go to `cOS_prds/` and `cOS_tasks/`. |
-| 2 | **Implement** | Creates a feature branch, writes tests first, then implements each task from the plan. Commits as it goes. |
-| 3 | **Review / Fix Loop** | Reviewer-tagged personas each run an independent, parallel, read-only review session. If any request changes, a dedicated fix agent addresses findings, then reviewers re-run. Loop repeats up to `max_fix_iterations`. Artifacts go to `cOS_reviews/`. |
-| 4 | **Decision Gate** | Reads all review artifacts and makes a **GO / NO-GO** verdict. NO-GO stops the pipeline before delivery. |
-| 5 | **Deliver** | Pushes the branch and opens a pull request with a summary linking back to the PRD. |
-
-Each phase is isolated with its own budget cap. If a phase fails, the run stops and logs what happened.
-
-## Prerequisites
-
-- **Python 3.11+**
-- **Claude Code CLI** — installed and authenticated (`claude --version` should work)
-- **Git** — the target repo must be a git repository
-- **GitHub CLI** (`gh`) — for the deliver phase to open PRs
+**ColonyOS builds itself.** The pipeline runs on its own codebase — every feature, fix, and review you see in this repo was proposed, implemented, and shipped by ColonyOS agents.
 
 ## Quickstart
 
@@ -51,16 +31,69 @@ Each phase is isolated with its own budget cap. If a phase fails, the run stops 
 pip install colonyos
 
 cd your-project/
-colonyos init          # interactive setup: project info + persona workshop
-colonyos run "Add user authentication with JWT"
+colonyos init              # interactive setup: project info + persona workshop
+colonyos auto --loop 5     # let it build 5 features autonomously
 ```
 
-Or go fully autonomous — ColonyOS proposes its own features, then executes:
+Or direct it yourself:
 
 ```bash
-colonyos auto          # CEO agent picks a feature, then runs the full pipeline
-colonyos auto --loop 5 # run up to 5 autonomous cycles back-to-back
+colonyos run "Add Stripe billing integration"
 ```
+
+## How It Works
+
+ColonyOS has two operating modes:
+
+**Autonomous mode** (`colonyos auto`) — the CEO agent analyzes your project, proposes the highest-impact feature, and the pipeline builds it end-to-end. Chain iterations with `--loop N` for continuous autonomous development.
+
+**Directed mode** (`colonyos run "..."`) — you provide the feature prompt, and the pipeline handles everything from PRD generation through to a shipped PR.
+
+Both modes run the same pipeline:
+
+```mermaid
+flowchart LR
+    CEO["CEO\nPropose"] --> Plan["Plan\nPRD + Tasks"] --> Implement["Implement\nCode + Tests"] --> ReviewFix["Review / Fix\nLoop"] --> Decision{"Decision\nGate"}
+    Decision -->|GO| Deliver["Deliver\nPush + PR"]
+    Decision -->|NO-GO| Stop["Pipeline\nStopped"]
+```
+
+## The Pipeline
+
+Each phase runs as an isolated Claude agent session with its own budget cap.
+
+| # | Phase | What happens |
+|---|-------|-------------|
+| 0 | **CEO** | Analyzes the project, its history, and strategic direction. Proposes the single highest-impact feature to build next. *(autonomous mode only)* |
+| 1 | **Plan** | Explores your codebase, generates a PRD with clarifying Q&A from your defined personas (running as parallel subagents), and produces a task breakdown. |
+| 2 | **Implement** | Creates a feature branch, writes tests first, then implements each task. Commits as it goes. |
+| 3 | **Review / Fix Loop** | Reviewer personas run independent, parallel, read-only reviews. If any request changes, a Staff+ fix agent addresses findings, then reviewers re-run. |
+| 4 | **Decision Gate** | Reads all review artifacts and makes a **GO / NO-GO** verdict. NO-GO halts the pipeline. |
+| 5 | **Deliver** | Pushes the branch and opens a pull request linking back to the PRD. |
+
+### Review / Fix Loop Detail
+
+The review phase is where ColonyOS ensures quality before shipping:
+
+```mermaid
+flowchart TD
+    StartRound["Start Review Round"] --> Parallel["Parallel Persona Reviews\n(read-only)"]
+    Parallel --> Check{"All\napprove?"}
+    Check -->|Yes| Gate["Decision Gate"]
+    Check -->|No| Fix["Fix Agent\nAddress Findings"]
+    Fix --> Budget{"Budget &\niterations\nremaining?"}
+    Budget -->|Yes| Parallel
+    Budget -->|No| Gate
+```
+
+Each reviewer persona runs concurrently with its own expertise and perspective. When any reviewer requests changes, their findings are consolidated and handed to a dedicated fix agent. This loop repeats up to `max_fix_iterations` before the final decision gate.
+
+## Prerequisites
+
+- **Python 3.11+**
+- **Claude Code CLI** — installed and authenticated (`claude --version` should work)
+- **Git** — the target repo must be a git repository
+- **GitHub CLI** (`gh`) — for the deliver phase to open PRs
 
 ## Setup: `colonyos init`
 
@@ -92,7 +125,7 @@ Participate in code reviews? [Y/n]: n
 Config saved to .colonyos/config.yaml
 ```
 
-Personas shape how PRDs are written. During the plan phase, each persona runs as a parallel subagent answering clarifying questions from their unique perspective. Personas with `reviewer: true` also participate in independent, parallel code reviews during the review/fix loop.
+Personas shape how PRDs are written. During planning, each persona runs as a parallel subagent answering clarifying questions from their unique perspective. Personas with `reviewer: true` also participate in independent, parallel code reviews during the review/fix loop.
 
 ## CLI Reference
 
@@ -100,11 +133,14 @@ Personas shape how PRDs are written. During the plan phase, each persona runs as
 |---------|-------------|
 | `colonyos init` | Interactive project + persona setup |
 | `colonyos init --personas` | Re-run just the persona workshop |
-| `colonyos run "feature prompt"` | Full pipeline: plan → implement → review → deliver |
+| `colonyos auto` | Fully autonomous: CEO proposes, pipeline builds + ships |
+| `colonyos auto --loop N` | Run N autonomous cycles back-to-back (max 10) |
+| `colonyos auto --no-confirm` | Skip human approval even if `auto_approve` is off |
+| `colonyos auto --propose-only` | CEO proposes but doesn't execute |
+| `colonyos run "feature prompt"` | Directed mode: plan, implement, review, deliver |
 | `colonyos run "..." --plan-only` | Stop after PRD + tasks |
 | `colonyos run --from-prd cOS_prds/xxx.md` | Skip planning, implement an existing PRD |
-| `colonyos auto` | Autonomous mode: CEO picks a feature, then runs the pipeline |
-| `colonyos auto --loop N` | Run up to N autonomous cycles (max 10) |
+| `colonyos run --resume <run-id>` | Resume a failed run from its last successful phase |
 | `colonyos status` | Show recent runs with cost breakdown |
 
 ## Configuration
@@ -128,20 +164,21 @@ personas:
     # reviewer defaults to false — plan-phase only
 
 model: opus
+auto_approve: true         # skip human confirmation in autonomous mode
 budget:
-  per_phase: 5.00       # USD per Claude Code session
-  per_run: 15.00        # USD total cap for a full run
+  per_phase: 5.00         # USD per Claude Code session
+  per_run: 15.00          # USD total cap for a full run
 phases:
   plan: true
   implement: true
-  review: true           # parallel per-persona reviews + fix loop
-  deliver: true          # set false to skip PR creation
+  review: true             # parallel per-persona reviews + fix loop
+  deliver: true            # set false to skip PR creation
 branch_prefix: "colonyos/"
 prds_dir: "cOS_prds"
 tasks_dir: "cOS_tasks"
 reviews_dir: "cOS_reviews"
 proposals_dir: "cOS_proposals"
-max_fix_iterations: 2    # how many review→fix cycles before decision gate
+max_fix_iterations: 2      # review/fix cycles before decision gate
 ```
 
 ## Output Structure
@@ -152,13 +189,11 @@ ColonyOS creates `cOS_`-prefixed directories in your repo that serve as a timest
 your-repo/
   cOS_prds/
     20260316_172530_prd_stripe_billing.md
-    20260317_091200_prd_user_auth.md
   cOS_tasks/
     20260316_172530_tasks_stripe_billing.md
-    20260317_091200_tasks_user_auth.md
   cOS_reviews/
-    20260317_091200_review_round1_backend_engineer.md
-    20260317_091200_review_round2_security_auditor.md
+    review_round1_backend_engineer.md
+    review_round2_security_auditor.md
   cOS_proposals/
     20260317_155328_proposal_ceo_proposal.md
 ```
@@ -171,19 +206,18 @@ Run logs (costs, durations, session IDs) go to `.colonyos/runs/` which is gitign
 src/colonyos/
   cli.py            # Click CLI entry point
   init.py           # Interactive persona workshop
-  orchestrator.py   # Phase chaining: plan → implement → review → deliver
+  orchestrator.py   # Phase chaining: CEO → plan → implement → review → deliver
   agent.py          # Claude Agent SDK wrapper
   config.py         # .colonyos/config.yaml loader
   models.py         # Persona, PhaseResult, RunLog
   naming.py         # Deterministic timestamped filenames
   instructions/     # Markdown templates passed to Claude Code
-    base.md         # Repo conventions
+    ceo.md          # Autonomous feature proposal
     plan.md         # PRD + task generation
     implement.md    # Test-first implementation
     review.md       # Per-persona review with structured verdict
     fix.md          # Staff+ engineer fix agent
     decision.md     # GO/NO-GO decision gate
-    ceo.md          # Autonomous feature proposal
     deliver.md      # PR creation
 ```
 
