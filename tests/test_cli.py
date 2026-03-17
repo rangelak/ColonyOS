@@ -9,7 +9,7 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
-from colonyos.cli import app, _save_loop_state, _load_latest_loop_state, _compute_elapsed_hours
+from colonyos.cli import app, _save_loop_state, _load_latest_loop_state, _compute_elapsed_hours, _print_review_summary
 from colonyos.config import ColonyConfig, BudgetConfig, save_config
 from colonyos.models import (
     LoopState, LoopStatus, Persona, Phase, PhaseResult,
@@ -1036,3 +1036,136 @@ class TestHeartbeatInAutoLoop:
         assert result.exit_code == 0
         heartbeat = tmp_path / ".colonyos" / "runs" / "heartbeat"
         assert heartbeat.exists()
+
+
+# ===========================================================================
+# Tests for standalone review command
+# ===========================================================================
+
+
+class TestReviewCommand:
+    """Tests for the `colonyos review` CLI command."""
+
+    def test_branch_argument_required(self, runner: CliRunner):
+        result = runner.invoke(app, ["review"])
+        assert result.exit_code != 0
+
+    def test_no_config_shows_init_message(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["review", "my-branch"])
+        assert result.exit_code != 0
+        assert "colonyos init" in result.output
+
+    def test_preflight_error_exits_1(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.detect_base_branch", return_value="main"), \
+             patch("colonyos.cli.validate_review_preconditions", return_value="Branch not found"):
+            result = runner.invoke(app, ["review", "missing-branch"])
+
+        assert result.exit_code != 0
+        assert "Branch not found" in result.output
+
+    def test_exit_0_when_all_approve(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        (tmp_path / "cOS_reviews").mkdir(exist_ok=True)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.detect_base_branch", return_value="main"), \
+             patch("colonyos.cli.validate_review_preconditions", return_value=None), \
+             patch("colonyos.cli.run_review_loop", return_value="GO"):
+            result = runner.invoke(app, ["review", "feat/test", "-q"])
+
+        assert result.exit_code == 0
+
+    def test_exit_1_when_nogo(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        (tmp_path / "cOS_reviews").mkdir(exist_ok=True)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.detect_base_branch", return_value="main"), \
+             patch("colonyos.cli.validate_review_preconditions", return_value=None), \
+             patch("colonyos.cli.run_review_loop", return_value="NO-GO"):
+            result = runner.invoke(app, ["review", "feat/test", "-q"])
+
+        assert result.exit_code != 0
+
+    def test_exit_1_when_request_changes(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        (tmp_path / "cOS_reviews").mkdir(exist_ok=True)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.detect_base_branch", return_value="main"), \
+             patch("colonyos.cli.validate_review_preconditions", return_value=None), \
+             patch("colonyos.cli.run_review_loop", return_value="request-changes"):
+            result = runner.invoke(app, ["review", "feat/test", "-q"])
+
+        assert result.exit_code != 0
+
+    def test_prd_option_accepted(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        (tmp_path / "cOS_reviews").mkdir(exist_ok=True)
+        prd_file = tmp_path / "cOS_prds" / "test_prd.md"
+        (tmp_path / "cOS_prds").mkdir(exist_ok=True)
+        prd_file.write_text("# Test PRD")
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.detect_base_branch", return_value="main"), \
+             patch("colonyos.cli.validate_review_preconditions", return_value=None), \
+             patch("colonyos.cli.run_review_loop", return_value="GO") as mock_loop:
+            result = runner.invoke(app, [
+                "review", "feat/test", "--prd", str(prd_file), "-q"
+            ])
+
+        assert result.exit_code == 0
+        # Verify prd_rel was passed to run_review_loop
+        call_kwargs = mock_loop.call_args
+        assert call_kwargs.kwargs.get("prd_rel") == str(prd_file)
+
+    def test_fix_flag_passed_through(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        (tmp_path / "cOS_reviews").mkdir(exist_ok=True)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.detect_base_branch", return_value="main"), \
+             patch("colonyos.cli.validate_review_preconditions", return_value=None), \
+             patch("colonyos.cli.run_review_loop", return_value="GO") as mock_loop:
+            result = runner.invoke(app, ["review", "feat/test", "--fix", "-q"])
+
+        assert result.exit_code == 0
+        call_kwargs = mock_loop.call_args
+        assert call_kwargs.kwargs.get("enable_fix") is True
+
+    def test_base_option_passed_through(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        (tmp_path / "cOS_reviews").mkdir(exist_ok=True)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.detect_base_branch", return_value="develop") as mock_detect, \
+             patch("colonyos.cli.validate_review_preconditions", return_value=None), \
+             patch("colonyos.cli.run_review_loop", return_value="GO"):
+            result = runner.invoke(app, ["review", "feat/test", "--base", "develop", "-q"])
+
+        assert result.exit_code == 0
+        mock_detect.assert_called_once_with(tmp_path, override="develop")
+
+    def test_run_log_saved(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        (tmp_path / "cOS_reviews").mkdir(exist_ok=True)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.detect_base_branch", return_value="main"), \
+             patch("colonyos.cli.validate_review_preconditions", return_value=None), \
+             patch("colonyos.cli.run_review_loop", return_value="GO"):
+            result = runner.invoke(app, ["review", "feat/test", "-q"])
+
+        assert result.exit_code == 0
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        run_files = list(runs_dir.glob("review-*.json"))
+        assert len(run_files) == 1
+
+    def test_review_in_welcome_banner(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, [])
+        assert "review" in result.output.lower()
