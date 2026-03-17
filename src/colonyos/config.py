@@ -26,6 +26,11 @@ DEFAULTS = {
     "reviews_dir": "cOS_reviews",
     "proposals_dir": "cOS_proposals",
     "max_fix_iterations": 2,
+    "verification": {
+        "verify_command": None,
+        "max_verify_retries": 2,
+        "verify_timeout": 300,
+    },
 }
 
 
@@ -46,6 +51,13 @@ class PhasesConfig:
 
 
 @dataclass
+class VerificationConfig:
+    verify_command: str | None = None
+    max_verify_retries: int = 2
+    verify_timeout: int = 300
+
+
+@dataclass
 class ColonyConfig:
     project: ProjectInfo | None = None
     personas: list[Persona] = field(default_factory=list)
@@ -61,6 +73,7 @@ class ColonyConfig:
     vision: str = ""
     max_fix_iterations: int = 2
     auto_approve: bool = False
+    verification: VerificationConfig = field(default_factory=VerificationConfig)
 
 
 def _parse_personas(raw: list[dict]) -> list[Persona]:
@@ -94,6 +107,18 @@ def _parse_project(raw: dict) -> ProjectInfo | None:
         name=raw.get("name", ""),
         description=raw.get("description", ""),
         stack=raw.get("stack", ""),
+    )
+
+
+def _parse_verification(raw: dict | None) -> VerificationConfig:
+    if not raw:
+        return VerificationConfig()
+    vd = DEFAULTS["verification"]
+    cmd = raw.get("verify_command", vd["verify_command"])
+    return VerificationConfig(
+        verify_command=cmd if cmd else None,
+        max_verify_retries=int(raw.get("max_verify_retries", vd["max_verify_retries"])),
+        verify_timeout=int(raw.get("verify_timeout", vd["verify_timeout"])),
     )
 
 
@@ -132,6 +157,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         vision=raw.get("vision", ""),
         max_fix_iterations=int(raw.get("max_fix_iterations", DEFAULTS["max_fix_iterations"])),
         auto_approve=bool(raw.get("auto_approve", False)),
+        verification=_parse_verification(raw.get("verification", {})),
     )
 
 
@@ -180,6 +206,20 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
 
     data["max_fix_iterations"] = config.max_fix_iterations
     data["auto_approve"] = config.auto_approve
+
+    _default_verification = VerificationConfig()
+    if (
+        config.verification.verify_command is not None
+        or config.verification.max_verify_retries != _default_verification.max_verify_retries
+        or config.verification.verify_timeout != _default_verification.verify_timeout
+    ):
+        verification_data: dict = {
+            "max_verify_retries": config.verification.max_verify_retries,
+            "verify_timeout": config.verification.verify_timeout,
+        }
+        if config.verification.verify_command is not None:
+            verification_data["verify_command"] = config.verification.verify_command
+        data["verification"] = verification_data
 
     if config.ceo_persona:
         data["ceo_persona"] = {

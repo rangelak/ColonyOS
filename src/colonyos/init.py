@@ -9,6 +9,7 @@ from colonyos.config import (
     ColonyConfig,
     BudgetConfig,
     PhasesConfig,
+    VerificationConfig,
     config_dir_path,
     load_config,
     save_config,
@@ -118,6 +119,50 @@ def _collect_personas_with_packs(existing: list[Persona] | None = None) -> list[
     return pack_personas
 
 
+def _detect_test_command(repo_root: Path) -> str | None:
+    """Auto-detect the project's test command.
+
+    Checks in priority order: Makefile test target, package.json test script,
+    pytest config (pyproject.toml / pytest.ini), Cargo.toml.
+    Returns the detected command string or None.
+    """
+    # 1. Makefile with test target
+    makefile = repo_root / "Makefile"
+    if makefile.exists():
+        content = makefile.read_text(encoding="utf-8", errors="ignore")
+        if "test:" in content:
+            return "make test"
+
+    # 2. package.json with test script
+    package_json = repo_root / "package.json"
+    if package_json.exists():
+        try:
+            import json
+            data = json.loads(package_json.read_text(encoding="utf-8"))
+            if data.get("scripts", {}).get("test"):
+                return "npm test"
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # 3. pytest config
+    pyproject = repo_root / "pyproject.toml"
+    if pyproject.exists():
+        content = pyproject.read_text(encoding="utf-8", errors="ignore")
+        if "[tool.pytest" in content:
+            return "pytest"
+
+    pytest_ini = repo_root / "pytest.ini"
+    if pytest_ini.exists():
+        return "pytest"
+
+    # 4. Cargo.toml (Rust)
+    cargo = repo_root / "Cargo.toml"
+    if cargo.exists():
+        return "cargo test"
+
+    return None
+
+
 def run_init(
     repo_root: Path,
     *,
@@ -163,6 +208,8 @@ def run_init(
         )
         personas = list(PACKS[0].personas)
 
+        detected_cmd = _detect_test_command(repo_root)
+
         from colonyos.config import DEFAULTS
         config = ColonyConfig(
             project=project,
@@ -180,6 +227,7 @@ def run_init(
             tasks_dir=existing.tasks_dir,
             reviews_dir=existing.reviews_dir,
             proposals_dir=existing.proposals_dir,
+            verification=VerificationConfig(verify_command=detected_cmd),
         )
 
     elif personas_only:
@@ -219,6 +267,12 @@ def run_init(
             "Budget per run (USD)", default=existing.budget.per_run, type=float
         )
 
+        click.echo("\n--- Verification ---\n")
+        verify_command = _prompt(
+            "What command runs your test suite? (leave blank to skip)",
+            default="",
+        )
+
         config = ColonyConfig(
             project=project,
             personas=personas,
@@ -232,6 +286,9 @@ def run_init(
             proposals_dir=existing.proposals_dir,
             ceo_persona=existing.ceo_persona,
             vision=vision,
+            verification=VerificationConfig(
+                verify_command=verify_command if verify_command else None,
+            ),
         )
 
     config_path = save_config(repo_root, config)

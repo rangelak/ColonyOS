@@ -7,7 +7,7 @@ import yaml
 
 from colonyos.config import ColonyConfig, save_config
 from colonyos.models import Persona, ProjectInfo
-from colonyos.init import select_persona_pack, _collect_personas_with_packs, run_init
+from colonyos.init import select_persona_pack, _collect_personas_with_packs, run_init, _detect_test_command
 from colonyos.persona_packs import PACKS
 
 
@@ -107,7 +107,7 @@ class TestRunInitReviewsDir:
         with patch("colonyos.init.click") as mock_click, \
              patch("colonyos.init._collect_personas_with_packs") as mock_personas:
             mock_click.prompt.side_effect = [
-                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0
+                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0, ""
             ]
             mock_click.echo = click.echo
             mock_personas.return_value = [
@@ -124,7 +124,7 @@ class TestRunInitReviewsDir:
         with patch("colonyos.init.click") as mock_click, \
              patch("colonyos.init._collect_personas_with_packs") as mock_personas:
             mock_click.prompt.side_effect = [
-                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0
+                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0, ""
             ]
             mock_click.echo = click.echo
             mock_personas.return_value = [
@@ -146,7 +146,7 @@ class TestRunInitReviewsDir:
         with patch("colonyos.init.click") as mock_click, \
              patch("colonyos.init._collect_personas_with_packs") as mock_personas:
             mock_click.prompt.side_effect = [
-                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0
+                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0, ""
             ]
             # Use real echo so we can capture stderr output
             mock_click.echo = click.echo
@@ -251,3 +251,106 @@ class TestDoctorPreCheck:
                     project_stack="Python",
                     doctor_check=True,
                 )
+
+
+class TestDetectTestCommand:
+    def test_makefile_with_test_target(self, tmp_path: Path):
+        (tmp_path / "Makefile").write_text("test:\n\tpytest\n")
+        assert _detect_test_command(tmp_path) == "make test"
+
+    def test_package_json_with_test_script(self, tmp_path: Path):
+        import json
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"test": "jest"}}),
+        )
+        assert _detect_test_command(tmp_path) == "npm test"
+
+    def test_pyproject_with_pytest(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\naddopts = '-v'\n"
+        )
+        assert _detect_test_command(tmp_path) == "pytest"
+
+    def test_pytest_ini(self, tmp_path: Path):
+        (tmp_path / "pytest.ini").write_text("[pytest]\n")
+        assert _detect_test_command(tmp_path) == "pytest"
+
+    def test_cargo_toml(self, tmp_path: Path):
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "foo"\n')
+        assert _detect_test_command(tmp_path) == "cargo test"
+
+    def test_no_test_runner_detected(self, tmp_path: Path):
+        assert _detect_test_command(tmp_path) is None
+
+    def test_priority_makefile_over_package_json(self, tmp_path: Path):
+        import json
+        (tmp_path / "Makefile").write_text("test:\n\tnpm test\n")
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"test": "jest"}}),
+        )
+        assert _detect_test_command(tmp_path) == "make test"
+
+    def test_priority_package_json_over_pytest(self, tmp_path: Path):
+        import json
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"test": "jest"}}),
+        )
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\naddopts = '-v'\n"
+        )
+        assert _detect_test_command(tmp_path) == "npm test"
+
+
+class TestInitVerificationInteractive:
+    def test_interactive_saves_verify_command(self, tmp_path: Path):
+        with patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+            mock_click.prompt.side_effect = [
+                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0, "pytest"
+            ]
+            mock_click.echo = click.echo
+            mock_personas.return_value = [
+                Persona(role="Engineer", expertise="Backend", perspective="Scale")
+            ]
+            config = run_init(tmp_path)
+
+        assert config.verification.verify_command == "pytest"
+
+    def test_interactive_blank_input_skips(self, tmp_path: Path):
+        with patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+            mock_click.prompt.side_effect = [
+                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0, ""
+            ]
+            mock_click.echo = click.echo
+            mock_personas.return_value = [
+                Persona(role="Engineer", expertise="Backend", perspective="Scale")
+            ]
+            config = run_init(tmp_path)
+
+        assert config.verification.verify_command is None
+
+
+class TestQuickInitVerification:
+    def test_quick_auto_detects_pytest(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\naddopts = '-v'\n"
+        )
+        config = run_init(
+            tmp_path,
+            quick=True,
+            project_name="TestProject",
+            project_description="test",
+            project_stack="Python",
+        )
+        assert config.verification.verify_command == "pytest"
+
+    def test_quick_no_detection_sets_none(self, tmp_path: Path):
+        config = run_init(
+            tmp_path,
+            quick=True,
+            project_name="TestProject",
+            project_description="test",
+            project_stack="Python",
+        )
+        assert config.verification.verify_command is None

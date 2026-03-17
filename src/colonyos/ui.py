@@ -21,38 +21,6 @@ TOOL_STYLE: dict[str, str] = {
 
 DEFAULT_TOOL_STYLE = "dim"
 
-REVIEWER_COLORS = [
-    "bright_cyan",
-    "bright_magenta",
-    "bright_yellow",
-    "bright_green",
-    "bright_blue",
-    "bright_red",
-    "bright_white",
-]
-
-
-def _reviewer_color(index: int) -> str:
-    return REVIEWER_COLORS[index % len(REVIEWER_COLORS)]
-
-
-def make_reviewer_prefix(role: str, index: int) -> str:
-    """Build a short numbered prefix like '[cyan]R1[/cyan] '."""
-    color = _reviewer_color(index)
-    return f"[{color}]R{index + 1}[/{color}] "
-
-
-def print_reviewer_legend(reviewers: list[tuple[int, str]]) -> None:
-    """Print legend mapping R1..RN -> full role name before review starts."""
-    console.print()
-    for i, role in reviewers:
-        color = _reviewer_color(i)
-        console.print(
-            f"  [{color}]R{i + 1}[/{color}] {role}",
-            highlight=False,
-        )
-    console.print()
-
 TOOL_ARG_KEYS: dict[str, list[str]] = {
     "Read": ["file_path", "path"],
     "Write": ["file_path", "path"],

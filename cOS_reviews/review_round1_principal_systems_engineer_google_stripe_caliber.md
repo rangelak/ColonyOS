@@ -1,61 +1,18 @@
 # Review by Principal Systems Engineer (Google/Stripe caliber) (Round 1)
 
-Now I have all the information needed for a comprehensive review. Here is my assessment:
-
----
-
-## Review: Standalone `colonyos review <branch>` Command
-
-### Completeness Assessment
-
-All 30 functional requirements (FR-1 through FR-30) from the PRD are implemented. All tasks in the task file are marked complete. The three instruction templates, the extracted `run_review_loop()`, the CLI command, base branch detection, pre-flight validation, run ID generation, artifact naming, summary table, and exit codes are all present. 192 tests pass, including 25+ new tests covering the new functionality.
-
-### Critical Findings
-
-**BUG: Review loop wastes budget when `--fix` is disabled (lines 294-330, orchestrator.py)**
-
-When `enable_fix=False` and reviewers request changes, the loop does NOT break. It continues for all `max_fix_iterations + 1` iterations (default: 4 rounds), re-running identical parallel reviews each time because no code is being fixed between rounds. This silently burns 4x the review budget for zero value.
-
-The fix is straightforward — add an `else: break` after the `if enable_fix and iteration < config.max_fix_iterations:` block at line 294:
-
-```python
-        if enable_fix and iteration < config.max_fix_iterations:
-            # ... fix logic ...
-        else:
-            break  # No fix to apply; re-reviewing won't change anything
-```
-
-**BUG: Reviewer verdict summary shows stale (round 1) verdicts instead of latest round (cli.py lines 381-388)**
-
-The `review` CLI command iterates `log.phases` forward and takes the first N `Phase.REVIEW` results. When fix iterations run (e.g., round 1 → fix → round 2), the summary table displays round 1 verdicts (which requested changes) rather than round 2 verdicts (which may now approve). This gives the user misleading output.
-
-Fix: iterate `log.phases` in reverse order, or filter for the highest round number.
-
-**CODE SMELL: Import statement at line 372 of orchestrator.py is syntactically valid but structurally broken**
-
-```python
-    return verdict
-from colonyos.ui import NullUI, PhaseUI
-```
-
-The `from colonyos.ui import NullUI, PhaseUI` module-level import was displaced by the insertion of ~355 lines of new code before it. It now sits at line 372, after the `run_review_loop()` function definition, rather than at the top of the file with the other imports. This works at runtime (Python processes all module-level statements before any function calls), but it's a maintenance hazard — any developer reading the file top-down will see `PhaseUI` referenced in `run_review_loop`'s type hint without an import in sight.
-
-### Minor Findings
-
-- **cli.py line 361**: `prd_rel = prd_path if prd_path else None` is redundant — `prd_path` is already `None` when not provided (Click default).
-- **orchestrator.py line 298**: When `prd_rel` is provided but `task_rel` is None (standalone review with `--prd`), the code falls through to `_build_standalone_fix_prompt()`. This means PRD-provided standalone reviews get a standalone fix prompt that doesn't reference the PRD. This is a subtle behavioral inconsistency — the review phase uses the PRD but the fix phase ignores it.
-- **CEO Proposal Panel (cli.py ~555-566)**: The Rich Panel formatting for CEO proposals is an unrelated cosmetic change bundled into this branch.
+I have all the information I need to complete the review. Let me summarize my findings:
 
 ---
 
 VERDICT: request-changes
 
 FINDINGS:
-- [src/colonyos/orchestrator.py:294-330]: BUG — When `enable_fix=False`, the review loop runs `max_fix_iterations+1` identical review rounds, burning budget for zero value. Need `else: break` after the fix block.
-- [src/colonyos/cli.py:381-388]: BUG — Reviewer verdict summary always shows round 1 verdicts, not the latest round. After fix iterations, the summary table is stale/misleading.
-- [src/colonyos/orchestrator.py:372]: Import `from colonyos.ui import NullUI, PhaseUI` displaced from top of file to line 372 (between function definitions). Technically works but is a maintenance hazard.
-- [src/colonyos/orchestrator.py:298]: When `prd_rel` is set but `task_rel` is None (standalone `--prd` mode), the fix prompt falls through to standalone variant, losing PRD context during fix iterations.
-- [src/colonyos/cli.py:555-566]: Unrelated change — CEO Proposal output reformatted from plain text to Rich Panel. Should be a separate commit.
+- [src/colonyos/orchestrator.py:260]: **Behavioral regression: Bash tool removed from reviewers and decision gate.** The refactored `run_review_loop` sets `review_tools = ["Read", "Glob", "Grep"]` and passes the same restricted list to the decision gate. The original inlined code used `["Read", "Glob", "Grep", "Bash"]` for both. This silently degrades reviewer and decision-gate capabilities — they can no longer run git diff, check file permissions, run linters, or inspect runtime behavior. This is an unrelated change bundled into the verification feature and represents a capability regression for all review runs, not just those using the new verify gate.
+- [src/colonyos/orchestrator.py:1162]: **Verify skip map doesn't include "verify" itself, which is intentional per FR-22 but underdocumented.** A comment explaining *why* verify re-runs on resume (because it's free) would prevent a future maintainer from "fixing" it to include verify in its own skip set.
+- [src/colonyos/config.py:207-213]: **save_config only persists verification section when verify_command is set.** If a user explicitly sets `max_verify_retries: 5` but leaves `verify_command` null (intending to add a command later), the custom retry count is silently dropped on save. Minor, but violates round-trip fidelity.
+- [src/colonyos/cli.py:18-26]: **Private symbols imported from orchestrator.** `_build_review_run_id`, `_extract_review_verdict`, `_reviewer_personas`, `_save_run_log` are underscore-prefixed private functions being imported by `cli.py`. This creates a fragile coupling — any internal refactor of orchestrator can break the CLI. These should be promoted to public API (drop the underscore) or a thin public facade should be added.
+- [src/colonyos/orchestrator.py:680]: **shell=True with user-supplied verify_command.** The PRD explicitly calls this out as a non-goal to sandbox (since the agent already has unrestricted shell), so this is accepted. However, the verify_command string is not validated at config load time — an empty string `""` is coerced to `None` (good), but there's no check for obviously malicious patterns. This is a reasonable v1 trade-off but worth noting for future hardening.
+- [src/colonyos/ui.py:53]: **Missing blank line before `TOOL_ARG_KEYS`.** Minor style issue — a blank line was dropped between the new `print_reviewer_legend` function and the existing `TOOL_ARG_KEYS` dict, violating PEP 8 two-blank-lines-between-top-level-definitions.
 
 SYNTHESIS:
-The implementation is structurally sound — the extraction of `run_review_loop()` is the right architectural move, the pre-flight checks are thorough, the test coverage is strong (192 passing tests), and the instruction templates are well-crafted. However, there are two bugs that matter at 3am: the budget-burning loop when `--fix` is disabled will silently cost users 4x what they expect (this is the kind of thing that gets a CI budget burned through in a day), and the stale verdict display will cause developers to debug phantom failures. The displaced import is a code quality issue that should be fixed while we're here. The PRD-context-loss in fix mode with `--prd` is a design gap that should at minimum be documented. Fix the budget loop bug and the verdict display, move the import, and this is ready to ship.
+The verification gate implementation is architecturally sound — it follows existing patterns (subprocess for git, dataclass config, instruction templates), the retry loop with budget guards is well-structured, and the test coverage at 303/303 passing is thorough. The core feature (FR-1 through FR-29) is fully implemented: config parsing, Phase.VERIFY enum, subprocess execution with timeout handling, output truncation, retry loop with budget enforcement, pipeline integration, resume semantics, and `colonyos init` integration with auto-detection. The one blocking issue is the **silent removal of the Bash tool from reviewer and decision-gate allowed_tools**. This is a behavioral regression that affects all review runs (not just those using the verify gate) and was introduced as a side-effect of the refactoring that extracted `run_review_loop`. The original code gave reviewers Bash access; the new shared function does not. This needs to be restored before merging. The private symbol imports in cli.py should also be cleaned up to avoid brittleness, but that's a softer concern.

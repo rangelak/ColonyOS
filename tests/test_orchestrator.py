@@ -10,13 +10,8 @@ from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, ResumeStat
 from colonyos.orchestrator import (
     run,
     prepare_resume,
-    detect_base_branch,
-    run_review_loop,
-    validate_review_preconditions,
-    _build_persona_standalone_review_prompt,
-    _build_review_run_id,
-    _build_standalone_decision_prompt,
-    _build_standalone_fix_prompt,
+    run_verify_loop,
+    _build_verify_fix_prompt,
     _format_personas_block,
     _build_persona_agents,
     _build_fix_prompt,
@@ -28,10 +23,11 @@ from colonyos.orchestrator import (
     _build_persona_review_prompt,
     _extract_review_verdict,
     _collect_review_findings,
+    _run_verify_command,
     _save_run_log,
     _validate_resume_preconditions,
     _compute_next_phase,
-    _validate_branch_name,
+    _SKIP_MAP,
 )
 
 
@@ -103,7 +99,7 @@ class TestPhaseReviewEnum:
 
     def test_phase_ordering(self):
         phases = list(Phase)
-        assert phases == [Phase.CEO, Phase.PLAN, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.DELIVER]
+        assert phases == [Phase.CEO, Phase.PLAN, Phase.IMPLEMENT, Phase.VERIFY, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.DELIVER]
 
     def test_fix_phase_exists(self):
         assert Phase.FIX == "fix"
@@ -313,7 +309,7 @@ class TestRun:
         assert Phase.REVIEW not in phase_types
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_review_skipped_when_no_reviewer_personas(self, mock_run, tmp_repo: Path):
+    def test_review_skipped_when_no__reviewer_personas(self, mock_run, tmp_repo: Path):
         """No reviewer personas means review phase is skipped entirely."""
         config = ColonyConfig(
             project=ProjectInfo(name="Test", description="test", stack="Python"),
@@ -373,11 +369,11 @@ class TestRun:
         review_calls = calls[0][0]
         assert len(review_calls) == 1  # 1 reviewer persona
         assert review_calls[0]["phase"] == Phase.REVIEW
-        assert review_calls[0]["allowed_tools"] == ["Read", "Glob", "Grep"]
+        assert review_calls[0]["allowed_tools"] == ["Read", "Glob", "Grep", "Bash"]
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_multiple_reviewer_personas(self, mock_run, mock_parallel, tmp_repo: Path):
+    def test_multiple__reviewer_personas(self, mock_run, mock_parallel, tmp_repo: Path):
         """All reviewer personas get their own parallel session."""
         r1 = Persona(role="Systems Eng", expertise="Distributed", perspective="Reliability", reviewer=True)
         r2 = Persona(role="Security Eng", expertise="AppSec", perspective="Threats", reviewer=True)
@@ -764,7 +760,7 @@ class TestRunLogResumeFields:
 
 
 class TestSaveRunLogResumeFields:
-    """Task 2: _save_run_log persists resume fields and last_successful_phase."""
+    """Task 2: save_run_log persists resume fields and last_successful_phase."""
 
     def test_persists_resume_fields(self, tmp_repo: Path):
         log = RunLog(
@@ -909,8 +905,8 @@ class TestComputeNextPhase:
     def test_plan_to_implement(self):
         assert _compute_next_phase("plan") == "implement"
 
-    def test_implement_to_review(self):
-        assert _compute_next_phase("implement") == "review"
+    def test_implement_to_verify(self):
+        assert _compute_next_phase("implement") == "verify"
 
     def test_review_to_review(self):
         assert _compute_next_phase("review") == "review"
@@ -920,6 +916,9 @@ class TestComputeNextPhase:
 
     def test_decision_to_deliver(self):
         assert _compute_next_phase("decision") == "deliver"
+
+    def test_verify_to_review(self):
+        assert _compute_next_phase("verify") == "review"
 
     def test_unknown_returns_none(self):
         assert _compute_next_phase("unknown") is None
@@ -1363,454 +1362,181 @@ class TestHeartbeat:
     """Task 6.1: Tests for heartbeat file."""
 
     def test_heartbeat_created_at_phase_start(self, tmp_repo: Path):
-        from colonyos.orchestrator import _touch_heartbeat
+        from colonyos.orchestrator import _touch_heartbeat as touch_heartbeat
         heartbeat_path = tmp_repo / ".colonyos" / "runs" / "heartbeat"
         assert not heartbeat_path.exists()
-        _touch_heartbeat(tmp_repo)
+        touch_heartbeat(tmp_repo)
         assert heartbeat_path.exists()
 
     def test_heartbeat_path_is_correct(self, tmp_repo: Path):
-        from colonyos.orchestrator import _touch_heartbeat
-        _touch_heartbeat(tmp_repo)
+        from colonyos.orchestrator import _touch_heartbeat as touch_heartbeat
+        touch_heartbeat(tmp_repo)
         heartbeat_path = tmp_repo / ".colonyos" / "runs" / "heartbeat"
         assert heartbeat_path.exists()
 
     def test_heartbeat_touch_updates_mtime(self, tmp_repo: Path):
         import time
-        from colonyos.orchestrator import _touch_heartbeat
-        _touch_heartbeat(tmp_repo)
+        from colonyos.orchestrator import _touch_heartbeat as touch_heartbeat
+        touch_heartbeat(tmp_repo)
         heartbeat_path = tmp_repo / ".colonyos" / "runs" / "heartbeat"
         mtime1 = heartbeat_path.stat().st_mtime
         time.sleep(0.05)
-        _touch_heartbeat(tmp_repo)
+        touch_heartbeat(tmp_repo)
         mtime2 = heartbeat_path.stat().st_mtime
         assert mtime2 >= mtime1
 
 
-# ===========================================================================
-# Tests for standalone review command features
-# ===========================================================================
+class TestSkipMapVerify:
+    def test_verify_skips_plan_and_implement(self):
+        assert _SKIP_MAP["verify"] == {"plan", "implement"}
 
 
-class TestDetectBaseBranch:
-    """Tests for detect_base_branch()."""
-
-    def test_returns_override_when_provided(self, tmp_repo: Path):
-        result = detect_base_branch(tmp_repo, override="develop")
-        assert result == "develop"
-
-    def test_returns_main_when_main_exists(self, tmp_repo: Path):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = detect_base_branch(tmp_repo)
-        assert result == "main"
-
-    def test_returns_master_when_only_master_exists(self, tmp_repo: Path):
-        def side_effect(cmd, **kwargs):
-            if "main" in cmd:
-                return MagicMock(returncode=1)
-            return MagicMock(returncode=0)
-
-        with patch("subprocess.run", side_effect=side_effect):
-            result = detect_base_branch(tmp_repo)
-        assert result == "master"
-
-    def test_falls_back_to_head(self, tmp_repo: Path):
-        with patch("subprocess.run", return_value=MagicMock(returncode=1)):
-            result = detect_base_branch(tmp_repo)
-        assert result == "HEAD~1"
-
-
-class TestValidateReviewPreconditions:
-    """Tests for validate_review_preconditions()."""
-
-    def test_branch_not_found(self, tmp_repo: Path):
-        with patch("subprocess.run", return_value=MagicMock(returncode=1)):
-            error = validate_review_preconditions(tmp_repo, "missing-branch", "main", False)
-        assert error is not None
-        assert "not found" in error
-
-    def test_empty_diff(self, tmp_repo: Path):
-        def side_effect(cmd, **kwargs):
-            if "rev-parse" in cmd:
-                return MagicMock(returncode=0)
-            if "diff" in cmd:
-                return MagicMock(returncode=0, stdout="")
-            return MagicMock(returncode=0, stdout="")
-
-        with patch("subprocess.run", side_effect=side_effect):
-            error = validate_review_preconditions(tmp_repo, "my-branch", "main", False)
-        assert error is not None
-        assert "No changes" in error
-
-    def test_dirty_working_tree_with_fix(self, tmp_repo: Path):
-        def side_effect(cmd, **kwargs):
-            if "rev-parse" in cmd:
-                return MagicMock(returncode=0)
-            if "diff" in cmd:
-                return MagicMock(returncode=0, stdout=" src/foo.py | 2 +-\n")
-            if "status" in cmd:
-                return MagicMock(returncode=0, stdout=" M src/bar.py\n")
-            return MagicMock(returncode=0, stdout="")
-
-        with patch("subprocess.run", side_effect=side_effect):
-            error = validate_review_preconditions(tmp_repo, "my-branch", "main", True)
-        assert error is not None
-        assert "uncommitted" in error
-
-    def test_clean_state_passes(self, tmp_repo: Path):
-        def side_effect(cmd, **kwargs):
-            if "rev-parse" in cmd:
-                return MagicMock(returncode=0)
-            if "diff" in cmd:
-                return MagicMock(returncode=0, stdout=" src/foo.py | 2 +-\n")
-            if "status" in cmd:
-                return MagicMock(returncode=0, stdout="")
-            return MagicMock(returncode=0, stdout="")
-
-        with patch("subprocess.run", side_effect=side_effect):
-            error = validate_review_preconditions(tmp_repo, "my-branch", "main", True)
-        assert error is None
-
-    def test_no_fix_skips_working_tree_check(self, tmp_repo: Path):
-        def side_effect(cmd, **kwargs):
-            if "rev-parse" in cmd:
-                return MagicMock(returncode=0)
-            if "diff" in cmd:
-                return MagicMock(returncode=0, stdout=" src/foo.py | 2 +-\n")
-            return MagicMock(returncode=0, stdout="")
-
-        with patch("subprocess.run", side_effect=side_effect):
-            error = validate_review_preconditions(tmp_repo, "my-branch", "main", False)
-        assert error is None
-
-
-class TestBuildReviewRunId:
-    """Tests for _build_review_run_id()."""
-
-    def test_format_matches_pattern(self):
-        import re
-        run_id = _build_review_run_id("my-feature")
-        assert re.match(r"review-\d{8}_\d{6}-[a-f0-9]{10}", run_id)
-
-    def test_prefix_is_review(self):
-        run_id = _build_review_run_id("any-branch")
-        assert run_id.startswith("review-")
-
-    def test_different_branches_different_hashes(self):
-        id1 = _build_review_run_id("branch-a")
-        id2 = _build_review_run_id("branch-b")
-        # Hashes differ (timestamps may differ too)
-        assert id1.split("-")[-1] != id2.split("-")[-1]
-
-
-class TestBuildPersonaStandaloneReviewPrompt:
-    """Tests for _build_persona_standalone_review_prompt()."""
-
-    def test_contains_persona_identity(self):
-        persona = Persona(role="Security Lead", expertise="AppSec", perspective="Threat model", reviewer=True)
-        config = ColonyConfig()
-        system, user = _build_persona_standalone_review_prompt(persona, config, "feat/x", "main")
-        assert "Security Lead" in system
-        assert "AppSec" in system
-        assert "Threat model" in system
-
-    def test_contains_branch_and_base(self):
-        config = ColonyConfig()
-        system, user = _build_persona_standalone_review_prompt(
-            REVIEWER_PERSONA, config, "feat/test", "main"
+class TestBuildVerifyFixPrompt:
+    def test_returns_tuple(self, config):
+        from colonyos.config import VerificationConfig
+        config.verification = VerificationConfig(
+            verify_command="pytest", max_verify_retries=2,
         )
-        assert "feat/test" in system
-        assert "main" in system
-        assert "feat/test" in user
-
-    def test_does_not_reference_prd(self):
-        config = ColonyConfig()
-        system, user = _build_persona_standalone_review_prompt(
-            REVIEWER_PERSONA, config, "feat/x", "main"
+        system, user = _build_verify_fix_prompt(
+            config, "cOS_prds/prd.md", "cOS_tasks/tasks.md",
+            "colonyos/feat", "FAILED", 1,
         )
-        assert "prd_path" not in system.lower()
-        assert "PRD" not in user
+        assert isinstance(system, str)
+        assert isinstance(user, str)
 
-    def test_uses_standalone_template(self):
-        config = ColonyConfig()
-        system, _ = _build_persona_standalone_review_prompt(
-            REVIEWER_PERSONA, config, "feat/x", "main"
+    def test_system_includes_prd_path(self, config):
+        from colonyos.config import VerificationConfig
+        config.verification = VerificationConfig(
+            verify_command="pytest", max_verify_retries=2,
         )
-        assert "Standalone Review" in system
-
-
-class TestBuildStandaloneFixPrompt:
-    """Tests for _build_standalone_fix_prompt()."""
-
-    def test_contains_branch_and_findings(self):
-        config = ColonyConfig()
-        system, user = _build_standalone_fix_prompt(
-            config, "feat/x", "main", "Some findings", 1
+        system, _ = _build_verify_fix_prompt(
+            config, "cOS_prds/prd.md", "cOS_tasks/tasks.md",
+            "colonyos/feat", "err output", 1,
         )
-        assert "feat/x" in system
-        assert "Some findings" in system
-        assert "main" in system
+        assert "cOS_prds/prd.md" in system
+        assert "cOS_tasks/tasks.md" in system
+        assert "err output" in system
 
-    def test_does_not_reference_prd_or_task(self):
-        config = ColonyConfig()
-        system, user = _build_standalone_fix_prompt(
-            config, "feat/x", "main", "findings", 1
+
+class TestRunVerifyCommandOSError:
+    """_run_verify_command handles OSError (e.g. missing binary) gracefully."""
+
+    def test_missing_binary_returns_failure(self, tmp_path: Path):
+        """With shell=True, a missing binary returns exit code 127 (not OSError)."""
+        passed, output, exit_code = _run_verify_command(
+            "nonexistent_binary_that_does_not_exist_xyz", tmp_path, timeout=10,
         )
-        assert "prd_path" not in system.lower()
-        assert "task_path" not in system.lower()
+        assert not passed
+        assert exit_code == 127  # shell reports "command not found"
 
-    def test_iteration_info(self):
-        config = ColonyConfig(max_fix_iterations=3)
-        system, user = _build_standalone_fix_prompt(
-            config, "feat/x", "main", "findings", 2
-        )
-        assert "2" in user
-        assert "3" in user
-
-
-class TestBuildStandaloneDecisionPrompt:
-    """Tests for _build_standalone_decision_prompt()."""
-
-    def test_contains_branch_and_base(self):
-        config = ColonyConfig()
-        system, user = _build_standalone_decision_prompt(config, "feat/x", "main")
-        assert "feat/x" in system
-        assert "main" in system
-
-    def test_does_not_reference_prd(self):
-        config = ColonyConfig()
-        system, user = _build_standalone_decision_prompt(config, "feat/x", "main")
-        assert "prd_path" not in system.lower()
-        assert "PRD" not in user
-
-    def test_uses_standalone_template(self):
-        config = ColonyConfig()
-        system, _ = _build_standalone_decision_prompt(config, "feat/x", "main")
-        assert "Standalone Decision" in system
+    @patch("colonyos.orchestrator.subprocess.run", side_effect=OSError("No such file"))
+    def test_oserror_caught(self, mock_subprocess, tmp_path: Path):
+        passed, output, exit_code = _run_verify_command("bad_cmd", tmp_path, timeout=10)
+        assert not passed
+        assert exit_code == -1
+        assert "Failed to execute verify command" in output
 
 
-class TestStandaloneArtifactNaming:
-    """Tests for standalone artifact naming patterns."""
+class TestRunCallsVerifyLoop:
+    """Integration test: run() calls run_verify_loop between implement and review."""
 
-    def test_standalone_review_filename(self):
-        from colonyos.naming import slugify
-        branch_slug = slugify("feat/my-feature")
-        fname = f"review_standalone_{branch_slug}_round1_engineer.md"
-        assert "standalone_" in fname
-        assert "round1" in fname
-        assert "engineer" in fname
-
-    def test_standalone_decision_filename(self):
-        from colonyos.naming import slugify
-        branch_slug = slugify("feat/my-feature")
-        fname = f"decision_standalone_{branch_slug}.md"
-        assert "standalone_" in fname
-        assert "feat_my_feature" in fname
-
-
-class TestRunReviewLoop:
-    """Tests for run_review_loop()."""
-
-    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.run_verify_loop")
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
-    def test_all_approve_returns_verdict(self, mock_parallel, mock_run, tmp_repo, config):
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_verify_loop_called_when_configured(
+        self, mock_run, mock_parallel, mock_verify, tmp_repo: Path, config: ColonyConfig,
+    ):
+        from colonyos.config import VerificationConfig
+        config.verification = VerificationConfig(verify_command="pytest")
+        save_config(tmp_repo, config)
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
         mock_parallel.return_value = [_approve_review_result()]
-        mock_run.return_value = PhaseResult(
-            phase=Phase.DECISION, success=True, cost_usd=0.01,
-            duration_ms=50, session_id="s",
-            artifacts={"result": "VERDICT: GO"},
-        )
 
-        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
-        verdict = run_review_loop(
-            tmp_repo, config, "feat/x", log,
-            prd_rel="cOS_prds/test.md",
-            quiet=True,
-        )
-        assert verdict == "GO"
+        log = run("Add tests", repo_root=tmp_repo, config=config)
 
-    @patch("colonyos.orchestrator.run_phase_sync")
+        assert log.status == RunStatus.COMPLETED
+        mock_verify.assert_called_once()
+        # Verify it was called with correct args
+        call_args = mock_verify.call_args
+        assert call_args[0][1] is config  # config
+        assert call_args[0][2] is log  # log
+
+    @patch("colonyos.orchestrator.run_verify_loop")
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
-    def test_fix_disabled_skips_fix(self, mock_parallel, mock_run, tmp_repo, config):
-        mock_parallel.return_value = [_request_changes_review_result()]
-        mock_run.return_value = PhaseResult(
-            phase=Phase.DECISION, success=True, cost_usd=0.01,
-            duration_ms=50, session_id="s",
-            artifacts={"result": "VERDICT: NO-GO"},
-        )
-
-        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
-        verdict = run_review_loop(
-            tmp_repo, config, "feat/x", log,
-            enable_fix=False,
-            quiet=True,
-        )
-        assert verdict == "NO-GO"
-        # Fix should not have been called
-        fix_calls = [c for c in mock_run.call_args_list if c.args[0] == Phase.FIX]
-        assert len(fix_calls) == 0
-
     @patch("colonyos.orchestrator.run_phase_sync")
-    @patch("colonyos.orchestrator.run_phases_parallel_sync")
-    def test_standalone_uses_standalone_prompts(self, mock_parallel, mock_run, tmp_repo, config):
+    def test_verify_loop_not_called_when_no_command(
+        self, mock_run, mock_parallel, mock_verify, tmp_repo: Path, config: ColonyConfig,
+    ):
+        """run_verify_loop is not called when verify_command is not set."""
+        save_config(tmp_repo, config)
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
         mock_parallel.return_value = [_approve_review_result()]
-        mock_run.return_value = PhaseResult(
-            phase=Phase.DECISION, success=True, cost_usd=0.01,
-            duration_ms=50, session_id="s",
-            artifacts={"result": "VERDICT: GO"},
-        )
 
-        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
-        run_review_loop(
-            tmp_repo, config, "feat/x", log,
-            prd_rel=None,
-            base_branch="main",
-            quiet=True,
-        )
+        log = run("Add tests", repo_root=tmp_repo, config=config)
 
-        # The review calls should use standalone prompts (no PRD in system prompt)
-        call_args = mock_parallel.call_args[0][0]
-        assert "Standalone" in call_args[0]["system_prompt"]
+        assert log.status == RunStatus.COMPLETED
+        mock_verify.assert_not_called()
 
-    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.run_verify_loop")
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
-    def test_saves_standalone_artifacts(self, mock_parallel, mock_run, tmp_repo, config):
-        mock_parallel.return_value = [_approve_review_result()]
-        mock_run.return_value = PhaseResult(
-            phase=Phase.DECISION, success=True, cost_usd=0.01,
-            duration_ms=50, session_id="s",
-            artifacts={"result": "VERDICT: GO"},
-        )
-
-        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
-        run_review_loop(
-            tmp_repo, config, "feat/x", log,
-            artifact_prefix="standalone_",
-            quiet=True,
-        )
-
-        reviews_dir = tmp_repo / config.reviews_dir
-        filenames = {f.name for f in reviews_dir.glob("*.md")}
-        assert any("standalone_" in f for f in filenames)
-        assert any("decision_standalone_" in f for f in filenames)
-
     @patch("colonyos.orchestrator.run_phase_sync")
-    @patch("colonyos.orchestrator.run_phases_parallel_sync")
-    def test_no_reviewers_returns_approve(self, mock_parallel, mock_run, tmp_repo):
-        config_no_reviewers = ColonyConfig(
-            project=ProjectInfo(name="Test", description="test", stack="Python"),
-            personas=[NON_REVIEWER_PERSONA],
-        )
-        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
-        verdict = run_review_loop(
-            tmp_repo, config_no_reviewers, "feat/x", log, quiet=True,
-        )
-        assert verdict == "approve"
-        mock_parallel.assert_not_called()
-        mock_run.assert_not_called()
+    def test_verify_called_after_implement_before_review(
+        self, mock_run, mock_parallel, mock_verify, tmp_repo: Path, config: ColonyConfig,
+    ):
+        """Verify is called in the correct pipeline position: after implement, before review."""
+        from colonyos.config import VerificationConfig
+        config.verification = VerificationConfig(verify_command="pytest")
+        save_config(tmp_repo, config)
 
-    @patch("colonyos.orchestrator.run_phase_sync")
-    @patch("colonyos.orchestrator.run_phases_parallel_sync")
-    def test_fix_disabled_runs_only_one_review_round(self, mock_parallel, mock_run, tmp_repo, config):
-        """When enable_fix=False and reviewers request changes, the loop must break
-        after a single review round instead of re-running identical reviews."""
-        mock_parallel.return_value = [_request_changes_review_result()]
-        mock_run.return_value = PhaseResult(
-            phase=Phase.DECISION, success=True, cost_usd=0.01,
-            duration_ms=50, session_id="s",
-            artifacts={"result": "VERDICT: NO-GO"},
-        )
+        call_order = []
 
-        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
-        run_review_loop(
-            tmp_repo, config, "feat/x", log,
-            enable_fix=False,
-            quiet=True,
-        )
-        # Should only call reviews once (not max_fix_iterations+1 times)
-        assert mock_parallel.call_count == 1
+        def track_run(*args, **kwargs):
+            phase = args[0] if args else kwargs.get("phase")
+            call_order.append(f"run_{phase.value}")
+            if phase == Phase.PLAN:
+                return _fake_phase_result(Phase.PLAN)
+            elif phase == Phase.IMPLEMENT:
+                return _fake_phase_result(Phase.IMPLEMENT)
+            elif phase == Phase.DECISION:
+                return PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                                   duration_ms=50, session_id="s",
+                                   artifacts={"result": "VERDICT: GO"})
+            elif phase == Phase.DELIVER:
+                return _fake_phase_result(Phase.DELIVER)
+            return _fake_phase_result(phase)
 
-    @patch("colonyos.orchestrator.run_phase_sync")
-    @patch("colonyos.orchestrator.run_phases_parallel_sync")
-    def test_review_tools_exclude_bash(self, mock_parallel, mock_run, tmp_repo, config):
-        """Reviewer agents should not have Bash access (read-only assessors)."""
-        mock_parallel.return_value = [_approve_review_result()]
-        mock_run.return_value = PhaseResult(
-            phase=Phase.DECISION, success=True, cost_usd=0.01,
-            duration_ms=50, session_id="s",
-            artifacts={"result": "VERDICT: GO"},
-        )
+        def track_verify(*args, **kwargs):
+            call_order.append("verify")
 
-        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
-        run_review_loop(
-            tmp_repo, config, "feat/x", log, quiet=True,
-        )
-        review_calls = mock_parallel.call_args[0][0]
-        assert "Bash" not in review_calls[0]["allowed_tools"]
+        def track_parallel(*args, **kwargs):
+            call_order.append("review_parallel")
+            return [_approve_review_result()]
 
-    @patch("colonyos.orchestrator.run_phase_sync")
-    @patch("colonyos.orchestrator.run_phases_parallel_sync")
-    def test_decision_gate_tools_exclude_bash(self, mock_parallel, mock_run, tmp_repo, config):
-        """Decision gate agent should not have Bash access (read-only summarizer)."""
-        mock_parallel.return_value = [_approve_review_result()]
-        mock_run.return_value = PhaseResult(
-            phase=Phase.DECISION, success=True, cost_usd=0.01,
-            duration_ms=50, session_id="s",
-            artifacts={"result": "VERDICT: GO"},
-        )
+        mock_run.side_effect = track_run
+        mock_verify.side_effect = track_verify
+        mock_parallel.side_effect = track_parallel
 
-        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
-        run_review_loop(
-            tmp_repo, config, "feat/x", log, quiet=True,
-        )
-        # Decision gate is the run_phase_sync call
-        decision_call = mock_run.call_args
-        assert "Bash" not in decision_call.kwargs.get("allowed_tools", [])
+        run("Add tests", repo_root=tmp_repo, config=config)
 
-
-class TestBranchNameValidation:
-    """Tests for _validate_branch_name()."""
-
-    def test_valid_branch_names(self):
-        assert _validate_branch_name("main") is None
-        assert _validate_branch_name("feat/my-feature") is None
-        assert _validate_branch_name("colonyos/add_review") is None
-        assert _validate_branch_name("release/1.0.0") is None
-        assert _validate_branch_name("user/branch.name") is None
-
-    def test_rejects_empty(self):
-        assert _validate_branch_name("") is not None
-
-    def test_rejects_leading_dash(self):
-        result = _validate_branch_name("--exec=malicious")
-        assert result is not None
-        assert "Must not start with '-'" in result
-
-    def test_rejects_double_dot(self):
-        result = _validate_branch_name("feat/../etc/passwd")
-        assert result is not None
-        assert "Must not contain '..'" in result
-
-    def test_rejects_special_characters(self):
-        result = _validate_branch_name("branch name with spaces")
-        assert result is not None
-        assert "disallowed characters" in result
-
-    def test_rejects_shell_metacharacters(self):
-        assert _validate_branch_name("branch;rm -rf /") is not None
-        assert _validate_branch_name("branch$(cmd)") is not None
-
-    def test_validate_preconditions_checks_branch_name(self, tmp_repo):
-        result = validate_review_preconditions(
-            tmp_repo, "--exec=malicious", "main", False,
-        )
-        assert result is not None
-        assert "Must not start with '-'" in result
-
-    def test_validate_preconditions_checks_base_branch(self, tmp_repo):
-        result = validate_review_preconditions(
-            tmp_repo, "valid-branch", "--upload-pack=evil", False,
-        )
-        assert result is not None
-        assert "Must not start with '-'" in result
+        # Verify appears after implement and before review
+        assert "verify" in call_order
+        implement_idx = call_order.index("run_implement")
+        verify_idx = call_order.index("verify")
+        review_idx = call_order.index("review_parallel")
+        assert implement_idx < verify_idx < review_idx

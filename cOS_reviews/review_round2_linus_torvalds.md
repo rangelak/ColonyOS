@@ -1,33 +1,23 @@
 # Review by Linus Torvalds (Round 2)
 
-The import succeeds because `Phase` isn't needed at import time — it's referenced inside the function body. The bug will manifest at runtime when someone runs `colonyos review feat/branch` without `-q` (the non-quiet path).
-
-Now let me compile my findings:
+Now I have a complete picture. Here is my review:
 
 ---
-
-I've completed a thorough review of the implementation. Here's my assessment:
-
----
-
-## Review Assessment
-
-### What was done well:
-1. **Clean extraction** — `run_review_loop()` was cleanly pulled out of the monolithic `orchestrator.run()` into a reusable function. The data structures are right, and both code paths (pipeline and standalone) share the same loop. This is the correct architecture.
-2. **Branch name validation** — `_validate_branch_name()` with regex and `-` prefix rejection is proper defense-in-depth against flag injection into git commands. Good security hygiene.
-3. **Pre-flight checks** — All three checks (branch exists, non-empty diff, clean working tree for `--fix`) are simple, correct, and testable.
-4. **Instruction templates** — Well-structured, using the same `VERDICT:` output format, making parsing uniform.
-5. **Test coverage** — Comprehensive unit tests for the new functions: `detect_base_branch`, `validate_review_preconditions`, `_build_review_run_id`, standalone prompt builders, `run_review_loop`, artifact naming, CLI argument parsing, and exit codes. 204 tests, all passing.
-
-### Findings:
 
 VERDICT: request-changes
 
 FINDINGS:
-- [src/colonyos/cli.py:381]: **BUG — Missing import: `Phase` not imported but used at runtime.** Line 381 references `Phase.REVIEW` in the list comprehension `[pr for pr in log.phases if pr.phase == Phase.REVIEW]`. `Phase` is NOT in the `from colonyos.models import ...` on line 18. This will raise a `NameError` at runtime when a user runs `colonyos review <branch>` without `-q`. The tests all mock `run_review_loop` and pass `-q`, so this code path is never exercised. This is a real, ship-blocking bug.
-- [src/colonyos/cli.py:376]: **Code smell — Deferred import of symbols already available.** `_extract_review_verdict` and `_reviewer_personas` are imported at function scope via `from colonyos.orchestrator import ...` despite the module already having a top-level `from colonyos.orchestrator import (...)` block. These should be in the top-level import, not hidden inside the function body. This is the kind of lazy import pattern that hides import problems and makes the code harder to grep.
-- [src/colonyos/cli.py:375-389]: **Fragile reviewer-to-verdict mapping.** The code assumes `last_round[i]` corresponds to `reviewers[i]` — i.e., that parallel review results come back in the same order as the input. If `run_phases_parallel_sync` ever reorders results (as many parallel executors do), this mapping silently produces wrong per-persona verdicts. The review results should carry the persona identity, not rely on positional correlation. Not blocking for v1 since the current parallel runner preserves order, but it's a latent bug.
-- [src/colonyos/cli.py:375-389]: **Duplicated logic.** The verdict-extraction-per-reviewer logic in `cli.py` duplicates what's already available in `orchestrator.py` (`_extract_review_verdict`, `_collect_review_findings`). This logic belongs in `run_review_loop()` which should return the per-persona verdicts alongside the overall verdict, not force the CLI to re-parse artifacts.
+- [branch scope]: This branch conflates two separate features — the verification gate (PRD `20260317_183545`) AND the standalone `colonyos review <branch>` command (PRD `20260317_180029`). The standalone review command adds ~400 lines to `orchestrator.py`, ~140 lines to `cli.py`, and 3 new instruction templates (`review_standalone.md`, `fix_standalone.md`, `decision_standalone.md`). These are separate features and belong on separate branches. Reviewing two features on one branch is how you end up unable to revert one without the other.
+- [src/colonyos/orchestrator.py]: The massive `run_review_loop()` extraction refactor (~170 lines) was done to share code between the pipeline `run()` and the standalone `review` command. The refactor itself is clean, but it's driven by the out-of-scope feature. The verification gate could have been wired in with ~10 lines of changes to `run()`.
+- [tests/test_orchestrator.py:320]: Test method renamed from `test_review_skipped_when_no_reviewer_personas` to `test_review_skipped_when_noreviewer_personas` — dropped an underscore. Same at line 384: `test_multiplereviewer_personas`. These look like accidental renames from a broken find-and-replace. Fix your test names.
+- [src/colonyos/orchestrator.py]: Several private functions were made public (`_save_run_log` → `save_run_log`, `_touch_heartbeat` → `touch_heartbeat`, `_reviewer_personas` → `reviewer_personas`, `_extract_review_verdict` → `extract_review_verdict`) solely to support the standalone review command that shouldn't be on this branch.
+- [src/colonyos/ui.py]: `REVIEWER_COLORS`, `_reviewer_color()`, `make_reviewer_prefix()`, `print_reviewer_legend()` — none of these are verification gate features. They're UI for the standalone review command. Out of scope.
+- [src/colonyos/orchestrator.py]: `_validate_branch_name()`, `detect_base_branch()`, `validate_review_preconditions()`, `build_review_run_id()` — all standalone review command plumbing. Out of scope.
 
 SYNTHESIS:
-The architecture is fundamentally sound — extracting `run_review_loop()` was the right call, the templates are clean, the pre-flight validation is thorough, and the test coverage is extensive. But there's a ship-blocking `NameError` bug from a missing `Phase` import in `cli.py` that will crash every non-quiet standalone review at runtime. The tests don't catch it because they mock too aggressively and always pass `-q`. Fix the import, move the deferred imports to the top level, and ideally have `run_review_loop()` return the per-persona verdicts so the CLI doesn't have to re-derive them with fragile positional indexing. The missing import is the only hard blocker; the rest is code quality that can be addressed in a follow-up.
+
+The verification gate implementation itself is actually solid. `_run_verify_command()` is a clean 15-line function that does exactly what it says. `run_verify_loop()` handles the retry logic correctly — budget guards, exhaustion fallthrough, proper phase logging with `cost_usd=0.0`. The `verify_fix.md` template is focused and actionable. The config parsing follows existing patterns precisely. The `_SKIP_MAP` comment explaining why verify doesn't skip itself shows someone who actually thought about the semantics. All 308 tests pass.
+
+But here's the problem: this branch ships two features in one. The verification gate (which is what the PRD asks for) is ~300 lines of real changes. The standalone `colonyos review <branch>` command (which has its own separate PRD) adds another ~700+ lines of code, instruction templates, and a major refactoring of the review loop. I refuse to review two features as one. The review command drove a large refactor of `run()` that makes it impossible to assess the verification gate's integration in isolation. If the review command has a bug, you can't revert it without also reverting the verification gate.
+
+Split these. Put the standalone review command on its own branch (it already has its own PRD). The verification gate can land cleanly without any of the review loop extraction, public API renames, UI color additions, or branch validation code. The test names with dropped underscores need fixing too — that's just sloppy.

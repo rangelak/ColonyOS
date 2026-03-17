@@ -1,20 +1,48 @@
 # Review by Staff Security Engineer (Round 1)
 
-I now have all the information I need for my review. Here is my assessment:
+Here is my security review:
 
 ---
 
-VERDICT: request-changes
+## Review: Staff Security Engineer — Post-Implement Verification Gate
+
+### Completeness
+
+All 29 functional requirements (FR-1 through FR-29) are implemented. All 7 task groups are marked complete. 238 tests pass. The `Phase.VERIFY` enum, `VerificationConfig` dataclass, `run_verify_loop()`, `_run_verify_command()`, `_build_verify_fix_prompt()`, verify_fix.md template, pipeline wiring, `_compute_next_phase()`, `_SKIP_MAP`, and `colonyos init` integration (both interactive and `--quick` auto-detection) are all present and tested.
+
+### Security Assessment
+
+**1. `shell=True` subprocess execution (orchestrator.py:670-671)** — The `verify_command` is executed via `subprocess.run(cmd, shell=True, ...)`. This means the value from `.colonyos/config.yaml` is passed directly to a shell. However, as the PRD correctly notes, ColonyOS already runs Claude Code with `bypassPermissions` (agent.py), meaning the agent itself already has unrestricted shell access. The `verify_command` is set by the repo owner via config file or `colonyos init`, not by untrusted input. This is an **accepted risk** with appropriate documentation in the PRD non-goals.
+
+**2. Test output → LLM prompt injection surface (orchestrator.py:696-703)** — Test failure output is truncated to 4000 chars and injected directly into the system prompt via Python `.format()`. A malicious test suite could craft output that attempts to hijack the implement agent's instructions (e.g., "IGNORE ALL PREVIOUS INSTRUCTIONS..."). The 4000-char truncation limit provides a partial mitigation by bounding the injection surface, and the output is placed inside a fenced code block in `verify_fix.md` (lines 16-18: ````...```), which provides weak framing. This is a **low-severity concern** — the attacker would need control over test output in a repo where they already have code execution via the test suite itself. No action needed for v1, but worth noting.
+
+**3. No environment variable leakage** — The subprocess call does not pass `env=` parameter, so it inherits the parent process environment. This is standard behavior and consistent with how git subprocess calls work elsewhere in the codebase. The test output (which may contain env vars printed by a failing test) is logged in `PhaseResult.artifacts` and truncated, but run logs are stored in `.colonyos/runs/` which is gitignored. **Acceptable.**
+
+**4. Timeout enforcement (orchestrator.py:675, 681-682)** — `subprocess.TimeoutExpired` is properly caught and treated as a failure. Default timeout is 300s, configurable via `verify_timeout`. This prevents the pipeline from hanging on a stuck test suite. The timeout value is parsed as `int()` in `_parse_verification()` (config.py:121), but there's no upper bound validation — a user could set `verify_timeout: 999999`. **Low risk** since it's operator-configured.
+
+**5. Budget guard before retries (orchestrator.py:773-781)** — Budget enforcement correctly checks `cost_so_far` against `per_run` before each implement retry. Verify runs themselves are logged with `cost_usd=0.0` and don't count against budget. The retry count cap (`max_verify_retries`) provides a secondary defense. **Well implemented.**
+
+**6. No secrets in committed code** — Grep confirms no credentials, tokens, or API keys in the diff. The only sensitive-adjacent patterns are in instruction template boilerplate.
+
+**7. Config round-trip safety** — `save_config()` only writes the `verification:` section when `verify_command` is not None (config.py:210). `load_config()` defaults gracefully when the section is missing. YAML is loaded via `yaml.safe_load()`, preventing deserialization attacks. **Sound.**
+
+**8. Audit trail** — Every verification attempt is recorded as a `PhaseResult` with `phase=Phase.VERIFY`, exit code, and truncated test output in artifacts. Implement retries are logged as normal `Phase.IMPLEMENT` entries. The run log is saved after verification completes (orchestrator.py:1337). **Good observability for post-incident analysis.**
+
+### Quality Notes
+
+- Tests are comprehensive: 314 lines of dedicated verification tests (`test_verify.py`) plus integration tests in `test_orchestrator.py` and config/init tests.
+- No TODO/FIXME/HACK in production code.
+- Code follows existing patterns (dataclass config, instruction templates, budget guards).
+- The `_SKIP_MAP` correctly maps `"verify": {"plan", "implement"}` so resume re-runs the free verification subprocess.
+
+---
+
+VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/orchestrator.py:317-325]: **Fix agent runs without `allowed_tools` restriction** — The fix phase in `run_review_loop()` calls `run_phase_sync(Phase.FIX, ...)` without passing an `allowed_tools` parameter, giving it the full default toolset (including unrestricted Bash, Write, Edit, etc.). While this matches the existing pipeline behavior (the old inline code also omitted it), the PRD's own security section acknowledged this concern ("Security engineer recommends restricting `--fix` agent tools (no Bash)"). For a command explicitly designed to be used in CI (`colonyos review $BRANCH --base main -q`), granting an AI agent unrestricted shell access on arbitrary branches is a significant supply chain risk. At minimum, document this as a known limitation; ideally, gate the fix agent's Bash access behind an explicit opt-in.
-- [src/colonyos/orchestrator.py:224-261]: **Review agents have Bash access** — `review_tools = ["Read", "Glob", "Grep", "Bash"]`. Reviewers are supposed to be read-only assessors, yet they have Bash tool access. A compromised or adversarial instruction template could use a reviewer agent to execute arbitrary commands. The review persona should not need Bash if it's only reading diffs and files — `Read`, `Glob`, and `Grep` are sufficient.
-- [src/colonyos/orchestrator.py:345-351]: **Decision gate has Bash access** — Same concern as review agents. The decision gate agent gets `allowed_tools=["Read", "Glob", "Grep", "Bash"]`. A decision gate is a read-only summarization step; it should not have shell execution capability.
-- [src/colonyos/instructions/fix_standalone.md]: **No audit trail for fix actions** — The fix template instructs the agent to "Commit all fixes on branch `{branch_name}`" but there's no mechanism to log or audit what the fix agent actually did (files modified, commands run). In CI contexts, this is a supply chain integrity gap — a compromised fix template could inject malicious code into the branch.
-- [src/colonyos/orchestrator.py:30-39]: **Branch name not sanitized before shell interpolation** — `detect_base_branch()` and `validate_review_preconditions()` pass user-supplied `branch` directly into `subprocess.run(["git", "rev-parse", "--verify", branch])`. While the list-form `subprocess.run` mitigates classic shell injection, git itself interprets arguments like `--upload-pack=...` or refs starting with `-`. A branch argument like `--exec=malicious` could be interpreted as a git flag. Consider validating the branch name format (alphanumeric, `/`, `-`, `_`, `.`) before passing it to git commands.
-- [src/colonyos/orchestrator.py:1129-1139]: **Pipeline `run()` doesn't pass `base_branch` to `run_review_loop()`** — The refactored `run()` call omits `base_branch`, so it defaults to `"main"`. If the repository uses `master` or another default branch, the standalone review prompts within the pipeline will generate incorrect `git diff main...HEAD` instructions. This is a functional regression from the extraction — the old inline code didn't need base_branch because it always had a PRD, but now the function signature allows PRD-less mode which depends on `base_branch`.
-- [src/colonyos/cli.py:555-570]: **Unrelated Rich Panel change in `_run_single_iteration`** — The CEO Proposal output was changed from plain `click.echo` to `rich.Panel` formatting. This is cosmetic scope creep unrelated to the review command feature. It should be in a separate commit/PR.
-- [src/colonyos/cli.py:377-386]: **Reviewer verdict extraction is fragile** — The `_print_review_summary` matches reviewers to verdicts by counting `Phase.REVIEW` entries and assuming they appear in persona order. In a multi-round fix loop, there would be multiple rounds of REVIEW phase results, and this simple index-matching would produce incorrect persona-verdict mappings for all rounds after the first.
+- [src/colonyos/orchestrator.py:670]: `shell=True` on user-configured command — accepted risk per PRD non-goals, consistent with existing agent permissions model
+- [src/colonyos/orchestrator.py:696-703]: Test output injected into LLM prompt via `.format()` inside fenced code block — low-severity prompt injection surface bounded by 4000-char truncation; attacker already needs code execution in the repo
+- [src/colonyos/config.py:121]: No upper-bound validation on `verify_timeout` — operator-configured, low risk, but could add a ceiling (e.g., 3600s) in a future hardening pass
 
 SYNTHESIS:
-From a security engineering perspective, this implementation exposes a meaningful attack surface by granting Bash execution to agents that should be read-only (reviewers, decision gate), and by running the fix agent with unrestricted tools in a command explicitly designed for CI use. The PRD itself acknowledged the security engineer's concerns about restricting fix agent tools but deferred them — however, the *review* and *decision* agents having Bash access wasn't even discussed and represents unnecessary privilege. The branch name input validation gap, while mitigated by `subprocess.run` list form, is still worth hardening for defense-in-depth. The functional regression with `base_branch` not being forwarded from `run()` could cause incorrect review prompts in the pipeline path. The unrelated cosmetic change should be separated. I recommend: (1) remove Bash from reviewer and decision gate `allowed_tools`, (2) add basic branch name format validation, (3) pass `base_branch` through from `run()`, and (4) split out the unrelated Rich Panel change.
+From a supply-chain security and least-privilege perspective, this implementation is sound for v1. The key security decision — running the verify command via `shell=True` without sandboxing — is explicitly justified: the agent already operates with unrestricted shell access, so sandboxing a user-configured test command would be security theater. The audit trail is good: every verify attempt and retry is logged with exit codes and truncated output in the run log. Budget enforcement provides defense-in-depth against runaway retries. The two minor findings (prompt injection via test output, unbounded timeout) are both low-severity given the threat model — the operator controls both the config and the test suite. All PRD requirements are met, all tasks complete, 238 tests pass, no secrets in code, no TODOs remain. Approved.
