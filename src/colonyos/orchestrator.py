@@ -14,6 +14,33 @@ from colonyos.agent import run_phase_sync, run_phases_parallel_sync
 from colonyos.config import ColonyConfig, runs_dir_path
 from colonyos.models import Persona, Phase, PhaseResult, ResumeState, RunLog, RunStatus
 from colonyos.naming import generate_timestamp, planning_names, proposal_names, slugify
+from colonyos.ui import NullUI, PhaseUI, make_reviewer_prefix
+
+# ---------------------------------------------------------------------------
+# Branch name validation
+# ---------------------------------------------------------------------------
+
+_BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9_./~^-]+$")
+
+
+def _validate_branch_name(name: str) -> str | None:
+    """Validate a branch name for safe use in git commands.
+
+    Returns an error message if invalid, or None if OK.
+    Rejects names starting with ``-`` (could be interpreted as flags),
+    containing ``..`` (path traversal in git), or using characters
+    outside the safe set ``[A-Za-z0-9_./-]``.
+    """
+    if not name:
+        return "Branch name must not be empty."
+    if name.startswith("-"):
+        return f"Invalid branch name: {name!r}. Must not start with '-'."
+    if ".." in name:
+        return f"Invalid branch name: {name!r}. Must not contain '..'."
+    if not _BRANCH_NAME_RE.match(name):
+        return f"Invalid branch name: {name!r}. Contains disallowed characters."
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Base-branch detection & pre-flight validation
@@ -52,6 +79,14 @@ def validate_review_preconditions(
 
     Returns an error message string if validation fails, or ``None`` if OK.
     """
+    # 0. Validate branch name format (defense-in-depth against flag injection)
+    branch_err = _validate_branch_name(branch)
+    if branch_err:
+        return branch_err
+    base_err = _validate_branch_name(base_branch)
+    if base_err:
+        return base_err
+
     # 1. Branch exists locally
     result = subprocess.run(
         ["git", "rev-parse", "--verify", branch],
@@ -221,7 +256,7 @@ def run_review_loop(
     else:
         _log(f"=== Review ({len(reviewers)} reviewers) ===")
 
-    review_tools = ["Read", "Glob", "Grep", "Bash"]
+    review_tools = ["Read", "Glob", "Grep"]
     last_findings: list[tuple[str, str]] = []
     branch_slug = slugify(branch_name)
 
@@ -241,7 +276,7 @@ def run_review_loop(
         _log(f"  Review round {iteration + 1}/{config.max_fix_iterations + 1}")
 
         review_calls = []
-        for persona in reviewers:
+        for i, persona in enumerate(reviewers):
             if prd_rel:
                 sys_prompt, usr_prompt = _build_persona_review_prompt(
                     persona, config, prd_rel, branch_name
@@ -250,7 +285,7 @@ def run_review_loop(
                 sys_prompt, usr_prompt = _build_persona_standalone_review_prompt(
                     persona, config, branch_name, base_branch
                 )
-            persona_ui = _make_ui(prefix=f"[{persona.role}] ")
+            persona_ui = _make_ui(prefix=make_reviewer_prefix(persona.role, i))
             review_calls.append(dict(
                 phase=Phase.REVIEW,
                 prompt=usr_prompt,
@@ -328,6 +363,9 @@ def run_review_loop(
                 if fix_ui is None:
                     _log(f"  Fix phase failed: {fix_result.error}")
                 break
+        else:
+            # No fix to apply; re-reviewing won't change anything
+            break
 
     # --- Decision Gate ---
     decision_ui = _make_ui()
@@ -348,7 +386,7 @@ def run_review_loop(
         system_prompt=system,
         model=config.model,
         budget_usd=config.budget.per_phase,
-        allowed_tools=["Read", "Glob", "Grep", "Bash"],
+        allowed_tools=["Read", "Glob", "Grep"],
         ui=decision_ui,
     )
     log.phases.append(decision_result)
@@ -369,7 +407,6 @@ def run_review_loop(
     )
 
     return verdict
-from colonyos.ui import NullUI, PhaseUI
 
 
 def _touch_heartbeat(repo_root: Path) -> None:
@@ -1133,6 +1170,7 @@ def run(
             log,
             prd_rel=prd_rel,
             task_rel=task_rel,
+            base_branch=detect_base_branch(repo_root),
             enable_fix=True,
             verbose=verbose,
             quiet=quiet,

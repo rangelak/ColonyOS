@@ -21,6 +21,44 @@ TOOL_STYLE: dict[str, str] = {
 
 DEFAULT_TOOL_STYLE = "dim"
 
+REVIEWER_COLORS = [
+    "bright_cyan",
+    "bright_magenta",
+    "bright_yellow",
+    "bright_green",
+    "bright_blue",
+    "bright_red",
+    "bright_white",
+]
+
+
+def make_reviewer_prefix(role: str, index: int) -> str:
+    """Build a short, colored prefix tag for a reviewer.
+
+    Turns 'Principal Systems Engineer (Google/Stripe caliber)' into
+    something like '[bright_cyan]PSE[/bright_cyan] '.
+    """
+    color = REVIEWER_COLORS[index % len(REVIEWER_COLORS)]
+    tag = _abbreviate_role(role)
+    return f"[{color}]{tag}[/{color}] "
+
+
+def _abbreviate_role(role: str) -> str:
+    """Shorten a role to a compact tag.
+
+    'Staff Security Engineer' -> 'SSE'
+    'Andrej Karpathy'        -> 'Andrej'
+    'Linus Torvalds'         -> 'Linus'
+    """
+    words = role.strip().split()
+    if len(words) <= 2:
+        return words[0]
+    # Strip parenthetical qualifiers
+    clean = role.split("(")[0].strip().split()
+    if all(w[0].isupper() and len(w) > 2 for w in clean):
+        return "".join(w[0] for w in clean)
+    return clean[0]
+
 TOOL_ARG_KEYS: dict[str, list[str]] = {
     "Read": ["file_path", "path"],
     "Write": ["file_path", "path"],

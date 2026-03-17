@@ -31,6 +31,7 @@ from colonyos.orchestrator import (
     _save_run_log,
     _validate_resume_preconditions,
     _compute_next_phase,
+    _validate_branch_name,
 )
 
 
@@ -372,7 +373,7 @@ class TestRun:
         review_calls = calls[0][0]
         assert len(review_calls) == 1  # 1 reviewer persona
         assert review_calls[0]["phase"] == Phase.REVIEW
-        assert review_calls[0]["allowed_tools"] == ["Read", "Glob", "Grep", "Bash"]
+        assert review_calls[0]["allowed_tools"] == ["Read", "Glob", "Grep"]
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
@@ -1708,3 +1709,108 @@ class TestRunReviewLoop:
         assert verdict == "approve"
         mock_parallel.assert_not_called()
         mock_run.assert_not_called()
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    def test_fix_disabled_runs_only_one_review_round(self, mock_parallel, mock_run, tmp_repo, config):
+        """When enable_fix=False and reviewers request changes, the loop must break
+        after a single review round instead of re-running identical reviews."""
+        mock_parallel.return_value = [_request_changes_review_result()]
+        mock_run.return_value = PhaseResult(
+            phase=Phase.DECISION, success=True, cost_usd=0.01,
+            duration_ms=50, session_id="s",
+            artifacts={"result": "VERDICT: NO-GO"},
+        )
+
+        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
+        run_review_loop(
+            tmp_repo, config, "feat/x", log,
+            enable_fix=False,
+            quiet=True,
+        )
+        # Should only call reviews once (not max_fix_iterations+1 times)
+        assert mock_parallel.call_count == 1
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    def test_review_tools_exclude_bash(self, mock_parallel, mock_run, tmp_repo, config):
+        """Reviewer agents should not have Bash access (read-only assessors)."""
+        mock_parallel.return_value = [_approve_review_result()]
+        mock_run.return_value = PhaseResult(
+            phase=Phase.DECISION, success=True, cost_usd=0.01,
+            duration_ms=50, session_id="s",
+            artifacts={"result": "VERDICT: GO"},
+        )
+
+        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
+        run_review_loop(
+            tmp_repo, config, "feat/x", log, quiet=True,
+        )
+        review_calls = mock_parallel.call_args[0][0]
+        assert "Bash" not in review_calls[0]["allowed_tools"]
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    def test_decision_gate_tools_exclude_bash(self, mock_parallel, mock_run, tmp_repo, config):
+        """Decision gate agent should not have Bash access (read-only summarizer)."""
+        mock_parallel.return_value = [_approve_review_result()]
+        mock_run.return_value = PhaseResult(
+            phase=Phase.DECISION, success=True, cost_usd=0.01,
+            duration_ms=50, session_id="s",
+            artifacts={"result": "VERDICT: GO"},
+        )
+
+        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
+        run_review_loop(
+            tmp_repo, config, "feat/x", log, quiet=True,
+        )
+        # Decision gate is the run_phase_sync call
+        decision_call = mock_run.call_args
+        assert "Bash" not in decision_call.kwargs.get("allowed_tools", [])
+
+
+class TestBranchNameValidation:
+    """Tests for _validate_branch_name()."""
+
+    def test_valid_branch_names(self):
+        assert _validate_branch_name("main") is None
+        assert _validate_branch_name("feat/my-feature") is None
+        assert _validate_branch_name("colonyos/add_review") is None
+        assert _validate_branch_name("release/1.0.0") is None
+        assert _validate_branch_name("user/branch.name") is None
+
+    def test_rejects_empty(self):
+        assert _validate_branch_name("") is not None
+
+    def test_rejects_leading_dash(self):
+        result = _validate_branch_name("--exec=malicious")
+        assert result is not None
+        assert "Must not start with '-'" in result
+
+    def test_rejects_double_dot(self):
+        result = _validate_branch_name("feat/../etc/passwd")
+        assert result is not None
+        assert "Must not contain '..'" in result
+
+    def test_rejects_special_characters(self):
+        result = _validate_branch_name("branch name with spaces")
+        assert result is not None
+        assert "disallowed characters" in result
+
+    def test_rejects_shell_metacharacters(self):
+        assert _validate_branch_name("branch;rm -rf /") is not None
+        assert _validate_branch_name("branch$(cmd)") is not None
+
+    def test_validate_preconditions_checks_branch_name(self, tmp_repo):
+        result = validate_review_preconditions(
+            tmp_repo, "--exec=malicious", "main", False,
+        )
+        assert result is not None
+        assert "Must not start with '-'" in result
+
+    def test_validate_preconditions_checks_base_branch(self, tmp_repo):
+        result = validate_review_preconditions(
+            tmp_repo, "valid-branch", "--upload-pack=evil", False,
+        )
+        assert result is not None
+        assert "Must not start with '-'" in result

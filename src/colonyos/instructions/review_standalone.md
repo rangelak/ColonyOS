@@ -31,7 +31,7 @@ You are reviewing the implementation on branch `{branch_name}` against the base 
 
 ## Process
 
-1. Read all changed files by running `git diff {base_branch}...HEAD`
+1. Read all changed files by running `git diff {base_branch}...{branch_name}`
 2. Examine each changed file in detail
 3. Assess each checklist item from your unique perspective as {reviewer_role}
 4. Produce structured output in the exact format below

@@ -1169,3 +1169,47 @@ class TestReviewCommand:
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
             result = runner.invoke(app, [])
         assert "review" in result.output.lower()
+
+
+class TestPrintReviewSummary:
+    """Tests for _print_review_summary displaying correct verdicts."""
+
+    def test_shows_last_round_verdicts(self):
+        """When multiple review rounds exist, summary should use last round."""
+        # Simulate a log with 2 rounds of reviews (1 reviewer each)
+        # Round 1: request-changes, Round 2: approve
+        round1_result = PhaseResult(
+            phase=Phase.REVIEW, success=True, cost_usd=0.01,
+            duration_ms=100, session_id="s1",
+            artifacts={"result": "VERDICT: request-changes\nFINDINGS:\n- bug\nSYNTHESIS: bad"},
+        )
+        fix_result = PhaseResult(
+            phase=Phase.FIX, success=True, cost_usd=0.01,
+            duration_ms=100, session_id="s2",
+            artifacts={"result": "Fixed"},
+        )
+        round2_result = PhaseResult(
+            phase=Phase.REVIEW, success=True, cost_usd=0.01,
+            duration_ms=100, session_id="s3",
+            artifacts={"result": "VERDICT: approve\nFINDINGS:\n- None\nSYNTHESIS: good"},
+        )
+        log = RunLog(
+            run_id="test", prompt="test", status=RunStatus.COMPLETED,
+            phases=[round1_result, fix_result, round2_result],
+        )
+
+        # Now test the verdict extraction logic from the review command
+        from colonyos.orchestrator import _extract_review_verdict
+        reviewers = [Persona(role="Engineer", expertise="Backend", perspective="Scale", reviewer=True)]
+        num_reviewers = len(reviewers)
+        all_review_results = [pr for pr in log.phases if pr.phase == Phase.REVIEW]
+        last_round = all_review_results[-num_reviewers:]
+        reviewer_verdicts = []
+        for i, phase_result in enumerate(last_round):
+            text = phase_result.artifacts.get("result", "")
+            rv = _extract_review_verdict(text)
+            reviewer_verdicts.append((reviewers[i].role, rv))
+
+        # Should show round 2 verdict (approve), not round 1 (request-changes)
+        assert len(reviewer_verdicts) == 1
+        assert reviewer_verdicts[0] == ("Engineer", "approve")

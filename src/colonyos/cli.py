@@ -357,18 +357,14 @@ def review(
     log.branch_name = branch
     log.prd_rel = prd_path
 
-    # Determine PRD/task rels
-    prd_rel = prd_path if prd_path else None
-    task_rel = None  # standalone reviews have no task file
-
     # Run the review loop
     verdict = run_review_loop(
         repo_root,
         config,
         branch,
         log,
-        prd_rel=prd_rel,
-        task_rel=task_rel,
+        prd_rel=prd_path,
+        task_rel=None,
         base_branch=detected_base,
         enable_fix=fix_enabled,
         artifact_prefix="standalone_",
@@ -376,17 +372,21 @@ def review(
         quiet=quiet,
     )
 
-    # Compute per-reviewer verdicts for summary
+    # Compute per-reviewer verdicts for the LAST review round
     from colonyos.orchestrator import _extract_review_verdict, _reviewer_personas
     reviewers = _reviewer_personas(config)
+    num_reviewers = len(reviewers)
+    # Collect all REVIEW phase results, then take only the last round
+    all_review_results = [
+        pr for pr in log.phases if pr.phase == Phase.REVIEW
+    ]
+    # The last round's results are the final num_reviewers entries
+    last_round = all_review_results[-num_reviewers:] if num_reviewers else []
     reviewer_verdicts: list[tuple[str, str]] = []
-    for phase_result in log.phases:
-        if phase_result.phase == Phase.REVIEW:
-            text = phase_result.artifacts.get("result", "")
-            rv = _extract_review_verdict(text)
-            # Match to reviewer persona (in order)
-            if len(reviewer_verdicts) < len(reviewers):
-                reviewer_verdicts.append((reviewers[len(reviewer_verdicts) % len(reviewers)].role, rv))
+    for i, phase_result in enumerate(last_round):
+        text = phase_result.artifacts.get("result", "")
+        rv = _extract_review_verdict(text)
+        reviewer_verdicts.append((reviewers[i].role, rv))
 
     # Finalize log
     if verdict in ("NO-GO", "request-changes"):
@@ -552,22 +552,11 @@ def _run_single_iteration(
         _save_loop_state(repo_root, loop_state)
         return aggregate_cost, False
 
-    from rich.console import Console
-    from rich.markdown import Markdown
-    from rich.panel import Panel
-
-    _console = Console()
-    _console.print()
-    _console.print(
-        Panel(
-            Markdown(prompt),
-            title="[bold]CEO Proposal[/bold]",
-            title_align="left",
-            border_style="bright_black",
-            padding=(1, 2),
-            expand=True,
-        )
-    )
+    click.echo(f"\n{'=' * 60}")
+    click.echo("CEO Proposal:")
+    click.echo(f"{'=' * 60}")
+    click.echo(prompt)
+    click.echo(f"{'=' * 60}")
 
     if propose_only:
         click.echo("\nPropose-only mode: proposal saved, pipeline not triggered.")
