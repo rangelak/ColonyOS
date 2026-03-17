@@ -6,9 +6,12 @@ from enum import Enum
 
 
 class Phase(str, Enum):
+    CEO = "ceo"
     PLAN = "plan"
     IMPLEMENT = "implement"
     REVIEW = "review"
+    DECISION = "decision"
+    FIX = "fix"
     DELIVER = "deliver"
 
 
@@ -23,6 +26,7 @@ class Persona:
     role: str
     expertise: str
     perspective: str
+    reviewer: bool = False
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,17 @@ class PhaseResult:
 
 
 @dataclass
+class ResumeState:
+    """Typed container for resume-from parameters passed to the orchestrator."""
+
+    log: "RunLog"
+    branch_name: str
+    prd_rel: str
+    task_rel: str
+    last_successful_phase: str
+
+
+@dataclass
 class RunLog:
     run_id: str
     prompt: str
@@ -64,6 +79,9 @@ class RunLog:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     finished_at: str | None = None
+    branch_name: str | None = None
+    prd_rel: str | None = None
+    task_rel: str | None = None
 
     def mark_finished(self) -> None:
         self.finished_at = datetime.now(timezone.utc).isoformat()

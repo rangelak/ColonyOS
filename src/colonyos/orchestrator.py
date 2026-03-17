@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
-from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
 
+import click
 from claude_agent_sdk import AgentDefinition
 
-from colonyos.agent import run_phase_sync
+from colonyos.agent import run_phase_sync, run_phases_parallel_sync
 from colonyos.config import ColonyConfig, runs_dir_path
-from colonyos.models import Persona, Phase, PhaseResult, RunLog, RunStatus
-from colonyos.naming import planning_names, review_names, slugify
+from colonyos.models import Persona, Phase, PhaseResult, ResumeState, RunLog, RunStatus
+from colonyos.naming import generate_timestamp, planning_names, proposal_names, slugify
 
 
 def _log(msg: str) -> None:
@@ -21,8 +22,7 @@ def _log(msg: str) -> None:
 
 def _build_run_id(prompt: str) -> str:
     digest = sha1(prompt.strip().encode()).hexdigest()[:10]
-    ts = datetime.now().strftime("%Y%m%d%H%M%S")
-    return f"run-{ts}-{digest}"
+    return f"run-{generate_timestamp()}-{digest}"
 
 
 def _load_instruction(name: str) -> str:
@@ -70,27 +70,6 @@ def _build_persona_agents(personas: list[Persona]) -> dict[str, AgentDefinition]
     return agents
 
 
-def _build_review_persona_agents(personas: list[Persona]) -> dict[str, AgentDefinition]:
-    """Build an AgentDefinition per persona for the review phase (read-only tools)."""
-    agents: dict[str, AgentDefinition] = {}
-    for p in personas:
-        key = _persona_slug(p.role)
-        agents[key] = AgentDefinition(
-            description=f"{p.role} — {p.expertise} (reviewer)",
-            prompt=(
-                f"You are {p.role}.\n"
-                f"Expertise: {p.expertise}\n"
-                f"Perspective: {p.perspective}\n\n"
-                "You are reviewing an implementation. Examine the code from your "
-                "unique perspective. Provide a structured review with a verdict "
-                "(approve or request-changes), specific findings with file paths, "
-                "and a synthesis paragraph."
-            ),
-            tools=["Read", "Glob", "Grep"],
-        )
-    return agents
-
-
 def _format_personas_block(personas: list[Persona]) -> str:
     """Build a persona listing for the plan system prompt.
 
@@ -118,31 +97,6 @@ def _format_personas_block(personas: list[Persona]) -> str:
     lines.append(
         "After collecting all persona responses, synthesize their answers "
         "into the PRD. Highlight areas of agreement and tension between personas."
-    )
-    return "\n".join(lines)
-
-
-def _format_review_personas_block(personas: list[Persona]) -> str:
-    """Build a persona listing for the review system prompt."""
-    if not personas:
-        return (
-            "No project personas are defined. Review from the perspectives of: "
-            "a senior engineer, a security engineer, and a product lead."
-        )
-
-    lines = [
-        "The following expert personas are available as subagents for review. "
-        "Delegate the review to ALL persona subagents IN PARALLEL (call all Agent "
-        "tools at once). Each persona has read-only access to the codebase and "
-        "will review from their unique perspective.\n"
-    ]
-    for p in personas:
-        key = _persona_slug(p.role)
-        lines.append(f"- **`{key}`**: {p.role} — {p.expertise}")
-    lines.append("")
-    lines.append(
-        "After collecting all persona reviews, consolidate them into a single "
-        "review document with sections for each persona."
     )
     return "\n".join(lines)
 
@@ -190,25 +144,114 @@ def _build_implement_prompt(
     return system, user
 
 
-def _build_review_prompt(
+def _reviewer_personas(config: ColonyConfig) -> list[Persona]:
+    """Return only personas that have reviewer=True."""
+    return [p for p in config.personas if p.reviewer]
+
+
+def _build_persona_review_prompt(
+    persona: Persona,
     config: ColonyConfig,
     prd_path: str,
     branch_name: str,
-    task_description: str,
 ) -> tuple[str, str]:
-    """Build the system prompt and user prompt for the review phase."""
+    """Build a review prompt for a single persona with identity baked in."""
     review_template = _load_instruction("review.md")
 
     system = _format_base(config) + "\n\n" + review_template.format(
-        persona_block=_format_review_personas_block(config.personas),
+        reviewer_role=persona.role,
+        reviewer_expertise=persona.expertise,
+        reviewer_perspective=persona.perspective,
         prd_path=prd_path,
         branch_name=branch_name,
-        task_description=task_description,
     )
 
     user = (
-        f"Review the implementation on branch `{branch_name}` for the task: "
-        f"{task_description}\n\nPRD is at `{prd_path}`."
+        f"Review the implementation on branch `{branch_name}` against the PRD at "
+        f"`{prd_path}`. Assess the entire implementation holistically from your "
+        f"perspective as {persona.role}."
+    )
+    return system, user
+
+
+_REVIEW_VERDICT_RE = re.compile(
+    r"VERDICT:\s*(approve|request-changes)", re.IGNORECASE
+)
+
+
+def _extract_review_verdict(result_text: str) -> str:
+    """Extract VERDICT: approve or VERDICT: request-changes from review output."""
+    match = _REVIEW_VERDICT_RE.search(result_text)
+    return match.group(1).lower() if match else "request-changes"
+
+
+def _collect_review_findings(
+    results: list[PhaseResult],
+    reviewers: list[Persona],
+) -> list[tuple[str, str]]:
+    """Parse review results and return (role, full_text) for those requesting changes."""
+    findings: list[tuple[str, str]] = []
+    for persona, result in zip(reviewers, results):
+        text = result.artifacts.get("result", "")
+        verdict = _extract_review_verdict(text)
+        if verdict == "request-changes":
+            findings.append((persona.role, text))
+    return findings
+
+
+def _build_decision_prompt(
+    config: ColonyConfig,
+    prd_path: str,
+    branch_name: str,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the decision gate."""
+    decision_template = _load_instruction("decision.md")
+
+    system = _format_base(config) + "\n\n" + decision_template.format(
+        prd_path=prd_path,
+        branch_name=branch_name,
+        reviews_dir=config.reviews_dir,
+    )
+
+    user = (
+        f"Review all artifacts for the implementation on branch `{branch_name}` "
+        f"and make a GO / NO-GO decision. "
+        f"The PRD is at `{prd_path}`. Review artifacts are in `{config.reviews_dir}/`."
+    )
+    return system, user
+
+
+def _extract_verdict(result_text: str) -> str:
+    """Extract VERDICT: GO or VERDICT: NO-GO from decision output."""
+    match = re.search(r"VERDICT:\s*(GO|NO-GO)", result_text, re.IGNORECASE)
+    return match.group(1).upper() if match else "UNKNOWN"
+
+
+def _build_fix_prompt(
+    config: ColonyConfig,
+    prd_path: str,
+    task_path: str,
+    branch_name: str,
+    findings_text: str,
+    fix_iteration: int,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the fix phase."""
+    fix_template = _load_instruction("fix.md")
+
+    system = _format_base(config) + "\n\n" + fix_template.format(
+        prd_path=prd_path,
+        task_path=task_path,
+        branch_name=branch_name,
+        reviews_dir=config.reviews_dir,
+        findings_text=findings_text,
+        fix_iteration=fix_iteration,
+        max_fix_iterations=config.max_fix_iterations,
+    )
+
+    user = (
+        f"Fix the issues identified by reviewers for branch `{branch_name}`. "
+        f"This is fix iteration {fix_iteration} of {config.max_fix_iterations}. "
+        f"The PRD is at `{prd_path}` and the task file is at `{task_path}`."
     )
     return system, user
 
@@ -230,6 +273,101 @@ def _build_deliver_prompt(
         f"feature described in `{prd_path}`."
     )
     return system, user
+
+
+DEFAULT_CEO_PERSONA = Persona(
+    role="Product CEO",
+    expertise="Product strategy, prioritization, user impact analysis",
+    perspective="What is the single most impactful feature to build next that advances the project's goals?",
+)
+
+
+def _build_ceo_prompt(
+    config: ColonyConfig,
+    proposal_filename: str,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the CEO phase."""
+    ceo_template = _load_instruction("ceo.md")
+    persona = config.ceo_persona or DEFAULT_CEO_PERSONA
+
+    system = ceo_template.format(
+        ceo_role=persona.role,
+        ceo_expertise=persona.expertise,
+        ceo_perspective=persona.perspective,
+        project_name=config.project.name if config.project else "Unknown",
+        project_description=config.project.description if config.project else "",
+        project_stack=config.project.stack if config.project else "",
+        vision=config.vision or "No vision statement configured.",
+        prds_dir=config.prds_dir,
+        tasks_dir=config.tasks_dir,
+        reviews_dir=config.reviews_dir,
+        proposals_dir=config.proposals_dir,
+    )
+
+    user = (
+        "Analyze this project and propose the single most impactful feature to build next. "
+        "Output your proposal in the format described in the instructions."
+    )
+    return system, user
+
+
+def run_ceo(
+    repo_root: Path,
+    config: ColonyConfig,
+) -> tuple[str, PhaseResult]:
+    """Run the CEO phase: analyze the project and propose the next feature.
+
+    Returns a tuple of (proposed_prompt, phase_result).
+    """
+    names = proposal_names("ceo_proposal")
+    proposal_filename = names.proposal_filename
+
+    system, user = _build_ceo_prompt(config, proposal_filename)
+
+    _log("=== CEO Phase ===")
+    result = run_phase_sync(
+        Phase.CEO,
+        user,
+        cwd=repo_root,
+        system_prompt=system,
+        model=config.model,
+        budget_usd=config.budget.per_phase,
+        allowed_tools=["Read", "Glob", "Grep"],
+    )
+
+    proposal_text = result.artifacts.get("result", "")
+
+    if result.success and proposal_text:
+        proposals_dir = repo_root / config.proposals_dir
+        proposals_dir.mkdir(parents=True, exist_ok=True)
+        proposal_path = proposals_dir / proposal_filename
+        proposal_path.write_text(proposal_text, encoding="utf-8")
+
+    prompt = _extract_feature_prompt(proposal_text) if result.success else ""
+
+    return prompt, result
+
+
+_FEATURE_REQUEST_RE = re.compile(
+    r"^#{2,3}\s+feature\s+request\s*$", re.IGNORECASE | re.MULTILINE
+)
+_NEXT_SECTION_RE = re.compile(r"^#{2,3}\s+", re.MULTILINE)
+_CODE_FENCE_RE = re.compile(r"^```.*$", re.MULTILINE)
+
+
+def _extract_feature_prompt(proposal_text: str) -> str:
+    """Extract the feature request section from a CEO proposal."""
+    match = _FEATURE_REQUEST_RE.search(proposal_text)
+    if match:
+        body = proposal_text[match.end():].strip()
+        next_match = _NEXT_SECTION_RE.search(body)
+        if next_match:
+            body = body[:next_match.start()].strip()
+        body = _CODE_FENCE_RE.sub("", body).strip()
+        if body:
+            return body
+
+    return proposal_text.strip() or "No proposal generated."
 
 
 def _parse_parent_tasks(task_content: str) -> list[str]:
@@ -256,10 +394,29 @@ def _save_review_artifact(
     return path
 
 
-def _save_run_log(repo_root: Path, log: RunLog) -> Path:
+def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Path:
     runs = runs_dir_path(repo_root)
     runs.mkdir(parents=True, exist_ok=True)
     log_path = runs / f"{log.run_id}.json"
+    # Derive last_successful_phase from the log's phases list
+    last_successful_phase: str | None = None
+    for p in log.phases:
+        if p.success:
+            last_successful_phase = p.phase.value
+
+    # Load existing resume_events if re-saving the same file
+    resume_events: list[str] = []
+    if log_path.exists():
+        try:
+            existing_data = json.loads(log_path.read_text(encoding="utf-8"))
+            resume_events = existing_data.get("resume_events", [])
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    if resumed:
+        from datetime import datetime, timezone
+        resume_events.append(datetime.now(timezone.utc).isoformat())
+
     log_path.write_text(
         json.dumps(
             {
@@ -269,6 +426,11 @@ def _save_run_log(repo_root: Path, log: RunLog) -> Path:
                 "total_cost_usd": log.total_cost_usd,
                 "started_at": log.started_at,
                 "finished_at": log.finished_at,
+                "branch_name": log.branch_name,
+                "prd_rel": log.prd_rel,
+                "task_rel": log.task_rel,
+                "last_successful_phase": last_successful_phase,
+                "resume_events": resume_events,
                 "phases": [
                     {
                         "phase": p.phase.value,
@@ -288,6 +450,176 @@ def _save_run_log(repo_root: Path, log: RunLog) -> Path:
     return log_path
 
 
+def _validate_run_id(run_id: str) -> None:
+    """Validate that run_id contains no path traversal characters."""
+    if not run_id:
+        raise click.ClickException("Run ID must not be empty.")
+    if "/" in run_id or "\\" in run_id or ".." in run_id:
+        raise click.ClickException(
+            f"Invalid run ID: {run_id!r}. "
+            "Run IDs must not contain path separators or '..' sequences."
+        )
+
+
+def _validate_rel_path(repo_root: Path, rel_path: str, label: str) -> None:
+    """Validate that a relative path does not escape the repo root."""
+    resolved = (repo_root / rel_path).resolve()
+    repo_resolved = repo_root.resolve()
+    if not str(resolved).startswith(str(repo_resolved) + "/") and resolved != repo_resolved:
+        raise click.ClickException(
+            f"{label} path escapes repository root: {rel_path!r}"
+        )
+
+
+def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
+    """Load a RunLog from its JSON file in .colonyos/runs/."""
+    _validate_run_id(run_id)
+    log_path = runs_dir_path(repo_root) / f"{run_id}.json"
+    # Verify resolved path is under the runs directory
+    runs_dir = runs_dir_path(repo_root).resolve()
+    if not str(log_path.resolve()).startswith(str(runs_dir) + "/"):
+        raise click.ClickException(f"Invalid run ID: {run_id!r}")
+    if not log_path.exists():
+        raise click.ClickException(f"Run log not found: {log_path}")
+    try:
+        data = json.loads(log_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"Corrupted run log: {log_path}: {exc}")
+
+    try:
+        phases = []
+        for p in data.get("phases", []):
+            phases.append(PhaseResult(
+                phase=Phase(p["phase"]),
+                success=p["success"],
+                cost_usd=p.get("cost_usd"),
+                duration_ms=p.get("duration_ms", 0),
+                session_id=p.get("session_id", ""),
+                error=p.get("error"),
+            ))
+
+        log = RunLog(
+            run_id=data["run_id"],
+            prompt=data["prompt"],
+            status=RunStatus(data["status"]),
+            phases=phases,
+            total_cost_usd=data.get("total_cost_usd", 0.0),
+            started_at=data.get("started_at", ""),
+            finished_at=data.get("finished_at"),
+            branch_name=data.get("branch_name"),
+            prd_rel=data.get("prd_rel"),
+            task_rel=data.get("task_rel"),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise click.ClickException(
+            f"Invalid run log schema in {log_path}: {exc}"
+        )
+
+    # Validate relative paths don't escape repo root
+    if log.prd_rel:
+        _validate_rel_path(repo_root, log.prd_rel, "prd_rel")
+    if log.task_rel:
+        _validate_rel_path(repo_root, log.task_rel, "task_rel")
+
+    return log
+
+
+def _validate_resume_preconditions(repo_root: Path, log: RunLog) -> None:
+    """Validate that a run log is eligible for resumption."""
+    if log.status != RunStatus.FAILED:
+        raise click.ClickException(
+            f"Cannot resume run with status '{log.status.value}'. "
+            f"Only failed runs can be resumed."
+        )
+
+    if not log.branch_name:
+        raise click.ClickException(
+            "Run log missing branch_name. This run is not resumable."
+        )
+
+    # Check branch exists locally (-- terminates option parsing for safety)
+    result = subprocess.run(
+        ["git", "branch", "--list", "--", log.branch_name],
+        capture_output=True, text=True, cwd=repo_root,
+    )
+    if not result.stdout.strip():
+        raise click.ClickException(
+            f"Branch '{log.branch_name}' not found locally. "
+            f"Cannot resume without the branch."
+        )
+
+    if not log.prd_rel:
+        raise click.ClickException(
+            "Run log missing prd_rel. This run is not resumable."
+        )
+    if not (repo_root / log.prd_rel).exists():
+        raise click.ClickException(
+            f"PRD file not found: {log.prd_rel}"
+        )
+
+    if not log.task_rel:
+        raise click.ClickException(
+            "Run log missing task_rel. This run is not resumable."
+        )
+    if not (repo_root / log.task_rel).exists():
+        raise click.ClickException(
+            f"Task file not found: {log.task_rel}"
+        )
+
+
+def _compute_next_phase(last_successful_phase: str | None) -> str | None:
+    """Map last_successful_phase to the next phase to resume from.
+
+    Returns the next phase name, or None if nothing to resume.
+    """
+    mapping = {
+        "plan": "implement",
+        "implement": "review",
+        "review": "review",
+        "fix": "review",
+        "decision": "deliver",
+    }
+    return mapping.get(last_successful_phase)
+
+
+# Phases that should be skipped based on last_successful_phase
+_SKIP_MAP: dict[str, set[str]] = {
+    "plan": {"plan"},
+    "implement": {"plan", "implement"},
+    "review": {"plan", "implement"},
+    "fix": {"plan", "implement"},
+    "decision": {"plan", "implement", "review"},
+}
+
+
+def prepare_resume(repo_root: Path, run_id: str) -> ResumeState:
+    """Load and validate a failed run for resumption.
+
+    This is the public API for resume preparation, used by the CLI.
+    Returns a ResumeState with all data needed to resume the run.
+    """
+    log = _load_run_log(repo_root, run_id)
+    _validate_resume_preconditions(repo_root, log)
+
+    last_successful_phase = None
+    for p in log.phases:
+        if p.success:
+            last_successful_phase = p.phase.value
+
+    if last_successful_phase is None:
+        raise click.ClickException(
+            "No successful phases found in run log. Nothing to resume from."
+        )
+
+    return ResumeState(
+        log=log,
+        branch_name=log.branch_name,  # type: ignore[arg-type]
+        prd_rel=log.prd_rel,  # type: ignore[arg-type]
+        task_rel=log.task_rel,  # type: ignore[arg-type]
+        last_successful_phase=last_successful_phase,
+    )
+
+
 def run(
     prompt: str,
     *,
@@ -295,20 +627,44 @@ def run(
     config: ColonyConfig,
     plan_only: bool = False,
     from_prd: str | None = None,
+    resume_from: ResumeState | None = None,
 ) -> RunLog:
     """Execute the full orchestration loop: plan -> implement -> review -> deliver."""
-    run_id = _build_run_id(prompt)
-    log = RunLog(run_id=run_id, prompt=prompt, status=RunStatus.RUNNING)
+    is_resume = resume_from is not None
 
-    slug = slugify(prompt)
-    names = planning_names(prompt)
-    branch_name = f"{config.branch_prefix}{slug}"
+    # --- Resume mode ---
+    if resume_from:
+        log = resume_from.log
+        branch_name = resume_from.branch_name
+        prd_rel = resume_from.prd_rel
+        task_rel = resume_from.task_rel
+        last_successful = resume_from.last_successful_phase
+        skip_phases = _SKIP_MAP.get(last_successful, set())
+        next_phase = _compute_next_phase(last_successful)
+        log.status = RunStatus.RUNNING
+        _log(f"Resuming from phase: {next_phase}")
+        # Record resume event for audit trail
+        _save_run_log(repo_root, log, resumed=True)
+    else:
+        run_id = _build_run_id(prompt)
+        log = RunLog(run_id=run_id, prompt=prompt, status=RunStatus.RUNNING)
+        skip_phases: set[str] = set()
 
-    prd_rel = f"{config.prds_dir}/{names.prd_filename}"
-    task_rel = f"{config.tasks_dir}/{names.task_filename}"
+        slug = slugify(prompt)
+        names = planning_names(prompt)
+        branch_name = f"{config.branch_prefix}{slug}"
+
+        prd_rel = f"{config.prds_dir}/{names.prd_filename}"
+        task_rel = f"{config.tasks_dir}/{names.task_filename}"
+
+    log.branch_name = branch_name
+    log.prd_rel = prd_rel
+    log.task_rel = task_rel
 
     # --- Phase 1: Plan ---
-    if from_prd:
+    if "plan" in skip_phases:
+        _log("Skipping plan phase (already completed in previous run)")
+    elif from_prd:
         _log(f"Skipping plan phase, using existing PRD: {from_prd}")
         prd_rel = from_prd
         prd_stem = Path(from_prd).stem
@@ -347,117 +703,160 @@ def run(
         return log
 
     # --- Phase 2: Implement ---
-    _log("=== Phase 2: Implement ===")
-    system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name)
-    impl_result = run_phase_sync(
-        Phase.IMPLEMENT,
-        user,
-        cwd=repo_root,
-        system_prompt=system,
-        model=config.model,
-        budget_usd=config.budget.per_phase,
-    )
-    log.phases.append(impl_result)
-
-    if not impl_result.success:
-        log.status = RunStatus.FAILED
-        log.mark_finished()
-        _save_run_log(repo_root, log)
-        _log(f"Implement phase failed: {impl_result.error}")
-        return log
-
-    # --- Phase 3: Review ---
-    if config.phases.review:
-        _log("=== Phase 3: Review ===")
-
-        # Read the task file to extract parent tasks
-        task_path = repo_root / task_rel
-        parent_tasks: list[str] = []
-        if task_path.exists():
-            task_content = task_path.read_text(encoding="utf-8")
-            parent_tasks = _parse_parent_tasks(task_content)
-
-        if not parent_tasks:
-            parent_tasks = ["Full implementation review"]
-
-        r_names = review_names(prompt, task_count=len(parent_tasks))
-        review_agents = _build_review_persona_agents(config.personas) or None
-        if review_agents:
-            _log(f"  {len(review_agents)} persona subagents configured for review")
-
-        # Per-task reviews
-        for i, task_desc in enumerate(parent_tasks):
-            _log(f"  Reviewing task {i + 1}/{len(parent_tasks)}: {task_desc[:60]}")
-            system, user_prompt = _build_review_prompt(
-                config, prd_rel, branch_name, task_desc
-            )
-            review_result = run_phase_sync(
-                Phase.REVIEW,
-                user_prompt,
-                cwd=repo_root,
-                system_prompt=system,
-                model=config.model,
-                budget_usd=config.budget.per_phase,
-                agents=review_agents,
-            )
-
-            # Save per-task review artifact
-            result_text = review_result.artifacts.get("result", "")
-            _save_review_artifact(
-                repo_root,
-                config.reviews_dir,
-                r_names.task_review_filenames[i],
-                f"# Task Review: {task_desc}\n\n{result_text}",
-            )
-
-            if not review_result.success:
-                log.phases.append(review_result)
-                log.status = RunStatus.FAILED
-                log.mark_finished()
-                _save_run_log(repo_root, log)
-                _log(f"Review phase failed on task {i + 1}: {review_result.error}")
-                return log
-
-        # Final holistic review
-        _log("  Running final holistic review...")
-        system, user_prompt = _build_review_prompt(
-            config,
-            prd_rel,
-            branch_name,
-            "Final holistic review: assess the entire implementation against the PRD, "
-            "covering cross-cutting concerns (security, performance, architecture, UX).",
-        )
-        final_review_result = run_phase_sync(
-            Phase.REVIEW,
-            user_prompt,
+    if "implement" in skip_phases:
+        _log("Skipping implement phase (already completed in previous run)")
+    else:
+        _log("=== Phase 2: Implement ===")
+        system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name)
+        impl_result = run_phase_sync(
+            Phase.IMPLEMENT,
+            user,
             cwd=repo_root,
             system_prompt=system,
             model=config.model,
             budget_usd=config.budget.per_phase,
-            agents=review_agents,
         )
+        log.phases.append(impl_result)
 
-        # Save final review artifact
-        final_text = final_review_result.artifacts.get("result", "")
-        _save_review_artifact(
-            repo_root,
-            config.reviews_dir,
-            r_names.final_review_filename,
-            f"# Final Holistic Review\n\n{final_text}",
-        )
-
-        log.phases.append(final_review_result)
-
-        if not final_review_result.success:
+        if not impl_result.success:
             log.status = RunStatus.FAILED
             log.mark_finished()
             _save_run_log(repo_root, log)
-            _log(f"Review phase failed (holistic): {final_review_result.error}")
+            _log(f"Implement phase failed: {impl_result.error}")
             return log
 
-    # --- Phase 4: Deliver ---
+    # --- Phase 3: Review/Fix Loop ---
+    if "review" in skip_phases:
+        _log("Skipping review phase (already completed in previous run)")
+    elif config.phases.review:
+        reviewers = _reviewer_personas(config)
+        if not reviewers:
+            _log("No reviewer personas configured, skipping review phase")
+        else:
+            _log(f"=== Phase 3: Review ({len(reviewers)} reviewers) ===")
+            review_tools = ["Read", "Glob", "Grep", "Bash"]
+            last_findings: list[tuple[str, str]] = []
+
+            for iteration in range(config.max_fix_iterations + 1):
+                # Budget guard
+                cost_so_far = sum(
+                    p.cost_usd for p in log.phases if p.cost_usd is not None
+                )
+                remaining = config.budget.per_run - cost_so_far
+                if remaining < config.budget.per_phase:
+                    _log(
+                        f"Review loop: budget exhausted "
+                        f"({remaining:.2f} remaining). Stopping reviews."
+                    )
+                    break
+
+                _log(f"  Review round {iteration + 1}/{config.max_fix_iterations + 1}")
+
+                review_calls = []
+                for persona in reviewers:
+                    sys_prompt, usr_prompt = _build_persona_review_prompt(
+                        persona, config, prd_rel, branch_name
+                    )
+                    review_calls.append(dict(
+                        phase=Phase.REVIEW,
+                        prompt=usr_prompt,
+                        cwd=repo_root,
+                        system_prompt=sys_prompt,
+                        model=config.model,
+                        budget_usd=config.budget.per_phase,
+                        allowed_tools=review_tools,
+                    ))
+
+                results = run_phases_parallel_sync(review_calls)
+
+                # Save each persona's review artifact
+                for persona, result in zip(reviewers, results):
+                    p_slug = _persona_slug(persona.role)
+                    text = result.artifacts.get("result", "")
+                    fname = f"review_round{iteration + 1}_{p_slug}.md"
+                    _save_review_artifact(
+                        repo_root,
+                        config.reviews_dir,
+                        fname,
+                        f"# Review by {persona.role} (Round {iteration + 1})\n\n{text}",
+                    )
+                    log.phases.append(result)
+
+                last_findings = _collect_review_findings(results, reviewers)
+
+                if not last_findings:
+                    _log("  All reviewers approve")
+                    break
+
+                _log(
+                    f"  {len(last_findings)} reviewer(s) requested changes: "
+                    + ", ".join(role for role, _ in last_findings)
+                )
+
+                if iteration < config.max_fix_iterations:
+                    findings_text = "\n\n---\n\n".join(
+                        f"### {role}\n\n{text}" for role, text in last_findings
+                    )
+                    fix_system, fix_user = _build_fix_prompt(
+                        config,
+                        prd_rel,
+                        task_rel,
+                        branch_name,
+                        findings_text,
+                        iteration + 1,
+                    )
+                    _log(f"  Running fix agent (iteration {iteration + 1})...")
+                    fix_result = run_phase_sync(
+                        Phase.FIX,
+                        fix_user,
+                        cwd=repo_root,
+                        system_prompt=fix_system,
+                        model=config.model,
+                        budget_usd=config.budget.per_phase,
+                    )
+                    log.phases.append(fix_result)
+                    if not fix_result.success:
+                        _log(f"  Fix phase failed: {fix_result.error}")
+                        break
+
+            # --- Decision Gate ---
+            _log("=== Decision Gate ===")
+            system, user = _build_decision_prompt(config, prd_rel, branch_name)
+            decision_result = run_phase_sync(
+                Phase.DECISION,
+                user,
+                cwd=repo_root,
+                system_prompt=system,
+                model=config.model,
+                budget_usd=config.budget.per_phase,
+                allowed_tools=["Read", "Glob", "Grep", "Bash"],
+            )
+            log.phases.append(decision_result)
+
+            verdict_text = decision_result.artifacts.get("result", "")
+            verdict = _extract_verdict(verdict_text)
+            _log(f"  Decision: {verdict}")
+
+            _save_review_artifact(
+                repo_root,
+                config.reviews_dir,
+                f"decision_{slugify(prompt)}.md",
+                f"# Decision Gate\n\nVerdict: **{verdict}**\n\n{verdict_text}",
+            )
+
+            if verdict == "NO-GO":
+                log.status = RunStatus.FAILED
+                log.mark_finished()
+                _save_run_log(repo_root, log)
+                _log("Decision gate: NO-GO. Pipeline stopped before deliver.")
+                return log
+
+            if verdict == "UNKNOWN":
+                _log("  Warning: could not parse verdict, proceeding with caution")
+
+    # --- Deliver Phase ---
     if config.phases.deliver:
-        phase_num = 4 if config.phases.review else 3
+        phase_num = 5 if config.phases.review else 3
         _log(f"=== Phase {phase_num}: Deliver ===")
         system, user = _build_deliver_prompt(config, prd_rel, branch_name)
         deliver_result = run_phase_sync(

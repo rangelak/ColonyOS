@@ -1,5 +1,47 @@
 # Changelog
 
+## 20260317_180000 — Review/fix loop redesign: per-persona parallel reviews + fix agent
+
+Replaced the monolithic subagent-based review with independent per-persona parallel
+sessions and a dedicated fix agent loop. Reviews are now fast, focused, and configurable.
+
+**Architecture change:**
+- Old: 1 session per task with 7 subagents nested → holistic review → decision → fix loop
+- New: N reviewer personas run in parallel via asyncio.gather → if request-changes, fix agent runs → re-review → decision gate
+
+**Changes:**
+- `src/colonyos/models.py` — Added `reviewer: bool = False` field to `Persona` dataclass
+- `src/colonyos/config.py` — Parse/serialize `reviewer` in `_parse_personas`, `_parse_persona`, `save_config`
+- `src/colonyos/init.py` — Ask "Should this persona participate in code reviews?" during persona collection
+- `src/colonyos/agent.py` — Added `run_phases_parallel()` and `run_phases_parallel_sync()` for concurrent phase execution
+- `src/colonyos/orchestrator.py` — Deleted `_build_review_persona_agents`, `_format_review_personas_block`, per-task review loop; added `_reviewer_personas`, `_build_persona_review_prompt`, `_extract_review_verdict`, `_collect_review_findings`; rewrote Phase 3 as review/fix loop
+- `src/colonyos/instructions/review.md` — Persona identity baked into template (`{reviewer_role}`, `{reviewer_expertise}`, `{reviewer_perspective}`); structured VERDICT output required
+- `src/colonyos/instructions/fix.md` — Staff+ Google Engineer identity; uses `{findings_text}` from reviewer findings
+- `.colonyos/config.yaml` — Tagged 4 personas as reviewers; added `proposals_dir`, `max_fix_iterations`
+- `tests/test_orchestrator.py` — Full rewrite for new parallel review + fix loop architecture
+- `tests/test_config.py` — Added `TestReviewerField` class
+- `tests/test_ceo.py` — Updated integration test for parallel review mocking
+
+## 20260317_150000 — Address persona review findings + decision gate
+
+Addressed all CRITICAL/HIGH findings from the 7-persona review of the CEO stage.
+Added a decision gate between review and deliver that gives a GO/NO-GO verdict.
+
+**Fixes:**
+- `src/colonyos/naming.py` — Truncate slugs to 80 chars max (fixes OSError: File name too long)
+- `src/colonyos/orchestrator.py` — `_extract_feature_prompt` uses case-insensitive regex, handles ### terminators, strips code fences
+- `src/colonyos/orchestrator.py` — Proposal only saved on success; removed "save your proposal" from CEO prompt
+- `src/colonyos/cli.py` — CEO phase recorded in RunLog; `_print_run_summary` helper extracted; success check before display
+- `src/colonyos/cli.py` — `--loop` capped at 10 iterations with aggregate budget enforcement via `per_run`
+- `src/colonyos/cli.py` — `--plan-only` renamed to `--propose-only` on `auto` command
+- `src/colonyos/init.py` — Preserves `ceo_persona` when re-running init
+
+**New features:**
+- `src/colonyos/instructions/decision.md` — Decision gate instruction template
+- `src/colonyos/orchestrator.py` — `_build_decision_prompt`, `_extract_verdict`, wired between review and deliver
+- `src/colonyos/models.py` — `Phase.DECISION` enum value
+- Pipeline now: plan → implement → review → **decision gate** → deliver
+
 ## 20260317_100000 — Add iconic personas + parallel subagent Q&A
 
 Added Steve Jobs, Jony Ive, Linus Torvalds, and Andrej Karpathy as personas.

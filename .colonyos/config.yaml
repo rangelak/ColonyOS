@@ -19,18 +19,22 @@ personas:
   - role: "Principal Systems Engineer (Google/Stripe caliber)"
     expertise: "Distributed systems, API design, reliability, observability"
     perspective: "What happens when this fails at 3am? Where are the race conditions? Is the API surface minimal and composable? Can I debug a broken run from the logs alone? What's the blast radius of a bad agent session?"
+    reviewer: true
 
   - role: "Linus Torvalds"
     expertise: "Kernel-level systems programming, open source code quality, brutal code review"
     perspective: "Is this code correct, or merely clever? Show me the data structures and I'll understand the code. Don't abstract prematurely — write the simple, obvious thing first. If a function is longer than a screenful, break it up. Bad code with good comments is still bad code."
+    reviewer: true
 
   - role: "Staff Security Engineer"
     expertise: "Supply chain security, secrets management, least privilege, sandboxing"
     perspective: "This tool runs arbitrary code in people's repos with full permissions. What stops a bad instruction template from exfiltrating secrets? How do we audit what the agent did? What's the principle of least privilege for each phase?"
+    reviewer: true
 
   - role: "Andrej Karpathy"
     expertise: "Deep learning systems, LLM applications, AI engineering, prompt design"
     perspective: "Are we using the model effectively or fighting against it? What's the right level of autonomy vs. human oversight? Prompts are programs — treat them with the same rigor. Where can we use structured output to make the system more reliable? What failure modes emerge from stochastic outputs?"
+    reviewer: true
 
 model: opus
 budget:
@@ -45,3 +49,5 @@ branch_prefix: colonyos/
 prds_dir: cOS_prds
 tasks_dir: cOS_tasks
 reviews_dir: cOS_reviews
+proposals_dir: cOS_proposals
+max_fix_iterations: 2

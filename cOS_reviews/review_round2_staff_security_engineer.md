@@ -1,0 +1,22 @@
+# Review by Staff Security Engineer (Round 2)
+
+I now have a comprehensive understanding of the implementation. Let me compile my review.
+
+---
+
+VERDICT: approve
+
+FINDINGS:
+- [src/colonyos/orchestrator.py:453-461]: **Good: Path traversal protection on run_id**. `_validate_run_id()` rejects `/`, `\`, and `..` in run IDs. Additionally, `_load_run_log()` at line 478-481 does a resolved-path containment check. This is defense-in-depth — well done.
+- [src/colonyos/orchestrator.py:464-471]: **Good: Relative path containment validation**. `_validate_rel_path()` verifies that `prd_rel` and `task_rel` from the JSON cannot escape the repo root via symlink or `..` traversal. This is critical because these paths are fed into agent instructions and the orchestrator trusts them.
+- [src/colonyos/orchestrator.py:540-543]: **Good: Git argument injection prevention**. The `--` terminator before `log.branch_name` in `["git", "branch", "--list", "--", log.branch_name]` prevents a malicious branch name like `--delete` from being interpreted as a flag. Tested explicitly in `TestGitBranchArgTermination`.
+- [src/colonyos/orchestrator.py:407-418]: **Good: Audit trail for resume events**. The `resume_events` list with ISO timestamps provides an audit trail of when a run was resumed. This enables post-incident investigation of abuse patterns.
+- [src/colonyos/orchestrator.py:527-533]: **Good: Status gating**. Only `FAILED` runs can be resumed — blocking resume of `RUNNING` (which could cause concurrent execution of the same run) or `COMPLETED` runs (which could re-execute deliver/push).
+- [src/colonyos/orchestrator.py:416-418]: **Minor: datetime import inside function**. The `from datetime import datetime, timezone` import at line 417 is inside the `if resumed:` block. This is a lazy import pattern — not a security issue, but `datetime` is already imported at module level in `models.py`. Consider importing at module level for consistency. Not blocking.
+- [src/colonyos/cli.py:69-75]: **Good: Mutual exclusivity enforcement**. `--resume` combined with `--plan-only`, `--from-prd`, or a prompt argument is rejected immediately. This prevents confusing state where resume semantics conflict with fresh-run semantics.
+- [src/colonyos/models.py:61-68]: **Good: Typed ResumeState dataclass**. Using a typed `ResumeState` rather than an untyped `dict` eliminates a class of bugs where dict keys are misspelled or missing. The PRD originally specified `dict | None` — this is a strict improvement.
+- [tests/test_orchestrator.py:1173-1278]: **Good: Comprehensive security test coverage**. Path traversal tests for run_id (dotdot, slash, backslash, empty), relative path escape tests for prd_rel/task_rel, git argument injection test, and schema validation tests for corrupted JSON. This is thorough.
+- [src/colonyos/orchestrator.py:397]: **Note: `resumed` flag as keyword-only argument**. The `resumed: bool = False` parameter on `_save_run_log` is keyword-only (via `*`), preventing accidental positional misuse. Good API design.
+
+SYNTHESIS:
+From a security perspective, this implementation is solid. The primary attack surface for `--resume` is the run log JSON file sitting on disk in `.colonyos/runs/`. An attacker who can write arbitrary JSON to that directory could inject malicious `prd_rel` or `task_rel` paths, or craft a `branch_name` that exploits git argument parsing. The implementation defends against all of these: path traversal in run IDs is blocked, relative paths are resolved and checked for containment within the repo root, and git commands use `--` argument termination. The `ResumeState` is a typed dataclass rather than an untyped dict, reducing the surface for key confusion bugs. The audit trail via `resume_events` timestamps is a good addition beyond what the PRD required — it enables forensic analysis of whether resume was abused to repeatedly re-trigger expensive phases. The only RUNNING status is correctly blocked to prevent concurrent execution races. All 198 tests pass, including dedicated security-focused test classes for path traversal, schema validation, and argument injection. No secrets, credentials, or exfiltration vectors were introduced. This is a well-defended feature from a supply chain and least-privilege perspective.

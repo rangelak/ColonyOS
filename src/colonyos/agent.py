@@ -28,11 +28,13 @@ async def run_phase(
     budget_usd: float = 5.0,
     max_turns: int | None = None,
     agents: dict[str, AgentDefinition] | None = None,
+    allowed_tools: list[str] | None = None,
 ) -> PhaseResult:
     """Run a single phase by invoking Claude Code with the given prompt and instructions."""
-    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
-    if agents:
-        allowed_tools.append("Agent")
+    if allowed_tools is None:
+        allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+        if agents:
+            allowed_tools.append("Agent")
 
     options = ClaudeAgentOptions(
         cwd=cwd,
@@ -99,6 +101,7 @@ def run_phase_sync(
     budget_usd: float = 5.0,
     max_turns: int | None = None,
     agents: dict[str, AgentDefinition] | None = None,
+    allowed_tools: list[str] | None = None,
 ) -> PhaseResult:
     """Synchronous wrapper around run_phase for use in non-async contexts."""
     return asyncio.run(
@@ -111,5 +114,17 @@ def run_phase_sync(
             budget_usd=budget_usd,
             max_turns=max_turns,
             agents=agents,
+            allowed_tools=allowed_tools,
         )
     )
+
+
+async def run_phases_parallel(calls: list[dict]) -> list[PhaseResult]:
+    """Run multiple phase calls concurrently via asyncio.gather."""
+    tasks = [run_phase(**c) for c in calls]
+    return list(await asyncio.gather(*tasks))
+
+
+def run_phases_parallel_sync(calls: list[dict]) -> list[PhaseResult]:
+    """Synchronous wrapper for run_phases_parallel."""
+    return asyncio.run(run_phases_parallel(calls))

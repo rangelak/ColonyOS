@@ -26,9 +26,14 @@ class ReviewNames:
     final_review_filename: str
 
 
-def slugify(value: str) -> str:
+MAX_SLUG_LEN = 80
+
+
+def slugify(value: str, *, max_len: int = MAX_SLUG_LEN) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", value.lower())
     slug = re.sub(r"_+", "_", slug).strip("_")
+    if len(slug) > max_len:
+        slug = slug[:max_len].rstrip("_")
     return slug or "untitled"
 
 
@@ -67,6 +72,27 @@ def review_names(
         slug=slug,
         task_review_filenames=task_filenames,
         final_review_filename=f"{ts}_review_final_{slug}.md",
+    )
+
+
+@dataclass(frozen=True)
+class ProposalNames:
+    timestamp: str
+    slug: str
+    proposal_filename: str
+
+
+def proposal_names(
+    feature_name: str,
+    *,
+    timestamp: str | None = None,
+) -> ProposalNames:
+    ts = timestamp or generate_timestamp()
+    slug = slugify(feature_name)
+    return ProposalNames(
+        timestamp=ts,
+        slug=slug,
+        proposal_filename=f"{ts}_proposal_{slug}.md",
     )
 
 

@@ -89,7 +89,10 @@ def collect_personas(existing: list[Persona] | None = None) -> list[Persona]:
             "Perspective (what does this person think about?)",
             default="",
         )
-        personas.append(Persona(role=role, expertise=expertise, perspective=perspective))
+        is_reviewer = click.confirm(
+            "Should this persona participate in code reviews?", default=True
+        )
+        personas.append(Persona(role=role, expertise=expertise, perspective=perspective, reviewer=is_reviewer))
 
         if len(personas) >= 3 and not click.confirm("Add another persona?", default=len(personas) < 5):
             break
@@ -131,11 +134,20 @@ def run_init(repo_root: Path, *, personas_only: bool = False) -> ColonyConfig:
             prds_dir=existing.prds_dir,
             tasks_dir=existing.tasks_dir,
             reviews_dir=existing.reviews_dir,
+            proposals_dir=existing.proposals_dir,
+            ceo_persona=existing.ceo_persona,
+            vision=existing.vision,
         )
     else:
         project = collect_project_info()
         personas = _collect_personas_with_packs(
             existing.personas if existing.personas else None,
+        )
+
+        click.echo("\n--- Strategic Direction ---\n")
+        vision = _prompt(
+            "Describe your project's vision and priorities (optional, press Enter to skip)",
+            default="",
         )
 
         click.echo("\n--- Configuration ---\n")
@@ -157,6 +169,9 @@ def run_init(repo_root: Path, *, personas_only: bool = False) -> ColonyConfig:
             prds_dir=existing.prds_dir,
             tasks_dir=existing.tasks_dir,
             reviews_dir=existing.reviews_dir,
+            proposals_dir=existing.proposals_dir,
+            ceo_persona=existing.ceo_persona,
+            vision=vision,
         )
 
     config_path = save_config(repo_root, config)
@@ -164,9 +179,11 @@ def run_init(repo_root: Path, *, personas_only: bool = False) -> ColonyConfig:
     prds_dir = repo_root / config.prds_dir
     tasks_dir = repo_root / config.tasks_dir
     reviews_dir = repo_root / config.reviews_dir
+    proposals_dir = repo_root / config.proposals_dir
     prds_dir.mkdir(parents=True, exist_ok=True)
     tasks_dir.mkdir(parents=True, exist_ok=True)
     reviews_dir.mkdir(parents=True, exist_ok=True)
+    proposals_dir.mkdir(parents=True, exist_ok=True)
 
     # Warn if old non-prefixed directories exist alongside new cOS_ dirs
     for old_name, new_name in [("prds", config.prds_dir), ("tasks", config.tasks_dir)]:
@@ -192,7 +209,7 @@ def run_init(repo_root: Path, *, personas_only: bool = False) -> ColonyConfig:
         gitignore.write_text("\n".join(entries_needed) + "\n", encoding="utf-8")
 
     click.echo(f"\nConfig saved to {config_path}")
-    click.echo(f"Created {prds_dir}/, {tasks_dir}/, and {reviews_dir}/ directories")
+    click.echo(f"Created {prds_dir}/, {tasks_dir}/, {reviews_dir}/, and {proposals_dir}/ directories")
     click.echo(f"Defined {len(config.personas)} personas")
     click.echo("\nRun `colonyos run \"<feature>\"` to start building.")
 

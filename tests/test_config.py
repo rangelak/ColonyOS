@@ -113,6 +113,34 @@ class TestLoadConfig:
         assert config.tasks_dir == "tasks"
 
 
+    def test_loads_ceo_persona_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "ceo_persona": {
+                    "role": "Growth CEO",
+                    "expertise": "Growth hacking",
+                    "perspective": "Move the needle",
+                },
+                "vision": "Become #1 dev tool",
+                "proposals_dir": "custom_proposals",
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.ceo_persona is not None
+        assert config.ceo_persona.role == "Growth CEO"
+        assert config.vision == "Become #1 dev tool"
+        assert config.proposals_dir == "custom_proposals"
+
+    def test_defaults_for_new_fields(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.ceo_persona is None
+        assert config.vision == ""
+        assert config.proposals_dir == "cOS_proposals"
+
+
 class TestDefaults:
     def test_defaults_have_cos_prefix(self):
         assert DEFAULTS["prds_dir"] == "cOS_prds"
@@ -122,13 +150,16 @@ class TestDefaults:
     def test_defaults_have_review_phase(self):
         assert DEFAULTS["phases"]["review"] is True
 
+    def test_defaults_have_proposals_dir(self):
+        assert DEFAULTS["proposals_dir"] == "cOS_proposals"
+
 
 class TestSaveConfig:
     def test_roundtrip(self, tmp_repo: Path):
         original = ColonyConfig(
             project=ProjectInfo(name="MyApp", description="desc", stack="Go"),
             personas=[
-                Persona(role="Lead", expertise="Arch", perspective="Big picture")
+                Persona(role="Lead", expertise="Arch", perspective="Big picture", reviewer=True)
             ],
             model="test-model",
             budget=BudgetConfig(per_phase=2.0, per_run=6.0),
@@ -145,6 +176,7 @@ class TestSaveConfig:
         assert loaded.project is not None
         assert loaded.project.name == "MyApp"
         assert loaded.personas[0].role == "Lead"
+        assert loaded.personas[0].reviewer is True
         assert loaded.model == "test-model"
         assert loaded.budget.per_phase == 2.0
         assert loaded.phases.implement is False
@@ -160,6 +192,30 @@ class TestSaveConfig:
         loaded = load_config(tmp_repo)
         assert loaded.phases.review is False
 
+    def test_roundtrip_ceo_fields(self, tmp_repo: Path):
+        original = ColonyConfig(
+            ceo_persona=Persona(
+                role="Growth CEO",
+                expertise="Growth",
+                perspective="Metrics",
+            ),
+            vision="Build the best tool",
+            proposals_dir="my_proposals",
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.ceo_persona is not None
+        assert loaded.ceo_persona.role == "Growth CEO"
+        assert loaded.vision == "Build the best tool"
+        assert loaded.proposals_dir == "my_proposals"
+
+    def test_roundtrip_without_ceo_persona(self, tmp_repo: Path):
+        original = ColonyConfig(vision="Some vision")
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.ceo_persona is None
+        assert loaded.vision == "Some vision"
+
     def test_reviews_dir_persisted(self, tmp_repo: Path):
         original = ColonyConfig(reviews_dir="custom_reviews")
         save_config(tmp_repo, original)
@@ -167,3 +223,80 @@ class TestSaveConfig:
         config_path = tmp_repo / ".colonyos" / "config.yaml"
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert raw["reviews_dir"] == "custom_reviews"
+
+
+class TestReviewerField:
+    def test_defaults_to_false(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "personas": [
+                    {"role": "Eng", "expertise": "x", "perspective": "y"},
+                ]
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.personas[0].reviewer is False
+
+    def test_parsed_when_true(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "personas": [
+                    {"role": "Eng", "expertise": "x", "perspective": "y", "reviewer": True},
+                ]
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.personas[0].reviewer is True
+
+    def test_roundtrip(self, tmp_repo: Path):
+        original = ColonyConfig(
+            personas=[
+                Persona(role="Reviewer", expertise="x", perspective="y", reviewer=True),
+                Persona(role="Planner", expertise="x", perspective="y", reviewer=False),
+            ],
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.personas[0].reviewer is True
+        assert loaded.personas[1].reviewer is False
+
+
+class TestMaxFixIterations:
+    def test_default_value(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.max_fix_iterations == 2
+
+    def test_parsed_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"max_fix_iterations": 5}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.max_fix_iterations == 5
+
+    def test_zero_disables_fix_loop(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"max_fix_iterations": 0}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.max_fix_iterations == 0
+
+    def test_serialized_via_save_config(self, tmp_repo: Path):
+        original = ColonyConfig(max_fix_iterations=3)
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.max_fix_iterations == 3
+
+    def test_defaults_dict_has_max_fix_iterations(self):
+        assert DEFAULTS["max_fix_iterations"] == 2
