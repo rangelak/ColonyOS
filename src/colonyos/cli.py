@@ -521,11 +521,22 @@ def _run_single_iteration(
         _save_loop_state(repo_root, loop_state)
         return aggregate_cost, False
 
-    click.echo(f"\n{'=' * 60}")
-    click.echo("CEO Proposal:")
-    click.echo(f"{'=' * 60}")
-    click.echo(prompt)
-    click.echo(f"{'=' * 60}")
+    from rich.console import Console
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+
+    _console = Console()
+    _console.print()
+    _console.print(
+        Panel(
+            Markdown(prompt),
+            title="[bold]CEO Proposal[/bold]",
+            title_align="left",
+            border_style="bright_black",
+            padding=(1, 2),
+            expand=True,
+        )
+    )
 
     if propose_only:
         click.echo("\nPropose-only mode: proposal saved, pipeline not triggered.")

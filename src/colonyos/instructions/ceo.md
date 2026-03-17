@@ -26,16 +26,9 @@ Read the project's README, key source files, and directory structure to understa
 
 ### Step 2: Review History
 
-Scan all files in these directories to understand what has been built and what's in progress:
-- `{prds_dir}/` — Previous PRDs (feature specifications)
-- `{tasks_dir}/` — Previous task lists
-- `{reviews_dir}/` — Previous code reviews
-- `{proposals_dir}/` — Previous CEO proposals
+The user prompt includes the **full development changelog** listing every feature already built. Review it carefully before proposing anything new. Your proposal must not duplicate past work.
 
-Pay special attention to:
-- Features that have already been built (avoid duplication)
-- Patterns and themes across prior work
-- Any gaps or follow-up items mentioned in reviews
+If you need more detail on a specific past feature, you may read its PRD or task file in `{prds_dir}/` or `{tasks_dir}/`.
 
 ### Step 3: Analyze Opportunities
 
@@ -57,6 +50,9 @@ Your output MUST follow this exact format:
 
 ### Rationale
 [2-3 sentences explaining why this is the top priority right now]
+
+### Builds Upon
+[List 1-3 changelog entries by title that this feature extends, complements, or depends on. Example: "Rich Streaming Terminal UI", "Autonomous CEO Stage". If truly novel, say "New capability — no direct predecessor."]
 
 ### Feature Request
 [A clear, detailed natural-language description of what to build. This should be specific enough to serve as input to a planning phase that will generate a PRD and task list.]

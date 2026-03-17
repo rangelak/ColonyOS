@@ -354,6 +354,7 @@ DEFAULT_CEO_PERSONA = Persona(
 def _build_ceo_prompt(
     config: ColonyConfig,
     proposal_filename: str,
+    repo_root: Path,
 ) -> tuple[str, str]:
     """Build the system prompt and user prompt for the CEO phase."""
     ceo_template = _load_instruction("ceo.md")
@@ -369,11 +370,19 @@ def _build_ceo_prompt(
         vision=config.vision or "No vision statement configured.",
         prds_dir=config.prds_dir,
         tasks_dir=config.tasks_dir,
-        reviews_dir=config.reviews_dir,
-        proposals_dir=config.proposals_dir,
     )
 
+    changelog = ""
+    changelog_path = repo_root / "CHANGELOG.md"
+    if changelog_path.exists():
+        changelog = changelog_path.read_text(encoding="utf-8")
+
     user = (
+        "## Development History\n\n"
+        "Below is the complete changelog of features already built. "
+        "Your proposal MUST NOT duplicate any of these. "
+        "Your proposal MUST build upon or complement existing work.\n\n"
+        f"{changelog}\n\n---\n\n"
         "Analyze this project and propose the single most impactful feature to build next. "
         "Output your proposal in the format described in the instructions."
     )
@@ -393,7 +402,7 @@ def run_ceo(
     names = proposal_names("ceo_proposal")
     proposal_filename = names.proposal_filename
 
-    system, user = _build_ceo_prompt(config, proposal_filename)
+    system, user = _build_ceo_prompt(config, proposal_filename, repo_root)
 
     if ui is not None:
         ui.phase_header("CEO", config.budget.per_phase, config.model)

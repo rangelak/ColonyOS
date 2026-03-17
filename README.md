@@ -213,6 +213,7 @@ ColonyOS creates `cOS_`-prefixed directories in your repo that serve as a timest
 
 ```
 your-repo/
+  CHANGELOG.md                              # auto-updated feature log (CEO reads this)
   cOS_prds/
     20260316_172530_prd_stripe_billing.md
   cOS_tasks/
@@ -223,6 +224,8 @@ your-repo/
   cOS_proposals/
     20260317_155328_proposal_ceo_proposal.md
 ```
+
+The `CHANGELOG.md` at the project root is the source of truth for what's been built. The CEO reads it before proposing new features to avoid duplication. The deliver phase auto-appends entries after each successful run.
 
 Run logs (costs, durations, session IDs) and loop state files go to `.colonyos/runs/` which is gitignored by default.
 

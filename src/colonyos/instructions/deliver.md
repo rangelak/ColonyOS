@@ -14,13 +14,24 @@ You are opening a pull request for the work on branch `{branch_name}`.
 
 Check `git status`. If there are uncommitted changes, commit them with a descriptive message.
 
-### Step 2: Push the Branch
+### Step 2: Update the Changelog
+
+Read `CHANGELOG.md` in the project root. Add a new entry at the **top** (immediately after the `# Changelog` heading) with:
+
+- A timestamp heading: `## YYYYMMDD_HHMMSS — [Feature Title]`
+- 1–2 sentence summary of what was built
+- List of key files created or modified
+- Links to the PRD and task files
+
+Use the current UTC time for the timestamp. Keep the entry concise — match the style of existing entries.
+
+### Step 3: Push the Branch
 
 ```bash
 git push -u origin {branch_name}
 ```
 
-### Step 3: Open the Pull Request
+### Step 4: Open the Pull Request
 
 Use `gh pr create` with:
 
@@ -35,7 +46,7 @@ Use `gh pr create` with:
 gh pr create --title "..." --body "..."
 ```
 
-### Step 4: Report the PR URL
+### Step 5: Report the PR URL
 
 Output the PR URL so it can be recorded in the run log.
 

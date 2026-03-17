@@ -63,17 +63,17 @@ class TestDefaultCeoPersona:
 
 
 class TestBuildCeoPrompt:
-    def test_contains_project_info(self, config: ColonyConfig):
-        system, user = _build_ceo_prompt(config, "test_proposal.md")
+    def test_contains_project_info(self, tmp_repo: Path, config: ColonyConfig):
+        system, user = _build_ceo_prompt(config, "test_proposal.md", tmp_repo)
         assert "TestApp" in system
         assert "A test app" in system
         assert "Python" in system
 
-    def test_contains_default_persona(self, config: ColonyConfig):
-        system, user = _build_ceo_prompt(config, "test_proposal.md")
+    def test_contains_default_persona(self, tmp_repo: Path, config: ColonyConfig):
+        system, user = _build_ceo_prompt(config, "test_proposal.md", tmp_repo)
         assert "Product CEO" in system
 
-    def test_uses_custom_ceo_persona(self):
+    def test_uses_custom_ceo_persona(self, tmp_repo: Path):
         custom_persona = Persona(
             role="Growth CEO",
             expertise="Growth hacking",
@@ -83,32 +83,42 @@ class TestBuildCeoPrompt:
             project=ProjectInfo(name="App", description="d", stack="s"),
             ceo_persona=custom_persona,
         )
-        system, user = _build_ceo_prompt(config, "test.md")
+        system, user = _build_ceo_prompt(config, "test.md", tmp_repo)
         assert "Growth CEO" in system
         assert "Growth hacking" in system
 
-    def test_contains_vision_when_set(self):
+    def test_contains_vision_when_set(self, tmp_repo: Path):
         config = ColonyConfig(
             project=ProjectInfo(name="App", description="d", stack="s"),
             vision="Become the #1 developer tool",
         )
-        system, user = _build_ceo_prompt(config, "test.md")
+        system, user = _build_ceo_prompt(config, "test.md", tmp_repo)
         assert "Become the #1 developer tool" in system
 
-    def test_contains_no_vision_placeholder_when_empty(self, config: ColonyConfig):
-        system, user = _build_ceo_prompt(config, "test.md")
+    def test_contains_no_vision_placeholder_when_empty(self, tmp_repo: Path, config: ColonyConfig):
+        system, user = _build_ceo_prompt(config, "test.md", tmp_repo)
         assert "No vision statement configured" in system
 
-    def test_user_prompt_mentions_output(self, config: ColonyConfig):
-        system, user = _build_ceo_prompt(config, "20260317_120000_proposal_ceo.md")
+    def test_user_prompt_mentions_output(self, tmp_repo: Path, config: ColonyConfig):
+        system, user = _build_ceo_prompt(config, "20260317_120000_proposal_ceo.md", tmp_repo)
         assert "proposal" in user.lower() or "format" in user.lower()
 
-    def test_contains_directory_references(self, config: ColonyConfig):
-        system, user = _build_ceo_prompt(config, "test.md")
+    def test_contains_directory_references(self, tmp_repo: Path, config: ColonyConfig):
+        system, user = _build_ceo_prompt(config, "test.md", tmp_repo)
         assert "cOS_prds" in system
         assert "cOS_tasks" in system
-        assert "cOS_reviews" in system
-        assert "cOS_proposals" in system
+
+    def test_injects_changelog_into_user_prompt(self, tmp_repo: Path, config: ColonyConfig):
+        changelog_path = tmp_repo / "CHANGELOG.md"
+        changelog_path.write_text("# Changelog\n\n## 20260317 — Widget System\nAdded widgets.\n")
+        system, user = _build_ceo_prompt(config, "test.md", tmp_repo)
+        assert "Widget System" in user
+        assert "MUST NOT duplicate" in user
+
+    def test_no_changelog_still_works(self, tmp_repo: Path, config: ColonyConfig):
+        system, user = _build_ceo_prompt(config, "test.md", tmp_repo)
+        assert "Development History" in user
+        assert "propose" in user.lower()
 
 
 class TestExtractFeaturePrompt:
