@@ -1,23 +1,81 @@
 # Review by Principal Systems Engineer (Google/Stripe caliber) (Round 3)
 
-All 310 tests pass, no TODOs in shipped code, all tasks marked complete. Let me verify one behavioral detail — the `Bash` tool removal from reviewers is intentional and a security improvement, but I want to confirm the pipeline mode also lost it (this is a behavioral change):
+I now have a comprehensive view of the implementation. Here is my review:
 
-The diff shows `review_tools = ["Read", "Glob", "Grep"]` in `run_review_loop()`, and the old pipeline code had `["Read", "Glob", "Grep", "Bash"]`. The decision gate also lost `Bash`. This is actually a security improvement (reviewers are read-only assessors), and there's an explicit test for it (`test_review_tools_exclude_bash`, `test_decision_gate_tools_exclude_bash`). The existing test was updated from asserting `Bash` was included to asserting it's excluded. This is a deliberate hardening change.
+---
 
-Here is my review:
+## Review: Post-Implement Verification Gate
+
+### Completeness Assessment
+
+**All 29 functional requirements checked against the diff:**
+
+| FR | Status | Notes |
+|---|---|---|
+| FR-1 | ✅ | `verification:` section with `verify_command`, `max_verify_retries` in DEFAULTS |
+| FR-2 | ✅ | `verify_timeout: 300` in DEFAULTS and `VerificationConfig` |
+| FR-3 | ✅ | `if not verify_cfg.verify_command: return` in `run_verify_loop` |
+| FR-4 | ✅ | `VerificationConfig` dataclass in `config.py`, nested on `ColonyConfig` |
+| FR-5 | ✅ | `_parse_verification()` in `load_config()`, `save_config()` writes verification section |
+| FR-6 | ✅ | `VERIFY = "verify"` added to `Phase` enum |
+| FR-7 | ✅ | `PhaseResult(phase=Phase.VERIFY, cost_usd=0.0, artifacts={...})` |
+| FR-8 | ✅ | Implement retries logged as `Phase.IMPLEMENT` via `run_phase_sync` |
+| FR-9 | ✅ | `subprocess.run(cmd, shell=True, capture_output=True, cwd=repo_root, timeout=verify_timeout)` |
+| FR-10 | ✅ | `if passed: return` proceeds to review |
+| FR-11 | ✅ | Non-zero triggers retry loop |
+| FR-12 | ✅ | `except subprocess.TimeoutExpired` handled |
+| FR-13 | ✅ | `_build_verify_fix_prompt` includes PRD, task, truncated output, fix instructions |
+| FR-14 | ✅ | `verify_fix.md` template created |
+| FR-15 | ✅ | `run_phase_sync(Phase.IMPLEMENT, ..., budget_usd=config.budget.per_phase)` |
+| FR-16 | ✅ | `if attempt >= verify_cfg.max_verify_retries: break` then proceeds to review |
+| FR-17 | ✅ | Budget guard: `if remaining < config.budget.per_phase: break` |
+| FR-18 | ✅ | Verify results always `cost_usd=0.0` |
+| FR-19 | ✅ | Wired between implement and review in `run()` |
+| FR-20 | ✅ | Pipeline: Plan → Implement → Verify → Review/Fix → Decision → Deliver |
+| FR-21 | ✅ | `_compute_next_phase`: implement→verify, verify→review |
+| FR-22 | ✅ | `_SKIP_MAP["verify"] = {"plan", "implement"}` |
+| FR-23 | ✅ | `phase_header("Verify", ...)` with command as extra |
+| FR-24 | ✅ | `phase_complete(cost=0.0, ...)` on success |
+| FR-25 | ✅ | Failure output logged, retry message shown |
+| FR-26 | ✅ | `"Verify command timed out after {timeout} seconds"` |
+| FR-27 | ✅ | Interactive prompt: "What command runs your test suite?" |
+| FR-28 | ✅ | `_detect_test_command()` checks Makefile→package.json→pytest→Cargo.toml |
+| FR-29 | ✅ | Returns `None` when no runner detected |
+
+### Quality Assessment
+
+- **306/306 tests pass** — zero regressions
+- **48 new tests** covering all verification paths: subprocess args, exit codes, timeout, truncation, retry loops, budget guards, prompt building, config round-trip, init detection, pipeline integration ordering
+- Code follows existing patterns precisely: dataclass nesting mirrors `BudgetConfig`/`PhasesConfig`, instruction template follows `fix.md`, subprocess usage matches existing git operations
+- No unnecessary dependencies added
+- Two minor cosmetic test renames (`test_review_skipped_when_no__reviewer_personas` with double underscore) — harmless noise but non-ideal
+
+### Safety Assessment
+
+- No secrets or credentials in committed code
+- `OSError` is caught for subprocess failures (FR-12 + the explicit `except OSError`)
+- Budget guard prevents runaway spend
+- Retry cap prevents infinite loops
+- `shell=True` is acceptable per PRD rationale (agent already has unrestricted shell)
+
+### Reliability Concerns (Systems Engineer Perspective)
+
+1. **Stdout + stderr concatenation order**: `_run_verify_command` does `stdout + stderr`. If stderr contains the key diagnostic but stdout is 8KB of noise, the 4000-char tail truncation could clip the stderr entirely. Interleaved output (via `stdout=subprocess.PIPE` without `capture_output` + merging to single stream) would be more robust, but this is explicitly a v1 simplification acknowledged in the PRD.
+
+2. **No structured timeout message in retry prompt**: When `TimeoutExpired` fires, the test output is just the string `"Verify command timed out after N seconds"` — no partial output from the subprocess is captured. Python's `TimeoutExpired` has `.stdout`/`.stderr` attributes that could be harvested. The implement agent gets zero diagnostic data for timeout cases. This is a minor gap but not a blocking issue.
+
+3. **Resume semantics are sound**: The `_SKIP_MAP` correctly re-runs verify on resume (since it's free), and the comment explaining this decision is excellent. This is the right call.
+
+4. **The `run_verify_loop` always returns `None`** — the function signature is `-> None`. This is intentional per FR-16 (always proceed to review), and the docstring explains it. Clean design choice.
 
 ---
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/orchestrator.py]: Bash tool removed from reviewer and decision gate agents — this is a behavioral change to the existing pipeline (not just standalone review). Intentional hardening, but could surprise users who had reviewers running shell commands for analysis. Verified by tests.
-- [src/colonyos/orchestrator.py]: `_validate_branch_name` regex allows `~` and `^` which are git revision syntax characters (e.g., `HEAD~1`). This is needed for the `HEAD~1` fallback in `detect_base_branch`, but means a branch named `feat~1` would pass validation — unlikely to cause issues since git itself validates branch names upstream.
-- [src/colonyos/cli.py]: The `_print_review_summary` function is defined at module level but imports `rich` lazily inside the function body — good pattern, consistent with existing code.
-- [src/colonyos/cli.py]: When `run_review_loop` returns `"UNKNOWN"`, the CLI exits with code 1 (line ~410). This is the safe default — fail closed on unparseable verdicts. Good.
-- [src/colonyos/orchestrator.py]: The `run_review_loop` function takes a mutable `log: RunLog` and appends to `log.phases` as a side effect, while the CLI separately calls `_save_run_log`. This split responsibility is slightly awkward but matches the existing pattern in `orchestrator.run()`. Acceptable for consistency.
-- [src/colonyos/ui.py]: Missing blank line before `TOOL_ARG_KEYS` after the new `_abbreviate_role` function. Minor style nit.
-- [tests/]: 432+ new test lines covering all key paths: argument parsing, exit codes, base branch detection, precondition validation, prompt construction, artifact naming, branch name injection defense, tool restrictions. Solid coverage.
+- [src/colonyos/orchestrator.py]: `_run_verify_command` concatenates stdout+stderr sequentially rather than interleaving; long stdout could push stderr diagnostics out of the 4000-char truncation window. Acceptable for v1.
+- [src/colonyos/orchestrator.py]: `TimeoutExpired` handler discards any partial output the subprocess produced before timeout (`TimeoutExpired.stdout`/`.stderr` are not harvested). The implement retry agent gets only "timed out after N seconds" with no diagnostic context.
+- [tests/test_orchestrator.py]: Minor cosmetic: two test method names gained spurious double underscores (`test_review_skipped_when_no__reviewer_personas`, `test_multiple__reviewer_personas`) — likely unintentional from a find-replace.
 
 SYNTHESIS:
-This is a well-executed extraction and extension. The core architectural decision — pulling the review/fix/decision loop into `run_review_loop()` and having both the pipeline and standalone command call it — is exactly right and eliminates code duplication without introducing unnecessary abstraction. The implementation covers all 30 functional requirements from the PRD. Pre-flight validation is thorough (branch existence, non-empty diff, clean working tree for `--fix`), and the branch name sanitization is a thoughtful defense-in-depth measure against flag injection attacks via `subprocess.run`. The removal of `Bash` from reviewer/decision agents is a meaningful security hardening — reviewers are read-only assessors and should not need shell access. All 310 tests pass, including 432+ new lines of test coverage. Exit codes are CI-ready (0=approve, 1=reject). The run log format with `review-` prefix integrates cleanly with existing `colonyos status`. I'd approve this for merge.
+This is a clean, well-scoped implementation that hits every functional requirement from the PRD. The architecture is right: subprocess for verification (zero LLM cost), retry loop with budget guards, and always-proceed-to-review semantics. The code follows existing project conventions precisely — dataclass nesting, instruction templates, prompt builders, phase enum ordering, skip maps. Test coverage is thorough with 48 new tests covering all paths including edge cases (budget exhaustion, OSError, timeout, config round-trip). The two minor findings (truncation ordering and timeout partial output) are genuine reliability gaps but well within acceptable bounds for v1, and both are easily addressable in follow-up work without API changes. Ship it.

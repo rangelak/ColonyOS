@@ -1,44 +1,23 @@
 # Review by Andrej Karpathy (Round 2)
 
+Good — the rename from private `_touch_heartbeat` to public `touch_heartbeat` is clean (no leftover references).
+
 Here is my review:
-
----
-
-## Review Assessment
-
-This is a well-structured implementation that cleanly decouples the review/fix/decision loop from the full pipeline. The core architectural decision — extracting `run_review_loop()` as a shared function — is the right call, and the execution follows through with discipline.
-
-### Completeness Check
-
-All 30 functional requirements (FR-1 through FR-30) are implemented. All tasks in the task file are marked complete. The three new instruction templates exist and contain properly structured prompts with the right placeholders. Tests cover argument parsing, base branch detection, prompt construction, artifact naming, exit codes, and the fix-disabled path.
-
-### Quality Observations
-
-**Strong:**
-- The branch name validation (`_validate_branch_name`) is a thoughtful defense-in-depth addition not explicitly in the PRD — prevents flag injection via branch names like `--exec=malicious`. This is exactly the kind of thing you want when subprocess-calling `git` with user-controlled inputs.
-- The second commit cleanly addresses a review finding: removing Bash from reviewer/decision-gate tools (read-only agents shouldn't have shell access). Good security posture.
-- Test coverage is comprehensive: 204 tests all passing, with specific tests for the fix-disabled single-round behavior and Bash tool exclusion.
-- The prompt templates are well-structured programs — clear process steps, explicit output format requirements, and correct placeholder usage. The structured `VERDICT:` / `FINDINGS:` / `SYNTHESIS:` format makes parsing deterministic.
-
-**Concerns:**
-
-1. **Reviewer tool list change affects pipeline mode.** The extraction changed the review tools from `["Read", "Glob", "Grep", "Bash"]` to `["Read", "Glob", "Grep"]` — but this applies to *both* the standalone `review` command AND the existing `orchestrator.run()` pipeline. The existing test was updated to match, but this is a behavioral change to the main pipeline that warrants explicit acknowledgment. Reviewers in the full pipeline may have legitimately needed Bash (e.g., running `git diff` directly). The decision gate similarly lost Bash. This is arguably a net positive from a security perspective, but it's a silent regression in pipeline capabilities.
-
-2. **`_print_review_summary` computes verdicts by index-matching against `_reviewer_personas(config)`.** This assumes the order of `last_round` results matches the order of `reviewers` — which is true because `run_phases_parallel_sync` preserves order (it uses `asyncio.gather` which returns results in input order). But this coupling is fragile and undocumented. If someone refactors the parallel executor to use unordered results, the summary will silently misattribute verdicts.
-
-3. **The `_abbreviate_role` function** handles the "pretty name" case but the fallback logic (`all(w[0].isupper() and len(w) > 2 for w in clean)`) would fail on roles like "AI Expert" because "AI" has length 2. Minor edge case but worth noting.
-
-4. **Missing blank line** in `ui.py` between `_abbreviate_role` and `TOOL_ARG_KEYS` — PEP 8 style violation (two blank lines between top-level definitions).
 
 ---
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/orchestrator.py]: Review tools changed from `["Read", "Glob", "Grep", "Bash"]` to `["Read", "Glob", "Grep"]` in the shared `run_review_loop()`, which also affects the main pipeline `orchestrator.run()` path. This is a behavioral change to the existing pipeline, not just the new command. Intentional (per commit 2) but should be documented.
-- [src/colonyos/cli.py]: Reviewer verdict extraction in `review()` relies on index-matching between `_reviewer_personas(config)` and `last_round` results — fragile coupling to parallel executor ordering guarantees.
-- [src/colonyos/ui.py]: Missing blank line before `TOOL_ARG_KEYS` (PEP 8 two-blank-lines between top-level definitions). Also `_abbreviate_role` would produce initials-only for most multi-word roles but fails the `len(w) > 2` check on short words like "AI", "QA", "VP".
-- [src/colonyos/instructions/decision_standalone.md]: Well-structured prompt with clear decision criteria and output format. The severity hierarchy (CRITICAL > HIGH > MEDIUM > LOW) provides good structured reasoning scaffolding.
+- [src/colonyos/orchestrator.py]: The verification gate is cleanly implemented as a subprocess ($0 cost) with proper truncation (tail 4000 chars), timeout handling, and budget guards before retries. The architecture is exactly right — fast deterministic feedback loop before expensive stochastic reviewers. The `_run_verify_command` handles `TimeoutExpired` and `OSError` gracefully.
+- [src/colonyos/orchestrator.py]: `run_verify_loop` correctly returns `None` in all cases (FR-16: always proceed to review), making the gate a best-effort quality improvement that never blocks the pipeline. This is the right design choice for a stochastic system — verification is a filter, not a hard gate.
+- [src/colonyos/instructions/verify_fix.md]: The retry prompt is well-structured — it explicitly says "do NOT rewrite from scratch" and provides the truncated test output. This is good prompt engineering: the model gets concrete, actionable failure signals rather than vague "try again" instructions.
+- [src/colonyos/config.py]: `save_config()` only writes the `verification:` section when non-default values are present (lines 211-222). Good — existing configs stay clean. The `_parse_verification` coerces empty string to `None` (line 119), which is a nice edge case handling.
+- [src/colonyos/init.py]: Auto-detection priority order (Makefile → package.json → pyproject.toml → pytest.ini → Cargo.toml) is sensible. The `_detect_test_command` function properly catches `json.JSONDecodeError` when reading malformed `package.json`.
+- [src/colonyos/orchestrator.py]: The `_SKIP_MAP` for `"verify"` correctly maps to `{"plan", "implement"}` — meaning verify is re-run on resume since it's free. This matches FR-22 and is the right call: a $0 subprocess should always re-validate rather than trusting stale state.
+- [tests/test_verify.py]: Comprehensive test coverage: subprocess args, exit codes, timeout, truncation, retry loop, budget guard, zero-cost accounting, and artifact storage. The budget guard test (lines 253-285) is particularly well-designed — it pre-loads cost to near-budget to verify the guard trips correctly.
+- [src/colonyos/orchestrator.py]: Minor observation: the rename `_touch_heartbeat` → `touch_heartbeat` (public API exposure) was part of a prior commit for the standalone review command. No leftover private references exist — clean.
+- [src/colonyos/models.py]: `Phase.VERIFY` is correctly positioned between `IMPLEMENT` and `REVIEW` in the enum, and test_models.py validates this ordering.
 
 SYNTHESIS:
-This is a clean, well-tested implementation that correctly extracts the review loop into a reusable function and exposes it as a standalone CLI command. The prompt templates are treated as programs — with explicit output schemas, step-by-step process instructions, and clear decision criteria — which is exactly the right approach for reliable LLM-based tooling. The branch name validation is a welcome security addition. The only material concern is the Bash tool removal from reviewers affecting the existing pipeline path, but given that reviewers should be read-only assessors, this is defensible. The test coverage is thorough and all 204 tests pass. Shipping this.
+This is a textbook example of using deterministic signals to reduce stochastic waste. The core insight — that a `$0` subprocess call can prevent `$5-10` in wasted reviewer LLM spend — is implemented with surgical precision. The verification gate follows every existing codebase pattern (subprocess usage, config dataclass, instruction templates, budget guards), so there's zero conceptual overhead for someone reading this code. The prompt template (`verify_fix.md`) treats prompts as programs with proper parameterization, not ad-hoc string concatenation. The retry loop has the right termination conditions (retry cap, budget guard, and implement failure), and critically, the gate *never* blocks progression to review — it's a best-effort inner loop, which is the correct architecture when your test suite itself might be broken or flaky. All 359 tests pass, no TODOs remain, no secrets committed, backward compatibility preserved (unconfigured → gate skipped entirely). The `colonyos init` integration is clean for both interactive and quick modes with sensible auto-detection. Ship it.
