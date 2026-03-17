@@ -268,8 +268,11 @@ class TestModelPresets:
         assert preset["phase_models"]["implement"] == "opus"
         assert preset["phase_models"]["deliver"] == "haiku"
         assert preset["phase_models"]["learn"] == "haiku"
-        # Decision phase should NOT use haiku — it's a safety-critical gate
-        assert preset["phase_models"]["decision"] == "sonnet"
+        # Only phases that differ from the global default should be listed
+        assert "plan" not in preset["phase_models"]
+        assert "review" not in preset["phase_models"]
+        assert "fix" not in preset["phase_models"]
+        assert "decision" not in preset["phase_models"]
 
     def test_quick_init_uses_cost_optimized(self, tmp_path: Path):
         config = run_init(

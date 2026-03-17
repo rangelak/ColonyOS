@@ -361,7 +361,7 @@ def compute_model_usage(runs: list[dict]) -> list[ModelUsageRow]:
         for phase_entry in run.get("phases", []):
             model = phase_entry.get("model")
             if model is None:
-                model = "unknown"
+                model = "<legacy>"
             stats = model_data.setdefault(model, {"invocations": 0, "total_cost": 0.0})
             stats["invocations"] += 1
             cost = phase_entry.get("cost_usd")

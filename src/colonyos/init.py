@@ -25,11 +25,7 @@ MODEL_PRESETS: dict[str, dict[str, str | dict[str, str]]] = {
     "Cost-optimized": {
         "model": "sonnet",
         "phase_models": {
-            "plan": "sonnet",
             "implement": "opus",
-            "review": "sonnet",
-            "fix": "sonnet",
-            "decision": "sonnet",
             "learn": "haiku",
             "deliver": "haiku",
         },

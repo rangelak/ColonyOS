@@ -644,13 +644,13 @@ class TestComputeModelUsage:
         assert rows[0].total_cost == pytest.approx(1.5)
         assert rows[0].avg_cost == pytest.approx(0.75)
 
-    def test_missing_model_field_grouped_as_unknown(self):
+    def test_missing_model_field_grouped_as_legacy(self):
         run = _make_run(phases=[
             _make_phase(phase="implement", cost_usd=1.0),
         ])
         rows = compute_model_usage([run])
         assert len(rows) == 1
-        assert rows[0].model == "unknown"
+        assert rows[0].model == "<legacy>"
 
     def test_integrated_into_compute_stats(self):
         run = _make_run(phases=[
