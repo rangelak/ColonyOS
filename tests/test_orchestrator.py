@@ -15,7 +15,7 @@ from colonyos.orchestrator import (
     run_verify_loop,
     validate_review_preconditions,
     _build_persona_standalone_review_prompt,
-    _build_review_run_id,
+    build_review_run_id,
     _build_standalone_decision_prompt,
     _build_standalone_fix_prompt,
     _build_verify_fix_prompt,
@@ -26,12 +26,12 @@ from colonyos.orchestrator import (
     _load_run_log,
     _parse_parent_tasks,
     _persona_slug,
-    _reviewer_personas,
+    reviewer_personas,
     _build_persona_review_prompt,
-    _extract_review_verdict,
+    extract_review_verdict,
     _collect_review_findings,
     _run_verify_command,
-    _save_run_log,
+    save_run_log,
     _validate_resume_preconditions,
     _compute_next_phase,
     _SKIP_MAP,
@@ -159,7 +159,7 @@ class TestReviewerPersonas:
         config = ColonyConfig(
             personas=[REVIEWER_PERSONA, NON_REVIEWER_PERSONA],
         )
-        reviewers = _reviewer_personas(config)
+        reviewers = reviewer_personas(config)
         assert len(reviewers) == 1
         assert reviewers[0].role == "Engineer"
 
@@ -167,13 +167,13 @@ class TestReviewerPersonas:
         config = ColonyConfig(
             personas=[NON_REVIEWER_PERSONA],
         )
-        assert _reviewer_personas(config) == []
+        assert reviewer_personas(config) == []
 
     def test_all_reviewers(self):
         p1 = Persona(role="A", expertise="a", perspective="a", reviewer=True)
         p2 = Persona(role="B", expertise="b", perspective="b", reviewer=True)
         config = ColonyConfig(personas=[p1, p2])
-        assert len(_reviewer_personas(config)) == 2
+        assert len(reviewer_personas(config)) == 2
 
 
 class TestBuildPersonaReviewPrompt:
@@ -200,16 +200,16 @@ class TestBuildPersonaReviewPrompt:
 
 class TestExtractReviewVerdict:
     def test_approve(self):
-        assert _extract_review_verdict("VERDICT: approve\nLooks good.") == "approve"
+        assert extract_review_verdict("VERDICT: approve\nLooks good.") == "approve"
 
     def test_request_changes(self):
-        assert _extract_review_verdict("VERDICT: request-changes\nNeeds fixes.") == "request-changes"
+        assert extract_review_verdict("VERDICT: request-changes\nNeeds fixes.") == "request-changes"
 
     def test_case_insensitive(self):
-        assert _extract_review_verdict("Verdict: Approve") == "approve"
+        assert extract_review_verdict("Verdict: Approve") == "approve"
 
     def test_defaults_to_request_changes(self):
-        assert _extract_review_verdict("No clear verdict.") == "request-changes"
+        assert extract_review_verdict("No clear verdict.") == "request-changes"
 
 
 class TestCollectReviewFindings:
@@ -317,7 +317,7 @@ class TestRun:
         assert Phase.REVIEW not in phase_types
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_review_skipped_when_no_reviewer_personas(self, mock_run, tmp_repo: Path):
+    def test_review_skipped_when_noreviewer_personas(self, mock_run, tmp_repo: Path):
         """No reviewer personas means review phase is skipped entirely."""
         config = ColonyConfig(
             project=ProjectInfo(name="Test", description="test", stack="Python"),
@@ -377,11 +377,11 @@ class TestRun:
         review_calls = calls[0][0]
         assert len(review_calls) == 1  # 1 reviewer persona
         assert review_calls[0]["phase"] == Phase.REVIEW
-        assert review_calls[0]["allowed_tools"] == ["Read", "Glob", "Grep"]
+        assert review_calls[0]["allowed_tools"] == ["Read", "Glob", "Grep", "Bash"]
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_multiple_reviewer_personas(self, mock_run, mock_parallel, tmp_repo: Path):
+    def test_multiplereviewer_personas(self, mock_run, mock_parallel, tmp_repo: Path):
         """All reviewer personas get their own parallel session."""
         r1 = Persona(role="Systems Eng", expertise="Distributed", perspective="Reliability", reviewer=True)
         r2 = Persona(role="Security Eng", expertise="AppSec", perspective="Threats", reviewer=True)
@@ -768,14 +768,14 @@ class TestRunLogResumeFields:
 
 
 class TestSaveRunLogResumeFields:
-    """Task 2: _save_run_log persists resume fields and last_successful_phase."""
+    """Task 2: save_run_log persists resume fields and last_successful_phase."""
 
     def test_persists_resume_fields(self, tmp_repo: Path):
         log = RunLog(
             run_id="r1", prompt="test", status=RunStatus.COMPLETED,
             branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
         )
-        path = _save_run_log(tmp_repo, log)
+        path = save_run_log(tmp_repo, log)
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["branch_name"] == "feat/x"
         assert data["prd_rel"] == "cOS_prds/prd.md"
@@ -790,7 +790,7 @@ class TestSaveRunLogResumeFields:
                 _fake_phase_result(Phase.REVIEW, success=False),
             ],
         )
-        path = _save_run_log(tmp_repo, log)
+        path = save_run_log(tmp_repo, log)
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["last_successful_phase"] == "implement"
 
@@ -799,7 +799,7 @@ class TestSaveRunLogResumeFields:
             run_id="r3", prompt="test", status=RunStatus.FAILED,
             phases=[_fake_phase_result(Phase.PLAN, success=False)],
         )
-        path = _save_run_log(tmp_repo, log)
+        path = save_run_log(tmp_repo, log)
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["last_successful_phase"] is None
 
@@ -813,7 +813,7 @@ class TestLoadRunLog:
             branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
             phases=[_fake_phase_result(Phase.PLAN)],
         )
-        _save_run_log(tmp_repo, log)
+        save_run_log(tmp_repo, log)
         loaded = _load_run_log(tmp_repo, "r1")
         assert loaded.run_id == "r1"
         assert loaded.status == RunStatus.FAILED
@@ -924,6 +924,9 @@ class TestComputeNextPhase:
 
     def test_decision_to_deliver(self):
         assert _compute_next_phase("decision") == "deliver"
+
+    def test_verify_to_review(self):
+        assert _compute_next_phase("verify") == "review"
 
     def test_unknown_returns_none(self):
         assert _compute_next_phase("unknown") is None
@@ -1074,7 +1077,7 @@ class TestResumeFromRun:
             task_rel="cOS_tasks/tasks.md",
             phases=[original_plan],
         )
-        _save_run_log(tmp_repo, existing_log)
+        save_run_log(tmp_repo, existing_log)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.IMPLEMENT),
@@ -1298,12 +1301,12 @@ class TestResumeAuditTrail:
             branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
         )
         # First save (no resume)
-        _save_run_log(tmp_repo, log)
+        save_run_log(tmp_repo, log)
         data = json.loads((tmp_repo / ".colonyos" / "runs" / "r-audit.json").read_text())
         assert data.get("resume_events", []) == []
 
         # Save with resumed=True
-        _save_run_log(tmp_repo, log, resumed=True)
+        save_run_log(tmp_repo, log, resumed=True)
         data = json.loads((tmp_repo / ".colonyos" / "runs" / "r-audit.json").read_text())
         assert len(data["resume_events"]) == 1
         assert isinstance(data["resume_events"][0], str)  # ISO timestamp
@@ -1313,9 +1316,9 @@ class TestResumeAuditTrail:
             run_id="r-multi", prompt="test", status=RunStatus.FAILED,
             branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
         )
-        _save_run_log(tmp_repo, log)
-        _save_run_log(tmp_repo, log, resumed=True)
-        _save_run_log(tmp_repo, log, resumed=True)
+        save_run_log(tmp_repo, log)
+        save_run_log(tmp_repo, log, resumed=True)
+        save_run_log(tmp_repo, log, resumed=True)
         data = json.loads((tmp_repo / ".colonyos" / "runs" / "r-multi.json").read_text())
         assert len(data["resume_events"]) == 2
 
@@ -1329,7 +1332,7 @@ class TestPrepareResume:
             branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
             phases=[_fake_phase_result(Phase.PLAN)],
         )
-        _save_run_log(tmp_repo, log)
+        save_run_log(tmp_repo, log)
         (tmp_repo / "cOS_prds" / "prd.md").write_text("# PRD", encoding="utf-8")
         (tmp_repo / "cOS_tasks" / "tasks.md").write_text("# Tasks", encoding="utf-8")
 
@@ -1349,7 +1352,7 @@ class TestPrepareResume:
             branch_name="feat/x", prd_rel="cOS_prds/prd.md", task_rel="cOS_tasks/tasks.md",
             phases=[_fake_phase_result(Phase.PLAN, success=False)],
         )
-        _save_run_log(tmp_repo, log)
+        save_run_log(tmp_repo, log)
         (tmp_repo / "cOS_prds" / "prd.md").write_text("# PRD", encoding="utf-8")
         (tmp_repo / "cOS_tasks" / "tasks.md").write_text("# Tasks", encoding="utf-8")
 
@@ -1367,26 +1370,26 @@ class TestHeartbeat:
     """Task 6.1: Tests for heartbeat file."""
 
     def test_heartbeat_created_at_phase_start(self, tmp_repo: Path):
-        from colonyos.orchestrator import _touch_heartbeat
+        from colonyos.orchestrator import touch_heartbeat
         heartbeat_path = tmp_repo / ".colonyos" / "runs" / "heartbeat"
         assert not heartbeat_path.exists()
-        _touch_heartbeat(tmp_repo)
+        touch_heartbeat(tmp_repo)
         assert heartbeat_path.exists()
 
     def test_heartbeat_path_is_correct(self, tmp_repo: Path):
-        from colonyos.orchestrator import _touch_heartbeat
-        _touch_heartbeat(tmp_repo)
+        from colonyos.orchestrator import touch_heartbeat
+        touch_heartbeat(tmp_repo)
         heartbeat_path = tmp_repo / ".colonyos" / "runs" / "heartbeat"
         assert heartbeat_path.exists()
 
     def test_heartbeat_touch_updates_mtime(self, tmp_repo: Path):
         import time
-        from colonyos.orchestrator import _touch_heartbeat
-        _touch_heartbeat(tmp_repo)
+        from colonyos.orchestrator import touch_heartbeat
+        touch_heartbeat(tmp_repo)
         heartbeat_path = tmp_repo / ".colonyos" / "runs" / "heartbeat"
         mtime1 = heartbeat_path.stat().st_mtime
         time.sleep(0.05)
-        _touch_heartbeat(tmp_repo)
+        touch_heartbeat(tmp_repo)
         mtime2 = heartbeat_path.stat().st_mtime
         assert mtime2 >= mtime1
 
@@ -1490,20 +1493,20 @@ class TestValidateReviewPreconditions:
 
 
 class TestBuildReviewRunId:
-    """Tests for _build_review_run_id()."""
+    """Tests for build_review_run_id()."""
 
     def test_format_matches_pattern(self):
         import re
-        run_id = _build_review_run_id("my-feature")
+        run_id = build_review_run_id("my-feature")
         assert re.match(r"review-\d{8}_\d{6}-[a-f0-9]{10}", run_id)
 
     def test_prefix_is_review(self):
-        run_id = _build_review_run_id("any-branch")
+        run_id = build_review_run_id("any-branch")
         assert run_id.startswith("review-")
 
     def test_different_branches_different_hashes(self):
-        id1 = _build_review_run_id("branch-a")
-        id2 = _build_review_run_id("branch-b")
+        id1 = build_review_run_id("branch-a")
+        id2 = build_review_run_id("branch-b")
         # Hashes differ (timestamps may differ too)
         assert id1.split("-")[-1] != id2.split("-")[-1]
 
@@ -1737,8 +1740,8 @@ class TestRunReviewLoop:
 
     @patch("colonyos.orchestrator.run_phase_sync")
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
-    def test_review_tools_exclude_bash(self, mock_parallel, mock_run, tmp_repo, config):
-        """Reviewer agents should not have Bash access (read-only assessors)."""
+    def test_review_tools_include_bash(self, mock_parallel, mock_run, tmp_repo, config):
+        """Reviewer agents have Bash access for git diff, linters, etc."""
         mock_parallel.return_value = [_approve_review_result()]
         mock_run.return_value = PhaseResult(
             phase=Phase.DECISION, success=True, cost_usd=0.01,
@@ -1751,7 +1754,7 @@ class TestRunReviewLoop:
             tmp_repo, config, "feat/x", log, quiet=True,
         )
         review_calls = mock_parallel.call_args[0][0]
-        assert "Bash" not in review_calls[0]["allowed_tools"]
+        assert "Bash" in review_calls[0]["allowed_tools"]
 
     @patch("colonyos.orchestrator.run_phase_sync")
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
@@ -1820,14 +1823,6 @@ class TestBranchNameValidation:
         assert "Must not start with '-'" in result
 
 
-class TestComputeNextPhaseVerify:
-    def test_implement_maps_to_verify(self):
-        assert _compute_next_phase("implement") == "verify"
-
-    def test_verify_maps_to_review(self):
-        assert _compute_next_phase("verify") == "review"
-
-
 class TestSkipMapVerify:
     def test_verify_skips_plan_and_implement(self):
         assert _SKIP_MAP["verify"] == {"plan", "implement"}
@@ -1858,3 +1853,127 @@ class TestBuildVerifyFixPrompt:
         assert "cOS_prds/prd.md" in system
         assert "cOS_tasks/tasks.md" in system
         assert "err output" in system
+
+
+class TestRunVerifyCommandOSError:
+    """_run_verify_command handles OSError (e.g. missing binary) gracefully."""
+
+    def test_missing_binary_returns_failure(self, tmp_path: Path):
+        """With shell=True, a missing binary returns exit code 127 (not OSError)."""
+        passed, output, exit_code = _run_verify_command(
+            "nonexistent_binary_that_does_not_exist_xyz", tmp_path, timeout=10,
+        )
+        assert not passed
+        assert exit_code == 127  # shell reports "command not found"
+
+    @patch("colonyos.orchestrator.subprocess.run", side_effect=OSError("No such file"))
+    def test_oserror_caught(self, mock_subprocess, tmp_path: Path):
+        passed, output, exit_code = _run_verify_command("bad_cmd", tmp_path, timeout=10)
+        assert not passed
+        assert exit_code == -1
+        assert "Failed to execute verify command" in output
+
+
+class TestRunCallsVerifyLoop:
+    """Integration test: run() calls run_verify_loop between implement and review."""
+
+    @patch("colonyos.orchestrator.run_verify_loop")
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_verify_loop_called_when_configured(
+        self, mock_run, mock_parallel, mock_verify, tmp_repo: Path, config: ColonyConfig,
+    ):
+        from colonyos.config import VerificationConfig
+        config.verification = VerificationConfig(verify_command="pytest")
+        save_config(tmp_repo, config)
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Add tests", repo_root=tmp_repo, config=config)
+
+        assert log.status == RunStatus.COMPLETED
+        mock_verify.assert_called_once()
+        # Verify it was called with correct args
+        call_args = mock_verify.call_args
+        assert call_args[0][1] is config  # config
+        assert call_args[0][2] is log  # log
+
+    @patch("colonyos.orchestrator.run_verify_loop")
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_verify_loop_not_called_when_no_command(
+        self, mock_run, mock_parallel, mock_verify, tmp_repo: Path, config: ColonyConfig,
+    ):
+        """run_verify_loop is not called when verify_command is not set."""
+        save_config(tmp_repo, config)
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Add tests", repo_root=tmp_repo, config=config)
+
+        assert log.status == RunStatus.COMPLETED
+        mock_verify.assert_not_called()
+
+    @patch("colonyos.orchestrator.run_verify_loop")
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_verify_called_after_implement_before_review(
+        self, mock_run, mock_parallel, mock_verify, tmp_repo: Path, config: ColonyConfig,
+    ):
+        """Verify is called in the correct pipeline position: after implement, before review."""
+        from colonyos.config import VerificationConfig
+        config.verification = VerificationConfig(verify_command="pytest")
+        save_config(tmp_repo, config)
+
+        call_order = []
+
+        def track_run(*args, **kwargs):
+            phase = args[0] if args else kwargs.get("phase")
+            call_order.append(f"run_{phase.value}")
+            if phase == Phase.PLAN:
+                return _fake_phase_result(Phase.PLAN)
+            elif phase == Phase.IMPLEMENT:
+                return _fake_phase_result(Phase.IMPLEMENT)
+            elif phase == Phase.DECISION:
+                return PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                                   duration_ms=50, session_id="s",
+                                   artifacts={"result": "VERDICT: GO"})
+            elif phase == Phase.DELIVER:
+                return _fake_phase_result(Phase.DELIVER)
+            return _fake_phase_result(phase)
+
+        def track_verify(*args, **kwargs):
+            call_order.append("verify")
+
+        def track_parallel(*args, **kwargs):
+            call_order.append("review_parallel")
+            return [_approve_review_result()]
+
+        mock_run.side_effect = track_run
+        mock_verify.side_effect = track_verify
+        mock_parallel.side_effect = track_parallel
+
+        run("Add tests", repo_root=tmp_repo, config=config)
+
+        # Verify appears after implement and before review
+        assert "verify" in call_order
+        implement_idx = call_order.index("run_implement")
+        verify_idx = call_order.index("verify")
+        review_idx = call_order.index("review_parallel")
+        assert implement_idx < verify_idx < review_idx

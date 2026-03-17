@@ -207,12 +207,19 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
     data["max_fix_iterations"] = config.max_fix_iterations
     data["auto_approve"] = config.auto_approve
 
-    if config.verification.verify_command:
-        data["verification"] = {
-            "verify_command": config.verification.verify_command,
+    _default_verification = VerificationConfig()
+    if (
+        config.verification.verify_command is not None
+        or config.verification.max_verify_retries != _default_verification.max_verify_retries
+        or config.verification.verify_timeout != _default_verification.verify_timeout
+    ):
+        verification_data: dict = {
             "max_verify_retries": config.verification.max_verify_retries,
             "verify_timeout": config.verification.verify_timeout,
         }
+        if config.verification.verify_command is not None:
+            verification_data["verify_command"] = config.verification.verify_command
+        data["verification"] = verification_data
 
     if config.ceo_persona:
         data["ceo_persona"] = {

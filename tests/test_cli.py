@@ -1201,7 +1201,7 @@ class TestPrintReviewSummary:
         )
 
         # Now test the verdict extraction logic from the review command
-        from colonyos.orchestrator import _extract_review_verdict
+        from colonyos.orchestrator import extract_review_verdict
         reviewers = [Persona(role="Engineer", expertise="Backend", perspective="Scale", reviewer=True)]
         num_reviewers = len(reviewers)
         all_review_results = [pr for pr in log.phases if pr.phase == Phase.REVIEW]
@@ -1209,7 +1209,7 @@ class TestPrintReviewSummary:
         reviewer_verdicts = []
         for i, phase_result in enumerate(last_round):
             text = phase_result.artifacts.get("result", "")
-            rv = _extract_review_verdict(text)
+            rv = extract_review_verdict(text)
             reviewer_verdicts.append((reviewers[i].role, rv))
 
         # Should show round 2 verdict (approve), not round 1 (request-changes)

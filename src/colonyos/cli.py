@@ -18,17 +18,17 @@ from colonyos.init import run_init
 from colonyos.models import LoopState, LoopStatus, Phase, RunLog, RunStatus
 from colonyos.naming import generate_timestamp
 from colonyos.orchestrator import (
-    _touch_heartbeat,
+    touch_heartbeat,
     detect_base_branch,
     run as run_orchestrator,
     run_ceo,
     run_review_loop,
     prepare_resume,
     validate_review_preconditions,
-    _build_review_run_id,
-    _extract_review_verdict,
-    _reviewer_personas,
-    _save_run_log,
+    build_review_run_id,
+    extract_review_verdict,
+    reviewer_personas,
+    save_run_log,
 )
 
 logger = logging.getLogger(__name__)
@@ -350,7 +350,7 @@ def review(
         sys.exit(1)
 
     # Build run log
-    run_id = _build_review_run_id(branch)
+    run_id = build_review_run_id(branch)
     log = RunLog(
         run_id=run_id,
         prompt=f"review:{branch}",
@@ -375,7 +375,7 @@ def review(
     )
 
     # Compute per-reviewer verdicts for the LAST review round
-    reviewers = _reviewer_personas(config)
+    reviewers = reviewer_personas(config)
     num_reviewers = len(reviewers)
     # Collect all REVIEW phase results, then take only the last round
     all_review_results = [
@@ -386,7 +386,7 @@ def review(
     reviewer_verdicts: list[tuple[str, str]] = []
     for i, phase_result in enumerate(last_round):
         text = phase_result.artifacts.get("result", "")
-        rv = _extract_review_verdict(text)
+        rv = extract_review_verdict(text)
         reviewer_verdicts.append((reviewers[i].role, rv))
 
     # Finalize log
@@ -395,7 +395,7 @@ def review(
     else:
         log.status = RunStatus.COMPLETED
     log.mark_finished()
-    _save_run_log(repo_root, log)
+    save_run_log(repo_root, log)
 
     # Print summary
     if not quiet:
@@ -534,7 +534,7 @@ def _run_single_iteration(
     """
     from colonyos.ui import NullUI, PhaseUI
 
-    _touch_heartbeat(repo_root)
+    touch_heartbeat(repo_root)
 
     ceo_ui: PhaseUI | NullUI | None = None
     if not quiet:

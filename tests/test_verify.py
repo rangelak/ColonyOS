@@ -182,7 +182,7 @@ class TestRunVerifyLoop:
             "cOS_prds/prd.md", "cOS_tasks/tasks.md", "colonyos/feat",
             quiet=True,
         )
-        assert result is True
+        assert result is None
         # No phases should be added
         assert len(log.phases) == 0
 
@@ -196,7 +196,7 @@ class TestRunVerifyLoop:
                 quiet=True,
             )
 
-        assert result is True
+        assert result is None
         assert len(log.phases) == 1
         assert log.phases[0].phase == Phase.VERIFY
         assert log.phases[0].success is True
@@ -220,7 +220,7 @@ class TestRunVerifyLoop:
                 quiet=True,
             )
 
-        assert result is True
+        assert result is None
         # Should have: verify(fail) + implement(retry) + verify(pass)
         assert len(log.phases) == 3
         assert log.phases[0].phase == Phase.VERIFY
@@ -243,7 +243,7 @@ class TestRunVerifyLoop:
                 quiet=True,
             )
 
-        assert result is False
+        assert result is None
         # 3 verify attempts (initial + 2 retries) + 2 implement retries
         verify_phases = [p for p in log.phases if p.phase == Phase.VERIFY]
         impl_phases = [p for p in log.phases if p.phase == Phase.IMPLEMENT]
@@ -274,7 +274,7 @@ class TestRunVerifyLoop:
                 quiet=True,
             )
 
-        assert result is False
+        assert result is None
         # Should have only 1 verify attempt (no retries due to budget)
         verify_phases = [p for p in log.phases if p.phase == Phase.VERIFY]
         impl_retry_phases = [

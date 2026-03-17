@@ -53,6 +53,7 @@ def print_reviewer_legend(reviewers: list[tuple[int, str]]) -> None:
         )
     console.print()
 
+
 TOOL_ARG_KEYS: dict[str, list[str]] = {
     "Read": ["file_path", "path"],
     "Write": ["file_path", "path"],

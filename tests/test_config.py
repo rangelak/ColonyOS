@@ -469,6 +469,23 @@ class TestVerificationConfig:
         assert loaded.verification.max_verify_retries == 3
         assert loaded.verification.verify_timeout == 180
 
+    def test_save_config_persists_non_default_retries_without_command(self, tmp_repo: Path):
+        """Round-trip fidelity: custom retry count is preserved even without verify_command."""
+        original = ColonyConfig(
+            verification=VerificationConfig(
+                verify_command=None,
+                max_verify_retries=5,
+            ),
+        )
+        save_config(tmp_repo, original)
+        config_path = tmp_repo / ".colonyos" / "config.yaml"
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "verification" in raw
+        assert raw["verification"]["max_verify_retries"] == 5
+        loaded = load_config(tmp_repo)
+        assert loaded.verification.max_verify_retries == 5
+        assert loaded.verification.verify_command is None
+
     def test_defaults_dict_has_verification(self):
         assert DEFAULTS["verification"]["verify_command"] is None
         assert DEFAULTS["verification"]["max_verify_retries"] == 2

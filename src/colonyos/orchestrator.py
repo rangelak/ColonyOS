@@ -124,7 +124,7 @@ def validate_review_preconditions(
     return None
 
 
-def _build_review_run_id(branch_name: str) -> str:
+def build_review_run_id(branch_name: str) -> str:
     """Generate a run ID for standalone review runs."""
     digest = sha1(branch_name.strip().encode()).hexdigest()[:10]
     return f"review-{generate_timestamp()}-{digest}"
@@ -241,7 +241,7 @@ def run_review_loop(
             return None
         return PhaseUI(verbose=verbose, prefix=prefix)
 
-    reviewers = _reviewer_personas(config)
+    reviewers = reviewer_personas(config)
     if not reviewers:
         _log("No reviewer personas configured, skipping review phase")
         return "approve"
@@ -257,7 +257,7 @@ def run_review_loop(
     else:
         _log(f"=== Review ({len(reviewers)} reviewers) ===")
 
-    review_tools = ["Read", "Glob", "Grep"]
+    review_tools = ["Read", "Glob", "Grep", "Bash"]
     last_findings: list[tuple[str, str]] = []
     branch_slug = slugify(branch_name)
 
@@ -410,7 +410,7 @@ def run_review_loop(
     return verdict
 
 
-def _touch_heartbeat(repo_root: Path) -> None:
+def touch_heartbeat(repo_root: Path) -> None:
     """Touch the heartbeat file to signal the orchestrator is alive."""
     heartbeat_path = runs_dir_path(repo_root) / "heartbeat"
     heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
@@ -545,7 +545,7 @@ def _build_implement_prompt(
     return system, user
 
 
-def _reviewer_personas(config: ColonyConfig) -> list[Persona]:
+def reviewer_personas(config: ColonyConfig) -> list[Persona]:
     """Return only personas that have reviewer=True."""
     return [p for p in config.personas if p.reviewer]
 
@@ -580,7 +580,7 @@ _REVIEW_VERDICT_RE = re.compile(
 )
 
 
-def _extract_review_verdict(result_text: str) -> str:
+def extract_review_verdict(result_text: str) -> str:
     """Extract VERDICT: approve or VERDICT: request-changes from review output."""
     match = _REVIEW_VERDICT_RE.search(result_text)
     return match.group(1).lower() if match else "request-changes"
@@ -594,7 +594,7 @@ def _collect_review_findings(
     findings: list[tuple[str, str]] = []
     for persona, result in zip(reviewers, results):
         text = result.artifacts.get("result", "")
-        verdict = _extract_review_verdict(text)
+        verdict = extract_review_verdict(text)
         if verdict == "request-changes":
             findings.append((persona.role, text))
     return findings
@@ -680,6 +680,8 @@ def _run_verify_command(cmd: str, cwd: Path, timeout: int) -> tuple[bool, str, i
         return result.returncode == 0, output, result.returncode
     except subprocess.TimeoutExpired:
         return False, f"Verify command timed out after {timeout} seconds", -1
+    except OSError as exc:
+        return False, f"Failed to execute verify command: {exc}", -1
 
 
 def _build_verify_fix_prompt(
@@ -720,14 +722,16 @@ def run_verify_loop(
     *,
     verbose: bool = False,
     quiet: bool = False,
-) -> bool:
+) -> None:
     """Run the verification gate: verify command + implement retry loop.
 
-    Returns True if verification passed (or was skipped), False if retries exhausted.
+    The pipeline always proceeds to review regardless of the outcome
+    (per FR-16), so this function returns None rather than a status.
+    Results are recorded in ``log.phases``.
     """
     verify_cfg = config.verification
     if not verify_cfg.verify_command:
-        return True
+        return
 
     def _make_ui() -> "PhaseUI | NullUI | None":
         if quiet:
@@ -762,7 +766,7 @@ def run_verify_loop(
                 verify_ui.phase_complete(cost=0.0, turns=0, duration_ms=0)
             else:
                 _log("  Tests passed")
-            return True
+            return
 
         # Verification failed
         if verify_ui is None:
@@ -819,7 +823,7 @@ def run_verify_loop(
             _log(f"  Implement retry failed: {impl_result.error}")
             break
 
-    return False
+    return
 
 
 def _build_deliver_prompt(
@@ -966,7 +970,7 @@ def _save_review_artifact(
     return path
 
 
-def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Path:
+def save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Path:
     runs = runs_dir_path(repo_root)
     runs.mkdir(parents=True, exist_ok=True)
     log_path = runs / f"{log.run_id}.json"
@@ -1159,6 +1163,9 @@ def _compute_next_phase(last_successful_phase: str | None) -> str | None:
 _SKIP_MAP: dict[str, set[str]] = {
     "plan": {"plan"},
     "implement": {"plan", "implement"},
+    # verify intentionally does NOT skip itself — re-running the verify
+    # command is free (subprocess, no LLM cost), so on resume we always
+    # re-check rather than assuming the previous result is still valid.
     "verify": {"plan", "implement"},
     "review": {"plan", "implement"},
     "fix": {"plan", "implement"},
@@ -1226,7 +1233,7 @@ def run(
         log.status = RunStatus.RUNNING
         _log(f"Resuming from phase: {next_phase}")
         # Record resume event for audit trail
-        _save_run_log(repo_root, log, resumed=True)
+        save_run_log(repo_root, log, resumed=True)
     else:
         run_id = _build_run_id(prompt)
         log = RunLog(run_id=run_id, prompt=prompt, status=RunStatus.RUNNING)
@@ -1244,7 +1251,7 @@ def run(
     log.task_rel = task_rel
 
     # --- Phase 1: Plan ---
-    _touch_heartbeat(repo_root)
+    touch_heartbeat(repo_root)
     if "plan" in skip_phases:
         _log("Skipping plan phase (already completed in previous run)")
     elif from_prd:
@@ -1284,7 +1291,7 @@ def run(
         if not plan_result.success:
             log.status = RunStatus.FAILED
             log.mark_finished()
-            _save_run_log(repo_root, log)
+            save_run_log(repo_root, log)
             if plan_ui is None:
                 _log(f"Plan phase failed: {plan_result.error}")
             return log
@@ -1292,12 +1299,12 @@ def run(
     if plan_only:
         log.status = RunStatus.COMPLETED
         log.mark_finished()
-        _save_run_log(repo_root, log)
+        save_run_log(repo_root, log)
         _log("Plan-only mode: stopping after plan phase.")
         return log
 
     # --- Phase 2: Implement ---
-    _touch_heartbeat(repo_root)
+    touch_heartbeat(repo_root)
     if "implement" in skip_phases:
         _log("Skipping implement phase (already completed in previous run)")
     else:
@@ -1321,13 +1328,13 @@ def run(
         if not impl_result.success:
             log.status = RunStatus.FAILED
             log.mark_finished()
-            _save_run_log(repo_root, log)
+            save_run_log(repo_root, log)
             if impl_ui is None:
                 _log(f"Implement phase failed: {impl_result.error}")
             return log
 
     # --- Phase 2.5: Verification Gate ---
-    _touch_heartbeat(repo_root)
+    touch_heartbeat(repo_root)
     if "verify" in skip_phases:
         _log("Skipping verify phase (already completed in previous run)")
     elif config.verification.verify_command:
@@ -1335,10 +1342,10 @@ def run(
             repo_root, config, log, prd_rel, task_rel, branch_name,
             verbose=verbose, quiet=quiet,
         )
-        _save_run_log(repo_root, log, resumed=is_resume)
+        save_run_log(repo_root, log, resumed=is_resume)
 
     # --- Phase 3: Review/Fix Loop ---
-    _touch_heartbeat(repo_root)
+    touch_heartbeat(repo_root)
     if "review" in skip_phases:
         _log("Skipping review phase (already completed in previous run)")
     elif config.phases.review:
@@ -1358,7 +1365,7 @@ def run(
         if verdict == "NO-GO":
             log.status = RunStatus.FAILED
             log.mark_finished()
-            _save_run_log(repo_root, log)
+            save_run_log(repo_root, log)
             _log("Decision gate: NO-GO. Pipeline stopped before deliver.")
             return log
 
@@ -1366,7 +1373,7 @@ def run(
             _log("  Warning: could not parse verdict, proceeding with caution")
 
     # --- Deliver Phase ---
-    _touch_heartbeat(repo_root)
+    touch_heartbeat(repo_root)
     if config.phases.deliver:
         deliver_ui = _make_ui()
         if deliver_ui is not None:
@@ -1389,13 +1396,13 @@ def run(
         if not deliver_result.success:
             log.status = RunStatus.FAILED
             log.mark_finished()
-            _save_run_log(repo_root, log)
+            save_run_log(repo_root, log)
             if deliver_ui is None:
                 _log(f"Deliver phase failed: {deliver_result.error}")
             return log
 
     log.status = RunStatus.COMPLETED
     log.mark_finished()
-    _save_run_log(repo_root, log)
+    save_run_log(repo_root, log)
     _log(f"Run complete. Total cost: ${log.total_cost_usd:.4f}")
     return log
