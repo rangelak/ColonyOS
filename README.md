@@ -69,7 +69,7 @@ Perspective: Thinks about attack surfaces and data exposure
 Config saved to .colonyos/config.yaml
 ```
 
-Personas shape how PRDs are written. During the plan phase, Claude Code answers clarifying questions from each persona's perspective, giving diverse viewpoints grounded in your project's context.
+Personas shape how PRDs are written. During the plan phase, each persona runs as a parallel subagent answering clarifying questions from their unique perspective, giving diverse viewpoints grounded in your project's context.
 
 ## CLI Reference
 
@@ -79,7 +79,7 @@ colonyos init --personas                   # re-run just the persona setup
 
 colonyos run "Add Stripe billing"          # full loop: plan + implement + deliver
 colonyos run "Add Stripe billing" --plan-only   # stop after PRD + tasks
-colonyos run --from-prd prds/xxx_prd.md    # skip planning, implement existing PRD
+colonyos run --from-prd cOS_prds/xxx_prd.md    # skip planning, implement existing PRD
 
 colonyos status                            # show recent runs with cost
 ```
