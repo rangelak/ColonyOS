@@ -26,6 +26,7 @@ DEFAULTS = {
     "reviews_dir": "cOS_reviews",
     "proposals_dir": "cOS_proposals",
     "max_fix_iterations": 2,
+    "learnings": {"enabled": True, "max_entries": 100},
 }
 
 
@@ -46,6 +47,12 @@ class PhasesConfig:
 
 
 @dataclass
+class LearningsConfig:
+    enabled: bool = True
+    max_entries: int = 100
+
+
+@dataclass
 class ColonyConfig:
     project: ProjectInfo | None = None
     personas: list[Persona] = field(default_factory=list)
@@ -61,6 +68,7 @@ class ColonyConfig:
     vision: str = ""
     max_fix_iterations: int = 2
     auto_approve: bool = False
+    learnings: LearningsConfig = field(default_factory=LearningsConfig)
 
 
 def _parse_personas(raw: list[dict]) -> list[Persona]:
@@ -132,6 +140,10 @@ def load_config(repo_root: Path) -> ColonyConfig:
         vision=raw.get("vision", ""),
         max_fix_iterations=int(raw.get("max_fix_iterations", DEFAULTS["max_fix_iterations"])),
         auto_approve=bool(raw.get("auto_approve", False)),
+        learnings=LearningsConfig(
+            enabled=bool(raw.get("learnings", {}).get("enabled", DEFAULTS["learnings"]["enabled"])),
+            max_entries=int(raw.get("learnings", {}).get("max_entries", DEFAULTS["learnings"]["max_entries"])),
+        ),
     )
 
 
@@ -180,6 +192,10 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
 
     data["max_fix_iterations"] = config.max_fix_iterations
     data["auto_approve"] = config.auto_approve
+    data["learnings"] = {
+        "enabled": config.learnings.enabled,
+        "max_entries": config.learnings.max_entries,
+    }
 
     if config.ceo_persona:
         data["ceo_persona"] = {

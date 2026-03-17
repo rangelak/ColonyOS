@@ -5,16 +5,20 @@ from unittest.mock import patch, MagicMock
 import click
 import pytest
 
-from colonyos.config import ColonyConfig, BudgetConfig, PhasesConfig, save_config
+from colonyos.config import ColonyConfig, BudgetConfig, LearningsConfig, PhasesConfig, save_config
+from colonyos.learnings import learnings_path, LearningEntry, append_learnings
 from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, ResumeState, RunLog, RunStatus
 from colonyos.orchestrator import (
     run,
     prepare_resume,
     _format_personas_block,
     _build_persona_agents,
+    _build_implement_prompt,
     _build_fix_prompt,
+    _build_learn_prompt,
     _build_run_id,
     _load_run_log,
+    _parse_learn_output,
     _parse_parent_tasks,
     _persona_slug,
     reviewer_personas,
@@ -96,7 +100,7 @@ class TestPhaseReviewEnum:
 
     def test_phase_ordering(self):
         phases = list(Phase)
-        assert phases == [Phase.CEO, Phase.PLAN, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.DELIVER]
+        assert phases == [Phase.CEO, Phase.PLAN, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.LEARN, Phase.DELIVER]
 
     def test_fix_phase_exists(self):
         assert Phase.FIX == "fix"
@@ -277,6 +281,7 @@ class TestRun:
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -284,7 +289,7 @@ class TestRun:
         log = run("Add tests", repo_root=tmp_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
-        assert mock_run.call_count == 4
+        assert mock_run.call_count == 5
         assert mock_parallel.call_count == 1
 
     @patch("colonyos.orchestrator.run_phase_sync")
@@ -294,14 +299,15 @@ class TestRun:
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
 
         log = run("Add tests", repo_root=tmp_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
-        assert len(log.phases) == 3
-        assert mock_run.call_count == 3
+        assert len(log.phases) == 4
+        assert mock_run.call_count == 4
         phase_types = [p.phase for p in log.phases]
         assert Phase.REVIEW not in phase_types
 
@@ -319,13 +325,14 @@ class TestRun:
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
 
         log = run("Add tests", repo_root=tmp_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
-        assert mock_run.call_count == 3
+        assert mock_run.call_count == 4
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
@@ -335,6 +342,7 @@ class TestRun:
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -355,6 +363,7 @@ class TestRun:
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -387,6 +396,7 @@ class TestRun:
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result(), _approve_review_result()]
@@ -440,6 +450,7 @@ class TestRun:
         mock_run.side_effect = [
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -461,6 +472,7 @@ class TestRun:
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -482,6 +494,7 @@ class TestRun:
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: NO-GO\n\nToo many issues."}),
+            _fake_phase_result(Phase.LEARN),
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
@@ -559,6 +572,7 @@ class TestFixLoop:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.side_effect = [
@@ -587,6 +601,7 @@ class TestFixLoop:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: NO-GO\n\nStill bad."}),
+            _fake_phase_result(Phase.LEARN),
         ]
         mock_parallel.side_effect = [
             [_request_changes_review_result()],  # round 1
@@ -613,6 +628,7 @@ class TestFixLoop:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: NO-GO"}),
+            _fake_phase_result(Phase.LEARN),
         ]
         mock_parallel.return_value = [_request_changes_review_result()]
 
@@ -635,6 +651,7 @@ class TestFixLoop:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.side_effect = [
@@ -659,6 +676,7 @@ class TestFixLoop:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "No clear verdict here."}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -682,6 +700,7 @@ class TestFixLoop:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: NO-GO"}),
+            _fake_phase_result(Phase.LEARN),
         ]
         mock_parallel.return_value = [_request_changes_review_result()]
 
@@ -706,6 +725,7 @@ class TestFixLoop:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -726,6 +746,7 @@ class TestFixLoop:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -940,6 +961,7 @@ class TestResumeFromRun:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -958,7 +980,7 @@ class TestResumeFromRun:
         )
 
         assert log.status == RunStatus.COMPLETED
-        # Plan was from the original run, then implement+review+decision+deliver added
+        # Plan was from the original run, then implement+review+decision+learn+deliver added
         phase_types = [p.phase for p in log.phases]
         assert phase_types[0] == Phase.PLAN  # Original
         assert Phase.IMPLEMENT in phase_types
@@ -985,6 +1007,7 @@ class TestResumeFromRun:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -1004,8 +1027,8 @@ class TestResumeFromRun:
 
         assert log.status == RunStatus.COMPLETED
         # Plan mock should NOT have been called for plan or implement
-        # mock_run calls: decision + deliver = 2
-        assert mock_run.call_count == 2
+        # mock_run calls: decision + learn + deliver = 3
+        assert mock_run.call_count == 3
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
@@ -1029,6 +1052,7 @@ class TestResumeFromRun:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -1070,6 +1094,7 @@ class TestResumeFromRun:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -1118,6 +1143,7 @@ class TestResumeFromRun:
         )
 
         mock_run.side_effect = [
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
 
@@ -1135,7 +1161,7 @@ class TestResumeFromRun:
         )
 
         assert log.status == RunStatus.COMPLETED
-        assert mock_run.call_count == 1  # Only deliver
+        assert mock_run.call_count == 2  # Learn + deliver
         assert mock_parallel.call_count == 0  # No reviews
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
@@ -1151,6 +1177,7 @@ class TestResumeFromRun:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -1378,5 +1405,249 @@ class TestHeartbeat:
         touch_heartbeat(tmp_repo)
         mtime2 = heartbeat_path.stat().st_mtime
         assert mtime2 >= mtime1
+
+
+class TestLearningsInjection:
+    """Tests for learnings injection into implement and fix prompts."""
+
+    def test_implement_prompt_includes_learnings(self, tmp_repo: Path, config: ColonyConfig):
+        lpath = learnings_path(tmp_repo)
+        lpath.parent.mkdir(parents=True, exist_ok=True)
+        entries = [LearningEntry("code-quality", "Always add docstrings")]
+        append_learnings(tmp_repo, "run-001", "2026-03-17", "test", entries)
+
+        system, _ = _build_implement_prompt(config, "prd.md", "tasks.md", "branch", repo_root=tmp_repo)
+        assert "## Learnings from Past Runs" in system
+        assert "Always add docstrings" in system
+
+    def test_implement_prompt_no_crash_when_no_ledger(self, tmp_repo: Path, config: ColonyConfig):
+        system, _ = _build_implement_prompt(config, "prd.md", "tasks.md", "branch", repo_root=tmp_repo)
+        assert "Learnings" not in system
+
+    def test_implement_prompt_no_learnings_without_repo_root(self, config: ColonyConfig):
+        system, _ = _build_implement_prompt(config, "prd.md", "tasks.md", "branch")
+        assert "Learnings" not in system
+
+    def test_fix_prompt_includes_learnings(self, tmp_repo: Path, config: ColonyConfig):
+        lpath = learnings_path(tmp_repo)
+        lpath.parent.mkdir(parents=True, exist_ok=True)
+        entries = [LearningEntry("testing", "Write tests first")]
+        append_learnings(tmp_repo, "run-001", "2026-03-17", "test", entries)
+
+        system, _ = _build_fix_prompt(
+            config, "prd.md", "tasks.md", "branch", "fix this", 1, repo_root=tmp_repo
+        )
+        assert "## Learnings from Past Runs" in system
+        assert "Write tests first" in system
+
+    def test_fix_prompt_no_crash_when_no_ledger(self, tmp_repo: Path, config: ColonyConfig):
+        system, _ = _build_fix_prompt(
+            config, "prd.md", "tasks.md", "branch", "fix this", 1, repo_root=tmp_repo
+        )
+        assert "Learnings" not in system
+
+
+class TestParseLearnOutput:
+    def test_parses_valid_entries(self):
+        text = (
+            "- **[code-quality]** Always add docstrings\n"
+            "- **[testing]** Run pytest before committing\n"
+        )
+        entries = _parse_learn_output(text)
+        assert len(entries) == 2
+        assert entries[0].category == "code-quality"
+        assert entries[1].category == "testing"
+
+    def test_ignores_invalid_categories(self):
+        text = "- **[invalid-cat]** Something\n"
+        entries = _parse_learn_output(text)
+        assert len(entries) == 0
+
+    def test_truncates_long_entries(self):
+        long_text = "x" * 200
+        text = f"- **[code-quality]** {long_text}\n"
+        entries = _parse_learn_output(text)
+        assert len(entries[0].text) <= 150
+
+
+class TestBuildLearnPrompt:
+    def test_returns_system_and_user(self, tmp_repo: Path, config: ColonyConfig):
+        system, user = _build_learn_prompt(config, tmp_repo)
+        assert "review artifacts" in system.lower() or "review" in system.lower()
+        assert config.reviews_dir in user
+
+
+@patch("colonyos.orchestrator.run_phases_parallel_sync")
+@patch("colonyos.orchestrator.run_phase_sync")
+class TestLearnPhaseWiring:
+    """Tests for learn phase wiring in the orchestrator pipeline."""
+
+    def test_learn_phase_produces_phase_result(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """Learn phase runs and produces a PhaseResult with Phase.LEARN."""
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        phase_types = [p.phase for p in log.phases]
+        assert Phase.LEARN in phase_types
+
+    def test_learn_phase_runs_on_nogo(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """Learn phase runs even on NO-GO verdict."""
+        config.max_fix_iterations = 0
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: NO-GO"}),
+            _fake_phase_result(Phase.LEARN),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        assert log.status == RunStatus.FAILED
+        phase_types = [p.phase for p in log.phases]
+        assert Phase.LEARN in phase_types
+
+    def test_learn_phase_skipped_when_disabled(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """Learn phase is skipped when config.learnings.enabled is False."""
+        config.learnings = LearningsConfig(enabled=False)
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        phase_types = [p.phase for p in log.phases]
+        assert Phase.LEARN not in phase_types
+        assert log.status == RunStatus.COMPLETED
+
+    def test_learn_phase_failure_does_not_block_deliver(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """Learn phase failure does not prevent deliver from running."""
+        save_config(tmp_repo, config)
+
+        def learn_side_effect(*args, **kwargs):
+            # Determine which call this is by checking side_effect_calls
+            return learn_side_effect.results.pop(0)
+
+        learn_side_effect.results = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            PhaseResult(phase=Phase.LEARN, success=False, error="Budget exceeded"),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_run.side_effect = learn_side_effect
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        assert log.status == RunStatus.COMPLETED
+        phase_types = [p.phase for p in log.phases]
+        assert Phase.LEARN in phase_types
+        assert Phase.DELIVER in phase_types
+
+    def test_learn_phase_exception_does_not_block_deliver(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """Exception in learn phase does not prevent deliver from running."""
+        save_config(tmp_repo, config)
+
+        call_count = [0]
+        results = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            RuntimeError("Agent crashed"),  # learn phase raises
+            _fake_phase_result(Phase.DELIVER),
+        ]
+
+        def side_effect(*args, **kwargs):
+            r = results[call_count[0]]
+            call_count[0] += 1
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        mock_run.side_effect = side_effect
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Add feature", repo_root=tmp_repo, config=config)
+
+        assert log.status == RunStatus.COMPLETED
+        phase_types = [p.phase for p in log.phases]
+        assert Phase.LEARN in phase_types
+        assert Phase.DELIVER in phase_types
+        learn_result = [p for p in log.phases if p.phase == Phase.LEARN][0]
+        assert learn_result.success is False
+
+    def test_learn_phase_budget(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """Learn phase budget is min(0.50, config.budget.per_phase / 2)."""
+        config.budget.per_phase = 1.0
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        run("Add feature", repo_root=tmp_repo, config=config)
+
+        # Find the learn phase call
+        for call in mock_run.call_args_list:
+            if call[0][0] == Phase.LEARN:
+                assert call.kwargs["budget_usd"] == 0.50
+                assert call.kwargs["allowed_tools"] == ["Read", "Glob", "Grep"]
+                break
+
+    def test_learn_phase_uses_read_only_tools(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+        """Learn phase uses read-only tools."""
+        save_config(tmp_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        run("Add feature", repo_root=tmp_repo, config=config)
+
+        for call in mock_run.call_args_list:
+            if call[0][0] == Phase.LEARN:
+                tools = call.kwargs["allowed_tools"]
+                assert tools == ["Read", "Glob", "Grep"]
+                assert "Write" not in tools
+                assert "Bash" not in tools
+                break
 
 

@@ -12,6 +12,13 @@ from claude_agent_sdk import AgentDefinition
 
 from colonyos.agent import run_phase_sync, run_phases_parallel_sync
 from colonyos.config import ColonyConfig, runs_dir_path
+from colonyos.learnings import (
+    LearningEntry,
+    append_learnings,
+    learnings_path,
+    load_learnings_for_injection,
+    parse_learnings,
+)
 from colonyos.models import Persona, Phase, PhaseResult, ResumeState, RunLog, RunStatus
 from colonyos.naming import generate_timestamp, planning_names, proposal_names, slugify
 from colonyos.ui import NullUI, PhaseUI
@@ -135,6 +142,7 @@ def _build_implement_prompt(
     prd_path: str,
     task_path: str,
     branch_name: str,
+    repo_root: Path | None = None,
 ) -> tuple[str, str]:
     impl_template = _load_instruction("implement.md")
 
@@ -143,6 +151,11 @@ def _build_implement_prompt(
         task_path=task_path,
         branch_name=branch_name,
     )
+
+    if repo_root is not None:
+        learnings = load_learnings_for_injection(repo_root)
+        if learnings:
+            system += f"\n\n## Learnings from Past Runs\n\n{learnings}"
 
     user = (
         f"Implement the feature described in the PRD at `{prd_path}`. "
@@ -242,6 +255,7 @@ def _build_fix_prompt(
     branch_name: str,
     findings_text: str,
     fix_iteration: int,
+    repo_root: Path | None = None,
 ) -> tuple[str, str]:
     """Build the system prompt and user prompt for the fix phase."""
     fix_template = _load_instruction("fix.md")
@@ -255,6 +269,11 @@ def _build_fix_prompt(
         fix_iteration=fix_iteration,
         max_fix_iterations=config.max_fix_iterations,
     )
+
+    if repo_root is not None:
+        learnings = load_learnings_for_injection(repo_root)
+        if learnings:
+            system += f"\n\n## Learnings from Past Runs\n\n{learnings}"
 
     user = (
         f"Fix the issues identified by reviewers for branch `{branch_name}`. "
@@ -286,6 +305,43 @@ def _build_deliver_prompt(
         f"feature described in `{prd_path}`."
     )
     return system, user
+
+
+def _build_learn_prompt(
+    config: ColonyConfig,
+    repo_root: Path,
+) -> tuple[str, str]:
+    """Build the system and user prompts for the learn (extraction) phase."""
+    learn_template = _load_instruction("learn.md")
+    lpath = learnings_path(repo_root)
+
+    system = learn_template.format(
+        reviews_dir=config.reviews_dir,
+        learnings_path=str(lpath.relative_to(repo_root)) if lpath.exists() else ".colonyos/learnings.md",
+    )
+
+    user = (
+        f"Read all review artifacts in `{config.reviews_dir}/` and extract "
+        f"3-5 actionable learning patterns. Check `{lpath.relative_to(repo_root) if lpath.exists() else '.colonyos/learnings.md'}` "
+        f"for existing entries to avoid duplicates."
+    )
+    return system, user
+
+
+_LEARNING_ENTRY_RE = re.compile(r"^- \*\*\[([a-z-]+)\]\*\*\s+(.+)$", re.MULTILINE)
+
+VALID_CATEGORIES = {"code-quality", "testing", "architecture", "security", "style"}
+
+
+def _parse_learn_output(text: str) -> list[LearningEntry]:
+    """Parse the structured output from the learn phase agent."""
+    entries = []
+    for match in _LEARNING_ENTRY_RE.finditer(text):
+        category = match.group(1)
+        entry_text = match.group(2).strip()[:150]
+        if category in VALID_CATEGORIES:
+            entries.append(LearningEntry(category=category, text=entry_text))
+    return entries
 
 
 DEFAULT_CEO_PERSONA = Persona(
@@ -987,6 +1043,75 @@ def run_standalone_review(
     return all_approved, phase_results, total_cost, decision_verdict
 
 
+def _run_learn_phase(
+    config: ColonyConfig,
+    repo_root: Path,
+    log: RunLog,
+    prompt: str,
+    _make_ui,
+) -> None:
+    """Execute the learn phase: extract patterns from reviews into the ledger.
+
+    This is advisory and must never block the pipeline. All exceptions are
+    caught and logged as warnings.
+    """
+    if not config.learnings.enabled:
+        return
+
+    try:
+        learn_ui = _make_ui()
+        if learn_ui is not None:
+            learn_budget = min(0.50, config.budget.per_phase / 2)
+            learn_ui.phase_header("Learn", learn_budget, config.model)
+        else:
+            _log("=== Learn Phase ===")
+
+        system, user = _build_learn_prompt(config, repo_root)
+        learn_budget = min(0.50, config.budget.per_phase / 2)
+        learn_result = run_phase_sync(
+            Phase.LEARN,
+            user,
+            cwd=repo_root,
+            system_prompt=system,
+            model=config.model,
+            budget_usd=learn_budget,
+            allowed_tools=["Read", "Glob", "Grep"],
+            ui=learn_ui,
+        )
+        log.phases.append(learn_result)
+
+        if learn_result.success:
+            result_text = learn_result.artifacts.get("result", "")
+            entries = _parse_learn_output(result_text)
+            if entries:
+                from datetime import date as date_cls
+
+                feature_summary = slugify(prompt)[:60]
+                append_learnings(
+                    repo_root,
+                    log.run_id,
+                    date_cls.today().isoformat(),
+                    feature_summary,
+                    entries,
+                    max_entries=config.learnings.max_entries,
+                )
+                _log(f"  Extracted {len(entries)} learnings")
+            else:
+                _log("  No new learnings extracted")
+        else:
+            _log(f"  Learn phase did not succeed: {learn_result.error}")
+
+    except Exception as exc:
+        _log(f"  Learn phase failed (non-blocking): {exc}")
+        log.phases.append(
+            PhaseResult(
+                phase=Phase.LEARN,
+                success=False,
+                error=str(exc),
+            )
+        )
+
+
 def run(
     prompt: str,
     *,
@@ -1099,7 +1224,7 @@ def run(
             impl_ui.phase_header("Implement", config.budget.per_phase, config.model, branch_name)
         else:
             _log("=== Phase 2: Implement ===")
-        system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name)
+        system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name, repo_root=repo_root)
         impl_result = run_phase_sync(
             Phase.IMPLEMENT,
             user,
@@ -1209,6 +1334,7 @@ def run(
                         branch_name,
                         findings_text,
                         iteration + 1,
+                        repo_root=repo_root,
                     )
                     fix_ui = _make_ui()
                     if fix_ui is not None:
@@ -1265,6 +1391,7 @@ def run(
             )
 
             if verdict == "NO-GO":
+                _run_learn_phase(config, repo_root, log, prompt, _make_ui)
                 log.status = RunStatus.FAILED
                 log.mark_finished()
                 _save_run_log(repo_root, log)
@@ -1273,6 +1400,9 @@ def run(
 
             if verdict == "UNKNOWN":
                 _log("  Warning: could not parse verdict, proceeding with caution")
+
+    # --- Learn Phase ---
+    _run_learn_phase(config, repo_root, log, prompt, _make_ui)
 
     # --- Deliver Phase ---
     _touch_heartbeat(repo_root)
