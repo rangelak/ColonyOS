@@ -737,7 +737,6 @@ def status(limit: int) -> None:
 
     if not log_files and not loop_files:
         click.echo("No runs found.")
-        return
 
     if log_files:
         click.echo("=== Recent Runs ===\n")
@@ -767,3 +766,13 @@ def status(limit: int) -> None:
                 )
             except (json.JSONDecodeError, KeyError):
                 click.echo(f"  {log_file.name}: (corrupted)")
+
+    # --- Learnings ledger ---
+    from colonyos.learnings import count_learnings, learnings_path as _learnings_path
+
+    lpath = _learnings_path(repo_root)
+    if lpath.exists():
+        count = count_learnings(repo_root)
+        click.echo(f"\nLearnings ledger: {count} entries")
+    else:
+        click.echo("\nLearnings ledger: not found")

@@ -38,6 +38,33 @@ class TestStatus:
         assert result.exit_code == 0
         assert "No runs" in result.output
 
+    def test_shows_learnings_count(self, runner: CliRunner, tmp_path: Path):
+        """Status command shows learnings entry count when ledger exists."""
+        from colonyos.learnings import append_learnings, LearningEntry
+
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        entries = [
+            LearningEntry("code-quality", "Add docstrings"),
+            LearningEntry("testing", "Write tests"),
+        ]
+        append_learnings(tmp_path, "run-001", "2026-03-17", "test", entries)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0
+        assert "Learnings ledger: 2 entries" in result.output
+
+    def test_shows_learnings_not_found(self, runner: CliRunner, tmp_path: Path):
+        """Status command shows 'not found' when no ledger exists."""
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0
+        assert "Learnings ledger: not found" in result.output
+
 
 class TestRun:
     def test_no_prompt_no_prd(self, runner: CliRunner):

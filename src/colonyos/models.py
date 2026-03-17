@@ -16,6 +16,7 @@ class Phase(str, Enum):
     REVIEW = "review"
     DECISION = "decision"
     FIX = "fix"
+    LEARN = "learn"
     DELIVER = "deliver"
 
 

@@ -1,39 +1,23 @@
 # Review by Principal Systems Engineer (Google/Stripe caliber) (Round 1)
 
-Here is my complete review:
+The standalone review path uses `_build_standalone_fix_prompt` (no learnings injection), while the main pipeline uses `_build_fix_prompt` (with learnings injection). This is consistent — PRD FR-8 only calls for learnings in the main pipeline's fix prompt, and the standalone review is a separate feature.
+
+Now I have a comprehensive picture. Here's my review:
 
 ---
-
-## Review: Standalone `colonyos review <branch>` Command
-
-### Systematic FR Assessment
-
-I verified all 32 functional requirements from the PRD against the implementation:
-
-- **FR-1 through FR-6** (CLI registration, arguments, options): ✅ All present in `cli.py` lines 323-330
-- **FR-7 through FR-9** (Branch validation): ✅ `_validate_branch_exists()` validates local existence and rejects remote-style refs
-- **FR-10 through FR-13** (Diff-aware review prompt): ✅ Template created, prompt builder works, 10k char truncation implemented, no PRD references
-- **FR-14 through FR-17** (Parallel persona reviews): ✅ Reuses `_reviewer_personas()`, `run_phases_parallel_sync()`, correct tools, correct output format
-- **FR-18 through FR-21** (Fix loop): ✅ Runs unless `--no-fix`, standalone fix prompt, write tools for fix agent, re-review after fix
-- **FR-22 through FR-24** (Artifacts): ✅ Correct filenames with branch slug, summary file, decision artifact
-- **FR-25** (Decision gate): ✅ Runs when `--decide` passed
-- **FR-26 through FR-29** (Output/exit codes): ✅ Summary table printed, exit 0/1 logic correct for both review and decision modes
-- **FR-30 through FR-31** (Budget): ✅ Per-phase and per-run guards present
-- **FR-32** (No RunLog): ✅ No RunLog created
-
-### Tests
-
-All 358 tests pass. The new `test_standalone_review.py` (899 lines) provides comprehensive coverage across 10 test classes covering: branch validation, diff extraction, prompt building, orchestration, parallel execution, artifact filenames, summary printing, CLI flags, exit codes, budget enforcement, and fix failure edge cases.
-
-### Findings
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/orchestrator.py:840-844]: `subprocess.run` in `_validate_branch_exists()` has no timeout. If git hangs (corrupted repo, NFS stall), this blocks the process indefinitely. Same issue in `_get_branch_diff()` at line 864. Add `timeout=30` to both calls. This is a 3am-page-you-awake problem.
-- [src/colonyos/orchestrator.py:870-872]: `_get_branch_diff` silently swallows git errors (only catches OSError, ignores non-zero return codes and stderr). If the merge base is invalid, the reviewer gets `(empty diff)` with no diagnostic. Consider logging stderr when `result.returncode != 0`.
-- [src/colonyos/orchestrator.py:1145-1148]: Summary artifact persona-matching uses `len(phase_results) // len(reviewers)` which includes FIX/DECISION results in the count, then filters to only REVIEW results for the zip. This works today because `zip` truncates to the shorter list, but it's fragile — a refactor that changes the result structure could silently misalign personas with verdicts. Consider computing the multiplier from the filtered list length instead.
-- [PRD inconsistency]: The persona consensus table states "Fix loop default: Review-only, `--fix` opt-in (7/7)" but FR-5 specifies fix-by-default with `--no-fix` to disable. The implementation follows FR-5 (fix runs by default). This is a documentation inconsistency in the PRD, not a code bug, but worth noting for future reference.
+- [src/colonyos/learnings.py]: `prune_ledger` signature deviates from PRD FR-4 spec (`content: str, max_entries: int` → returns `str`) instead of `(repo_root: Path, max_entries: int) -> None`. This is actually a *better* design — it's a pure function operating on content, called internally by `append_learnings` which handles file I/O. The PRD's in-place mutation API would have been harder to test and compose. Acceptable deviation.
+- [src/colonyos/learnings.py]: `parse_learnings` return type is `list[tuple[str, str, str, list[LearningEntry]]]` rather than the PRD's `list[LearningEntry]`. This is a richer return that the module needs internally. The PRD's simpler signature was an API sketch; the actual API serves its consumers correctly.
+- [src/colonyos/instructions/learn.md]: The output format example is wrapped in a markdown code block (triple backticks). The `_parse_learn_output` regex in `orchestrator.py` matches `- **[category]** text` lines and will correctly parse the output regardless of whether the agent outputs inside or outside a code fence. However, some LLMs may emit the backtick fences literally — this would cause the regex to fail. Low risk given the explicit "Output ONLY" instruction, but worth noting.
+- [src/colonyos/orchestrator.py]: `_build_learn_prompt` computes `lpath.relative_to(repo_root)` which will raise `ValueError` if `lpath` is not relative to `repo_root`. Since `learnings_path()` always returns `repo_root / ".colonyos" / LEARNINGS_FILE`, this is safe by construction. No issue.
+- [src/colonyos/orchestrator.py]: `_run_learn_phase` imports `from datetime import date as date_cls` inside the function body (lazy import). Minor style inconsistency — all other imports are at module level. Not a bug but slightly unconventional.
+- [src/colonyos/cli.py]: The `status` command had its early `return` removed (line 740 diff), so it now falls through to display the learnings ledger even when no runs or loop files exist. This is correct — FR-14 says learnings count should always appear.
+- [tests/test_orchestrator.py]: The learn phase test coverage is thorough: GO path, NO-GO path, disabled config, failure non-blocking, exception non-blocking, budget validation, read-only tools. All 227 tests pass.
+- [src/colonyos/config.py]: `LearningsConfig` follows the exact same `@dataclass` pattern as `BudgetConfig` and `PhasesConfig`. Parsing and serialization are both covered. Clean.
+- [src/colonyos/learnings.py]: The deduplication strategy (normalized text comparison in `append_learnings`) plus LLM-prompt-level dedup instruction (FR-6) provides two layers of protection. The code-level dedup is deterministic and reliable.
 
 SYNTHESIS:
-This is a clean, well-structured implementation that correctly extends the orchestrator without disrupting the existing pipeline. The architectural choice to reuse `_reviewer_personas()`, `run_phases_parallel_sync()`, `_collect_review_findings()`, and `_save_review_artifact()` is exactly right — it avoids duplication while keeping the standalone path decoupled via its own prompt builders and instruction templates. The new instruction templates are appropriately PRD-free. Budget enforcement follows the established guard pattern. Test coverage is thorough with 899 lines of tests covering all code paths including edge cases (fix failure, budget exhaustion, empty diff, no reviewers). The three subprocess timeout findings are non-blocking for initial ship but should be addressed before this sees CI/production use, as they represent unbounded blocking on external processes — the classic "works fine until it doesn't" reliability gap.
+This is a clean, well-structured implementation that faithfully delivers all 15 functional requirements from the PRD. The architecture decisions are sound — `learnings.py` is a pure-function module with no side effects except file I/O at the boundary, the learn phase is properly isolated behind a try/except that can never block the pipeline, and the read-only tool restriction (`["Read", "Glob", "Grep"]`) correctly mitigates the stored prompt injection concern. The test coverage is comprehensive with 227 tests passing, covering both happy paths and critical failure modes (learn phase exceptions, budget exhaustion, disabled config). The `prune_ledger` being a pure function on `content: str` rather than the PRD's file-mutating signature is a strictly better design. The only minor concern is the code-block-wrapped output format in `learn.md` which could cause parsing misses if the LLM echoes the backtick fences, but this is a low-probability edge case that would result in zero learnings extracted (not a pipeline failure), consistent with the non-disruptive design goal. No secrets, no destructive operations, no placeholder code. Ship it.

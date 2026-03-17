@@ -1,23 +1,57 @@
 # Review by Linus Torvalds (Round 1)
 
-So there IS a separate PRD for the verification gate (`20260317_183545_prd_add_a_configurable_post_implement_verification_gate...`). The branch includes both features combined. That's scope leakage — this review is supposed to be for the standalone review command PRD only.
+Good — `prune_ledger` takes `content` string (not `repo_root` as the PRD says), which is actually a better design since it's a pure function called inside `append_learnings`. The PRD's signature was a suggestion, and this is a valid deviation that's cleaner.
 
-Now I have everything I need to write the review.
+Now I have everything I need for the review.
 
 ---
 
-VERDICT: request-changes
+## Review: Cross-Run Learnings System
+
+I've reviewed the full diff (41 files, ~3800 lines added) against the PRD. Let me be direct.
+
+### Completeness Assessment
+
+All 15 functional requirements from the PRD are implemented:
+
+- **FR-1** ✅ `LEARN = "learn"` added to `Phase` enum
+- **FR-2** ✅ `learnings.py` with all five required functions
+- **FR-3** ✅ `learn.md` instruction template with categories, dedup instructions, format
+- **FR-4** ✅ Ledger format matches spec exactly
+- **FR-5** ✅ Cap enforcement via `prune_ledger()` with FIFO eviction
+- **FR-6** ✅ Normalized text dedup (lowercase, whitespace-collapsed)
+- **FR-7** ✅ `_build_implement_prompt()` injects learnings
+- **FR-8** ✅ `_build_fix_prompt()` injects learnings
+- **FR-9** ✅ `LearningsConfig` dataclass, parsed/serialized, in DEFAULTS
+- **FR-10** ✅ Learn phase wired after decision, before deliver; runs on NO-GO
+- **FR-11** ✅ Read-only tools `["Read", "Glob", "Grep"]`, budget `min(0.50, per_phase/2)`
+- **FR-12** ✅ Exception handling wraps entire learn block, logs warning, never raises
+- **FR-13** ✅ `if not config.learnings.enabled: return` guard
+- **FR-14** ✅ Status command shows learnings count
+- **FR-15** ✅ DEFAULTS dict updated
+
+All 7 task groups and their subtasks are marked complete.
+
+### Quality
+
+- **353 tests pass**, zero failures
+- No linter errors observed
+- No TODOs, FIXMEs, or placeholder code
+- Code follows existing project conventions (dataclasses, `run_phase_sync` pattern, instruction templates)
+- No unnecessary dependencies added
+
+### Findings
+
+VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/cli.py]: `_print_review_summary(phase_results, reviewers, total_cost)` at line 371 never passes `decision_verdict` parameter — when `--decide` is used, the decision verdict is silently dropped from the summary output (FR-26, FR-29 partially broken). Furthermore, `run_standalone_review()` returns a 3-tuple and the `decision_verdict` is computed internally but never surfaced to the caller, so the CLI *cannot* display it without a return signature change.
-- [src/colonyos/cli.py]: The `review` command's exit code logic (lines 373-376) only checks `all_approved` from the review loop. When `--decide` is used and returns NO-GO, the exit code is correctly handled (because `run_standalone_review` sets `all_approved = False` on NO-GO), but the decision verdict is never *printed* — the user sees "Review Summary" with all approvals and exit code 1, which is confusing. FR-29 says "exit 0 for GO, exit 1 for NO-GO" — the code does this, but the summary doesn't explain why.
-- [src/colonyos/orchestrator.py]: The summary artifact generation (lines ~876-893) uses `zip(reviewers * ((len(phase_results) // len(reviewers)) or 1), ...)` to match personas to review results — this is fragile. If there are FIX or DECISION results interleaved in `phase_results`, the multiplied `reviewers` list won't align correctly with the filtered review results across multiple rounds. For round 1 with 2 reviewers + 1 fix + round 2 with 2 reviewers = 4 review results, but `reviewers * (5 // 2)` = `reviewers * 2` = 4 personas. It happens to work for 2 rounds but breaks for 3.
-- [src/colonyos/orchestrator.py, src/colonyos/config.py, src/colonyos/init.py, src/colonyos/models.py, tests/test_verify.py, tests/test_config.py, tests/test_init.py]: The branch includes the **entire verification gate feature** (VerificationConfig, run_verify_loop, _detect_test_command, Phase.VERIFY, verify_fix.md, etc.) which belongs to a separate PRD (`20260317_183545`). This is ~400 lines of unrelated code bundled into the standalone review branch. The PRD being reviewed says nothing about verification gates. Ship features on their own branches.
-- [src/colonyos/cli.py]: Importing private functions (`_validate_branch_exists`, `_extract_review_verdict`, `_reviewer_personas`) from `orchestrator.py` into `cli.py`. These are underscore-prefixed "private" APIs being used as public interfaces across module boundaries. Either make them properly public (drop the underscore) or provide a public wrapper. The current pattern lies about the API contract.
-- [src/colonyos/orchestrator.py]: `_get_branch_diff` swallows `OSError` silently and returns empty string (line 602-603). A user running `colonyos review feat` where `git` isn't installed would get a review with "(empty diff)" and no indication that the diff extraction failed. At minimum, log a warning.
-- [tests/test_orchestrator.py]: Test renames like `test_review_skipped_when_no__reviewer_personas` (double underscore) and `test_multiple__reviewer_personas` appear to be accidental typos introduced during editing, not intentional.
+- [src/colonyos/learnings.py]: `prune_ledger` takes `(content, max_entries)` instead of PRD's `(repo_root, max_entries)` — this is actually better design (pure function), called internally by `append_learnings`. Approved deviation.
+- [src/colonyos/learnings.py]: `parse_learnings` return type is `list[tuple[str, str, str, list[LearningEntry]]]` — the PRD said `list[LearningEntry]`. The tuple return is correct since sections contain metadata (run_id, date, feature). A named dataclass instead of a 4-tuple would be marginally more readable, but this is fine for internal use.
+- [src/colonyos/orchestrator.py]: `_run_learn_phase` defines `learn_budget` twice (once inside the UI block, once outside). The first assignment is dead code when `learn_ui` is None. Minor, harmless.
+- [src/colonyos/orchestrator.py]: Standalone review (`run_standalone_review`) was added in a prior commit on this branch but is not part of this PRD's scope. It's a significant chunk of the diff (~250 lines). Not a problem per se, but it means this branch carries scope from multiple features.
+- [src/colonyos/cli.py]: The `status` command previously had an early `return` when no runs/loops were found; this was changed to fall through so the learnings count always shows. Correct behavior change.
+- [tests/test_orchestrator.py]: Two test names appear to have had spaces removed (`test_review_skipped_when_noreviewer_personas`, `test_multiplereviewer_personas`) — these are cosmetic renames that happened in a prior commit. Harmless but untidy.
+- [src/colonyos/orchestrator.py]: The `_build_standalone_fix_prompt` does NOT inject learnings (no `repo_root` param), matching the PRD's non-goal that standalone review doesn't extract learnings. Consistent.
 
 SYNTHESIS:
-The standalone review command itself is structurally sound — the architecture is right, the data flow is clear, the test coverage is excellent (899 lines of tests for the standalone review alone), and it correctly reuses existing infrastructure rather than reimplementing. The prompt templates are clean and focused. Budget enforcement is correctly implemented. The parallel execution via `run_phases_parallel_sync` is the right call.
-
-However, there are two real problems. First, the `decision_verdict` is computed inside `run_standalone_review()` but never returned to the CLI layer, so `--decide` silently drops the verdict from the human-readable output — that's a user-facing bug against FR-26. Second, and more importantly from a process standpoint: this branch ships the entire verification gate feature (~400 lines of production code + 314 lines of tests) alongside the standalone review feature. These are two independent features with two independent PRDs, and they must not be shipped in the same branch. The verification gate changes touch `config.py`, `init.py`, `models.py`, and the main `run()` function in `orchestrator.py` — that's core pipeline code that has nothing to do with standalone reviews. Untangle these into separate branches and review them independently.
+This is clean, straightforward work. The learnings module (`learnings.py`) is 198 lines of pure functions with no magic — regex-based parsing, text normalization for dedup, FIFO pruning. The data structures are right: a flat list of entries organized by run sections, stored as human-readable markdown. The learn phase is properly isolated — read-only tools, conservative budget, exception-swallowing wrapper that logs and moves on. The injection into implement/fix prompts is a minimal, non-invasive change (append to system prompt). The test coverage is comprehensive: 21 unit tests for `learnings.py`, config roundtrip tests, orchestrator integration tests covering the happy path, NO-GO path, disabled config, exception handling, and budget enforcement. The one thing I'd nitpick is the 4-tuple return from `parse_learnings` — a `RunSection` dataclass would make the code more self-documenting — but that's a style preference, not a defect. The branch carries some unrelated changes from prior features (standalone review), which muddies the diff, but the learnings-specific changes are focused and correct. Ship it.

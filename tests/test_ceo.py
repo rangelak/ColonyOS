@@ -235,11 +235,14 @@ class TestCeoIntegration:
         decision_result = PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"})
         deliver_result = PhaseResult(phase=Phase.DELIVER, success=True, cost_usd=0.01, duration_ms=100, session_id="s", artifacts={"result": "done"})
 
+        learn_result = PhaseResult(phase=Phase.LEARN, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": ""})
+
         mock_run.side_effect = [
             ceo_result,  # CEO phase (run_ceo)
             plan_result,
             impl_result,
             decision_result,
+            learn_result,
             deliver_result,
         ]
         mock_parallel.return_value = [approve_result]

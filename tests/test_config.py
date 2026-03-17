@@ -7,6 +7,7 @@ from colonyos.config import (
     ColonyConfig,
     BudgetConfig,
     DEFAULTS,
+    LearningsConfig,
     PhasesConfig,
     load_config,
     save_config,
@@ -388,5 +389,45 @@ class TestBudgetConfigLongRunning:
     def test_defaults_dict_has_new_fields(self):
         assert DEFAULTS["budget"]["max_duration_hours"] == 8.0
         assert DEFAULTS["budget"]["max_total_usd"] == 500.0
+
+
+class TestLearningsConfig:
+    def test_default_values(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.learnings.enabled is True
+        assert config.learnings.max_entries == 100
+
+    def test_parsed_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"learnings": {"enabled": False, "max_entries": 50}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.learnings.enabled is False
+        assert config.learnings.max_entries == 50
+
+    def test_missing_section_falls_back_to_defaults(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "sonnet"}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.learnings.enabled is True
+        assert config.learnings.max_entries == 100
+
+    def test_roundtrip(self, tmp_repo: Path):
+        original = ColonyConfig(learnings=LearningsConfig(enabled=False, max_entries=42))
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.learnings.enabled is False
+        assert loaded.learnings.max_entries == 42
+
+    def test_defaults_dict_has_learnings(self):
+        assert DEFAULTS["learnings"]["enabled"] is True
+        assert DEFAULTS["learnings"]["max_entries"] == 100
 
 
