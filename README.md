@@ -10,11 +10,12 @@ ColonyOS is a CLI tool that orchestrates Claude agent sessions via the [Claude A
 colonyos run "Add Stripe billing integration"
 ```
 
-ColonyOS runs three phases, each as a separate Claude Code session with full access to your repo:
+ColonyOS runs four phases, each as a separate Claude agent session with full access to your repo:
 
-1. **Plan** — Explores your codebase, generates a PRD with clarifying Q&A from your defined personas, and produces a task breakdown. Outputs go to `prds/` and `tasks/`.
+1. **Plan** — Explores your codebase, generates a PRD with clarifying Q&A from your defined personas (running as parallel subagents), and produces a task breakdown. Outputs go to `cOS_prds/` and `cOS_tasks/`.
 2. **Implement** — Creates a feature branch, writes tests first, then implements each task from the plan. Commits as it goes.
-3. **Deliver** — Pushes the branch and opens a pull request with a summary linking back to the PRD.
+3. **Review** — Each persona reviews the implementation in parallel, first per-task then a final holistic review. Review artifacts go to `cOS_reviews/`.
+4. **Deliver** — Pushes the branch and opens a pull request with a summary linking back to the PRD.
 
 Each phase is isolated with its own budget cap. If a phase fails, the run stops and logs what happened.
 
@@ -108,24 +109,29 @@ budget:
 phases:
   plan: true
   implement: true
+  review: true           # persona-driven review of each task + holistic review
   deliver: true          # set false to skip PR creation
 branch_prefix: "colonyos/"
-prds_dir: "prds"
-tasks_dir: "tasks"
+prds_dir: "cOS_prds"
+tasks_dir: "cOS_tasks"
+reviews_dir: "cOS_reviews"
 ```
 
 ## Output Structure
 
-ColonyOS creates two directories in your repo that serve as a timestamped changelog:
+ColonyOS creates three `cOS_`-prefixed directories in your repo that serve as a timestamped changelog:
 
 ```
 your-repo/
-  prds/
+  cOS_prds/
     20260316_172530_prd_stripe_billing.md
     20260317_091200_prd_user_auth.md
-  tasks/
+  cOS_tasks/
     20260316_172530_tasks_stripe_billing.md
     20260317_091200_tasks_user_auth.md
+  cOS_reviews/
+    20260317_091200_review_task_01_user_auth.md
+    20260317_091200_review_final_user_auth.md
 ```
 
 Run logs (costs, durations, session IDs) go to `.colonyos/runs/` which is gitignored by default.
