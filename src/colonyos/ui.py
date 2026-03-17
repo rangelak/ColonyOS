@@ -17,7 +17,11 @@ TOOL_STYLE: dict[str, str] = {
     "Grep": "magenta",
     "Glob": "magenta",
     "Agent": "blue",
+    "Dispatch": "blue",
+    "Task": "blue",
 }
+
+_AGENT_TOOLS = {"Agent", "Dispatch", "Task"}
 
 DEFAULT_TOOL_STYLE = "dim"
 
@@ -28,7 +32,9 @@ TOOL_ARG_KEYS: dict[str, list[str]] = {
     "Bash": ["command"],
     "Grep": ["pattern", "regex"],
     "Glob": ["glob_pattern", "pattern"],
-    "Agent": ["agent_name", "name"],
+    "Agent": ["prompt", "task", "message", "description"],
+    "Dispatch": ["prompt", "task", "message", "description"],
+    "Task": ["prompt", "task", "message", "description"],
 }
 
 
@@ -139,7 +145,10 @@ class PhaseUI:
             for key in keys:
                 val = data.get(key)
                 if val:
-                    return _truncate(str(val), 80)
+                    text = str(val)
+                    if self._tool_name in _AGENT_TOOLS:
+                        text = _first_meaningful_line(text)
+                    return _truncate(text, 80)
             return None
         except (json.JSONDecodeError, TypeError):
             return None
@@ -156,6 +165,15 @@ class NullUI:
     def on_tool_done(self) -> None: ...
     def on_text_delta(self, *a: object) -> None: ...
     def on_turn_complete(self) -> None: ...
+
+
+def _first_meaningful_line(text: str) -> str:
+    """Extract the first non-blank, non-heading line from an agent prompt."""
+    for line in text.splitlines():
+        stripped = line.strip().lstrip("#").strip()
+        if stripped and len(stripped) > 5:
+            return stripped
+    return text.split("\n", 1)[0].strip()
 
 
 def _truncate(s: str, maxlen: int) -> str:
