@@ -118,11 +118,75 @@ def _collect_personas_with_packs(existing: list[Persona] | None = None) -> list[
     return pack_personas
 
 
-def run_init(repo_root: Path, *, personas_only: bool = False) -> ColonyConfig:
-    """Interactive init flow: collect project info + personas, save config."""
+def run_init(
+    repo_root: Path,
+    *,
+    personas_only: bool = False,
+    quick: bool = False,
+    project_name: str | None = None,
+    project_description: str | None = None,
+    project_stack: str | None = None,
+    doctor_check: bool = False,
+) -> ColonyConfig:
+    """Interactive init flow: collect project info + personas, save config.
+
+    When ``quick=True``, skip all interactive prompts and use first persona
+    pack with default config values.  ``project_name``, ``project_description``,
+    and ``project_stack`` supply the required project info in quick mode.
+    """
+    # --- Doctor pre-check (opt-in) ---
+    if doctor_check:
+        try:
+            from colonyos.cli import run_doctor_checks
+        except ImportError:
+            run_doctor_checks = None  # type: ignore[assignment]
+
+        if run_doctor_checks is not None:
+            checks = run_doctor_checks(repo_root)
+            hard_prereqs = {"Python ≥ 3.11", "Claude Code CLI", "Git"}
+            failures = [name for name, ok, _ in checks if not ok and name in hard_prereqs]
+            if failures:
+                raise click.ClickException(
+                    f"Missing prerequisite(s): {', '.join(failures)}. "
+                    f"Run `colonyos doctor` for details."
+                )
+
     existing = load_config(repo_root)
 
-    if personas_only:
+    if quick:
+        if not project_name:
+            raise click.ClickException(
+                "Project name is required for --quick init. "
+                "Use --name to specify it."
+            )
+
+        project = ProjectInfo(
+            name=project_name,
+            description=project_description or "",
+            stack=project_stack or "",
+        )
+        personas = list(PACKS[0].personas)
+
+        from colonyos.config import DEFAULTS
+        config = ColonyConfig(
+            project=project,
+            personas=personas,
+            model=DEFAULTS["model"],
+            budget=BudgetConfig(
+                per_phase=DEFAULTS["budget"]["per_phase"],
+                per_run=DEFAULTS["budget"]["per_run"],
+                max_duration_hours=DEFAULTS["budget"]["max_duration_hours"],
+                max_total_usd=DEFAULTS["budget"]["max_total_usd"],
+            ),
+            phases=PhasesConfig(),
+            branch_prefix=existing.branch_prefix,
+            prds_dir=existing.prds_dir,
+            tasks_dir=existing.tasks_dir,
+            reviews_dir=existing.reviews_dir,
+            proposals_dir=existing.proposals_dir,
+        )
+
+    elif personas_only:
         personas = _collect_personas_with_packs(existing.personas)
         config = ColonyConfig(
             project=existing.project,
@@ -211,6 +275,6 @@ def run_init(repo_root: Path, *, personas_only: bool = False) -> ColonyConfig:
     click.echo(f"\nConfig saved to {config_path}")
     click.echo(f"Created {prds_dir}/, {tasks_dir}/, {reviews_dir}/, and {proposals_dir}/ directories")
     click.echo(f"Defined {len(config.personas)} personas")
-    click.echo("\nRun `colonyos run \"<feature>\"` to start building.")
+    click.echo('\nNext step:\n  colonyos run "Add a health check endpoint"')
 
     return config

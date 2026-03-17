@@ -9,12 +9,21 @@
 </p>
 
 <p align="center">
+  <a href="https://pypi.org/project/colonyos/"><img src="https://img.shields.io/pypi/v/colonyos?color=blue" alt="PyPI version" /></a>
+  <a href="https://github.com/rangelak/ColonyOS/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" /></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue" alt="Python 3.11+" /></a>
+  <img src="https://img.shields.io/badge/build-passing-brightgreen" alt="Build Status" />
+</p>
+
+<p align="center">
+  <a href="#zero-to-pr">Zero to PR</a> &middot;
   <a href="#quickstart">Quickstart</a> &middot;
   <a href="#how-it-works">How It Works</a> &middot;
   <a href="#the-pipeline">The Pipeline</a> &middot;
   <a href="#cli-reference">CLI Reference</a> &middot;
   <a href="#configuration">Configuration</a> &middot;
-  <a href="#architecture">Architecture</a>
+  <a href="#built-by-colonyos">Built by ColonyOS</a> &middot;
+  <a href="#why-colonyos">Why ColonyOS?</a>
 </p>
 
 ---
@@ -25,27 +34,78 @@ It orchestrates Claude agent sessions via the [Claude Agent SDK](https://docs.an
 
 **ColonyOS builds itself.** The pipeline runs on its own codebase — every feature, fix, and review you see in this repo was proposed, implemented, and shipped by ColonyOS agents.
 
-## Quickstart
+<!-- TODO: Replace with actual asciinema/VHS terminal recording -->
+<!-- <p align="center"><a href="https://asciinema.org/a/XXXXX"><img src="https://asciinema.org/a/XXXXX.svg" alt="ColonyOS demo" width="700"/></a></p> -->
+
+## Zero to PR
+
+Three commands. Under 2 minutes of human effort.
 
 ```bash
-pip install colonyos
+# 1. Install (30 seconds)
+pipx install colonyos          # or: pip install colonyos
 
+# 2. Check prerequisites (10 seconds)
+colonyos doctor                # validates Python, Claude Code, Git, GitHub CLI
+
+# 3. Initialize & run (60 seconds)
 cd your-project/
-colonyos init              # interactive setup: project info + persona workshop
-colonyos auto --loop 5     # let it build 5 features autonomously
+colonyos init --quick --name "MyApp" --description "My project" --stack "Python"
+colonyos run "Add a health check endpoint"
 ```
 
-Or direct it yourself:
+That's it. ColonyOS generates a PRD, implements the code with tests, runs multi-persona code review, and opens a pull request.
+
+## Quickstart
+
+### Prerequisites
 
 ```bash
+colonyos doctor   # checks everything for you
+```
+
+Or verify manually:
+
+- **Python 3.11+** — `python3 --version`
+- **Claude Code CLI** — installed and authenticated (`claude --version`)
+- **Git** — `git --version`
+- **GitHub CLI** — `gh auth status`
+
+> **Recommended**: Install ColonyOS globally with `pipx install colonyos` so it's available in any project directory.
+
+### Setup
+
+```bash
+pipx install colonyos          # or: pip install colonyos
+
+cd your-project/
+colonyos init                  # interactive setup: project info + persona workshop
+```
+
+For zero-prompt setup:
+
+```bash
+colonyos init --quick --name "MyApp" --description "B2B analytics" --stack "Python/FastAPI"
+```
+
+### Run
+
+```bash
+# Directed mode — you choose what to build
 colonyos run "Add Stripe billing integration"
+
+# Autonomous mode — the CEO agent decides
+colonyos auto --loop 5
+
+# Long-running autonomous mode — walk away for the day
+colonyos auto --loop 50 --max-hours 24 --max-budget 500 --no-confirm
 ```
 
 ## How It Works
 
 ColonyOS has two operating modes:
 
-**Autonomous mode** (`colonyos auto`) — the CEO agent analyzes your project, proposes the highest-impact feature, and the pipeline builds it end-to-end. Chain iterations with `--loop N` for continuous autonomous development.
+**Autonomous mode** (`colonyos auto`) — the CEO agent analyzes your project, proposes the highest-impact feature, and the pipeline builds it end-to-end. Chain iterations with `--loop N` for continuous autonomous development. Set `--max-hours` and `--max-budget` for safety caps.
 
 **Directed mode** (`colonyos run "..."`) — you provide the feature prompt, and the pipeline handles everything from PRD generation through to a shipped PR.
 
@@ -88,60 +148,26 @@ flowchart TD
 
 Each reviewer persona runs concurrently with its own expertise and perspective. When any reviewer requests changes, their findings are consolidated and handed to a dedicated fix agent. This loop repeats up to `max_fix_iterations` before the final decision gate.
 
-## Prerequisites
-
-- **Python 3.11+**
-- **Claude Code CLI** — installed and authenticated (`claude --version` should work)
-- **Git** — the target repo must be a git repository
-- **GitHub CLI** (`gh`) — for the deliver phase to open PRs
-
-## Setup: `colonyos init`
-
-The init flow asks about your project and walks you through defining agent personas:
-
-```
-$ colonyos init
-
---- Project Info ---
-Project name: MyApp
-Brief description: B2B analytics platform
-Tech stack: Python/FastAPI, React, PostgreSQL
-
---- Agent Personas ---
-Define the expert personas who will review feature PRDs.
-
---- Persona 1 ---
-Role: Senior Backend Engineer
-Expertise: API design, database modeling, performance
-Perspective: Thinks about scalability and data integrity
-Participate in code reviews? [Y/n]: Y
-
---- Persona 2 ---
-Role: Product Lead
-Expertise: User research, prioritization
-Perspective: Thinks about user value and shipping incrementally
-Participate in code reviews? [Y/n]: n
-
-Config saved to .colonyos/config.yaml
-```
-
-Personas shape how PRDs are written. During planning, each persona runs as a parallel subagent answering clarifying questions from their unique perspective. Personas with `reviewer: true` also participate in independent, parallel code reviews during the review/fix loop.
-
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
+| `colonyos doctor` | Check prerequisites and environment health |
 | `colonyos init` | Interactive project + persona setup |
+| `colonyos init --quick` | Zero-prompt setup with defaults (first persona pack) |
 | `colonyos init --personas` | Re-run just the persona workshop |
 | `colonyos auto` | Fully autonomous: CEO proposes, pipeline builds + ships |
-| `colonyos auto --loop N` | Run N autonomous cycles back-to-back (max 10) |
+| `colonyos auto --loop N` | Run N autonomous cycles back-to-back |
+| `colonyos auto --max-hours H` | Stop loop after H wall-clock hours |
+| `colonyos auto --max-budget USD` | Stop loop after USD aggregate spend |
+| `colonyos auto --resume-loop` | Resume the most recent interrupted loop |
 | `colonyos auto --no-confirm` | Skip human approval even if `auto_approve` is off |
 | `colonyos auto --propose-only` | CEO proposes but doesn't execute |
 | `colonyos run "feature prompt"` | Directed mode: plan, implement, review, deliver |
 | `colonyos run "..." --plan-only` | Stop after PRD + tasks |
 | `colonyos run --from-prd cOS_prds/xxx.md` | Skip planning, implement an existing PRD |
 | `colonyos run --resume <run-id>` | Resume a failed run from its last successful phase |
-| `colonyos status` | Show recent runs with cost breakdown |
+| `colonyos status` | Show recent runs, loop summaries, and cost breakdown |
 
 ## Configuration
 
@@ -168,6 +194,8 @@ auto_approve: true         # skip human confirmation in autonomous mode
 budget:
   per_phase: 5.00         # USD per Claude Code session
   per_run: 15.00          # USD total cap for a full run
+  max_duration_hours: 8.0 # wall-clock cap for autonomous loops
+  max_total_usd: 500.0    # aggregate spend cap for autonomous loops
 phases:
   plan: true
   implement: true
@@ -198,19 +226,56 @@ your-repo/
     20260317_155328_proposal_ceo_proposal.md
 ```
 
-Run logs (costs, durations, session IDs) go to `.colonyos/runs/` which is gitignored by default.
+Run logs (costs, durations, session IDs) and loop state files go to `.colonyos/runs/` which is gitignored by default.
+
+## Built by ColonyOS
+
+Every feature in this repo was proposed, planned, implemented, reviewed, and shipped by ColonyOS agents running on their own codebase. Here are some of the PRDs the pipeline wrote for itself:
+
+| Feature | PRD |
+|---------|-----|
+| Persona packs & pack selection | `cOS_prds/` |
+| Parallel per-persona code review | `cOS_prds/` |
+| Resume failed runs | `cOS_prds/` |
+| CEO autonomous proposals | `cOS_prds/` |
+| Developer onboarding & long-running loops | `cOS_prds/20260317_163656_prd_i_want_this_to_be_super_easy_to_set_up_if_you_re_a_dev_you_should_be_able_to_be.md` |
+
+Check the `cOS_prds/` and `cOS_proposals/` directories for the full history.
+
+## Why ColonyOS?
+
+Most AI coding tools are co-pilots — they wait for you to steer. ColonyOS is an autopilot.
+
+**The self-improvement thesis**: If an AI pipeline can build software, and the pipeline itself is software, then the pipeline can improve itself. Every run makes the next run better — better prompts, better review criteria, better architecture.
+
+**Why this matters**:
+- **Compounding returns**: Each shipped PR teaches the pipeline about your codebase, making future PRDs more grounded.
+- **Quality through diversity**: Multiple expert personas review code from different angles simultaneously, catching issues that a single reviewer would miss.
+- **24/7 development**: With long-running loops (`--max-hours 24`), ColonyOS works while you sleep. Wake up to pull requests.
+- **Full auditability**: Every decision is documented — PRDs, task breakdowns, review artifacts, decision gate verdicts. Nothing is a black box.
+
+## Security Model
+
+ColonyOS runs Claude Code sessions with `bypassPermissions` enabled, meaning the agent has full read/write/execute access within your repository. This is by design — the agent needs to create branches, write code, run tests, and push to GitHub.
+
+**What this means for you**:
+- Only run ColonyOS on repositories where you trust the agent to modify files
+- Use budget caps (`max_total_usd`, `per_run`) to limit blast radius
+- Review generated PRs before merging, just as you would for any contributor
+- Long-running loops with `auto_approve: true` amplify the scope of autonomous action — set conservative caps
 
 ## Architecture
 
 ```
 src/colonyos/
-  cli.py            # Click CLI entry point
-  init.py           # Interactive persona workshop
-  orchestrator.py   # Phase chaining: CEO → plan → implement → review → deliver
+  cli.py            # Click CLI entry point (doctor, init, run, auto, status)
+  init.py           # Interactive persona workshop + --quick mode
+  orchestrator.py   # Phase chaining: CEO -> plan -> implement -> review -> deliver
   agent.py          # Claude Agent SDK wrapper
   config.py         # .colonyos/config.yaml loader
-  models.py         # Persona, PhaseResult, RunLog
+  models.py         # Persona, PhaseResult, RunLog, LoopState
   naming.py         # Deterministic timestamped filenames
+  persona_packs.py  # Prebuilt persona packs (startup, backend, fullstack, opensource)
   instructions/     # Markdown templates passed to Claude Code
     ceo.md          # Autonomous feature proposal
     plan.md         # PRD + task generation
@@ -238,3 +303,54 @@ pytest
 ## License
 
 MIT
+
+<details>
+<summary><strong>New to Claude Code?</strong></summary>
+
+### Setting Up Claude Code from Scratch
+
+ColonyOS requires the Claude Code CLI. Here's how to get started:
+
+1. **Install Node.js** (if not already installed):
+   ```bash
+   # macOS
+   brew install node
+
+   # Linux
+   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+   sudo apt-get install -y nodejs
+   ```
+
+2. **Install Claude Code CLI**:
+   ```bash
+   npm install -g @anthropic-ai/claude-code
+   ```
+
+3. **Authenticate**:
+   ```bash
+   claude
+   # Follow the authentication prompts to connect your Anthropic account
+   ```
+
+4. **Verify**:
+   ```bash
+   claude --version
+   ```
+
+5. **Install GitHub CLI** (for the deliver phase):
+   ```bash
+   # macOS
+   brew install gh
+
+   # Linux
+   sudo apt install gh
+   ```
+
+6. **Authenticate GitHub CLI**:
+   ```bash
+   gh auth login
+   ```
+
+Once everything is set up, run `colonyos doctor` to verify all prerequisites are in place.
+
+</details>

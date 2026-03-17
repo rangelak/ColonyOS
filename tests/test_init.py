@@ -1,8 +1,9 @@
 from pathlib import Path
-from unittest.mock import patch, call
+from unittest.mock import patch, call, MagicMock
 
 import pytest
 import click
+import yaml
 
 from colonyos.config import ColonyConfig, save_config
 from colonyos.models import Persona, ProjectInfo
@@ -157,3 +158,96 @@ class TestRunInitReviewsDir:
         captured = capsys.readouterr()
         assert "old 'prds/'" in captured.err
         assert "old 'tasks/'" in captured.err
+
+
+class TestQuickInit:
+    """Task 2.1: Tests for --quick flag."""
+
+    def test_quick_skips_interactive_prompts(self, tmp_path: Path):
+        """--quick should skip persona workshop and use defaults."""
+        config = run_init(
+            tmp_path,
+            quick=True,
+            project_name="TestProject",
+            project_description="A test",
+            project_stack="Python",
+        )
+
+        assert config.project is not None
+        assert config.project.name == "TestProject"
+        assert len(config.personas) > 0  # Should have first pack's personas
+
+    def test_quick_uses_first_persona_pack(self, tmp_path: Path):
+        config = run_init(
+            tmp_path,
+            quick=True,
+            project_name="TestProject",
+            project_description="A test",
+            project_stack="Python",
+        )
+
+        first_pack = PACKS[0]
+        assert len(config.personas) == len(first_pack.personas)
+        assert config.personas[0].role == first_pack.personas[0].role
+
+    def test_quick_creates_valid_config(self, tmp_path: Path):
+        config = run_init(
+            tmp_path,
+            quick=True,
+            project_name="TestProject",
+            project_description="A test",
+            project_stack="Python",
+        )
+
+        # Verify config was saved to disk
+        config_path = tmp_path / ".colonyos" / "config.yaml"
+        assert config_path.exists()
+
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert raw["project"]["name"] == "TestProject"
+        assert raw["model"] == "sonnet"
+
+    def test_quick_prints_next_step(self, tmp_path: Path, capsys):
+        with patch("colonyos.init.click") as mock_click:
+            mock_click.echo = click.echo
+            run_init(
+                tmp_path,
+                quick=True,
+                project_name="TestProject",
+                project_description="A test",
+                project_stack="Python",
+            )
+
+        captured = capsys.readouterr()
+        assert "colonyos run" in captured.out
+
+    def test_quick_requires_project_name(self, tmp_path: Path):
+        """--quick without project name should raise an error."""
+        with pytest.raises(click.ClickException):
+            run_init(tmp_path, quick=True)
+
+
+class TestDoctorPreCheck:
+    """Task 2.3: Doctor pre-check in init."""
+
+    def test_init_refuses_if_hard_prereqs_missing(self, tmp_path: Path):
+        """Init should refuse to proceed if hard prerequisites fail."""
+
+        def fake_checks(repo_root):
+            return [
+                ("Python ≥ 3.11", False, "Install Python 3.11+"),
+                ("Claude Code CLI", False, "Install claude"),
+                ("Git", True, ""),
+                ("GitHub CLI auth", True, ""),
+            ]
+
+        with patch("colonyos.cli.run_doctor_checks", fake_checks):
+            with pytest.raises(click.ClickException, match="prerequisite"):
+                run_init(
+                    tmp_path,
+                    quick=True,
+                    project_name="Test",
+                    project_description="test",
+                    project_stack="Python",
+                    doctor_check=True,
+                )

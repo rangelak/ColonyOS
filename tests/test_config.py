@@ -328,3 +328,63 @@ class TestMaxFixIterations:
 
     def test_defaults_dict_has_max_fix_iterations(self):
         assert DEFAULTS["max_fix_iterations"] == 2
+
+
+class TestBudgetConfigLongRunning:
+    """Task 3.1: Tests for max_duration_hours and max_total_usd in BudgetConfig."""
+
+    def test_defaults_when_fields_missing(self, tmp_repo: Path):
+        """Backward compat: configs without new fields get defaults."""
+        config = load_config(tmp_repo)
+        assert config.budget.max_duration_hours == 8.0
+        assert config.budget.max_total_usd == 500.0
+
+    def test_parsed_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "budget": {
+                    "per_phase": 5.0,
+                    "per_run": 15.0,
+                    "max_duration_hours": 24.0,
+                    "max_total_usd": 1000.0,
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.budget.max_duration_hours == 24.0
+        assert config.budget.max_total_usd == 1000.0
+
+    def test_roundtrip_save_load(self, tmp_repo: Path):
+        original = ColonyConfig(
+            budget=BudgetConfig(
+                per_phase=5.0,
+                per_run=15.0,
+                max_duration_hours=12.0,
+                max_total_usd=250.0,
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.budget.max_duration_hours == 12.0
+        assert loaded.budget.max_total_usd == 250.0
+
+    def test_backward_compat_old_budget_section(self, tmp_repo: Path):
+        """Old configs with only per_phase and per_run still work."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"budget": {"per_phase": 10.0, "per_run": 30.0}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.budget.per_phase == 10.0
+        assert config.budget.per_run == 30.0
+        assert config.budget.max_duration_hours == 8.0
+        assert config.budget.max_total_usd == 500.0
+
+    def test_defaults_dict_has_new_fields(self):
+        assert DEFAULTS["budget"]["max_duration_hours"] == 8.0
+        assert DEFAULTS["budget"]["max_total_usd"] == 500.0

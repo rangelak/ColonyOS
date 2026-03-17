@@ -13,7 +13,12 @@ RUNS_DIR = "runs"
 
 DEFAULTS = {
     "model": "sonnet",
-    "budget": {"per_phase": 5.0, "per_run": 15.0},
+    "budget": {
+        "per_phase": 5.0,
+        "per_run": 15.0,
+        "max_duration_hours": 8.0,
+        "max_total_usd": 500.0,
+    },
     "phases": {"plan": True, "implement": True, "review": True, "deliver": True},
     "branch_prefix": "colonyos/",
     "prds_dir": "cOS_prds",
@@ -28,6 +33,8 @@ DEFAULTS = {
 class BudgetConfig:
     per_phase: float = 5.0
     per_run: float = 15.0
+    max_duration_hours: float = 8.0
+    max_total_usd: float = 500.0
 
 
 @dataclass
@@ -107,6 +114,8 @@ def load_config(repo_root: Path) -> ColonyConfig:
         budget=BudgetConfig(
             per_phase=float(budget_raw.get("per_phase", DEFAULTS["budget"]["per_phase"])),
             per_run=float(budget_raw.get("per_run", DEFAULTS["budget"]["per_run"])),
+            max_duration_hours=float(budget_raw.get("max_duration_hours", DEFAULTS["budget"]["max_duration_hours"])),
+            max_total_usd=float(budget_raw.get("max_total_usd", DEFAULTS["budget"]["max_total_usd"])),
         ),
         phases=PhasesConfig(
             plan=bool(phases_raw.get("plan", True)),
@@ -154,6 +163,8 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
     data["budget"] = {
         "per_phase": config.budget.per_phase,
         "per_run": config.budget.per_run,
+        "max_duration_hours": config.budget.max_duration_hours,
+        "max_total_usd": config.budget.max_total_usd,
     }
     data["phases"] = {
         "plan": config.phases.plan,
