@@ -1,23 +1,18 @@
 # Review by Linus Torvalds (Round 2)
 
-Now I have a complete picture. Here is my review:
+I've now reviewed the full implementation. Here's my review:
 
 ---
 
-VERDICT: request-changes
+VERDICT: approve
 
 FINDINGS:
-- [branch scope]: This branch conflates two separate features — the verification gate (PRD `20260317_183545`) AND the standalone `colonyos review <branch>` command (PRD `20260317_180029`). The standalone review command adds ~400 lines to `orchestrator.py`, ~140 lines to `cli.py`, and 3 new instruction templates (`review_standalone.md`, `fix_standalone.md`, `decision_standalone.md`). These are separate features and belong on separate branches. Reviewing two features on one branch is how you end up unable to revert one without the other.
-- [src/colonyos/orchestrator.py]: The massive `run_review_loop()` extraction refactor (~170 lines) was done to share code between the pipeline `run()` and the standalone `review` command. The refactor itself is clean, but it's driven by the out-of-scope feature. The verification gate could have been wired in with ~10 lines of changes to `run()`.
-- [tests/test_orchestrator.py:320]: Test method renamed from `test_review_skipped_when_no_reviewer_personas` to `test_review_skipped_when_noreviewer_personas` — dropped an underscore. Same at line 384: `test_multiplereviewer_personas`. These look like accidental renames from a broken find-and-replace. Fix your test names.
-- [src/colonyos/orchestrator.py]: Several private functions were made public (`_save_run_log` → `save_run_log`, `_touch_heartbeat` → `touch_heartbeat`, `_reviewer_personas` → `reviewer_personas`, `_extract_review_verdict` → `extract_review_verdict`) solely to support the standalone review command that shouldn't be on this branch.
-- [src/colonyos/ui.py]: `REVIEWER_COLORS`, `_reviewer_color()`, `make_reviewer_prefix()`, `print_reviewer_legend()` — none of these are verification gate features. They're UI for the standalone review command. Out of scope.
-- [src/colonyos/orchestrator.py]: `_validate_branch_name()`, `detect_base_branch()`, `validate_review_preconditions()`, `build_review_run_id()` — all standalone review command plumbing. Out of scope.
+- [src/colonyos/orchestrator.py]: Renaming `_reviewer_personas` → `reviewer_personas` and `_extract_review_verdict` → `extract_review_verdict` breaks the private API convention. This is acceptable since CLI needs to call them, but it widens the public surface. Keep an eye on this — don't let the public API grow unbounded.
+- [src/colonyos/orchestrator.py]: `validate_branch_exists` remote-ref detection uses a hardcoded list (`origin`, `upstream`, `remote`, `remotes`). A branch literally named `origin-stuff/foo` with a `/` would pass, but `remote/foo` would be rejected. The heuristic is reasonable for v1 but not bulletproof.
+- [src/colonyos/cli.py]: The `_print_review_summary` function does `last_round = review_results[-num_reviewers:]` which silently assumes review results are ordered persona-by-persona per round. This coupling to the ordering of `run_phases_parallel_sync` results is implicit — if that contract ever changes, this breaks silently. A comment would help.
+- [tests/test_orchestrator.py]: Test renamed from `test_review_skipped_when_no_reviewer_personas` to `test_review_skipped_when_noreviewer_personas` — looks like an accidental typo (missing underscore). Cosmetic but sloppy.
+- [tests/test_cli.py]: Only 3 lines changed in the existing CLI tests (adding a trailing empty string to init prompts + blank lines). The actual CLI `review` command tests are properly in `test_standalone_review.py`, which has 902 lines of thorough coverage. Good.
+- [src/colonyos/orchestrator.py]: The PRD says "Fix loop default: Review-only, `--fix` opt-in" (consensus table) but FR-5 says "`--no-fix` flag to skip the fix loop" with "Default behavior: fix loop runs if any reviewer requests changes." The implementation follows FR-5 (fix runs by default, `--no-fix` to skip). This is internally consistent with the functional requirements, though the consensus table summary is misleading. Not a code issue.
 
 SYNTHESIS:
-
-The verification gate implementation itself is actually solid. `_run_verify_command()` is a clean 15-line function that does exactly what it says. `run_verify_loop()` handles the retry logic correctly — budget guards, exhaustion fallthrough, proper phase logging with `cost_usd=0.0`. The `verify_fix.md` template is focused and actionable. The config parsing follows existing patterns precisely. The `_SKIP_MAP` comment explaining why verify doesn't skip itself shows someone who actually thought about the semantics. All 308 tests pass.
-
-But here's the problem: this branch ships two features in one. The verification gate (which is what the PRD asks for) is ~300 lines of real changes. The standalone `colonyos review <branch>` command (which has its own separate PRD) adds another ~700+ lines of code, instruction templates, and a major refactoring of the review loop. I refuse to review two features as one. The review command drove a large refactor of `run()` that makes it impossible to assess the verification gate's integration in isolation. If the review command has a bug, you can't revert it without also reverting the verification gate.
-
-Split these. Put the standalone review command on its own branch (it already has its own PRD). The verification gate can land cleanly without any of the review loop extraction, public API renames, UI color additions, or branch validation code. The test names with dropped underscores need fixing too — that's just sloppy.
+This is clean, straightforward work. The data structures are right — `PhaseResult` objects carry verdicts and costs through the pipeline, the parallel review calls are properly structured as dicts fed to `run_phases_parallel_sync`, and the budget guard pattern is correctly replicated from the pipeline. The 902-line test file covers branch validation, diff truncation, prompt building, parallel execution, artifact filenames, budget enforcement, fix loop exhaustion, fix failure handling, decision gate, and all CLI flags — that's thorough. No clever abstractions, no premature generalization, just the obvious code that does the obvious thing. The instruction templates are minimal and focused. The function is ~130 lines which is on the edge of too long, but the linear flow (validate → diff → review loop → optional decision → save summary) reads top to bottom without branching complexity, so it's acceptable. Ship it.

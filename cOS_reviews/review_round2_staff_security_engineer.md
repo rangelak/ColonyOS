@@ -1,72 +1,22 @@
 # Review by Staff Security Engineer (Round 2)
 
-I now have a comprehensive view of the implementation. Let me write the review from my Staff Security Engineer perspective.
-
----
-
-## Security Review: Post-Implement Verification Gate
-
-### Checklist Assessment
-
-**Completeness**
-- [x] All functional requirements from the PRD are implemented (FR-1 through FR-29)
-- [x] All tasks in the task file are marked complete (7 task groups, all checked)
-- [x] No placeholder or TODO code remains
-
-**Quality**
-- [x] All tests pass (166 orchestrator + verify tests, 94 config/init/model tests — 260 total, 0 failures)
-- [x] Code follows existing project conventions (dataclass pattern, instruction template pattern, subprocess pattern)
-- [x] No unnecessary dependencies added
-- [x] No linter errors observed
-
-**Safety**
-- [x] No secrets or credentials in committed code
-- [x] No destructive database operations
-- [x] Error handling is present (TimeoutExpired, OSError caught)
-
-### Detailed Security Findings
-
-**1. `shell=True` in `_run_verify_command` (orchestrator.py:671) — Acceptable Risk, Properly Scoped**
-
-The command is executed with `shell=True`. In isolation this would be a finding, but the PRD explicitly addresses this (Non-Goals, §5): the tool already runs Claude Code with `permission_mode="bypassPermissions"`, so the verify command is not introducing new privilege. The command string originates from the user's own `config.yaml`, not from untrusted input. Other subprocess calls in this codebase (e.g., `doctor.py`) use similar patterns. **No action needed.**
-
-**2. Test output injection into LLM prompts — Mitigated by truncation**
-
-Test output is truncated to 4000 chars (`_VERIFY_TRUNCATE_LIMIT`) and injected into the retry prompt via `_build_verify_fix_prompt`. A malicious test suite could craft output containing prompt injection content (e.g., "Ignore previous instructions..."). The 4000-char ceiling limits the attack surface, and the prompt template wraps the output in a clearly delimited code block. The PRD persona synthesis (§7) acknowledged this risk and hardcoded the limit. This is adequate for v1 — the threat model is that the test suite is controlled by the same developer who controls the config. **Acceptable.**
-
-**3. OSError handling (orchestrator.py:683-684) — Good**
-
-The `OSError` catch handles cases where the verify command binary doesn't exist or permissions are wrong. This was a previous review finding that has been addressed. The error message is passed through to the retry prompt, which is fine since it only contains the OS error string, not secrets.
-
-**4. Budget guard (orchestrator.py:783-793) — Correct**
-
-The budget guard checks `per_run - cost_so_far < per_phase` before each implement retry, preventing runaway LLM spend. Verify subprocess runs are logged with `cost_usd=0.0` and correctly don't count against the dollar budget. The retry count cap (`max_verify_retries`) provides a second independent limit. This dual-guard approach is sound.
-
-**5. No environment variable leakage in subprocess**
-
-The subprocess call does NOT explicitly set `env=` parameter, which means it inherits the parent process's environment. This is consistent with how other subprocess calls work in this codebase (git operations in `orchestrator.py`). The verify command could theoretically access environment variables (API keys, etc.), but this is identical to the existing threat model where Claude Code itself runs with full environment access. **No regression.**
-
-**6. Config parsing (`_parse_verification`) — Defensive**
-
-The parser correctly handles `None` input, missing keys, and type coercion (`int()`). Empty string verify_command is treated as `None` (disabled). The `save_config` only writes the verification section when non-default, keeping configs clean. Round-trip tests confirm correctness.
-
-**7. Audit trail — Complete**
-
-Every verification attempt is logged as a `PhaseResult` with `phase=Phase.VERIFY`, `cost_usd=0.0`, and artifacts containing `test_output` and `exit_code`. Implement retries are logged as normal `Phase.IMPLEMENT` entries. This provides full audit trail of what the agent did, how many retries occurred, and why. The `RunLog` is persisted to disk for post-mortem analysis.
-
-**8. Resume semantics — Correct and safe**
-
-`_SKIP_MAP["verify"]` correctly skips `{"plan", "implement"}` but NOT `verify` itself, so resuming re-runs the free subprocess. This is the right behavior — re-verifying is free and safe.
+I now have a thorough understanding of the implementation. Here is my review:
 
 ---
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/orchestrator.py:669-671]: `shell=True` subprocess execution for verify command — acceptable given existing threat model (user-controlled config, agent already has unrestricted shell)
-- [src/colonyos/orchestrator.py:698-704]: Test output injected into LLM retry prompt — mitigated by 4000-char truncation and code-block delimiting; adequate for v1 where test suite is developer-controlled
-- [src/colonyos/orchestrator.py:683-684]: OSError catch added for missing binary — good defensive handling from prior review round
-- [src/colonyos/orchestrator.py:783-793]: Dual budget guard (dollar + retry count) prevents runaway spend — correctly implemented
+- [src/colonyos/orchestrator.py]: **Bash tool in review/decision phases (pre-existing, acknowledged)** — Reviewers and the decision gate get `["Read", "Glob", "Grep", "Bash"]` which is consistent with the pipeline (FR-16) but means a malicious instruction template could use Bash to exfiltrate secrets (e.g., `curl` env vars to an external endpoint, `cat ~/.ssh/id_rsa`). The PRD acknowledges this in Open Question #2 and defers it. Acceptable for v1, but this is the single highest-risk surface in the entire tool.
+- [src/colonyos/orchestrator.py]: **Fix agent has unrestricted tool access** — `run_phase_sync(Phase.FIX, ...)` does not pass `allowed_tools`, meaning the fix agent gets the default full tool set. This is consistent with FR-20 ("same as pipeline fix phase") and is expected since fixes need write access, but worth noting for audit purposes.
+- [src/colonyos/orchestrator.py]: **`subprocess.run` calls use list args, not shell=True** — Good. Both `validate_branch_exists()` and `_get_branch_diff()` pass commands as lists, not strings, preventing shell injection through branch names like `; rm -rf /`. This is the correct pattern.
+- [src/colonyos/orchestrator.py]: **Branch name flows into `git diff` and `git branch --list` without sanitization beyond remote-ref check** — The `--` separator in `git branch --list --` prevents option injection. The `git diff base...branch` call does not use `--`, but since `subprocess.run` uses a list (no shell), the risk is minimal. A pathologically named branch could still cause unexpected git behavior, but this is a low-severity concern.
+- [src/colonyos/instructions/fix_standalone.md]: **Fix template instructs agent to commit changes** — Line 45 says "Commit all fixes on branch `{branch_name}`". This is the expected behavior when `--fix` is used (not `--no-fix`), and the fix loop is opt-out by default (`no_fix=False` in the function signature — wait, let me verify)... Actually checking the PRD: FR-5 says "Default behavior: fix loop runs if any reviewer requests changes." The CLI defaults `--no-fix` to `is_flag=True` (off by default), so fixes DO run by default. The PRD says "Review-only by default (no branch mutation); fixes require explicit `--fix` flag" in Goal #5, but FR-5 contradicts this by saying the default runs fixes. The implementation follows FR-5 (fixes run unless `--no-fix`). This is a PRD internal inconsistency, not an implementation bug.
+- [src/colonyos/cli.py]: **No `--fix` flag, only `--no-fix`** — FR-5 defines `--no-fix` to skip fixes, and Goal #5 mentions an explicit `--fix` flag. The implementation uses `--no-fix` only, which is consistent with FR-5's default (fix runs unless told not to). This is fine but the PRD's Goal #5 language is misleading.
+- [src/colonyos/orchestrator.py]: **No RunLog created** — Correct per FR-32. Cost tracking uses `PhaseResult` objects and a running `total_cost` counter. This means there's no persistent audit trail of what the agent did beyond the review artifacts saved to disk. For auditability, the saved artifacts (per-persona review files + summary) provide a reasonable paper trail.
+- [src/colonyos/orchestrator.py]: **OSError handling in `_get_branch_diff`** — Properly catches `OSError` and returns empty string rather than crashing. Good defensive practice.
+- [tests/test_standalone_review.py]: **902 lines of comprehensive tests** — Covers branch validation (including remote ref rejection, feature/ branches), diff extraction/truncation, prompt building, parallel execution, artifact filenames, budget enforcement, fix phase failure, decision gate, CLI flags, and exit codes. Test quality is solid.
+- [src/colonyos/instructions/review_standalone.md]: **No secrets in templates** — Instruction templates contain only structural prompts with format placeholders. No credentials or sensitive data.
 
 SYNTHESIS:
-From a supply chain security and least-privilege perspective, this implementation is well-scoped. The verify command runs as a raw subprocess inheriting the parent environment, which introduces no new privilege surface beyond what the Claude Code agent already possesses. The key security-relevant decisions — hardcoded truncation limit, budget dual-guard, OSError handling, and `cost_usd=0.0` accounting — are all correctly implemented. The audit trail via `PhaseResult` artifacts gives operators full visibility into what the verification gate did. The only theoretical concern is prompt injection via crafted test output, but the threat model is self-attacking (the developer controls both the config and the test suite), and the 4000-char truncation with code-block delimiting provides reasonable defense-in-depth. Test coverage is comprehensive at 260 passing tests covering subprocess mocking, timeout handling, budget enforcement, retry exhaustion, and config round-tripping. No secrets, no credential exposure, no privilege escalation. Approve.
+From a security perspective, this implementation is well-constructed for v1. The subprocess calls avoid shell injection by using list arguments. Branch validation rejects remote-style refs and uses `--` to prevent option injection. Error handling is present throughout. The biggest security concern — Bash tool access for reviewers enabling arbitrary command execution — is a pre-existing architectural issue that affects the entire pipeline, not just this feature, and is correctly documented as a deferred open question in the PRD. The fix agent's unrestricted tool access is expected and gated behind the `--no-fix` opt-out flag. The absence of a RunLog means we lack a centralized audit trail, but the per-round review artifacts saved to disk provide reasonable traceability of what each persona evaluated and concluded. No secrets are committed, no destructive operations are unguarded, and the 309 passing tests provide good coverage of the security-relevant paths (branch validation, budget exhaustion, fix failure graceful degradation). I approve with the standing recommendation to revisit Bash tool access for reviewers as a priority follow-up.

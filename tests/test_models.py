@@ -10,20 +10,6 @@ import pytest
 from colonyos.models import LoopState, LoopStatus, Phase
 
 
-class TestPhaseVerify:
-    def test_verify_exists(self):
-        assert Phase.VERIFY == "verify"
-        assert Phase.VERIFY.value == "verify"
-
-    def test_verify_ordering(self):
-        phases = list(Phase)
-        impl_idx = phases.index(Phase.IMPLEMENT)
-        verify_idx = phases.index(Phase.VERIFY)
-        review_idx = phases.index(Phase.REVIEW)
-        assert verify_idx == impl_idx + 1
-        assert verify_idx == review_idx - 1
-
-
 class TestLoopState:
     def test_default_fields(self):
         state = LoopState(

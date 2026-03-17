@@ -19,8 +19,11 @@ from colonyos.models import LoopState, LoopStatus, RunLog, RunStatus
 from colonyos.naming import generate_timestamp
 from colonyos.orchestrator import (
     _touch_heartbeat,
+    validate_branch_exists,
+    extract_review_verdict,
     run as run_orchestrator,
     run_ceo,
+    run_standalone_review,
     prepare_resume,
 )
 
@@ -108,6 +111,8 @@ def _show_welcome() -> None:
     right.append("       Run the agent pipeline\n")
     right.append("  auto", style="green")
     right.append("      CEO \u2192 full pipeline\n")
+    right.append("  review", style="green")
+    right.append("    Standalone code review\n")
     right.append("  status", style="green")
     right.append("    Show recent runs\n")
     right.append("\u2500" * 34 + "\n", style="bright_black")
@@ -265,6 +270,109 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
     _print_run_summary(log)
 
     if log.status == RunStatus.FAILED:
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Standalone review command
+# ---------------------------------------------------------------------------
+
+
+def _print_review_summary(
+    phase_results: list,
+    reviewers: list,
+    total_cost: float,
+    decision_verdict: str | None = None,
+) -> None:
+    """Print a formatted review summary table to stdout."""
+    from colonyos.models import Phase
+
+    click.echo(f"\n{'=' * 60}")
+    click.echo("Review Summary")
+    click.echo(f"{'=' * 60}")
+
+    review_results = [r for r in phase_results if r.phase == Phase.REVIEW]
+    # Match reviewers to review results (may be multiple rounds)
+    num_reviewers = len(reviewers)
+    if review_results and num_reviewers:
+        # Show the last round of results
+        last_round = review_results[-num_reviewers:]
+        for persona, result in zip(reviewers, last_round):
+            text = result.artifacts.get("result", "")
+            verdict = extract_review_verdict(text)
+            # Extract first finding line
+            finding = ""
+            for line in text.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("- [") and "]:" in stripped:
+                    finding = stripped[:80]
+                    break
+            status = "✓ approve" if verdict == "approve" else "✗ request-changes"
+            click.echo(f"  {persona.role:30s} {status}")
+            if finding:
+                click.echo(f"    {finding}")
+
+    click.echo(f"\nTotal cost: ${total_cost:.4f}")
+
+    if decision_verdict:
+        click.echo(f"Decision: {decision_verdict}")
+
+    click.echo(f"{'=' * 60}")
+
+
+@app.command()
+@click.argument("branch")
+@click.option("--base", default="main", help="Base branch to compare against.")
+@click.option("--no-fix", is_flag=True, help="Skip fix loop, review only.")
+@click.option("--decide", is_flag=True, help="Run decision gate after reviews.")
+@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
+@click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
+def review(branch: str, base: str, no_fix: bool, decide: bool, verbose: bool, quiet: bool) -> None:
+    """Run standalone multi-persona code review on a branch."""
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+
+    if not config.project:
+        click.echo(
+            "No ColonyOS config found. Run `colonyos init` first.",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Validate branches
+    ok, err = validate_branch_exists(branch, repo_root)
+    if not ok:
+        click.echo(f"Error: {err}", err=True)
+        sys.exit(1)
+
+    ok, err = validate_branch_exists(base, repo_root)
+    if not ok:
+        click.echo(f"Error: {err}", err=True)
+        sys.exit(1)
+
+    from colonyos.orchestrator import reviewer_personas
+
+    reviewers = reviewer_personas(config)
+    if not reviewers:
+        click.echo("No reviewer personas configured. Add personas with reviewer=true to config.", err=True)
+        sys.exit(1)
+
+    all_approved, phase_results, total_cost, decision_verdict = run_standalone_review(
+        branch,
+        base,
+        repo_root,
+        config,
+        verbose=verbose,
+        quiet=quiet,
+        no_fix=no_fix,
+        decide=decide,
+    )
+
+    _print_review_summary(phase_results, reviewers, total_cost, decision_verdict=decision_verdict)
+
+    if all_approved:
+        sys.exit(0)
+    else:
         sys.exit(1)
 
 

@@ -219,7 +219,6 @@ class TestInitWithPacks:
             "sonnet",                # model
             "5.0",                   # budget per phase
             "15.0",                  # budget per run
-            "",                      # verify command (skip)
             "",                      # extra trailing newline
         ])
 

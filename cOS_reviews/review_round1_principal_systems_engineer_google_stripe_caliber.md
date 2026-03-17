@@ -1,18 +1,39 @@
 # Review by Principal Systems Engineer (Google/Stripe caliber) (Round 1)
 
-I have all the information I need to complete the review. Let me summarize my findings:
+Here is my complete review:
 
 ---
 
-VERDICT: request-changes
+## Review: Standalone `colonyos review <branch>` Command
+
+### Systematic FR Assessment
+
+I verified all 32 functional requirements from the PRD against the implementation:
+
+- **FR-1 through FR-6** (CLI registration, arguments, options): ✅ All present in `cli.py` lines 323-330
+- **FR-7 through FR-9** (Branch validation): ✅ `_validate_branch_exists()` validates local existence and rejects remote-style refs
+- **FR-10 through FR-13** (Diff-aware review prompt): ✅ Template created, prompt builder works, 10k char truncation implemented, no PRD references
+- **FR-14 through FR-17** (Parallel persona reviews): ✅ Reuses `_reviewer_personas()`, `run_phases_parallel_sync()`, correct tools, correct output format
+- **FR-18 through FR-21** (Fix loop): ✅ Runs unless `--no-fix`, standalone fix prompt, write tools for fix agent, re-review after fix
+- **FR-22 through FR-24** (Artifacts): ✅ Correct filenames with branch slug, summary file, decision artifact
+- **FR-25** (Decision gate): ✅ Runs when `--decide` passed
+- **FR-26 through FR-29** (Output/exit codes): ✅ Summary table printed, exit 0/1 logic correct for both review and decision modes
+- **FR-30 through FR-31** (Budget): ✅ Per-phase and per-run guards present
+- **FR-32** (No RunLog): ✅ No RunLog created
+
+### Tests
+
+All 358 tests pass. The new `test_standalone_review.py` (899 lines) provides comprehensive coverage across 10 test classes covering: branch validation, diff extraction, prompt building, orchestration, parallel execution, artifact filenames, summary printing, CLI flags, exit codes, budget enforcement, and fix failure edge cases.
+
+### Findings
+
+VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/orchestrator.py:260]: **Behavioral regression: Bash tool removed from reviewers and decision gate.** The refactored `run_review_loop` sets `review_tools = ["Read", "Glob", "Grep"]` and passes the same restricted list to the decision gate. The original inlined code used `["Read", "Glob", "Grep", "Bash"]` for both. This silently degrades reviewer and decision-gate capabilities — they can no longer run git diff, check file permissions, run linters, or inspect runtime behavior. This is an unrelated change bundled into the verification feature and represents a capability regression for all review runs, not just those using the new verify gate.
-- [src/colonyos/orchestrator.py:1162]: **Verify skip map doesn't include "verify" itself, which is intentional per FR-22 but underdocumented.** A comment explaining *why* verify re-runs on resume (because it's free) would prevent a future maintainer from "fixing" it to include verify in its own skip set.
-- [src/colonyos/config.py:207-213]: **save_config only persists verification section when verify_command is set.** If a user explicitly sets `max_verify_retries: 5` but leaves `verify_command` null (intending to add a command later), the custom retry count is silently dropped on save. Minor, but violates round-trip fidelity.
-- [src/colonyos/cli.py:18-26]: **Private symbols imported from orchestrator.** `_build_review_run_id`, `_extract_review_verdict`, `_reviewer_personas`, `_save_run_log` are underscore-prefixed private functions being imported by `cli.py`. This creates a fragile coupling — any internal refactor of orchestrator can break the CLI. These should be promoted to public API (drop the underscore) or a thin public facade should be added.
-- [src/colonyos/orchestrator.py:680]: **shell=True with user-supplied verify_command.** The PRD explicitly calls this out as a non-goal to sandbox (since the agent already has unrestricted shell), so this is accepted. However, the verify_command string is not validated at config load time — an empty string `""` is coerced to `None` (good), but there's no check for obviously malicious patterns. This is a reasonable v1 trade-off but worth noting for future hardening.
-- [src/colonyos/ui.py:53]: **Missing blank line before `TOOL_ARG_KEYS`.** Minor style issue — a blank line was dropped between the new `print_reviewer_legend` function and the existing `TOOL_ARG_KEYS` dict, violating PEP 8 two-blank-lines-between-top-level-definitions.
+- [src/colonyos/orchestrator.py:840-844]: `subprocess.run` in `_validate_branch_exists()` has no timeout. If git hangs (corrupted repo, NFS stall), this blocks the process indefinitely. Same issue in `_get_branch_diff()` at line 864. Add `timeout=30` to both calls. This is a 3am-page-you-awake problem.
+- [src/colonyos/orchestrator.py:870-872]: `_get_branch_diff` silently swallows git errors (only catches OSError, ignores non-zero return codes and stderr). If the merge base is invalid, the reviewer gets `(empty diff)` with no diagnostic. Consider logging stderr when `result.returncode != 0`.
+- [src/colonyos/orchestrator.py:1145-1148]: Summary artifact persona-matching uses `len(phase_results) // len(reviewers)` which includes FIX/DECISION results in the count, then filters to only REVIEW results for the zip. This works today because `zip` truncates to the shorter list, but it's fragile — a refactor that changes the result structure could silently misalign personas with verdicts. Consider computing the multiplier from the filtered list length instead.
+- [PRD inconsistency]: The persona consensus table states "Fix loop default: Review-only, `--fix` opt-in (7/7)" but FR-5 specifies fix-by-default with `--no-fix` to disable. The implementation follows FR-5 (fix runs by default). This is a documentation inconsistency in the PRD, not a code bug, but worth noting for future reference.
 
 SYNTHESIS:
-The verification gate implementation is architecturally sound — it follows existing patterns (subprocess for git, dataclass config, instruction templates), the retry loop with budget guards is well-structured, and the test coverage at 303/303 passing is thorough. The core feature (FR-1 through FR-29) is fully implemented: config parsing, Phase.VERIFY enum, subprocess execution with timeout handling, output truncation, retry loop with budget enforcement, pipeline integration, resume semantics, and `colonyos init` integration with auto-detection. The one blocking issue is the **silent removal of the Bash tool from reviewer and decision-gate allowed_tools**. This is a behavioral regression that affects all review runs (not just those using the verify gate) and was introduced as a side-effect of the refactoring that extracted `run_review_loop`. The original code gave reviewers Bash access; the new shared function does not. This needs to be restored before merging. The private symbol imports in cli.py should also be cleaned up to avoid brittleness, but that's a softer concern.
+This is a clean, well-structured implementation that correctly extends the orchestrator without disrupting the existing pipeline. The architectural choice to reuse `_reviewer_personas()`, `run_phases_parallel_sync()`, `_collect_review_findings()`, and `_save_review_artifact()` is exactly right — it avoids duplication while keeping the standalone path decoupled via its own prompt builders and instruction templates. The new instruction templates are appropriately PRD-free. Budget enforcement follows the established guard pattern. Test coverage is thorough with 899 lines of tests covering all code paths including edge cases (fix failure, budget exhaustion, empty diff, no reviewers). The three subprocess timeout findings are non-blocking for initial ship but should be addressed before this sees CI/production use, as they represent unbounded blocking on external processes — the classic "works fine until it doesn't" reliability gap.
