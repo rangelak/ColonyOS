@@ -14,6 +14,7 @@ from colonyos.agent import run_phase_sync, run_phases_parallel_sync
 from colonyos.config import ColonyConfig, runs_dir_path
 from colonyos.models import Persona, Phase, PhaseResult, ResumeState, RunLog, RunStatus
 from colonyos.naming import generate_timestamp, planning_names, proposal_names, slugify
+from colonyos.ui import NullUI, PhaseUI
 
 
 def _touch_heartbeat(repo_root: Path) -> None:
@@ -321,6 +322,8 @@ def _build_ceo_prompt(
 def run_ceo(
     repo_root: Path,
     config: ColonyConfig,
+    *,
+    ui: PhaseUI | NullUI | None = None,
 ) -> tuple[str, PhaseResult]:
     """Run the CEO phase: analyze the project and propose the next feature.
 
@@ -331,7 +334,10 @@ def run_ceo(
 
     system, user = _build_ceo_prompt(config, proposal_filename)
 
-    _log("=== CEO Phase ===")
+    if ui is not None:
+        ui.phase_header("CEO", config.budget.per_phase, config.model)
+    else:
+        _log("=== CEO Phase ===")
     result = run_phase_sync(
         Phase.CEO,
         user,
@@ -340,6 +346,7 @@ def run_ceo(
         model=config.model,
         budget_usd=config.budget.per_phase,
         allowed_tools=["Read", "Glob", "Grep"],
+        ui=ui,
     )
 
     proposal_text = result.artifacts.get("result", "")
@@ -635,8 +642,16 @@ def run(
     plan_only: bool = False,
     from_prd: str | None = None,
     resume_from: ResumeState | None = None,
+    verbose: bool = False,
+    quiet: bool = False,
 ) -> RunLog:
     """Execute the full orchestration loop: plan -> implement -> review -> deliver."""
+
+    def _make_ui(prefix: str = "") -> PhaseUI | NullUI | None:
+        if quiet:
+            return None
+        return PhaseUI(verbose=verbose, prefix=prefix)
+
     is_resume = resume_from is not None
 
     # --- Resume mode ---
@@ -678,13 +693,22 @@ def run(
         prd_stem = Path(from_prd).stem
         task_rel = f"{config.tasks_dir}/{prd_stem.replace('_prd_', '_tasks_')}.md"
     else:
-        _log("=== Phase 1: Plan ===")
+        plan_ui = _make_ui()
+        if plan_ui is not None:
+            extra = ""
+            persona_agents = _build_persona_agents(config.personas) or None
+            if persona_agents:
+                extra = f"{len(persona_agents)} persona subagents"
+            plan_ui.phase_header("Plan", config.budget.per_phase, config.model, extra)
+        else:
+            _log("=== Phase 1: Plan ===")
+            persona_agents = _build_persona_agents(config.personas) or None
+            if persona_agents:
+                _log(f"  {len(persona_agents)} persona subagents configured for parallel Q&A")
+
         system, user = _build_plan_prompt(
             prompt, config, names.prd_filename, names.task_filename
         )
-        persona_agents = _build_persona_agents(config.personas) or None
-        if persona_agents:
-            _log(f"  {len(persona_agents)} persona subagents configured for parallel Q&A")
         plan_result = run_phase_sync(
             Phase.PLAN,
             user,
@@ -693,6 +717,7 @@ def run(
             model=config.model,
             budget_usd=config.budget.per_phase,
             agents=persona_agents,
+            ui=plan_ui,
         )
         log.phases.append(plan_result)
 
@@ -700,7 +725,8 @@ def run(
             log.status = RunStatus.FAILED
             log.mark_finished()
             _save_run_log(repo_root, log)
-            _log(f"Plan phase failed: {plan_result.error}")
+            if plan_ui is None:
+                _log(f"Plan phase failed: {plan_result.error}")
             return log
 
     if plan_only:
@@ -715,7 +741,11 @@ def run(
     if "implement" in skip_phases:
         _log("Skipping implement phase (already completed in previous run)")
     else:
-        _log("=== Phase 2: Implement ===")
+        impl_ui = _make_ui()
+        if impl_ui is not None:
+            impl_ui.phase_header("Implement", config.budget.per_phase, config.model, branch_name)
+        else:
+            _log("=== Phase 2: Implement ===")
         system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name)
         impl_result = run_phase_sync(
             Phase.IMPLEMENT,
@@ -724,6 +754,7 @@ def run(
             system_prompt=system,
             model=config.model,
             budget_usd=config.budget.per_phase,
+            ui=impl_ui,
         )
         log.phases.append(impl_result)
 
@@ -731,7 +762,8 @@ def run(
             log.status = RunStatus.FAILED
             log.mark_finished()
             _save_run_log(repo_root, log)
-            _log(f"Implement phase failed: {impl_result.error}")
+            if impl_ui is None:
+                _log(f"Implement phase failed: {impl_result.error}")
             return log
 
     # --- Phase 3: Review/Fix Loop ---
@@ -743,7 +775,15 @@ def run(
         if not reviewers:
             _log("No reviewer personas configured, skipping review phase")
         else:
-            _log(f"=== Phase 3: Review ({len(reviewers)} reviewers) ===")
+            review_header_ui = _make_ui()
+            if review_header_ui is not None:
+                review_header_ui.phase_header(
+                    f"Review ({len(reviewers)} reviewers)",
+                    config.budget.per_phase,
+                    config.model,
+                )
+            else:
+                _log(f"=== Phase 3: Review ({len(reviewers)} reviewers) ===")
             review_tools = ["Read", "Glob", "Grep", "Bash"]
             last_findings: list[tuple[str, str]] = []
 
@@ -767,6 +807,7 @@ def run(
                     sys_prompt, usr_prompt = _build_persona_review_prompt(
                         persona, config, prd_rel, branch_name
                     )
+                    persona_ui = _make_ui(prefix=f"[{persona.role}] ")
                     review_calls.append(dict(
                         phase=Phase.REVIEW,
                         prompt=usr_prompt,
@@ -775,6 +816,7 @@ def run(
                         model=config.model,
                         budget_usd=config.budget.per_phase,
                         allowed_tools=review_tools,
+                        ui=persona_ui,
                     ))
 
                 results = run_phases_parallel_sync(review_calls)
@@ -815,7 +857,15 @@ def run(
                         findings_text,
                         iteration + 1,
                     )
-                    _log(f"  Running fix agent (iteration {iteration + 1})...")
+                    fix_ui = _make_ui()
+                    if fix_ui is not None:
+                        fix_ui.phase_header(
+                            f"Fix (iteration {iteration + 1})",
+                            config.budget.per_phase,
+                            config.model,
+                        )
+                    else:
+                        _log(f"  Running fix agent (iteration {iteration + 1})...")
                     fix_result = run_phase_sync(
                         Phase.FIX,
                         fix_user,
@@ -823,14 +873,20 @@ def run(
                         system_prompt=fix_system,
                         model=config.model,
                         budget_usd=config.budget.per_phase,
+                        ui=fix_ui,
                     )
                     log.phases.append(fix_result)
                     if not fix_result.success:
-                        _log(f"  Fix phase failed: {fix_result.error}")
+                        if fix_ui is None:
+                            _log(f"  Fix phase failed: {fix_result.error}")
                         break
 
             # --- Decision Gate ---
-            _log("=== Decision Gate ===")
+            decision_ui = _make_ui()
+            if decision_ui is not None:
+                decision_ui.phase_header("Decision Gate", config.budget.per_phase, config.model)
+            else:
+                _log("=== Decision Gate ===")
             system, user = _build_decision_prompt(config, prd_rel, branch_name)
             decision_result = run_phase_sync(
                 Phase.DECISION,
@@ -840,6 +896,7 @@ def run(
                 model=config.model,
                 budget_usd=config.budget.per_phase,
                 allowed_tools=["Read", "Glob", "Grep", "Bash"],
+                ui=decision_ui,
             )
             log.phases.append(decision_result)
 
@@ -867,8 +924,12 @@ def run(
     # --- Deliver Phase ---
     _touch_heartbeat(repo_root)
     if config.phases.deliver:
-        phase_num = 5 if config.phases.review else 3
-        _log(f"=== Phase {phase_num}: Deliver ===")
+        deliver_ui = _make_ui()
+        if deliver_ui is not None:
+            deliver_ui.phase_header("Deliver", config.budget.per_phase, config.model)
+        else:
+            phase_num = 5 if config.phases.review else 3
+            _log(f"=== Phase {phase_num}: Deliver ===")
         system, user = _build_deliver_prompt(config, prd_rel, branch_name)
         deliver_result = run_phase_sync(
             Phase.DELIVER,
@@ -877,6 +938,7 @@ def run(
             system_prompt=system,
             model=config.model,
             budget_usd=config.budget.per_phase,
+            ui=deliver_ui,
         )
         log.phases.append(deliver_result)
 
@@ -884,7 +946,8 @@ def run(
             log.status = RunStatus.FAILED
             log.mark_finished()
             _save_run_log(repo_root, log)
-            _log(f"Deliver phase failed: {deliver_result.error}")
+            if deliver_ui is None:
+                _log(f"Deliver phase failed: {deliver_result.error}")
             return log
 
     log.status = RunStatus.COMPLETED

@@ -1,5 +1,34 @@
 # Changelog
 
+## 20260317_173500 — Welcome banner with ASCII ant and commands
+
+Added a Claude Code–style welcome banner when running `colonyos` with no subcommand.
+Shows an ASCII ant mascot, the ColonyOS logo in big letters, version/model info,
+working directory, and a command reference.
+
+**Changes:**
+- `src/colonyos/cli.py` — Added `_show_welcome()` function with rich Panel/Table layout; changed `app` group to `invoke_without_command=True` with `@click.pass_context` to show banner when no subcommand given
+
+## 20260317_172645 — Rich Streaming Terminal UI
+
+Added a streaming terminal UI using the `rich` library that shows real-time agent
+activity during pipeline execution. Each phase renders tool calls as they happen,
+and parallel reviews show per-persona prefixed output.
+
+**New:**
+- `src/colonyos/ui.py` — `PhaseUI` class with streaming callbacks (tool_start, tool_input_delta, tool_done, text_delta, turn_complete); `NullUI` no-op for tests/quiet mode; `TOOL_DISPLAY` mapping for extracting primary args from partial JSON
+- `-v/--verbose` flag on `run` and `auto` — streams agent text alongside tool activity
+- `-q/--quiet` flag on `run` and `auto` — suppresses streaming UI
+- `rich>=13.0` added to `pyproject.toml`
+
+**Modified:**
+- `src/colonyos/agent.py` — `run_phase()` accepts `ui` param; enables `include_partial_messages` when ui present; processes `StreamEvent` (content_block_start/delta/stop) and `AssistantMessage` for turn counting
+- `src/colonyos/orchestrator.py` — `run()` and `run_ceo()` accept `verbose`/`quiet`; creates `PhaseUI` per phase; parallel reviews get `PhaseUI(prefix="[Role] ")`; falls back to `_log()` when ui is None
+- `src/colonyos/cli.py` — Added `-v`/`-q` flags to `run` and `auto` commands; passed through to orchestrator and `_run_single_iteration`
+
+**PRD:** `cOS_prds/20260317_172645_prd_rich_streaming_terminal_ui_for_agent_phases.md`
+**Tasks:** `cOS_tasks/20260317_172645_tasks_rich_streaming_terminal_ui_for_agent_phases.md`
+
 ## 20260317_200000 — Auto-approve config + README rebrand
 
 Added `auto_approve` config setting for unattended CEO-driven runs and rebranded

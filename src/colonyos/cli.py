@@ -56,10 +56,101 @@ def _print_run_summary(log: RunLog) -> None:
 # ---------------------------------------------------------------------------
 
 
-@click.group()
+def _show_welcome() -> None:
+    """Render the ColonyOS welcome banner (shown when no subcommand is given)."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    console = Console()
+
+    repo_root = _find_repo_root()
+    config_path = repo_root / ".colonyos" / "config.yaml"
+    initialized = config_path.exists()
+
+    model = "unknown"
+    if initialized:
+        try:
+            config = load_config(repo_root)
+            model = config.model or "unknown"
+        except Exception:
+            pass
+
+    home = Path.home()
+    try:
+        display_path = "~/" + str(repo_root.relative_to(home))
+    except ValueError:
+        display_path = str(repo_root)
+
+    # Left column: ant icon, branding, context
+    left = Text(justify="center")
+    left.append("\n")
+    left.append("    \u2591\u2592\u2593\u2588\u2588\u2593\u2592\u2591\n", style="yellow")
+    left.append("   \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\n", style="yellow")
+    left.append("  \u2588\u2588\u25cf\u2588\u2588\u2588\u25cf\u2588\u2588\n", style="yellow")
+    left.append("   \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\n", style="yellow")
+    left.append("    \u2588\u2588\u2588\u2588\u2588\u2588\n", style="yellow")
+    left.append("   \u2588\u2588 \u2588\u2588 \u2588\u2588\n", style="yellow")
+    left.append("  \u2588\u2588  \u2588\u2588  \u2588\u2588\n", style="yellow")
+    left.append("\n")
+    left.append(f"  {model} \u00b7 v{__version__}\n", style="dim")
+    left.append(f"  {display_path}\n", style="dim")
+
+    # Right column: commands + flags
+    right = Text()
+    right.append("Commands\n", style="bold")
+    right.append("  init", style="green")
+    right.append("      Set up this repo\n")
+    right.append("  doctor", style="green")
+    right.append("    Check prerequisites\n")
+    right.append("  run", style="green")
+    right.append("       Run the agent pipeline\n")
+    right.append("  auto", style="green")
+    right.append("      CEO \u2192 full pipeline\n")
+    right.append("  status", style="green")
+    right.append("    Show recent runs\n")
+    right.append("\u2500" * 34 + "\n", style="bright_black")
+    right.append("Flags\n", style="bold")
+    right.append("  -v, --verbose", style="green")
+    right.append("   Stream text\n")
+    right.append("  -q, --quiet", style="green")
+    right.append("     Minimal output\n")
+    right.append("  --version", style="green")
+    right.append("       Show version\n")
+
+    if not initialized:
+        right.append("\u2500" * 34 + "\n", style="bright_black")
+        right.append("  Run ")
+        right.append("colonyos init", style="green bold")
+        right.append(" to get started\n")
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(width=34, justify="center")
+    grid.add_column(justify="left", no_wrap=True)
+    grid.add_row(left, right)
+
+    console.print()
+    console.print(
+        Panel(
+            grid,
+            title=f"[bold]ColonyOS[/bold] [dim]v{__version__}[/dim]",
+            title_align="left",
+            border_style="bright_black",
+            padding=(1, 2),
+            expand=True,
+        )
+    )
+    console.print()
+
+
+@click.group(invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="colonyos")
-def app() -> None:
+@click.pass_context
+def app(ctx: click.Context) -> None:
     """ColonyOS — autonomous agent loop that turns prompts into shipped PRs."""
+    if ctx.invoked_subcommand is None:
+        _show_welcome()
 
 
 @app.command()
@@ -121,7 +212,9 @@ def init(
 @click.option("--plan-only", is_flag=True, help="Stop after PRD + task generation.")
 @click.option("--from-prd", type=click.Path(exists=True), help="Skip planning, implement an existing PRD.")
 @click.option("--resume", "resume_run_id", default=None, help="Resume a failed run from its last successful phase.")
-def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None) -> None:
+@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
+@click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
+def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, verbose: bool, quiet: bool) -> None:
     """Run the autonomous agent loop for a feature prompt."""
     # Mutual exclusivity check
     if resume_run_id:
@@ -153,6 +246,8 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             repo_root=repo_root,
             config=config,
             resume_from=resume_state,
+            verbose=verbose,
+            quiet=quiet,
         )
     else:
         effective_prompt = prompt or f"Implement the PRD at {from_prd}"
@@ -163,6 +258,8 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             config=config,
             plan_only=plan_only,
             from_prd=from_prd,
+            verbose=verbose,
+            quiet=quiet,
         )
 
     _print_run_summary(log)
@@ -285,6 +382,8 @@ def _run_single_iteration(
     aggregate_cost: float,
     no_confirm: bool,
     propose_only: bool,
+    verbose: bool = False,
+    quiet: bool = False,
 ) -> tuple[float, bool]:
     """Execute one iteration of the auto loop.
 
@@ -293,9 +392,15 @@ def _run_single_iteration(
     orchestrator run, False otherwise (CEO failure, propose-only, or
     pipeline failure — all of which allow the loop to continue).
     """
+    from colonyos.ui import NullUI, PhaseUI
+
     _touch_heartbeat(repo_root)
 
-    prompt, ceo_result = run_ceo(repo_root, config)
+    ceo_ui: PhaseUI | NullUI | None = None
+    if not quiet:
+        ceo_ui = PhaseUI(verbose=verbose)
+
+    prompt, ceo_result = run_ceo(repo_root, config, ui=ceo_ui)
     aggregate_cost += ceo_result.cost_usd or 0
 
     if not ceo_result.success:
@@ -330,6 +435,8 @@ def _run_single_iteration(
         prompt,
         repo_root=repo_root,
         config=config,
+        verbose=verbose,
+        quiet=quiet,
     )
     aggregate_cost += log.total_cost_usd
 
@@ -365,6 +472,8 @@ def _run_single_iteration(
 @click.option("--max-hours", type=float, default=None, help="Maximum wall-clock hours for the loop.")
 @click.option("--max-budget", type=float, default=None, help="Maximum aggregate USD spend for the loop.")
 @click.option("--resume-loop", is_flag=True, help="Resume the most recent interrupted loop.")
+@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
+@click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
 def auto(
     no_confirm: bool,
     propose_only: bool,
@@ -372,6 +481,8 @@ def auto(
     max_hours: float | None,
     max_budget: float | None,
     resume_loop: bool,
+    verbose: bool,
+    quiet: bool,
 ) -> None:
     """Autonomously decide what to build next and run the pipeline."""
     repo_root = _find_repo_root()
@@ -433,6 +544,8 @@ def auto(
             aggregate_cost=aggregate_cost,
             no_confirm=no_confirm,
             propose_only=propose_only,
+            verbose=verbose,
+            quiet=quiet,
         )
 
         if completed:
