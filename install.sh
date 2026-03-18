@@ -2,7 +2,10 @@
 # ColonyOS Installer
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/rangelak/ColonyOS/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/rangelak/ColonyOS/main/install.sh | sh
+#
+# Non-interactive usage (auto-approve all prompts):
+#   curl -fsSL https://raw.githubusercontent.com/rangelak/ColonyOS/main/install.sh | sh -s -- --yes
 #
 # Verify integrity (optional):
 #   sha256sum install.sh
@@ -10,13 +13,16 @@
 #
 # Options:
 #   --dry-run    Print what would be done without making changes
+#   --yes        Auto-approve all prompts (e.g. pipx installation)
 #
 set -euo pipefail
 
 DRY_RUN=false
+AUTO_YES=false
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
+    --yes) AUTO_YES=true ;;
     *) echo "Unknown option: $arg"; exit 1 ;;
   esac
 done
@@ -94,12 +100,17 @@ ok "Python $PY_VERSION"
 # --- Helpers: pip with PEP 668 fallback ---
 
 pip_install_user() {
-  # Try pip install --user; fall back to --break-system-packages for PEP 668
-  # (externally-managed-environment on Debian 12+, Ubuntu 23.04+, etc.)
+  # Try pip install --user first
   if "$PYTHON" -m pip install --user "$@" 2>/dev/null; then
     return 0
   fi
-  info "pip --user failed (PEP 668?), retrying with --break-system-packages..."
+  # PEP 668 (externally-managed-environment on Debian 12+, Ubuntu 23.04+)
+  # warns against breaking system packages. We proceed with --break-system-packages
+  # only because we're installing into --user scope, not system-wide.
+  info "WARNING: pip --user install failed, likely due to PEP 668 (externally-managed-environment)."
+  info "Retrying with --break-system-packages to install into user site-packages."
+  info "This does NOT modify system Python packages. To avoid this, install pipx via your"
+  info "system package manager instead: apt install pipx / brew install pipx"
   "$PYTHON" -m pip install --user --break-system-packages "$@"
 }
 
@@ -133,11 +144,19 @@ else
         INSTALLER="pipx"
         ;;
     esac
-  else
-    # Non-interactive (e.g. curl | sh) — default to installing pipx
-    info "Non-interactive mode detected. Installing pipx automatically..."
+  elif [ "$AUTO_YES" = true ]; then
+    # Non-interactive with explicit --yes flag
+    info "Non-interactive mode with --yes: installing pipx automatically..."
     install_pipx
     INSTALLER="pipx"
+  else
+    # Non-interactive without --yes — fail safe and tell the user how to proceed
+    fail "pipx is required but not installed, and no interactive terminal is available."
+    fail "Re-run with --yes to auto-install pipx, or install it manually first:"
+    fail "  apt install pipx  OR  brew install pipx  OR  pip install --user pipx"
+    fail ""
+    fail "Example: curl -fsSL https://raw.githubusercontent.com/rangelak/ColonyOS/main/install.sh | sh -s -- --yes"
+    exit 1
   fi
 fi
 

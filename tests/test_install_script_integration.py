@@ -58,6 +58,16 @@ class TestInstallScriptDryRun:
         )
         assert result.returncode != 0, "unknown option should cause non-zero exit"
 
+    def test_yes_flag_accepted(self):
+        """The --yes flag must be accepted without error."""
+        result = subprocess.run(
+            ["bash", str(INSTALL_SCRIPT), "--dry-run", "--yes"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"--yes flag rejected: stdout={result.stdout}, stderr={result.stderr}"
+        )
+
 
 class TestInstallScriptStdinHandling:
     """Verify the script handles non-interactive stdin correctly (curl | sh)."""
@@ -99,6 +109,12 @@ class TestInstallScriptContent:
             "install.sh should handle PEP 668 (--break-system-packages fallback)"
         )
 
+    def test_pep668_warns_user(self):
+        """PEP 668 fallback must warn the user about what it's doing."""
+        assert "WARNING" in self.content, (
+            "install.sh must warn the user before using --break-system-packages"
+        )
+
     def test_has_set_euo_pipefail(self):
         """Script must use strict mode."""
         assert "set -euo pipefail" in self.content
@@ -111,4 +127,23 @@ class TestInstallScriptContent:
         assert len(bare_reads) == 0, (
             f"Found {len(bare_reads)} bare 'read -r REPLY' without /dev/tty: "
             "these will fail when piped via curl | sh"
+        )
+
+    def test_has_yes_flag(self):
+        """Script must support --yes flag for non-interactive auto-approval."""
+        assert "--yes" in self.content, (
+            "install.sh must support --yes flag for non-interactive consent"
+        )
+
+    def test_curl_usage_has_f_flag(self):
+        """Script header curl usage must include -f flag for HTTP error detection."""
+        assert "curl -fsSL" in self.content, (
+            "install.sh usage must use curl -fsSL (with -f for HTTP error detection)"
+        )
+
+    def test_non_interactive_without_yes_requires_pipx(self):
+        """Non-interactive mode without --yes must fail if pipx is not found."""
+        # Check that the script has logic for failing when not interactive and no --yes
+        assert "AUTO_YES" in self.content, (
+            "install.sh must check AUTO_YES for non-interactive consent"
         )

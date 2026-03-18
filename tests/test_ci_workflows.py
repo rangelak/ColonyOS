@@ -31,6 +31,14 @@ class TestCIWorkflow:
         assert triggers is not None
         assert "pull_request" in triggers
 
+    def test_supports_workflow_call(self):
+        """CI workflow must support workflow_call for reuse from release.yml."""
+        triggers = self.workflow.get("on") or self.workflow.get(True)
+        assert triggers is not None
+        assert "workflow_call" in triggers, (
+            "CI workflow must support workflow_call for reuse"
+        )
+
     def test_has_test_job(self):
         assert "jobs" in self.workflow
         assert "test" in self.workflow["jobs"]
@@ -102,6 +110,14 @@ class TestReleaseWorkflow:
             "Release workflow must have a test gate job"
         )
 
+    def test_test_job_reuses_ci_workflow(self):
+        """Release test job must use workflow_call to reuse ci.yml, not duplicate it."""
+        test_job = self.workflow["jobs"]["test"]
+        uses = test_job.get("uses", "")
+        assert "ci.yml" in uses, (
+            "Release test job must reuse ci.yml via workflow_call, not duplicate it"
+        )
+
     def test_has_build_job(self):
         assert "build" in self.workflow["jobs"]
 
@@ -150,6 +166,9 @@ class TestReleaseWorkflow:
         """All 'uses' steps must reference commit SHAs, not mutable tags."""
         import re
         for job_name, job in self.workflow.get("jobs", {}).items():
+            # Skip reusable workflow calls (uses: ./.github/workflows/ci.yml)
+            if "uses" in job and "steps" not in job:
+                continue
             for step in job.get("steps", []):
                 uses = step.get("uses", "")
                 if uses:
@@ -164,6 +183,35 @@ class TestReleaseWorkflow:
             "Release workflow must have an update-homebrew job (FR-5.4)"
         )
 
+    def test_update_homebrew_uses_pr_not_direct_push(self):
+        """Homebrew update must use a PR, not push directly to main."""
+        homebrew_job = self.workflow["jobs"]["update-homebrew"]
+        steps = homebrew_job.get("steps", [])
+        all_run = " ".join(str(s.get("run", "")) for s in steps)
+        assert "gh pr create" in all_run, (
+            "update-homebrew must create a PR, not push directly to main"
+        )
+        assert "git push origin" in all_run, (
+            "update-homebrew must push branch to origin (not directly to main)"
+        )
+
+    def test_update_homebrew_validates_version_format(self):
+        """Homebrew update must validate version format to prevent injection."""
+        homebrew_job = self.workflow["jobs"]["update-homebrew"]
+        steps = homebrew_job.get("steps", [])
+        all_run = " ".join(str(s.get("run", "")) for s in steps)
+        assert "grep" in all_run and "VERSION" in all_run, (
+            "update-homebrew must validate VERSION format before sed substitution"
+        )
+
+    def test_update_homebrew_has_pr_permissions(self):
+        """Homebrew update job must have pull-requests: write permission."""
+        homebrew_job = self.workflow["jobs"]["update-homebrew"]
+        permissions = homebrew_job.get("permissions", {})
+        assert permissions.get("pull-requests") == "write", (
+            "update-homebrew must have pull-requests: write for PR creation"
+        )
+
     def test_checksums_not_in_pypi_upload_path(self):
         """SHA256SUMS.txt must not be in the dist/ artifact uploaded to PyPI."""
         build_job = self.workflow["jobs"]["build"]
@@ -171,6 +219,24 @@ class TestReleaseWorkflow:
         all_run = " ".join(str(s.get("run", "")) for s in steps)
         assert "mv SHA256SUMS.txt" in all_run or "cp SHA256SUMS.txt" in all_run, (
             "Build job must move SHA256SUMS.txt out of dist/ before upload"
+        )
+
+    def test_checksums_include_install_script(self):
+        """SHA256SUMS.txt must include a checksum for install.sh (FR-4.6)."""
+        build_job = self.workflow["jobs"]["build"]
+        steps = build_job.get("steps", [])
+        all_run = " ".join(str(s.get("run", "")) for s in steps)
+        assert "install.sh" in all_run, (
+            "Build job must include install.sh in SHA256SUMS.txt (FR-4.6)"
+        )
+
+    def test_release_notes_use_curl_f_flag(self):
+        """Release notes curl command must include -f flag for HTTP error detection."""
+        release_job = self.workflow["jobs"]["release"]
+        steps = release_job.get("steps", [])
+        all_run = " ".join(str(s.get("run", "")) for s in steps)
+        assert "curl -fsSL" in all_run, (
+            "Release notes must use curl -fsSL (with -f for HTTP error detection)"
         )
 
 
@@ -186,4 +252,19 @@ class TestHomebrewFormula:
         """Formula must document that it is auto-updated by the release workflow."""
         assert "release workflow" in self.content.lower() or "auto" in self.content.lower(), (
             "Formula should document that it is auto-updated by the release workflow"
+        )
+
+    def test_formula_uses_canonical_pypi_url(self):
+        """Formula must use files.pythonhosted.org, not pypi.io."""
+        assert "files.pythonhosted.org" in self.content, (
+            "Formula must use canonical PyPI URL (files.pythonhosted.org)"
+        )
+        assert "pypi.io" not in self.content, (
+            "Formula must not use pypi.io — use files.pythonhosted.org instead"
+        )
+
+    def test_formula_documents_placeholder_state(self):
+        """Formula must document that sha256 is a placeholder before first release."""
+        assert "placeholder" in self.content.lower() or "first release" in self.content.lower(), (
+            "Formula should document that sha256 is a placeholder before first release"
         )
