@@ -103,7 +103,7 @@ class TestHealthEndpoint:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/health")
         assert resp.status_code == 200
@@ -117,7 +117,7 @@ class TestRunsEndpoint:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/runs")
         assert resp.status_code == 200
@@ -130,7 +130,7 @@ class TestRunsEndpoint:
         runs_dir = tmp_repo / ".colonyos" / "runs"
         _write_run(runs_dir, sample_run_data)
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/runs")
         assert resp.status_code == 200
@@ -147,7 +147,7 @@ class TestRunDetailEndpoint:
         runs_dir = tmp_repo / ".colonyos" / "runs"
         _write_run(runs_dir, sample_run_data)
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/runs/run-20260318_120000-abc123")
         assert resp.status_code == 200
@@ -159,7 +159,7 @@ class TestRunDetailEndpoint:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/runs/run-nonexistent")
         assert resp.status_code == 404
@@ -168,7 +168,7 @@ class TestRunDetailEndpoint:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         # Use dotdot without slashes — slashes are consumed by the HTTP router
         resp = client.get("/api/runs/..%5C..%5Cetc%5Cpasswd")
@@ -179,7 +179,7 @@ class TestRunDetailEndpoint:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/runs/..\\..\\etc\\passwd")
         assert resp.status_code == 400
@@ -190,7 +190,7 @@ class TestStatsEndpoint:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/stats")
         assert resp.status_code == 200
@@ -205,7 +205,7 @@ class TestStatsEndpoint:
         runs_dir = tmp_repo / ".colonyos" / "runs"
         _write_run(runs_dir, sample_run_data)
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/stats")
         assert resp.status_code == 200
@@ -219,7 +219,7 @@ class TestConfigEndpoint:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/config")
         assert resp.status_code == 200
@@ -232,7 +232,7 @@ class TestConfigEndpoint:
 
         _write_config(tmp_repo)
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/config")
         assert resp.status_code == 200
@@ -247,7 +247,7 @@ class TestQueueEndpoint:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/queue")
         assert resp.status_code == 200
@@ -275,7 +275,7 @@ class TestQueueEndpoint:
         }
         _write_queue(tmp_repo, queue_data)
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/queue")
         assert resp.status_code == 200
@@ -285,31 +285,33 @@ class TestQueueEndpoint:
 
 
 class TestReadOnly:
-    """Verify no write methods are allowed."""
+    """Verify write methods are blocked when COLONYOS_WRITE_ENABLED is not set."""
 
-    def test_post_runs_not_allowed(self, tmp_repo: Path):
+    def test_post_runs_blocked(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.delenv("COLONYOS_WRITE_ENABLED", raising=False)
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.post("/api/runs", json={})
-        assert resp.status_code == 405
+        assert resp.status_code == 403
 
-    def test_put_config_not_allowed(self, tmp_repo: Path):
+    def test_put_config_blocked(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.delenv("COLONYOS_WRITE_ENABLED", raising=False)
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.put("/api/config", json={})
-        assert resp.status_code == 405
+        assert resp.status_code == 403
 
     def test_delete_run_not_allowed(self, tmp_repo: Path):
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.delete("/api/runs/run-123")
         assert resp.status_code == 405
@@ -335,7 +337,7 @@ class TestSanitization:
         }
         _write_run(runs_dir, run_data)
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/runs")
         assert resp.status_code == 200
@@ -364,7 +366,7 @@ class TestSanitization:
         }
         _write_run(runs_dir, run_data)
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/runs")
         assert resp.status_code == 200
@@ -380,7 +382,7 @@ class TestConfigRedaction:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/config")
         assert resp.status_code == 200
@@ -392,7 +394,7 @@ class TestConfigRedaction:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get("/api/config")
         assert resp.status_code == 200
@@ -418,7 +420,7 @@ class TestCORSDevOnly:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get(
             "/api/health",
@@ -432,7 +434,7 @@ class TestCORSDevOnly:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         resp = client.get(
             "/api/health",
@@ -449,7 +451,7 @@ class TestErrorMessageSafety:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         # Use dotdot without slashes — slashes are consumed by the HTTP router
         resp = client.get("/api/runs/..%5C..%5Cetc%5Cpasswd")
@@ -470,7 +472,7 @@ class TestSPAPathTraversal:
         if not _WEB_DIST_DIR.exists() or not (_WEB_DIST_DIR / "index.html").exists():
             pytest.skip("web_dist not built")
 
-        app = create_app(tmp_repo)
+        app, _ = create_app(tmp_repo)
         client = TestClient(app)
         # Attempt path traversal via the SPA catch-all
         resp = client.get("/..%2F..%2Fetc%2Fpasswd")
