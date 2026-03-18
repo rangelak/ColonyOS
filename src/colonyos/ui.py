@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 
 from rich.console import Console
+from rich.markdown import Markdown
+from rich.padding import Padding
 
 console = Console(stderr=True)
 
@@ -37,6 +40,11 @@ TOOL_ARG_KEYS: dict[str, list[str]] = {
     "Task": ["prompt", "task", "message", "description"],
 }
 
+_MD_PATTERN = re.compile(
+    r"(^#{1,4}\s)|(\*\*.*\*\*)|(\n\d+\.\s)|(\n[-*]\s)|(`[^`]+`)",
+    re.MULTILINE,
+)
+
 
 class PhaseUI:
     """Renders streaming output for a single agent phase.
@@ -56,6 +64,8 @@ class PhaseUI:
         self._tool_name: str | None = None
         self._tool_json: str = ""
         self._tool_displayed: bool = False
+        self._text_buf: str = ""
+        self._in_tool: bool = False
         self._start_time: float = time.monotonic()
         self._turn_count: int = 0
 
@@ -79,6 +89,7 @@ class PhaseUI:
         turns: int,
         duration_ms: int,
     ) -> None:
+        self._flush_text()
         elapsed = _format_duration(duration_ms)
         console.print(
             f"\n  [green]✓[/green] Phase completed  "
@@ -87,6 +98,7 @@ class PhaseUI:
         )
 
     def phase_error(self, error: str) -> None:
+        self._flush_text()
         console.print(
             f"\n  [red]✗[/red] Phase failed: {error}\n",
             highlight=False,
@@ -95,6 +107,8 @@ class PhaseUI:
     # -- streaming callbacks ------------------------------------------------
 
     def on_tool_start(self, tool_name: str) -> None:
+        self._flush_text()
+        self._in_tool = True
         self._tool_name = tool_name
         self._tool_json = ""
         self._tool_displayed = False
@@ -114,16 +128,36 @@ class PhaseUI:
         self._tool_name = None
         self._tool_json = ""
         self._tool_displayed = False
+        self._in_tool = False
 
     def on_text_delta(self, text: str) -> None:
-        if self._verbose:
-            console.file.write(text)
-            console.file.flush()
+        if self._in_tool:
+            return
+        self._text_buf += text
 
     def on_turn_complete(self) -> None:
+        self._flush_text()
         self._turn_count += 1
 
     # -- internals ----------------------------------------------------------
+
+    def _flush_text(self) -> None:
+        """Render buffered agent text, then clear the buffer."""
+        raw = self._text_buf.strip()
+        self._text_buf = ""
+        if not raw:
+            return
+        if _looks_like_markdown(raw):
+            console.print()
+            console.print(Padding(Markdown(raw), (0, 4)))
+        else:
+            for line in raw.splitlines():
+                stripped = line.strip()
+                if stripped:
+                    console.print(
+                        f"  {self._prefix}[dim]{_truncate(stripped, 120)}[/dim]",
+                        highlight=False,
+                    )
 
     def _print_tool_line(self, arg: str) -> None:
         name = self._tool_name or "?"
@@ -165,6 +199,11 @@ class NullUI:
     def on_tool_done(self) -> None: ...
     def on_text_delta(self, *a: object) -> None: ...
     def on_turn_complete(self) -> None: ...
+
+
+def _looks_like_markdown(text: str) -> bool:
+    """Return True if text contains markdown formatting worth rendering."""
+    return bool(_MD_PATTERN.search(text))
 
 
 def _first_meaningful_line(text: str) -> str:
