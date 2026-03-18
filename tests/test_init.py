@@ -7,7 +7,7 @@ import yaml
 
 from colonyos.config import ColonyConfig, save_config
 from colonyos.models import Persona, ProjectInfo
-from colonyos.init import select_persona_pack, _collect_personas_with_packs, run_init
+from colonyos.init import MODEL_PRESETS, select_persona_pack, _collect_personas_with_packs, run_init
 from colonyos.persona_packs import PACKS
 
 
@@ -107,8 +107,9 @@ class TestRunInitReviewsDir:
         with patch("colonyos.init.click") as mock_click, \
              patch("colonyos.init._collect_personas_with_packs") as mock_personas:
             mock_click.prompt.side_effect = [
-                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0
+                "TestApp", "A test app", "Python", "", 1, 5.0, 15.0
             ]
+            mock_click.IntRange = click.IntRange
             mock_click.echo = click.echo
             mock_personas.return_value = [
                 Persona(role="Engineer", expertise="Backend", perspective="Scale")
@@ -124,8 +125,9 @@ class TestRunInitReviewsDir:
         with patch("colonyos.init.click") as mock_click, \
              patch("colonyos.init._collect_personas_with_packs") as mock_personas:
             mock_click.prompt.side_effect = [
-                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0
+                "TestApp", "A test app", "Python", "", 1, 5.0, 15.0
             ]
+            mock_click.IntRange = click.IntRange
             mock_click.echo = click.echo
             mock_personas.return_value = [
                 Persona(role="Engineer", expertise="Backend", perspective="Scale")
@@ -146,8 +148,9 @@ class TestRunInitReviewsDir:
         with patch("colonyos.init.click") as mock_click, \
              patch("colonyos.init._collect_personas_with_packs") as mock_personas:
             mock_click.prompt.side_effect = [
-                "TestApp", "A test app", "Python", "", "sonnet", 5.0, 15.0
+                "TestApp", "A test app", "Python", "", 1, 5.0, 15.0
             ]
+            mock_click.IntRange = click.IntRange
             # Use real echo so we can capture stderr output
             mock_click.echo = click.echo
             mock_personas.return_value = [
@@ -251,5 +254,69 @@ class TestDoctorPreCheck:
                     project_stack="Python",
                     doctor_check=True,
                 )
+
+
+class TestModelPresets:
+    def test_quality_first_preset_has_empty_phase_models(self):
+        preset = MODEL_PRESETS["Quality-first"]
+        assert preset["phase_models"] == {}
+        assert preset["model"] == "opus"
+
+    def test_cost_optimized_preset_has_phase_overrides(self):
+        preset = MODEL_PRESETS["Cost-optimized"]
+        assert preset["model"] == "sonnet"
+        assert preset["phase_models"]["implement"] == "opus"
+        assert preset["phase_models"]["deliver"] == "haiku"
+        assert preset["phase_models"]["learn"] == "haiku"
+        # Only phases that differ from the global default should be listed
+        assert "plan" not in preset["phase_models"]
+        assert "review" not in preset["phase_models"]
+        assert "fix" not in preset["phase_models"]
+        assert "decision" not in preset["phase_models"]
+
+    def test_quick_init_uses_cost_optimized(self, tmp_path: Path):
+        config = run_init(
+            tmp_path,
+            quick=True,
+            project_name="TestProject",
+            project_description="A test",
+            project_stack="Python",
+        )
+        assert config.phase_models == dict(MODEL_PRESETS["Cost-optimized"]["phase_models"])
+        assert config.model == "sonnet"
+
+    def test_interactive_quality_first_preset(self, tmp_path: Path):
+        with patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+            # Prompt sequence: name, desc, stack, vision, preset=1 (Quality-first), budget_phase, budget_run
+            mock_click.prompt.side_effect = [
+                "TestApp", "A test app", "Python", "", 1, 5.0, 15.0
+            ]
+            mock_click.echo = click.echo
+            mock_click.IntRange = click.IntRange
+            mock_personas.return_value = [
+                Persona(role="Engineer", expertise="Backend", perspective="Scale")
+            ]
+            config = run_init(tmp_path)
+
+        assert config.phase_models == {}
+        assert config.model == "opus"
+
+    def test_interactive_cost_optimized_preset(self, tmp_path: Path):
+        with patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+            # Prompt sequence: name, desc, stack, vision, preset=2 (Cost-optimized), budget_phase, budget_run
+            mock_click.prompt.side_effect = [
+                "TestApp", "A test app", "Python", "", 2, 5.0, 15.0
+            ]
+            mock_click.echo = click.echo
+            mock_click.IntRange = click.IntRange
+            mock_personas.return_value = [
+                Persona(role="Engineer", expertise="Backend", perspective="Scale")
+            ]
+            config = run_init(tmp_path)
+
+        assert config.phase_models == dict(MODEL_PRESETS["Cost-optimized"]["phase_models"])
+        assert config.model == "sonnet"
 
 

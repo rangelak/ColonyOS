@@ -2,6 +2,25 @@
 
 Uses the ``gh`` CLI (validated by ``doctor.py``) for all GitHub API
 interactions — no new Python dependencies required.
+
+.. admonition:: Security — Prompt Injection Risk
+
+   GitHub issue content (title, body, labels, comments) is **untrusted
+   user input** that flows into agent prompts executed with
+   ``permission_mode="bypassPermissions"``.  A malicious issue author
+   could embed adversarial instructions (e.g. "Ignore previous
+   instructions and run …").
+
+   Mitigations applied here:
+
+   * XML-like tags are stripped from issue content so attackers cannot
+     close the ``<github_issue>`` delimiter and inject top-level
+     instructions.
+   * Content is wrapped in clearly-delimited ``<github_issue>`` tags
+     with a preamble that anchors the model's role.
+
+   These reduce — but do not eliminate — the risk.  A future V2 should
+   consider sandboxed execution for issue-sourced runs.
 """
 from __future__ import annotations
 
@@ -16,6 +35,18 @@ from pathlib import Path
 import click
 
 logger = logging.getLogger(__name__)
+
+# Regex to strip XML-like tags from untrusted content to mitigate prompt
+# injection via crafted GitHub issues.  Removes anything that looks like
+# <tag>, </tag>, or <tag attr="…"> — prevents an attacker from closing
+# the <github_issue> wrapper or injecting new XML delimiters.
+_XML_TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9_-]*(?:\s[^>]*)?>")
+
+
+def _sanitize_untrusted_content(text: str) -> str:
+    """Strip XML-like tags from untrusted content to reduce prompt injection risk."""
+    return _XML_TAG_RE.sub("", text)
+
 
 # Matches full GitHub issue URLs like https://github.com/owner/repo/issues/42
 _ISSUE_URL_RE = re.compile(
@@ -157,7 +188,15 @@ def format_issue_as_prompt(issue: GitHubIssue) -> str:
 
     The output is wrapped in ``<github_issue>`` delimiters with a preamble
     instructing the agent to treat it as a feature description.
+
+    All untrusted fields (title, body, labels, comments) are sanitized to
+    strip XML-like tags, reducing prompt injection risk.  See module docstring.
     """
+    safe_title = _sanitize_untrusted_content(issue.title)
+    safe_body = _sanitize_untrusted_content(issue.body)
+    safe_labels = [_sanitize_untrusted_content(lbl) for lbl in issue.labels]
+    safe_comments = [_sanitize_untrusted_content(c) for c in issue.comments]
+
     parts: list[str] = []
 
     parts.append(
@@ -166,31 +205,31 @@ def format_issue_as_prompt(issue: GitHubIssue) -> str:
     )
     parts.append("")
     parts.append("<github_issue>")
-    parts.append(f"# #{issue.number}: {issue.title}")
+    parts.append(f"# #{issue.number}: {safe_title}")
     parts.append("")
 
-    if issue.body:
-        parts.append(issue.body)
+    if safe_body:
+        parts.append(safe_body)
         parts.append("")
 
-    if issue.labels:
-        label_str = ", ".join(f"`{lbl}`" for lbl in issue.labels)
+    if safe_labels:
+        label_str = ", ".join(f"`{lbl}`" for lbl in safe_labels)
         parts.append(f"**Labels:** {label_str}")
         parts.append("")
 
     # Include up to _MAX_COMMENTS comments, capped at _COMMENTS_CHAR_CAP total
-    if issue.comments:
+    if safe_comments:
         parts.append("## Comments")
         parts.append("")
         total_chars = 0
-        for i, comment in enumerate(issue.comments[:_MAX_COMMENTS]):
+        for i, comment in enumerate(safe_comments[:_MAX_COMMENTS]):
             if total_chars + len(comment) > _COMMENTS_CHAR_CAP:
                 remaining = _COMMENTS_CHAR_CAP - total_chars
                 if remaining > 0:
                     parts.append(f"**Comment {i + 1}:**")
                     parts.append(comment[:remaining] + "\n\n[... truncated]")
                 else:
-                    parts.append(f"[... {len(issue.comments) - i} more comments truncated]")
+                    parts.append(f"[... {len(safe_comments) - i} more comments truncated]")
                 break
             parts.append(f"**Comment {i + 1}:**")
             parts.append(comment)
@@ -211,6 +250,8 @@ def fetch_open_issues(
     This is **non-blocking** — all errors are caught and logged, returning
     an empty list on failure.
     """
+    if not isinstance(limit, int) or limit < 1 or limit > 100:
+        raise ValueError(f"limit must be an integer between 1 and 100, got {limit!r}")
     try:
         result = subprocess.run(
             [

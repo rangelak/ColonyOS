@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
-from colonyos.models import Persona, ProjectInfo
+from colonyos.models import Persona, Phase, ProjectInfo
+
+logger = logging.getLogger(__name__)
 
 CONFIG_DIR = ".colonyos"
 CONFIG_FILE = "config.yaml"
 RUNS_DIR = "runs"
+
+VALID_MODELS: frozenset[str] = frozenset({"opus", "sonnet", "haiku"})
+
+# Phases that serve as safety gates and should not be downgraded to
+# lightweight models without explicit awareness of the trade-off.
+_SAFETY_CRITICAL_PHASES: frozenset[str] = frozenset({"review", "decision", "fix"})
 
 DEFAULTS = {
     "model": "sonnet",
@@ -57,6 +66,7 @@ class ColonyConfig:
     project: ProjectInfo | None = None
     personas: list[Persona] = field(default_factory=list)
     model: str = "sonnet"
+    phase_models: dict[str, str] = field(default_factory=dict)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     phases: PhasesConfig = field(default_factory=PhasesConfig)
     branch_prefix: str = "colonyos/"
@@ -69,6 +79,10 @@ class ColonyConfig:
     max_fix_iterations: int = 2
     auto_approve: bool = False
     learnings: LearningsConfig = field(default_factory=LearningsConfig)
+
+    def get_model(self, phase: Phase) -> str:
+        """Return the model for a phase, falling back to the global default."""
+        return self.phase_models.get(phase.value, self.model)
 
 
 def _parse_personas(raw: list[dict]) -> list[Persona]:
@@ -115,10 +129,47 @@ def load_config(repo_root: Path) -> ColonyConfig:
     budget_raw = raw.get("budget", {})
     phases_raw = raw.get("phases", {})
 
+    # Validate top-level model
+    model_val = raw.get("model", DEFAULTS["model"])
+    if model_val not in VALID_MODELS:
+        raise ValueError(
+            f"Invalid model '{model_val}'. Valid options: {sorted(VALID_MODELS)}. "
+            f"Note: use short names (e.g. 'opus') not full model IDs "
+            f"(e.g. 'claude-opus-4-20250514')."
+        )
+
+    # Parse and validate phase_models
+    phase_models_raw: dict[str, str] = raw.get("phase_models", {})
+    valid_phase_values = {p.value for p in Phase}
+    for phase_key, model_name in phase_models_raw.items():
+        if phase_key not in valid_phase_values:
+            raise ValueError(
+                f"Invalid phase key '{phase_key}' in phase_models. "
+                f"Valid phases: {sorted(valid_phase_values)}"
+            )
+        if model_name not in VALID_MODELS:
+            raise ValueError(
+                f"Invalid model '{model_name}' for phase '{phase_key}' in phase_models. "
+                f"Valid options: {sorted(VALID_MODELS)}. "
+                f"Note: use short names (e.g. 'opus') not full model IDs "
+                f"(e.g. 'claude-opus-4-20250514')."
+            )
+
+    # Warn when lightweight models are assigned to safety-critical phases
+    for phase_key, model_name in phase_models_raw.items():
+        if phase_key in _SAFETY_CRITICAL_PHASES and model_name == "haiku":
+            logger.warning(
+                "Phase '%s' is assigned model 'haiku'. This phase serves as a "
+                "safety gate in the pipeline — using a lightweight model may "
+                "reduce review quality. Consider using 'sonnet' or 'opus'.",
+                phase_key,
+            )
+
     return ColonyConfig(
         project=_parse_project(raw.get("project", {})),
         personas=_parse_personas(raw.get("personas", [])),
-        model=raw.get("model", DEFAULTS["model"]),
+        model=model_val,
+        phase_models=phase_models_raw,
         budget=BudgetConfig(
             per_phase=float(budget_raw.get("per_phase", DEFAULTS["budget"]["per_phase"])),
             per_run=float(budget_raw.get("per_run", DEFAULTS["budget"]["per_run"])),
@@ -172,6 +223,8 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         ]
 
     data["model"] = config.model
+    if config.phase_models:
+        data["phase_models"] = dict(config.phase_models)
     data["budget"] = {
         "per_phase": config.budget.per_phase,
         "per_run": config.budget.per_run,

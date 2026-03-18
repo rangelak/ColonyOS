@@ -1764,3 +1764,83 @@ class TestBuildCeoPromptWithIssues:
         assert "Analyze this project" in user
 
 
+class TestPerPhaseModelRouting:
+    """Verify that orchestrator passes config.get_model(Phase.XXX) to run_phase_sync for each phase."""
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_each_phase_receives_correct_model(self, mock_run, mock_parallel, tmp_repo: Path):
+        """With per-phase overrides, each run_phase_sync call gets the right model string."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[REVIEWER_PERSONA],
+            model="sonnet",
+            phase_models={"plan": "haiku", "implement": "opus", "deliver": "haiku"},
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+            phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True),
+        )
+        save_config(tmp_repo, config)
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        run("Test model routing", repo_root=tmp_repo, config=config)
+
+        # Collect model= kwarg from each run_phase_sync call
+        calls = mock_run.call_args_list
+        model_by_phase = {}
+        for call in calls:
+            phase_arg = call.args[0] if call.args else call.kwargs.get("phase")
+            model_kwarg = call.kwargs.get("model")
+            model_by_phase[phase_arg] = model_kwarg
+
+        # Overridden phases get their override
+        assert model_by_phase[Phase.PLAN] == "haiku"
+        assert model_by_phase[Phase.IMPLEMENT] == "opus"
+        assert model_by_phase[Phase.DELIVER] == "haiku"
+        # Non-overridden phases fall back to global model
+        assert model_by_phase[Phase.DECISION] == "sonnet"
+        assert model_by_phase[Phase.LEARN] == "sonnet"
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_review_parallel_receives_correct_model(self, mock_run, mock_parallel, tmp_repo: Path):
+        """Review phase (via parallel runner) also receives the per-phase model."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[REVIEWER_PERSONA],
+            model="sonnet",
+            phase_models={"review": "opus"},
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+            phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True),
+        )
+        save_config(tmp_repo, config)
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
+                        duration_ms=50, session_id="s",
+                        artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        run("Test review model", repo_root=tmp_repo, config=config)
+
+        # The parallel call for review passes a list of dicts, each with model=
+        parallel_call = mock_parallel.call_args
+        call_dicts = parallel_call.args[0]
+        for call_dict in call_dicts:
+            assert call_dict["model"] == "opus"
+
+

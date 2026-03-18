@@ -104,6 +104,7 @@ async def run_phase(
         return PhaseResult(
             phase=phase,
             success=False,
+            model=model,
             error=f"{exc}\n{stderr}".strip(),
         )
 
@@ -116,6 +117,7 @@ async def run_phase(
         return PhaseResult(
             phase=phase,
             success=False,
+            model=model,
             error=err,
         )
 
@@ -141,6 +143,7 @@ async def run_phase(
         cost_usd=result_msg.total_cost_usd,
         duration_ms=result_msg.duration_ms,
         session_id=result_msg.session_id,
+        model=model,
         error=result_msg.result if result_msg.is_error else None,
         artifacts={"result": result_msg.result or ""},
     )

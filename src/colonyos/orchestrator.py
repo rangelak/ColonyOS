@@ -452,7 +452,7 @@ def run_ceo(
     system, user = _build_ceo_prompt(config, proposal_filename, repo_root)
 
     if ui is not None:
-        ui.phase_header("CEO", config.budget.per_phase, config.model)
+        ui.phase_header("CEO", config.budget.per_phase, config.get_model(Phase.CEO))
     else:
         _log("=== CEO Phase ===")
     result = run_phase_sync(
@@ -460,7 +460,7 @@ def run_ceo(
         user,
         cwd=repo_root,
         system_prompt=system,
-        model=config.model,
+        model=config.get_model(Phase.CEO),
         budget_usd=config.budget.per_phase,
         allowed_tools=["Read", "Glob", "Grep"],
         ui=ui,
@@ -571,6 +571,7 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
                         "cost_usd": p.cost_usd,
                         "duration_ms": p.duration_ms,
                         "session_id": p.session_id,
+                        "model": p.model,
                         "error": p.error,
                     }
                     for p in log.phases
@@ -628,6 +629,7 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
                 cost_usd=p.get("cost_usd"),
                 duration_ms=p.get("duration_ms", 0),
                 session_id=p.get("session_id", ""),
+                model=p.get("model"),
                 error=p.get("error"),
             ))
 
@@ -956,7 +958,7 @@ def run_standalone_review(
                 prompt=usr_prompt,
                 cwd=repo_root,
                 system_prompt=sys_prompt,
-                model=config.model,
+                model=config.get_model(Phase.REVIEW),
                 budget_usd=config.budget.per_phase,
                 allowed_tools=review_tools,
                 ui=persona_ui,
@@ -1011,7 +1013,7 @@ def run_standalone_review(
                 fix_ui.phase_header(
                     f"Fix (iteration {iteration + 1})",
                     config.budget.per_phase,
-                    config.model,
+                    config.get_model(Phase.FIX),
                 )
             else:
                 _log(f"  Running fix agent (iteration {iteration + 1})...")
@@ -1021,7 +1023,7 @@ def run_standalone_review(
                 fix_user,
                 cwd=repo_root,
                 system_prompt=fix_system,
-                model=config.model,
+                model=config.get_model(Phase.FIX),
                 budget_usd=config.budget.per_phase,
                 ui=fix_ui,
             )
@@ -1043,7 +1045,7 @@ def run_standalone_review(
             decision_ui = _make_ui()
             if decision_ui is not None:
                 decision_ui.phase_header(
-                    "Decision Gate", config.budget.per_phase, config.model,
+                    "Decision Gate", config.budget.per_phase, config.get_model(Phase.DECISION),
                 )
             else:
                 _log("=== Decision Gate ===")
@@ -1056,7 +1058,7 @@ def run_standalone_review(
                 d_user,
                 cwd=repo_root,
                 system_prompt=d_system,
-                model=config.model,
+                model=config.get_model(Phase.DECISION),
                 budget_usd=config.budget.per_phase,
                 allowed_tools=["Read", "Glob", "Grep", "Bash"],
                 ui=decision_ui,
@@ -1122,7 +1124,7 @@ def _run_learn_phase(
         learn_ui = _make_ui()
         if learn_ui is not None:
             learn_budget = min(0.50, config.budget.per_phase / 2)
-            learn_ui.phase_header("Learn", learn_budget, config.model)
+            learn_ui.phase_header("Learn", learn_budget, config.get_model(Phase.LEARN))
         else:
             _log("=== Learn Phase ===")
 
@@ -1133,7 +1135,7 @@ def _run_learn_phase(
             user,
             cwd=repo_root,
             system_prompt=system,
-            model=config.model,
+            model=config.get_model(Phase.LEARN),
             budget_usd=learn_budget,
             allowed_tools=["Read", "Glob", "Grep"],
             ui=learn_ui,
@@ -1245,7 +1247,7 @@ def run(
             persona_agents = _build_persona_agents(config.personas) or None
             if persona_agents:
                 extra = f"{len(persona_agents)} persona subagents"
-            plan_ui.phase_header("Plan", config.budget.per_phase, config.model, extra)
+            plan_ui.phase_header("Plan", config.budget.per_phase, config.get_model(Phase.PLAN), extra)
         else:
             _log("=== Phase 1: Plan ===")
             persona_agents = _build_persona_agents(config.personas) or None
@@ -1262,7 +1264,7 @@ def run(
             user,
             cwd=repo_root,
             system_prompt=system,
-            model=config.model,
+            model=config.get_model(Phase.PLAN),
             budget_usd=config.budget.per_phase,
             agents=persona_agents,
             ui=plan_ui,
@@ -1291,7 +1293,7 @@ def run(
     else:
         impl_ui = _make_ui()
         if impl_ui is not None:
-            impl_ui.phase_header("Implement", config.budget.per_phase, config.model, branch_name)
+            impl_ui.phase_header("Implement", config.budget.per_phase, config.get_model(Phase.IMPLEMENT), branch_name)
         else:
             _log("=== Phase 2: Implement ===")
         system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name, repo_root=repo_root)
@@ -1300,7 +1302,7 @@ def run(
             user,
             cwd=repo_root,
             system_prompt=system,
-            model=config.model,
+            model=config.get_model(Phase.IMPLEMENT),
             budget_usd=config.budget.per_phase,
             ui=impl_ui,
         )
@@ -1328,7 +1330,7 @@ def run(
                 review_header_ui.phase_header(
                     f"Review ({len(reviewers)} reviewers)",
                     config.budget.per_phase,
-                    config.model,
+                    config.get_model(Phase.REVIEW),
                 )
             else:
                 _log(f"=== Phase 3: Review ({len(reviewers)} reviewers) ===")
@@ -1361,7 +1363,7 @@ def run(
                         prompt=usr_prompt,
                         cwd=repo_root,
                         system_prompt=sys_prompt,
-                        model=config.model,
+                        model=config.get_model(Phase.REVIEW),
                         budget_usd=config.budget.per_phase,
                         allowed_tools=review_tools,
                         ui=persona_ui,
@@ -1411,7 +1413,7 @@ def run(
                         fix_ui.phase_header(
                             f"Fix (iteration {iteration + 1})",
                             config.budget.per_phase,
-                            config.model,
+                            config.get_model(Phase.FIX),
                         )
                     else:
                         _log(f"  Running fix agent (iteration {iteration + 1})...")
@@ -1420,7 +1422,7 @@ def run(
                         fix_user,
                         cwd=repo_root,
                         system_prompt=fix_system,
-                        model=config.model,
+                        model=config.get_model(Phase.FIX),
                         budget_usd=config.budget.per_phase,
                         ui=fix_ui,
                     )
@@ -1433,7 +1435,7 @@ def run(
             # --- Decision Gate ---
             decision_ui = _make_ui()
             if decision_ui is not None:
-                decision_ui.phase_header("Decision Gate", config.budget.per_phase, config.model)
+                decision_ui.phase_header("Decision Gate", config.budget.per_phase, config.get_model(Phase.DECISION))
             else:
                 _log("=== Decision Gate ===")
             system, user = _build_decision_prompt(config, prd_rel, branch_name)
@@ -1442,7 +1444,7 @@ def run(
                 user,
                 cwd=repo_root,
                 system_prompt=system,
-                model=config.model,
+                model=config.get_model(Phase.DECISION),
                 budget_usd=config.budget.per_phase,
                 allowed_tools=["Read", "Glob", "Grep", "Bash"],
                 ui=decision_ui,
@@ -1479,7 +1481,7 @@ def run(
     if config.phases.deliver:
         deliver_ui = _make_ui()
         if deliver_ui is not None:
-            deliver_ui.phase_header("Deliver", config.budget.per_phase, config.model)
+            deliver_ui.phase_header("Deliver", config.budget.per_phase, config.get_model(Phase.DELIVER))
         else:
             phase_num = 5 if config.phases.review else 3
             _log(f"=== Phase {phase_num}: Deliver ===")
@@ -1492,7 +1494,7 @@ def run(
             user,
             cwd=repo_root,
             system_prompt=system,
-            model=config.model,
+            model=config.get_model(Phase.DELIVER),
             budget_usd=config.budget.per_phase,
             ui=deliver_ui,
         )

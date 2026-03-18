@@ -96,6 +96,16 @@ class PhaseDetailRow:
 
 
 @dataclass
+class ModelUsageRow:
+    """Per-model usage statistics."""
+
+    model: str = ""
+    invocations: int = 0
+    total_cost: float = 0.0
+    avg_cost: float = 0.0
+
+
+@dataclass
 class StatsResult:
     """Top-level container for all computed stats sections."""
 
@@ -107,6 +117,7 @@ class StatsResult:
     recent_trend: list[RecentRunEntry] = field(default_factory=list)
     phase_detail: list[PhaseDetailRow] = field(default_factory=list)
     phase_filter: str | None = None
+    model_usage: list[ModelUsageRow] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +353,37 @@ def compute_phase_detail(runs: list[dict], phase_name: str) -> list[PhaseDetailR
     return rows
 
 
+def compute_model_usage(runs: list[dict]) -> list[ModelUsageRow]:
+    """Compute per-model usage statistics from run logs."""
+    model_data: dict[str, dict[str, float | int]] = {}
+
+    for run in runs:
+        for phase_entry in run.get("phases", []):
+            model = phase_entry.get("model")
+            if model is None:
+                model = "<legacy>"
+            stats = model_data.setdefault(model, {"invocations": 0, "total_cost": 0.0})
+            stats["invocations"] += 1
+            cost = phase_entry.get("cost_usd")
+            if cost is not None:
+                stats["total_cost"] += cost
+
+    rows = []
+    for model_name in sorted(model_data.keys()):
+        stats = model_data[model_name]
+        invocations = int(stats["invocations"])
+        total_cost = float(stats["total_cost"])
+        rows.append(
+            ModelUsageRow(
+                model=model_name,
+                invocations=invocations,
+                total_cost=total_cost,
+                avg_cost=total_cost / invocations if invocations > 0 else 0.0,
+            )
+        )
+    return rows
+
+
 def compute_stats(
     runs: list[dict], phase_filter: str | None = None
 ) -> StatsResult:
@@ -355,6 +397,7 @@ def compute_stats(
         recent_trend=compute_recent_trend(runs),
         phase_detail=compute_phase_detail(runs, phase_filter) if phase_filter else [],
         phase_filter=phase_filter,
+        model_usage=compute_model_usage(runs),
     )
 
 
@@ -485,6 +528,26 @@ def render_phase_detail(
     console.print(table)
 
 
+def render_model_usage(console: Console, rows: list[ModelUsageRow]) -> None:
+    """Render model usage breakdown as a Rich Table."""
+    if not rows:
+        return
+    table = Table(title="Model Usage Breakdown")
+    table.add_column("Model", style="cyan")
+    table.add_column("Invocations", justify="right")
+    table.add_column("Total Cost", justify="right")
+    table.add_column("Avg Cost", justify="right")
+
+    for row in rows:
+        table.add_row(
+            row.model,
+            str(row.invocations),
+            f"${row.total_cost:.4f}",
+            f"${row.avg_cost:.4f}",
+        )
+    console.print(table)
+
+
 def render_dashboard(console: Console, result: StatsResult) -> None:
     """Orchestrate rendering of all dashboard sections."""
     render_run_summary(console, result.summary)
@@ -503,6 +566,10 @@ def render_dashboard(console: Console, result: StatsResult) -> None:
     console.print()
 
     render_recent_trend(console, result.recent_trend)
+
+    if result.model_usage:
+        console.print()
+        render_model_usage(console, result.model_usage)
 
     if result.phase_filter and result.phase_detail:
         console.print()

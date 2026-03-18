@@ -11,6 +11,7 @@ from rich.console import Console
 
 from colonyos.stats import (
     DurationRow,
+    ModelUsageRow,
     PhaseCostRow,
     PhaseDetailRow,
     PhaseFailureRow,
@@ -21,6 +22,7 @@ from colonyos.stats import (
     compute_cost_breakdown,
     compute_duration_stats,
     compute_failure_hotspots,
+    compute_model_usage,
     compute_phase_detail,
     compute_recent_trend,
     compute_review_loop_stats,
@@ -32,6 +34,7 @@ from colonyos.stats import (
     render_dashboard,
     render_duration_stats,
     render_failure_hotspots,
+    render_model_usage,
     render_phase_detail,
     render_recent_trend,
     render_review_loop_stats,
@@ -605,3 +608,84 @@ class TestRendering:
         assert "Cost Breakdown" in output
         assert "Failure Hotspots" in output
         assert "Review Loop" in output
+
+
+# ---------------------------------------------------------------------------
+# Task: Model usage tests
+# ---------------------------------------------------------------------------
+
+
+class TestComputeModelUsage:
+    def test_empty(self):
+        assert compute_model_usage([]) == []
+
+    def test_groups_by_model(self):
+        run = _make_run(phases=[
+            {**_make_phase(phase="implement", cost_usd=1.0), "model": "opus"},
+            {**_make_phase(phase="review", cost_usd=0.5), "model": "sonnet"},
+            {**_make_phase(phase="deliver", cost_usd=0.1), "model": "haiku"},
+        ])
+        rows = compute_model_usage([run])
+        assert len(rows) == 3
+        model_map = {r.model: r for r in rows}
+        assert model_map["opus"].invocations == 1
+        assert model_map["opus"].total_cost == pytest.approx(1.0)
+        assert model_map["sonnet"].invocations == 1
+        assert model_map["haiku"].total_cost == pytest.approx(0.1)
+
+    def test_multiple_invocations_same_model(self):
+        run = _make_run(phases=[
+            {**_make_phase(phase="implement", cost_usd=1.0), "model": "opus"},
+            {**_make_phase(phase="review", cost_usd=0.5), "model": "opus"},
+        ])
+        rows = compute_model_usage([run])
+        assert len(rows) == 1
+        assert rows[0].invocations == 2
+        assert rows[0].total_cost == pytest.approx(1.5)
+        assert rows[0].avg_cost == pytest.approx(0.75)
+
+    def test_missing_model_field_grouped_as_legacy(self):
+        run = _make_run(phases=[
+            _make_phase(phase="implement", cost_usd=1.0),
+        ])
+        rows = compute_model_usage([run])
+        assert len(rows) == 1
+        assert rows[0].model == "<legacy>"
+
+    def test_integrated_into_compute_stats(self):
+        run = _make_run(phases=[
+            {**_make_phase(phase="implement", cost_usd=1.0), "model": "opus"},
+        ])
+        result = compute_stats([run])
+        assert len(result.model_usage) == 1
+        assert result.model_usage[0].model == "opus"
+
+
+class TestRenderModelUsage:
+    def test_empty(self):
+        console = _capture_console()
+        render_model_usage(console, [])
+        assert _get_output(console) == ""
+
+    def test_with_data(self):
+        console = _capture_console()
+        rows = [
+            ModelUsageRow(model="opus", invocations=5, total_cost=10.0, avg_cost=2.0),
+            ModelUsageRow(model="haiku", invocations=3, total_cost=0.3, avg_cost=0.1),
+        ]
+        render_model_usage(console, rows)
+        output = _get_output(console)
+        assert "Model Usage" in output
+        assert "opus" in output
+        assert "haiku" in output
+
+    def test_dashboard_includes_model_usage(self):
+        console = _capture_console()
+        result = StatsResult(
+            model_usage=[
+                ModelUsageRow(model="opus", invocations=2, total_cost=5.0, avg_cost=2.5),
+            ],
+        )
+        render_dashboard(console, result)
+        output = _get_output(console)
+        assert "Model Usage" in output

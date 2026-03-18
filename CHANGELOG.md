@@ -1,5 +1,31 @@
 # Changelog
 
+## 20260318_004500 — Per-Phase Model Override Configuration
+
+Added `phase_models` configuration to `.colonyos/config.yaml` allowing users to assign
+different Claude models (opus, sonnet, haiku) to different pipeline phases. Enables
+50-70% cost savings by routing mechanical phases to cheaper models while keeping opus
+for deep reasoning tasks. Includes fail-fast validation, two init presets
+(quality-first / cost-optimized), model usage stats in `colonyos stats`, and full
+backward compatibility.
+
+**Created:**
+- `cOS_prds/20260318_003243_prd_add_per_phase_model_override_configuration_to_colonyos_currently_config_yaml_has.md` — PRD
+- `cOS_tasks/20260318_003243_tasks_add_per_phase_model_override_configuration_to_colonyos_currently_config_yaml_has.md` — Tasks
+
+**Modified:**
+- `src/colonyos/config.py` — `VALID_MODELS`, `phase_models` field, `get_model()` method, validation
+- `src/colonyos/models.py` — `PhaseResult.model` field
+- `src/colonyos/agent.py` — Populate `PhaseResult.model` on execution
+- `src/colonyos/orchestrator.py` — Replace `config.model` with `config.get_model(Phase.XXX)` across all phases
+- `src/colonyos/init.py` — Model preset selection (quality-first / cost-optimized)
+- `src/colonyos/stats.py` — `ModelUsageRow`, `compute_model_usage()`, model usage dashboard section
+- `src/colonyos/ui.py` — Per-phase model display in phase headers
+- `tests/test_config.py`, `tests/test_orchestrator.py`, `tests/test_stats.py`, `tests/test_init.py` — New tests
+
+**PRD:** `cOS_prds/20260318_003243_prd_add_per_phase_model_override_configuration_to_colonyos_currently_config_yaml_has.md`
+**Tasks:** `cOS_tasks/20260318_003243_tasks_add_per_phase_model_override_configuration_to_colonyos_currently_config_yaml_has.md`
+
 ## 20260318_002000 — `colonyos stats` Aggregate Analytics Dashboard
 
 Added a `colonyos stats` CLI command that reads all persisted `run-*.json` files from
