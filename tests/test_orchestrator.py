@@ -11,8 +11,10 @@ from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, ResumeStat
 from colonyos.orchestrator import (
     run,
     prepare_resume,
+    _extract_pr_number_from_log,
     _format_personas_block,
     _build_persona_agents,
+    _build_ci_fix_prompt,
     _build_implement_prompt,
     _build_fix_prompt,
     _build_learn_prompt,
@@ -24,6 +26,7 @@ from colonyos.orchestrator import (
     _parse_learn_output,
     _parse_parent_tasks,
     _persona_slug,
+    _run_ci_fix_loop,
     reviewer_personas,
     _build_persona_review_prompt,
     extract_review_verdict,
@@ -1887,5 +1890,145 @@ class TestSaveReviewArtifact:
             _save_review_artifact(
                 tmp_path, "cOS_reviews", "../../etc/passwd", "evil",
             )
+
+
+class TestExtractPrNumberFromLog:
+    """Tests for _extract_pr_number_from_log helper."""
+
+    def test_extracts_from_deliver_artifacts(self) -> None:
+        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
+        log.phases.append(PhaseResult(
+            phase=Phase.DELIVER,
+            success=True,
+            artifacts={"pr_url": "https://github.com/org/repo/pull/42"},
+        ))
+        assert _extract_pr_number_from_log(log) == 42
+
+    def test_returns_none_when_no_deliver_phase(self) -> None:
+        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
+        log.phases.append(PhaseResult(phase=Phase.IMPLEMENT, success=True))
+        assert _extract_pr_number_from_log(log) is None
+
+    def test_returns_none_when_no_pr_url(self) -> None:
+        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
+        log.phases.append(PhaseResult(
+            phase=Phase.DELIVER, success=True, artifacts={},
+        ))
+        assert _extract_pr_number_from_log(log) is None
+
+
+class TestBuildCiFixPrompt:
+    """Tests for _build_ci_fix_prompt."""
+
+    def test_returns_system_and_user(self, tmp_path: Path) -> None:
+        config = ColonyConfig()
+        system, user = _build_ci_fix_prompt(
+            config, "my-branch", "CI failure context here", 1, 3,
+        )
+        assert "my-branch" in system
+        assert "CI failure context here" in system
+        assert "attempt 1 of 3" in user
+
+    def test_includes_branch_name(self, tmp_path: Path) -> None:
+        config = ColonyConfig()
+        system, user = _build_ci_fix_prompt(
+            config, "feature/fix-tests", "", 2, 5,
+        )
+        assert "feature/fix-tests" in user
+
+
+class TestRunCiFixLoop:
+    """Integration tests for _run_ci_fix_loop."""
+
+    def _make_log_with_deliver(self, pr_url: str = "https://github.com/o/r/pull/42") -> RunLog:
+        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
+        log.phases.append(PhaseResult(
+            phase=Phase.DELIVER,
+            success=True,
+            artifacts={"pr_url": pr_url},
+        ))
+        return log
+
+    def test_skips_when_no_pr_number(self, tmp_path: Path) -> None:
+        config = ColonyConfig()
+        log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
+        # No deliver phase → should return immediately
+        _run_ci_fix_loop(config, tmp_path, log, "main", None)
+        # No CI_FIX phases should be added
+        assert not any(p.phase == Phase.CI_FIX for p in log.phases)
+
+    def test_skips_when_all_checks_pass(self, tmp_path: Path) -> None:
+        from colonyos.ci import CheckResult
+        config = ColonyConfig()
+        log = self._make_log_with_deliver()
+        checks = [CheckResult(name="test", state="completed", conclusion="success")]
+        with patch("colonyos.ci.poll_pr_checks", return_value=checks):
+            _run_ci_fix_loop(config, tmp_path, log, "main", None)
+        assert not any(p.phase == Phase.CI_FIX for p in log.phases)
+
+    def test_runs_fix_cycle_on_failure(self, tmp_path: Path) -> None:
+        from colonyos.ci import CheckResult
+        config = ColonyConfig()
+        log = self._make_log_with_deliver()
+        failed_checks = [
+            CheckResult(name="test", state="completed", conclusion="failure",
+                        details_url="https://github.com/o/r/actions/runs/1/jobs/1"),
+        ]
+        pass_checks = [CheckResult(name="test", state="completed", conclusion="success")]
+        mock_phase = PhaseResult(phase=Phase.CI_FIX, success=True, cost_usd=0.01)
+
+        with patch("colonyos.ci.poll_pr_checks", side_effect=[failed_checks, pass_checks]), \
+             patch("colonyos.ci.fetch_check_logs", return_value={"step": "error"}), \
+             patch("colonyos.orchestrator.run_phase_sync", return_value=mock_phase), \
+             patch("colonyos.orchestrator.subprocess.run") as mock_sp:
+            mock_sp.return_value = MagicMock(returncode=0)  # git push
+            _run_ci_fix_loop(config, tmp_path, log, "main", None)
+
+        ci_fix_phases = [p for p in log.phases if p.phase == Phase.CI_FIX]
+        assert len(ci_fix_phases) == 1
+        assert ci_fix_phases[0].success
+
+    def test_push_failure_breaks_loop(self, tmp_path: Path) -> None:
+        from colonyos.ci import CheckResult
+        config = ColonyConfig()
+        config.ci_fix.max_retries = 3
+        log = self._make_log_with_deliver()
+        failed_checks = [
+            CheckResult(name="test", state="completed", conclusion="failure",
+                        details_url="https://github.com/o/r/actions/runs/1/jobs/1"),
+        ]
+        mock_phase = PhaseResult(phase=Phase.CI_FIX, success=True, cost_usd=0.01)
+
+        with patch("colonyos.ci.poll_pr_checks", return_value=failed_checks), \
+             patch("colonyos.ci.fetch_check_logs", return_value={"step": "error"}), \
+             patch("colonyos.orchestrator.run_phase_sync", return_value=mock_phase), \
+             patch("colonyos.orchestrator.subprocess.run") as mock_sp:
+            mock_sp.return_value = MagicMock(returncode=1, stderr="push rejected")  # git push fails
+            _run_ci_fix_loop(config, tmp_path, log, "main", None)
+
+        # Only one attempt should have been made despite max_retries=3
+        ci_fix_phases = [p for p in log.phases if p.phase == Phase.CI_FIX]
+        assert len(ci_fix_phases) == 1
+
+    def test_agent_failure_continues_retries(self, tmp_path: Path) -> None:
+        from colonyos.ci import CheckResult
+        config = ColonyConfig()
+        config.ci_fix.max_retries = 2
+        log = self._make_log_with_deliver()
+        failed_checks = [
+            CheckResult(name="test", state="completed", conclusion="failure",
+                        details_url="https://github.com/o/r/actions/runs/1/jobs/1"),
+        ]
+        fail_phase = PhaseResult(phase=Phase.CI_FIX, success=False, error="agent crash")
+
+        with patch("colonyos.ci.poll_pr_checks", return_value=failed_checks), \
+             patch("colonyos.ci.fetch_check_logs", return_value={"step": "error"}), \
+             patch("colonyos.orchestrator.run_phase_sync", return_value=fail_phase):
+            _run_ci_fix_loop(config, tmp_path, log, "main", None)
+
+        # Both attempts should have been recorded
+        ci_fix_phases = [p for p in log.phases if p.phase == Phase.CI_FIX]
+        assert len(ci_fix_phases) == 2
+        assert all(not p.success for p in ci_fix_phases)
 
 

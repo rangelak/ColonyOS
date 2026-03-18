@@ -1414,17 +1414,17 @@ def ci_fix(
     """
     from colonyos.ci import (
         all_checks_pass,
-        fetch_check_logs,
+        check_pr_author_mismatch,
+        collect_ci_failure_context,
         fetch_pr_checks,
         format_ci_failures_as_prompt,
-        get_failed_checks,
         parse_pr_ref,
         poll_pr_checks,
         validate_branch_not_behind,
         validate_clean_worktree,
-        _extract_run_id_from_url,
+        validate_gh_auth,
     )
-    from colonyos.orchestrator import _build_ci_fix_prompt, run_phase_sync
+    from colonyos.orchestrator import _build_ci_fix_prompt, _save_run_log
 
     repo_root = _find_repo_root()
     config = load_config(repo_root)
@@ -1436,14 +1436,20 @@ def ci_fix(
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
 
-    # Pre-flight checks
+    # Pre-flight checks (FR16: validate gh auth upfront)
+    validate_gh_auth()
     validate_clean_worktree(repo_root)
     validate_branch_not_behind(repo_root)
 
+    # Warn if PR author differs from authenticated user (prompt injection risk)
+    author_warning = check_pr_author_mismatch(pr_number, repo_root)
+    if author_warning:
+        click.echo(f"[colonyos] {author_warning}", err=True)
+
     # Create run log for tracking
-    run_id = f"ci-fix-{generate_timestamp()}-pr{pr_number}"
+    ci_run_id = f"ci-fix-{generate_timestamp()}-pr{pr_number}"
     log = RunLog(
-        run_id=run_id,
+        run_id=ci_run_id,
         prompt=f"CI fix for PR #{pr_number}",
         status=RunStatus.RUNNING,
     )
@@ -1457,29 +1463,13 @@ def ci_fix(
             click.echo(f"[colonyos] All CI checks pass on PR #{pr_number}!")
             log.status = RunStatus.COMPLETED
             log.mark_finished()
-            _save_ci_fix_run_log(repo_root, log)
+            _save_run_log(repo_root, log)
             return
 
-        # Collect logs from failed checks
-        failed = get_failed_checks(checks)
-        failures_for_prompt: list[dict[str, str]] = []
-        for check in failed:
-            run_id_from_url = _extract_run_id_from_url(check.details_url)
-            if run_id_from_url:
-                step_logs = fetch_check_logs(run_id_from_url, repo_root, config.ci_fix.log_char_cap)
-                for step_name, log_text in step_logs.items():
-                    failures_for_prompt.append({
-                        "name": f"{check.name} / {step_name}",
-                        "conclusion": check.conclusion,
-                        "log": log_text,
-                    })
-            else:
-                failures_for_prompt.append({
-                    "name": check.name,
-                    "conclusion": check.conclusion,
-                    "log": f"(Could not fetch logs — no run ID in URL: {check.details_url})",
-                })
-
+        # Collect logs from failed checks (shared helper)
+        failures_for_prompt = collect_ci_failure_context(
+            checks, repo_root, config.ci_fix.log_char_cap,
+        )
         ci_failure_context = format_ci_failures_as_prompt(failures_for_prompt)
 
         # Get current branch name
@@ -1495,12 +1485,13 @@ def ci_fix(
         )
 
         from colonyos.agent import run_phase_sync as _run_phase
+        from colonyos.models import Phase
         phase_result = _run_phase(
             Phase.CI_FIX,
             user,
             cwd=repo_root,
             system_prompt=system,
-            model=config.get_model(Phase.CI_FIX) if hasattr(config, "get_model") else config.model,
+            model=config.get_model(Phase.CI_FIX),
             budget_usd=config.budget.per_phase,
             ui=None,
         )
@@ -1514,16 +1505,23 @@ def ci_fix(
 
         click.echo("[colonyos] CI fix agent completed. Pushing changes...")
 
-        # Push the fix commit
+        # Push the fix commit — abort on failure to avoid wasting retries
         push_result = subprocess.run(
             ["git", "push"],
             capture_output=True, text=True, timeout=60, cwd=repo_root,
         )
         if push_result.returncode != 0:
-            click.echo(f"[colonyos] Failed to push: {push_result.stderr.strip()}", err=True)
+            click.echo(
+                f"[colonyos] Failed to push: {push_result.stderr.strip()}",
+                err=True,
+            )
+            log.status = RunStatus.COMPLETED
+            log.mark_finished()
+            _save_run_log(repo_root, log)
+            sys.exit(1)
 
-        # If --wait, poll for CI results
-        if wait and attempt < max_retries:
+        # If --wait, poll for CI results (unified logic for all attempts)
+        if wait:
             click.echo(f"[colonyos] Waiting for CI checks (timeout: {wait_timeout}s)...")
             try:
                 final_checks = poll_pr_checks(pr_number, repo_root, timeout=wait_timeout)
@@ -1531,24 +1529,11 @@ def ci_fix(
                     click.echo(f"[colonyos] CI checks now pass on PR #{pr_number}!")
                     log.status = RunStatus.COMPLETED
                     log.mark_finished()
-                    _save_ci_fix_run_log(repo_root, log)
+                    _save_run_log(repo_root, log)
                     return
                 click.echo("[colonyos] CI still failing after fix attempt.")
             except click.ClickException as exc:
                 click.echo(f"[colonyos] {exc.message}", err=True)
-        elif wait and attempt >= max_retries:
-            # Last attempt — still wait to report final status
-            click.echo(f"[colonyos] Waiting for CI checks (timeout: {wait_timeout}s)...")
-            try:
-                final_checks = poll_pr_checks(pr_number, repo_root, timeout=wait_timeout)
-                if all_checks_pass(final_checks):
-                    click.echo(f"[colonyos] CI checks now pass on PR #{pr_number}!")
-                    log.status = RunStatus.COMPLETED
-                    log.mark_finished()
-                    _save_ci_fix_run_log(repo_root, log)
-                    return
-            except click.ClickException:
-                pass
 
     # Retries exhausted
     click.echo(
@@ -1557,35 +1542,5 @@ def ci_fix(
     )
     log.status = RunStatus.COMPLETED  # Still COMPLETED per FR20, but with success=False phases
     log.mark_finished()
-    _save_ci_fix_run_log(repo_root, log)
+    _save_run_log(repo_root, log)
     sys.exit(1)
-
-
-def _save_ci_fix_run_log(repo_root: Path, log: RunLog) -> None:
-    """Save a CI fix run log to the runs directory."""
-    runs_dir = runs_dir_path(repo_root)
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = runs_dir / f"{log.run_id}.json"
-
-    data = {
-        "run_id": log.run_id,
-        "prompt": log.prompt,
-        "status": log.status.value,
-        "phases": [
-            {
-                "phase": p.phase.value,
-                "success": p.success,
-                "cost_usd": p.cost_usd,
-                "duration_ms": p.duration_ms,
-                "session_id": p.session_id,
-                "model": p.model,
-                "error": p.error,
-                "artifacts": p.artifacts,
-            }
-            for p in log.phases
-        ],
-        "total_cost_usd": log.total_cost_usd,
-        "started_at": log.started_at,
-        "finished_at": log.finished_at,
-    }
-    log_path.write_text(json.dumps(data, indent=2), encoding="utf-8")

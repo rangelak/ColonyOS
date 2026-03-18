@@ -108,10 +108,19 @@ def fetch_pr_checks(pr_number: int, repo_root: Path) -> list[CheckResult]:
     return checks
 
 
-def _extract_run_id_from_url(url: str) -> str | None:
-    """Extract the run ID from a GitHub Actions details URL."""
+def extract_run_id_from_url(url: str) -> str | None:
+    """Extract the run ID from a GitHub Actions details URL.
+
+    Public API — used by both the CLI and orchestrator modules.
+    """
+    if not isinstance(url, str):
+        return None
     match = re.search(r"/actions/runs/(\d+)", url)
     return match.group(1) if match else None
+
+
+# Keep private alias for backward compatibility in tests
+_extract_run_id_from_url = extract_run_id_from_url
 
 
 def fetch_check_logs(
@@ -192,19 +201,40 @@ def _truncate_tail_biased(text: str, max_chars: int) -> str:
     return f"[... {truncated_lines} lines truncated]\n" + text[-max_chars:]
 
 
+# Maximum total characters across all failure logs injected into the prompt.
+# With per-step cap of 12K and up to 20 failing steps, uncapped total could
+# reach ~240K — this aggregate cap prevents prompt bloat.
+_TOTAL_LOG_CHAR_CAP = 120_000
+
+
 def format_ci_failures_as_prompt(
     failures: list[dict[str, str]],
+    total_char_cap: int = _TOTAL_LOG_CHAR_CAP,
 ) -> str:
     """Format CI failure context into a structured prompt block.
 
     Each failure dict has keys: ``name``, ``conclusion``, ``log``.
     Output wraps each in ``<ci_failure_log>`` delimiters with sanitized content.
+
+    An aggregate ``total_char_cap`` limits the total log text injected into
+    the prompt across all failures.  When the cap is reached, remaining
+    failures are listed by name only.
     """
     parts: list[str] = []
+    total_chars = 0
     for failure in failures:
         name = failure.get("name", "unknown")
         conclusion = failure.get("conclusion", "failure")
         log = sanitize_ci_logs(failure.get("log", ""))
+        if total_chars + len(log) > total_char_cap and total_chars > 0:
+            parts.append(
+                f'<ci_failure_log step="{name}" conclusion="{conclusion}">'
+            )
+            parts.append("[log omitted — aggregate log size cap reached]")
+            parts.append("</ci_failure_log>")
+            parts.append("")
+            continue
+        total_chars += len(log)
         parts.append(f'<ci_failure_log step="{name}" conclusion="{conclusion}">')
         parts.append(log)
         parts.append("</ci_failure_log>")
@@ -264,6 +294,105 @@ def validate_branch_not_behind(repo_root: Path) -> None:
         )
 
 
+def validate_gh_auth() -> None:
+    """Validate that the ``gh`` CLI is authenticated.
+
+    Raises ``click.ClickException`` on failure, directing the user to
+    ``colonyos doctor`` — same pattern as ``doctor.py``.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "status"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        raise click.ClickException(
+            "GitHub CLI (gh) not found. "
+            "Install it from https://cli.github.com/ then run `colonyos doctor`."
+        )
+    except subprocess.TimeoutExpired:
+        raise click.ClickException(
+            "Timed out checking GitHub CLI auth status."
+        )
+
+    if result.returncode != 0:
+        raise click.ClickException(
+            "GitHub CLI is not authenticated. "
+            "Run `gh auth login` or `colonyos doctor` to check prerequisites."
+        )
+
+
+def check_pr_author_mismatch(pr_number: int, repo_root: Path) -> str | None:
+    """Return a warning message if the PR author differs from the authenticated user.
+
+    Returns ``None`` when authors match or when the check cannot be performed.
+    This mitigates prompt injection risk: a malicious PR author could craft CI
+    log output to manipulate the agent.
+    """
+    try:
+        # Get PR author
+        pr_result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "author", "--jq", ".author.login"],
+            capture_output=True, text=True, timeout=10, cwd=repo_root,
+        )
+        if pr_result.returncode != 0:
+            return None
+        pr_author = pr_result.stdout.strip()
+
+        # Get authenticated user
+        auth_result = subprocess.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if auth_result.returncode != 0:
+            return None
+        auth_user = auth_result.stdout.strip()
+
+        if pr_author and auth_user and pr_author != auth_user:
+            return (
+                f"WARNING: PR #{pr_number} was authored by @{pr_author}, "
+                f"but you are authenticated as @{auth_user}. "
+                "CI logs from another user's PR may contain crafted content. "
+                "Proceed with caution."
+            )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    return None
+
+
+def collect_ci_failure_context(
+    checks: list[CheckResult],
+    repo_root: Path,
+    log_char_cap: int = _CI_LOG_CHAR_CAP,
+) -> list[dict[str, str]]:
+    """Collect log details for failed checks into a list of failure dicts.
+
+    Each dict has keys ``name``, ``conclusion``, and ``log``.
+    Shared by the CLI ``ci-fix`` command and the orchestrator CI fix loop.
+    """
+    failed = get_failed_checks(checks)
+    failures: list[dict[str, str]] = []
+    for check in failed:
+        run_id = extract_run_id_from_url(check.details_url)
+        if run_id:
+            step_logs = fetch_check_logs(run_id, repo_root, log_char_cap)
+            for step_name, log_text in step_logs.items():
+                failures.append({
+                    "name": f"{check.name} / {step_name}",
+                    "conclusion": check.conclusion,
+                    "log": log_text,
+                })
+        else:
+            failures.append({
+                "name": check.name,
+                "conclusion": check.conclusion,
+                "log": f"(Could not fetch logs — no run ID in URL: {check.details_url})",
+            })
+    return failures
+
+
 def poll_pr_checks(
     pr_number: int,
     repo_root: Path,
@@ -284,9 +413,11 @@ def poll_pr_checks(
 
     while True:
         checks = fetch_pr_checks(pr_number, repo_root)
-        # Check if all are completed (not pending/in_progress)
+        # Check if all are completed (not pending/in_progress).
+        # Empty state is NOT treated as terminal — GitHub may return empty
+        # state for checks that have not yet started.
         all_done = all(
-            c.state.lower() in ("completed", "complete", "")
+            c.state.lower() in ("completed", "complete")
             or c.conclusion.lower() in ("success", "failure", "cancelled", "skipped", "timed_out")
             for c in checks
         )

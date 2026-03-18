@@ -14,6 +14,9 @@ from colonyos.ci import (
     _parse_and_truncate_logs,
     _truncate_tail_biased,
     all_checks_pass,
+    check_pr_author_mismatch,
+    collect_ci_failure_context,
+    extract_run_id_from_url,
     fetch_check_logs,
     fetch_pr_checks,
     format_ci_failures_as_prompt,
@@ -22,6 +25,7 @@ from colonyos.ci import (
     poll_pr_checks,
     validate_branch_not_behind,
     validate_clean_worktree,
+    validate_gh_auth,
 )
 
 
@@ -208,3 +212,117 @@ class TestPollPrChecks:
             with patch("colonyos.ci.time.sleep"):
                 with pytest.raises(click.ClickException, match="Timed out"):
                     poll_pr_checks(42, tmp_path, timeout=0, initial_interval=1)
+
+    def test_empty_state_not_treated_as_terminal(self, tmp_path: Path) -> None:
+        """Checks with empty state should not be considered complete."""
+        pending = [CheckResult(name="test", state="", conclusion="")]
+        completed = [CheckResult(name="test", state="completed", conclusion="success")]
+        with patch("colonyos.ci.fetch_pr_checks", side_effect=[pending, completed]):
+            with patch("colonyos.ci.time.sleep"):
+                result = poll_pr_checks(42, tmp_path, timeout=60, initial_interval=1)
+        assert len(result) == 1
+        assert result[0].conclusion == "success"
+
+
+class TestValidateGhAuth:
+    def test_success(self) -> None:
+        with patch("colonyos.ci.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            validate_gh_auth()  # Should not raise
+
+    def test_not_authenticated(self) -> None:
+        with patch("colonyos.ci.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1)
+            with pytest.raises(click.ClickException, match="not authenticated"):
+                validate_gh_auth()
+
+    def test_gh_not_found(self) -> None:
+        with patch("colonyos.ci.subprocess.run", side_effect=FileNotFoundError):
+            with pytest.raises(click.ClickException, match="not found"):
+                validate_gh_auth()
+
+    def test_timeout(self) -> None:
+        import subprocess
+        with patch("colonyos.ci.subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 10)):
+            with pytest.raises(click.ClickException, match="Timed out"):
+                validate_gh_auth()
+
+
+class TestCheckPrAuthorMismatch:
+    def test_same_author_returns_none(self, tmp_path: Path) -> None:
+        with patch("colonyos.ci.subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="alice\n"),  # PR author
+                MagicMock(returncode=0, stdout="alice\n"),  # auth user
+            ]
+            assert check_pr_author_mismatch(42, tmp_path) is None
+
+    def test_different_author_returns_warning(self, tmp_path: Path) -> None:
+        with patch("colonyos.ci.subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="mallory\n"),  # PR author
+                MagicMock(returncode=0, stdout="alice\n"),    # auth user
+            ]
+            warning = check_pr_author_mismatch(42, tmp_path)
+            assert warning is not None
+            assert "mallory" in warning
+            assert "alice" in warning
+            assert "WARNING" in warning
+
+    def test_api_failure_returns_none(self, tmp_path: Path) -> None:
+        with patch("colonyos.ci.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="")
+            assert check_pr_author_mismatch(42, tmp_path) is None
+
+
+class TestCollectCiFailureContext:
+    def test_collects_from_failed_checks(self, tmp_path: Path) -> None:
+        checks = [
+            CheckResult(name="lint", state="completed", conclusion="failure",
+                        details_url="https://github.com/o/r/actions/runs/123/jobs/1"),
+            CheckResult(name="test", state="completed", conclusion="success"),
+        ]
+        mock_logs = {"step1": "Error: syntax error"}
+        with patch("colonyos.ci.fetch_check_logs", return_value=mock_logs):
+            result = collect_ci_failure_context(checks, tmp_path)
+        assert len(result) == 1
+        assert "lint" in result[0]["name"]
+        assert "syntax error" in result[0]["log"]
+
+    def test_no_run_id_fallback(self, tmp_path: Path) -> None:
+        checks = [
+            CheckResult(name="lint", state="completed", conclusion="failure",
+                        details_url="https://example.com/no-run-id"),
+        ]
+        result = collect_ci_failure_context(checks, tmp_path)
+        assert len(result) == 1
+        assert "Could not fetch logs" in result[0]["log"]
+
+
+class TestFormatCiFailuresTotalCap:
+    def test_aggregate_cap_limits_output(self) -> None:
+        failures = [
+            {"name": f"step-{i}", "conclusion": "failure", "log": "x" * 1000}
+            for i in range(5)
+        ]
+        # Cap at 2500 chars total — only first 2 steps fit fully
+        result = format_ci_failures_as_prompt(failures, total_char_cap=2500)
+        assert "aggregate log size cap reached" in result
+
+    def test_under_cap_includes_all(self) -> None:
+        failures = [
+            {"name": "step-0", "conclusion": "failure", "log": "short"},
+        ]
+        result = format_ci_failures_as_prompt(failures, total_char_cap=100_000)
+        assert "aggregate log size cap" not in result
+        assert "short" in result
+
+
+class TestExtractRunIdPublic:
+    def test_public_alias_matches_private(self) -> None:
+        url = "https://github.com/org/repo/actions/runs/99999/jobs/1"
+        assert extract_run_id_from_url(url) == _extract_run_id_from_url(url)
+        assert extract_run_id_from_url(url) == "99999"
+
+    def test_non_string_returns_none(self) -> None:
+        assert extract_run_id_from_url(None) is None  # type: ignore[arg-type]

@@ -1536,3 +1536,78 @@ class TestCIFixCommand:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = runner.invoke(app, ["ci-fix", "not-a-number"])
         assert result.exit_code != 0
+
+    def test_uncommitted_changes_error(self, runner: CliRunner, tmp_path: Path):
+        """Uncommitted changes should block ci-fix."""
+        from colonyos.ci import CheckResult
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.load_config", return_value=ColonyConfig()), \
+             patch("colonyos.ci.subprocess.run") as mock_run:
+            # gh auth succeeds, then git status shows dirty worktree
+            mock_run.side_effect = [
+                MagicMock(returncode=0),  # gh auth status
+                MagicMock(returncode=0, stdout=" M dirty.py\n", stderr=""),  # git status
+            ]
+            result = runner.invoke(app, ["ci-fix", "42"])
+        assert result.exit_code != 0
+        assert "uncommitted" in result.output.lower() or "uncommitted" in (result.output + str(result.exception)).lower()
+
+    def test_gh_not_authenticated_error(self, runner: CliRunner, tmp_path: Path):
+        """gh not authenticated should block ci-fix with helpful message."""
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.load_config", return_value=ColonyConfig()), \
+             patch("colonyos.ci.subprocess.run") as mock_run:
+            # gh auth status fails
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+            result = runner.invoke(app, ["ci-fix", "42"])
+        assert result.exit_code != 0
+
+    def test_push_failure_aborts(self, runner: CliRunner, tmp_path: Path):
+        """git push failure should abort rather than continue to next retry."""
+        from colonyos.ci import CheckResult
+
+        failed_checks = [
+            CheckResult(name="test", state="completed", conclusion="failure",
+                        details_url="https://github.com/o/r/actions/runs/1/jobs/1"),
+        ]
+        mock_phase = MagicMock(success=True, cost_usd=0.0, duration_ms=100,
+                               session_id="s1", model="m", error=None, artifacts={},
+                               phase=Phase.CI_FIX)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.load_config", return_value=ColonyConfig()), \
+             patch("colonyos.ci.subprocess.run") as ci_mock_run, \
+             patch("colonyos.cli.subprocess.run") as cli_mock_run:
+            # Pre-flight checks pass
+            ci_mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            with patch("colonyos.ci.fetch_pr_checks", return_value=failed_checks), \
+                 patch("colonyos.ci.check_pr_author_mismatch", return_value=None), \
+                 patch("colonyos.ci.fetch_check_logs", return_value={"step": "error log"}), \
+                 patch("colonyos.orchestrator._build_ci_fix_prompt", return_value=("sys", "usr")), \
+                 patch("colonyos.agent.run_phase_sync", return_value=mock_phase), \
+                 patch("colonyos.orchestrator._save_run_log"):
+                # git rev-parse succeeds, git push fails
+                cli_mock_run.side_effect = [
+                    MagicMock(returncode=0, stdout="main\n", stderr=""),  # git rev-parse
+                    MagicMock(returncode=1, stdout="", stderr="push rejected"),  # git push
+                ]
+                result = runner.invoke(app, ["ci-fix", "42", "--max-retries", "3"])
+        assert result.exit_code != 0
+
+    def test_pr_author_mismatch_warning(self, runner: CliRunner, tmp_path: Path):
+        """PR authored by someone else should show a warning."""
+        from colonyos.ci import CheckResult
+
+        checks = [CheckResult(name="test", state="completed", conclusion="success")]
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.load_config", return_value=ColonyConfig()), \
+             patch("colonyos.ci.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            with patch("colonyos.ci.fetch_pr_checks", return_value=checks), \
+                 patch("colonyos.ci.check_pr_author_mismatch",
+                       return_value="WARNING: PR #42 was authored by @mallory"), \
+                 patch("colonyos.orchestrator._save_run_log"):
+                result = runner.invoke(app, ["ci-fix", "42"])
+        assert "WARNING" in result.output or "mallory" in result.output

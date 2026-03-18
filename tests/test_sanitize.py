@@ -75,6 +75,36 @@ class TestSanitizeCiLogs:
         result = sanitize_ci_logs(text)
         assert "[REDACTED]" in result
 
+    def test_redacts_github_pat_token(self) -> None:
+        result = sanitize_ci_logs("token=github_pat_abcdef12345")
+        assert "github_pat_" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_gho_token(self) -> None:
+        result = sanitize_ci_logs("auth=gho_abcdef12345")
+        assert "gho_" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_slack_bot_token(self) -> None:
+        result = sanitize_ci_logs("SLACK_TOKEN=xoxb-123-456-abc")
+        assert "xoxb-" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_slack_user_token(self) -> None:
+        result = sanitize_ci_logs("SLACK_TOKEN=xoxp-123-456-abc")
+        assert "xoxp-" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_npm_token(self) -> None:
+        result = sanitize_ci_logs("NPM_TOKEN=npm_abcdef123456")
+        assert "npm_" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_api_key_near_keyword(self) -> None:
+        text = "APIKEY=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx"
+        result = sanitize_ci_logs(text)
+        assert "[REDACTED]" in result
+
 
 class TestXmlTagRegex:
     def test_matches_opening_tag(self) -> None:

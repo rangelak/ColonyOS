@@ -1238,6 +1238,18 @@ def _run_learn_phase(
         )
 
 
+def _extract_pr_number_from_log(log: RunLog) -> int | None:
+    """Extract PR number from the deliver phase artifacts in a run log."""
+    for phase in log.phases:
+        if phase.phase == Phase.DELIVER:
+            pr_url = phase.artifacts.get("pr_url", "")
+            if pr_url:
+                match = re.search(r"/pull/(\d+)", pr_url)
+                if match:
+                    return int(match.group(1))
+    return None
+
+
 def _run_ci_fix_loop(
     config: ColonyConfig,
     repo_root: Path,
@@ -1253,24 +1265,12 @@ def _run_ci_fix_loop(
     """
     from colonyos.ci import (
         all_checks_pass,
-        fetch_check_logs,
-        fetch_pr_checks,
+        collect_ci_failure_context,
         format_ci_failures_as_prompt,
-        get_failed_checks,
         poll_pr_checks,
-        _extract_run_id_from_url,
     )
 
-    # Extract PR number from deliver phase artifacts
-    pr_number = None
-    for phase in log.phases:
-        if phase.phase == Phase.DELIVER:
-            pr_url = phase.artifacts.get("pr_url", "")
-            if pr_url:
-                import re as _re
-                match = _re.search(r"/pull/(\d+)", pr_url)
-                if match:
-                    pr_number = int(match.group(1))
+    pr_number = _extract_pr_number_from_log(log)
     if pr_number is None:
         _log("CI fix: could not determine PR number from deliver phase, skipping.")
         return
@@ -1292,27 +1292,10 @@ def _run_ci_fix_loop(
     for attempt in range(1, config.ci_fix.max_retries + 1):
         _log(f"CI fix: attempt {attempt}/{config.ci_fix.max_retries}")
 
-        failed = get_failed_checks(checks)
-        failures_for_prompt: list[dict[str, str]] = []
-        for check in failed:
-            run_id_from_url = _extract_run_id_from_url(check.details_url)
-            if run_id_from_url:
-                step_logs = fetch_check_logs(
-                    run_id_from_url, repo_root, config.ci_fix.log_char_cap,
-                )
-                for step_name, log_text in step_logs.items():
-                    failures_for_prompt.append({
-                        "name": f"{check.name} / {step_name}",
-                        "conclusion": check.conclusion,
-                        "log": log_text,
-                    })
-            else:
-                failures_for_prompt.append({
-                    "name": check.name,
-                    "conclusion": check.conclusion,
-                    "log": "(Could not fetch logs)",
-                })
-
+        # Collect logs from failed checks (shared helper)
+        failures_for_prompt = collect_ci_failure_context(
+            checks, repo_root, config.ci_fix.log_char_cap,
+        )
         ci_failure_context = format_ci_failures_as_prompt(failures_for_prompt)
         system, user = _build_ci_fix_prompt(
             config, branch_name, ci_failure_context,
@@ -1334,12 +1317,14 @@ def _run_ci_fix_loop(
             _log(f"CI fix agent failed: {phase_result.error}")
             continue
 
-        # Push the fix
-        import subprocess as _sp
-        _sp.run(
+        # Push the fix — abort loop on failure to avoid wasting retries
+        push_result = subprocess.run(
             ["git", "push"],
             capture_output=True, text=True, timeout=60, cwd=repo_root,
         )
+        if push_result.returncode != 0:
+            _log(f"CI fix: git push failed: {push_result.stderr.strip()}")
+            break
 
         # Wait for CI
         try:

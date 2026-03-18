@@ -25,12 +25,17 @@ def sanitize_untrusted_content(text: str) -> str:
 SECRET_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"ghp_\w+"),          # GitHub personal access tokens
     re.compile(r"ghs_\w+"),          # GitHub server tokens
+    re.compile(r"github_pat_\w+"),   # GitHub fine-grained personal access tokens
+    re.compile(r"gho_\w+"),          # GitHub OAuth tokens
     re.compile(r"sk-\w+"),           # OpenAI / Stripe secret keys
     re.compile(r"AKIA\w+"),          # AWS access key IDs
     re.compile(r"Bearer\s+\S+"),     # Bearer tokens
+    re.compile(r"xoxb-\S+"),         # Slack bot tokens
+    re.compile(r"xoxp-\S+"),         # Slack user tokens
+    re.compile(r"npm_\w+"),          # npm tokens
     # High-entropy base64 blobs (>40 chars) adjacent to secret-like keywords.
     re.compile(
-        r"(?i)(?:TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)\s*[:=]\s*[A-Za-z0-9+/]{40,}={0,2}"
+        r"(?i)(?:TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL|API_?KEY)\s*[:=]\s*[A-Za-z0-9+/]{40,}={0,2}"
     ),
 ]
 
