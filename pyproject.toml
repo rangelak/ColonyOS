@@ -25,7 +25,7 @@ where = ["src"]
 colonyos = ["instructions/*.md", "web_dist/**"]
 
 [project.optional-dependencies]
-dev = ["pre-commit>=4.0", "pytest>=8.0"]
+dev = ["pre-commit>=4.0", "pytest>=8.0", "colonyos[ui]"]
 slack = ["slack-bolt[socket-mode]>=1.18"]
 ui = ["fastapi>=0.100", "uvicorn>=0.20"]
 
