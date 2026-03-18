@@ -62,3 +62,12 @@ _Date: 2026-03-19 | Feature: the_ui_tests_are_failing_on_the_ci_there_is_no_modu
 - **[security]** CORS allowed-origins must be scoped per environment; leaving dev-server origins in production builds weakens isolation.
 - **[architecture]** Mutable state files (queues, logs) lack append-only audit trails; add forensic logging for add/remove operations.
 - **[code-quality]** Reusable format/parse helpers (e.g. duration formatting) get copy-pasted instead of importing the shared utility.
+
+## Run: run-20260319_002326-b07675a1ab
+_Date: 2026-03-19 | Feature: connect_to_posthog_
+
+- **[style]** Instruction templates for LLMs should use concrete file paths and glob patterns, not natural-language directory descriptions.
+- **[code-quality]** LLM-targeted fix instructions must explicitly prohibit suppression comments (`# type: ignore`, `# noqa`) as solutions.
+- **[style]** Console/logger instances should be injected as parameters, not instantiated inside helpers, to maintain consistent output.
+- **[code-quality]** Mutating a collection while iterating requires an explicit comment documenting the loop invariant to prevent silent bugs.
+- **[architecture]** Frontend SPAs need a top-level error boundary so a single component crash does not white-screen the entire application.

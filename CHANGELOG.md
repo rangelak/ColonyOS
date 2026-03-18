@@ -1,5 +1,28 @@
 # Changelog
 
+## 20260319_010500 — Opt-in PostHog Telemetry Integration
+
+Added opt-in PostHog telemetry that emits anonymized pipeline lifecycle events
+(run started, phase completed, run completed/failed, CLI command) for cross-installation
+product analytics. Follows the established SlackConfig pattern: disabled by default,
+optional dependency, silent failures, and no prompts or code ever transmitted.
+
+**Created:**
+- `src/colonyos/telemetry.py` — Single telemetry module with lazy PostHog import, anonymous installation ID, and batched event capture
+- `tests/test_telemetry.py` — Comprehensive tests for the telemetry module
+- `TELEMETRY.md` — Documentation of exactly what data is transmitted
+
+**Modified:**
+- `src/colonyos/config.py` — Added `PostHogConfig` dataclass, parsing, and serialization
+- `src/colonyos/orchestrator.py` — Telemetry capture calls at run/phase lifecycle points
+- `src/colonyos/cli.py` — `cli_command` capture and `shutdown()` call
+- `src/colonyos/doctor.py` — PostHog API key soft check
+- `pyproject.toml` — Added `posthog` optional dependency group
+- `.github/workflows/ci.yml` — Added telemetry CI job
+
+**PRD:** `cOS_prds/20260319_002326_prd_connect_to_posthog.md`
+**Tasks:** `cOS_tasks/20260319_002326_tasks_connect_to_posthog.md`
+
 ## 20260319_001000 — Fix CI Failures & Interactive Dashboard Control Plane
 
 Fixed CI test failures caused by missing `fastapi`/`uvicorn` in dev dependencies, and
