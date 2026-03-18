@@ -1702,3 +1702,60 @@ class TestShow:
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
             result = runner.invoke(app, ["show", "abc123"])
         assert result.exit_code != 0
+
+
+class TestUI:
+    """Tests for the ``colonyos ui`` command."""
+
+    def test_command_registered(self, runner: CliRunner):
+        result = runner.invoke(app, ["ui", "--help"])
+        assert result.exit_code == 0
+        assert "--port" in result.output
+        assert "--no-open" in result.output
+
+    def test_missing_deps_message(self, runner: CliRunner, tmp_path: Path):
+        """When fastapi/uvicorn not installed, show a helpful message."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "uvicorn":
+                raise ImportError("No module named 'uvicorn'")
+            return real_import(name, *args, **kwargs)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("builtins.__import__", side_effect=mock_import):
+            result = runner.invoke(app, ["ui"])
+        assert result.exit_code != 0
+        assert "pip install colonyos[ui]" in result.output
+
+    def test_default_port(self, runner: CliRunner, tmp_path: Path):
+        """Verify the default port is 7400 and URL is printed."""
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("uvicorn.run") as mock_run, \
+             patch("webbrowser.open"):
+            result = runner.invoke(app, ["ui"])
+        assert result.exit_code == 0
+        assert "127.0.0.1:7400" in result.output
+        mock_run.assert_called_once()
+        call_kwargs = mock_run.call_args
+        assert call_kwargs.kwargs["host"] == "127.0.0.1"
+        assert call_kwargs.kwargs["port"] == 7400
+
+    def test_custom_port(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("uvicorn.run") as mock_run, \
+             patch("webbrowser.open"):
+            result = runner.invoke(app, ["ui", "--port", "9000"])
+        assert result.exit_code == 0
+        assert "127.0.0.1:9000" in result.output
+        assert mock_run.call_args.kwargs["port"] == 9000
+
+    def test_no_open_flag(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("uvicorn.run"), \
+             patch("webbrowser.open") as mock_open:
+            result = runner.invoke(app, ["ui", "--no-open"])
+        assert result.exit_code == 0
+        mock_open.assert_not_called()

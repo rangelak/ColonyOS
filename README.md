@@ -196,6 +196,9 @@ Each reviewer persona runs concurrently with its own expertise and perspective. 
 | `colonyos queue start --max-hours N` | Maximum wall-clock hours for the queue |
 | `colonyos queue status` | Show the current state of the execution queue |
 | `colonyos queue clear` | Remove all pending items from the queue |
+| `colonyos ui` | Launch the local web dashboard (requires `colonyos[ui]`) |
+| `colonyos ui --port N` | Serve dashboard on custom port (default: 7400) |
+| `colonyos ui --no-open` | Start dashboard without auto-opening browser |
 
 ## Configuration
 

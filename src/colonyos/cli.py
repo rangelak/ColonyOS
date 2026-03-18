@@ -2095,3 +2095,46 @@ def ci_fix(
     log.mark_finished()
     _save_run_log(repo_root, log)
     sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# colonyos ui — local web dashboard
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+@click.option("--port", default=7400, type=int, help="Port to serve on (default: 7400)")
+@click.option("--no-open", is_flag=True, help="Don't auto-open browser")
+def ui(port: int, no_open: bool) -> None:
+    """Launch the local web dashboard (requires colonyos[ui])."""
+    try:
+        import uvicorn  # noqa: F811
+    except ImportError:
+        click.echo(
+            "The web dashboard requires extra dependencies.\n"
+            "Install them with:  pip install colonyos[ui]",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        from colonyos.server import create_app
+    except ImportError as exc:
+        click.echo(f"Failed to import server module: {exc}", err=True)
+        sys.exit(1)
+
+    repo_root = _find_repo_root()
+    fast_app = create_app(repo_root)
+
+    url = f"http://127.0.0.1:{port}"
+    click.echo(f"[colonyos] Starting dashboard at {url}")
+
+    if not no_open:
+        import webbrowser
+
+        webbrowser.open(url)
+
+    try:
+        uvicorn.run(fast_app, host="127.0.0.1", port=port, log_level="warning")
+    except KeyboardInterrupt:
+        click.echo("\n[colonyos] Dashboard stopped.")
