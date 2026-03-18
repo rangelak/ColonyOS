@@ -294,12 +294,18 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
         save_config(repo_root, config)
         return _config_to_dict(config)
 
+    @app.get("/api/auth/verify")
+    def verify_auth(request: Request) -> dict[str, str]:
+        """Verify a bearer token is valid. Returns 401 if invalid."""
+        _require_write_auth(request)
+        return {"status": "ok"}
+
     @app.post("/api/runs")
     async def launch_run(request: Request) -> dict[str, Any]:
         """Launch an agent run in a background thread.
 
-        Returns the generated ``run_id`` so the frontend can navigate
-        directly to the new run's detail page (FR-6).
+        Returns a status indicator. The orchestrator assigns the actual
+        ``run_id`` asynchronously — poll GET /api/runs to discover new runs.
         """
         _require_write_auth(request)
 
@@ -311,17 +317,14 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
         if not prompt:
             raise HTTPException(status_code=400, detail="Prompt is required and must be non-empty")
 
-        prompt = sanitize_untrusted_content(prompt)
+        # Do NOT sanitize the prompt here — sanitization should happen at
+        # display time (in _sanitize_run_log), not at execution time, to
+        # avoid silently altering user intent.
 
         # Rate limit: max 1 concurrent run via semaphore
         acquired = active_run_semaphore.acquire(blocking=False)
         if not acquired:
             raise HTTPException(status_code=429, detail="A run is already in progress")
-
-        # Generate a deterministic run_id up front so we can return it
-        # immediately. The orchestrator will use this same id for its log file.
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        run_id = f"run-{ts}-{secrets.token_hex(3)}"
 
         def _run_in_background():
             try:
@@ -334,14 +337,19 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
                     quiet=True,
                 )
             except Exception:
-                logger.exception("Background run failed for %s", run_id)
+                logger.exception("Background run failed")
             finally:
                 active_run_semaphore.release()
 
-        thread = threading.Thread(target=_run_in_background, daemon=True)
-        thread.start()
+        try:
+            thread = threading.Thread(target=_run_in_background, daemon=True)
+            thread.start()
+        except Exception:
+            # Release semaphore if thread creation/start fails
+            active_run_semaphore.release()
+            raise HTTPException(status_code=500, detail="Failed to start background run")
 
-        return {"status": "launched", "run_id": run_id}
+        return {"status": "launched"}
 
     @app.get("/api/artifacts/{path:path}")
     def get_artifact(path: str) -> dict[str, Any]:
@@ -373,7 +381,7 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
         content = file_path.read_text(encoding="utf-8")
         return {
             "path": path,
-            "content": content,
+            "content": sanitize_untrusted_content(content),
             "filename": file_path.name,
         }
 

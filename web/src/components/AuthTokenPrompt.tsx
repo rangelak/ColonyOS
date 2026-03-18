@@ -2,17 +2,15 @@ import { useState, useEffect } from "react";
 import { getAuthToken, setAuthToken, fetchHealth } from "../api";
 
 /**
- * Verify a token by making a test GET to /api/config with the Authorization
- * header. A 401 means the token is invalid; any other response means it works.
+ * Verify a token by making a GET to /api/auth/verify which requires auth.
+ * A 200 means the token is valid; 401 means invalid.
  */
 async function verifyToken(token: string): Promise<boolean> {
   try {
-    const resp = await fetch("/api/config", {
+    const resp = await fetch("/api/auth/verify", {
       headers: { Authorization: `Bearer ${token}` },
     });
-    // 401 means invalid token; anything else means the token is accepted
-    // (even 403 would mean write-mode is off, not a bad token)
-    return resp.status !== 401;
+    return resp.status === 200;
   } catch {
     // Network error — assume valid to avoid blocking the user
     return true;

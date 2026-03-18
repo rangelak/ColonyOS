@@ -9,42 +9,13 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-
-@pytest.fixture
-def tmp_repo(tmp_path: Path) -> Path:
-    """Create a temporary repo root with .colonyos/runs/ directory."""
-    runs_dir = tmp_path / ".colonyos" / "runs"
-    runs_dir.mkdir(parents=True)
-    return tmp_path
+from conftest import write_config
 
 
 @pytest.fixture
 def write_env(monkeypatch):
     """Enable write mode for tests."""
     monkeypatch.setenv("COLONYOS_WRITE_ENABLED", "1")
-
-
-def _write_config(repo_root: Path) -> None:
-    """Write a minimal config.yaml."""
-    config_dir = repo_root / ".colonyos"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config = {
-        "model": "sonnet",
-        "project": {"name": "test-project", "description": "A test", "stack": "python"},
-        "personas": [
-            {
-                "role": "Security Engineer",
-                "expertise": "AppSec",
-                "perspective": "defensive",
-                "reviewer": True,
-            }
-        ],
-        "budget": {"per_phase": 5.0, "per_run": 15.0},
-        "phases": {"plan": True, "implement": True, "review": True, "deliver": True},
-    }
-    (config_dir / "config.yaml").write_text(
-        yaml.dump(config, default_flow_style=False), encoding="utf-8"
-    )
 
 
 def _create_app_with_token(repo_root: Path):
@@ -78,13 +49,13 @@ class TestAuthRequired:
 
     def test_put_config_no_auth(self, tmp_repo: Path, write_env):
         client, token = _create_app_with_token(tmp_repo)
-        _write_config(tmp_repo)
+        write_config(tmp_repo)
         resp = client.put("/api/config", json={"model": "opus"})
         assert resp.status_code == 401
 
     def test_put_config_wrong_token(self, tmp_repo: Path, write_env):
         client, token = _create_app_with_token(tmp_repo)
-        _write_config(tmp_repo)
+        write_config(tmp_repo)
         resp = client.put(
             "/api/config",
             json={"model": "opus"},
@@ -94,7 +65,7 @@ class TestAuthRequired:
 
     def test_put_config_valid_token(self, tmp_repo: Path, write_env):
         client, token = _create_app_with_token(tmp_repo)
-        _write_config(tmp_repo)
+        write_config(tmp_repo)
         resp = client.put(
             "/api/config",
             json={"model": "opus"},
@@ -114,7 +85,7 @@ class TestPutConfig:
 
     def test_update_model(self, tmp_repo: Path, write_env):
         client, token = _create_app_with_token(tmp_repo)
-        _write_config(tmp_repo)
+        write_config(tmp_repo)
         resp = client.put(
             "/api/config",
             json={"model": "opus"},
@@ -131,7 +102,7 @@ class TestPutConfig:
 
     def test_update_budget(self, tmp_repo: Path, write_env):
         client, token = _create_app_with_token(tmp_repo)
-        _write_config(tmp_repo)
+        write_config(tmp_repo)
         resp = client.put(
             "/api/config",
             json={"budget": {"per_phase": 10.0, "per_run": 30.0}},
@@ -143,7 +114,7 @@ class TestPutConfig:
 
     def test_reject_sensitive_fields(self, tmp_repo: Path, write_env):
         client, token = _create_app_with_token(tmp_repo)
-        _write_config(tmp_repo)
+        write_config(tmp_repo)
         resp = client.put(
             "/api/config",
             json={"slack": {"enabled": True}},
@@ -154,7 +125,7 @@ class TestPutConfig:
 
     def test_reject_ceo_persona(self, tmp_repo: Path, write_env):
         client, token = _create_app_with_token(tmp_repo)
-        _write_config(tmp_repo)
+        write_config(tmp_repo)
         resp = client.put(
             "/api/config",
             json={"ceo_persona": {"role": "CEO", "expertise": "leadership", "perspective": "strategic", "reviewer": False}},
@@ -168,7 +139,7 @@ class TestPutPersonas:
 
     def test_update_personas(self, tmp_repo: Path, write_env):
         client, token = _create_app_with_token(tmp_repo)
-        _write_config(tmp_repo)
+        write_config(tmp_repo)
         new_personas = [
             {"role": "UX Designer", "expertise": "UI/UX", "perspective": "user-centric", "reviewer": True},
             {"role": "Backend Dev", "expertise": "APIs", "perspective": "scalability", "reviewer": False},
@@ -185,7 +156,7 @@ class TestPutPersonas:
 
     def test_reject_invalid_persona(self, tmp_repo: Path, write_env):
         client, token = _create_app_with_token(tmp_repo)
-        _write_config(tmp_repo)
+        write_config(tmp_repo)
         # Missing required field 'perspective'
         resp = client.put(
             "/api/config/personas",
@@ -200,7 +171,7 @@ class TestPostRuns:
 
     def test_reject_empty_prompt(self, tmp_repo: Path, write_env):
         client, token = _create_app_with_token(tmp_repo)
-        _write_config(tmp_repo)
+        write_config(tmp_repo)
         resp = client.post(
             "/api/runs",
             json={"prompt": ""},
@@ -219,7 +190,7 @@ class TestPostRuns:
 
     def test_launch_run(self, tmp_repo: Path, write_env):
         client, token = _create_app_with_token(tmp_repo)
-        _write_config(tmp_repo)
+        write_config(tmp_repo)
         with patch("colonyos.server.threading.Thread") as mock_thread:
             mock_thread.return_value.start.return_value = None
             resp = client.post(
@@ -230,13 +201,13 @@ class TestPostRuns:
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "launched"
-        assert "run_id" in data
-        assert data["run_id"].startswith("run-")
+        # run_id is not returned — the orchestrator assigns it asynchronously
+        assert "run_id" not in data
 
     def test_launch_run_rate_limit(self, tmp_repo: Path, write_env):
         """Semaphore prevents concurrent runs."""
         client, token = _create_app_with_token(tmp_repo)
-        _write_config(tmp_repo)
+        write_config(tmp_repo)
         # Acquire the semaphore externally to simulate an in-progress run
         from colonyos.server import create_app
         app, token2 = create_app(tmp_repo)
@@ -340,3 +311,78 @@ class TestGetReviews:
         resp = client.get("/api/reviews")
         assert resp.status_code == 200
         assert resp.json() == []
+
+
+class TestAuthVerify:
+    """Test GET /api/auth/verify endpoint."""
+
+    def test_valid_token(self, tmp_repo: Path, write_env):
+        client, token = _create_app_with_token(tmp_repo)
+        resp = client.get(
+            "/api/auth/verify",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+    def test_invalid_token(self, tmp_repo: Path, write_env):
+        client, _ = _create_app_with_token(tmp_repo)
+        resp = client.get(
+            "/api/auth/verify",
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+        assert resp.status_code == 401
+
+    def test_no_token(self, tmp_repo: Path, write_env):
+        client, _ = _create_app_with_token(tmp_repo)
+        resp = client.get("/api/auth/verify")
+        assert resp.status_code == 401
+
+    def test_write_disabled(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.delenv("COLONYOS_WRITE_ENABLED", raising=False)
+        client, _ = _create_app_with_token(tmp_repo)
+        resp = client.get("/api/auth/verify")
+        assert resp.status_code == 403
+
+
+class TestArtifactSanitization:
+    """Verify artifact content is sanitized before being returned."""
+
+    def test_html_tags_stripped(self, tmp_repo: Path, write_env):
+        client, _ = _create_app_with_token(tmp_repo)
+        prd_dir = tmp_repo / "cOS_prds"
+        prd_dir.mkdir()
+        (prd_dir / "xss.md").write_text(
+            "Hello <script>alert(1)</script> world", encoding="utf-8"
+        )
+        resp = client.get("/api/artifacts/cOS_prds/xss.md")
+        assert resp.status_code == 200
+        content = resp.json()["content"]
+        assert "<script>" not in content
+        assert "Hello" in content
+        assert "world" in content
+
+
+class TestSemaphoreSafety:
+    """Verify semaphore is released if Thread creation fails."""
+
+    def test_semaphore_released_on_thread_error(self, tmp_repo: Path, write_env):
+        client, token = _create_app_with_token(tmp_repo)
+        write_config(tmp_repo)
+        with patch("colonyos.server.threading.Thread", side_effect=RuntimeError("boom")):
+            resp = client.post(
+                "/api/runs",
+                json={"prompt": "test prompt"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 500
+
+        # Semaphore should be released — a subsequent request should not get 429
+        with patch("colonyos.server.threading.Thread") as mock_thread:
+            mock_thread.return_value.start.return_value = None
+            resp2 = client.post(
+                "/api/runs",
+                json={"prompt": "test prompt 2"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp2.status_code == 200

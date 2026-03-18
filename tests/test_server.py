@@ -8,13 +8,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-
-@pytest.fixture
-def tmp_repo(tmp_path: Path) -> Path:
-    """Create a temporary repo root with .colonyos/runs/ directory."""
-    runs_dir = tmp_path / ".colonyos" / "runs"
-    runs_dir.mkdir(parents=True)
-    return tmp_path
+from conftest import write_config
 
 
 @pytest.fixture
@@ -61,31 +55,6 @@ def _write_queue(repo_root: Path, queue_data: dict) -> None:
     """Write a queue state JSON file."""
     (repo_root / ".colonyos" / "queue.json").write_text(
         json.dumps(queue_data), encoding="utf-8"
-    )
-
-
-def _write_config(repo_root: Path) -> None:
-    """Write a minimal config.yaml."""
-    import yaml
-
-    config_dir = repo_root / ".colonyos"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config = {
-        "model": "sonnet",
-        "project": {"name": "test-project", "description": "A test", "stack": "python"},
-        "personas": [
-            {
-                "role": "Security Engineer",
-                "expertise": "AppSec",
-                "perspective": "defensive",
-                "reviewer": True,
-            }
-        ],
-        "budget": {"per_phase": 5.0, "per_run": 15.0},
-        "phases": {"plan": True, "implement": True, "review": True, "deliver": True},
-    }
-    (config_dir / "config.yaml").write_text(
-        yaml.dump(config, default_flow_style=False), encoding="utf-8"
     )
 
 
@@ -230,7 +199,7 @@ class TestConfigEndpoint:
         from colonyos.server import create_app
         from starlette.testclient import TestClient
 
-        _write_config(tmp_repo)
+        write_config(tmp_repo)
 
         app, _ = create_app(tmp_repo)
         client = TestClient(app)

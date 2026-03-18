@@ -31,7 +31,7 @@ slack = ["slack-bolt[socket-mode]>=1.18"]
 ui = ["fastapi>=0.100", "uvicorn>=0.20"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 testpaths = ["tests"]
 
 [tool.setuptools_scm]
