@@ -5,6 +5,7 @@ Extracted into its own module to avoid circular imports between
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -90,5 +91,31 @@ def run_doctor_checks(repo_root: Path) -> list[tuple[str, bool, str]]:
             False,
             "No config found. Run `colonyos init` to set up.",
         ))
+
+    # 6. Slack tokens (soft check — only when slack is enabled)
+    try:
+        from colonyos.config import load_config
+
+        slack_config = load_config(repo_root).slack
+    except Exception:
+        slack_config = None
+
+    if slack_config is not None and slack_config.enabled:
+        bot_token = os.environ.get("COLONYOS_SLACK_BOT_TOKEN", "").strip()
+        app_token = os.environ.get("COLONYOS_SLACK_APP_TOKEN", "").strip()
+        if bot_token and app_token:
+            results.append(("Slack tokens", True, ""))
+        else:
+            missing = []
+            if not bot_token:
+                missing.append("COLONYOS_SLACK_BOT_TOKEN")
+            if not app_token:
+                missing.append("COLONYOS_SLACK_APP_TOKEN")
+            results.append((
+                "Slack tokens",
+                False,
+                f"Missing environment variables: {', '.join(missing)}. "
+                "Set them before running `colonyos watch`.",
+            ))
 
     return results

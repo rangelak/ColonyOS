@@ -62,6 +62,16 @@ class LearningsConfig:
 
 
 @dataclass
+class SlackConfig:
+    enabled: bool = False
+    channels: list[str] = field(default_factory=list)
+    trigger_mode: str = "mention"
+    auto_approve: bool = False
+    max_runs_per_hour: int = 3
+    allowed_user_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ColonyConfig:
     project: ProjectInfo | None = None
     personas: list[Persona] = field(default_factory=list)
@@ -79,6 +89,7 @@ class ColonyConfig:
     max_fix_iterations: int = 2
     auto_approve: bool = False
     learnings: LearningsConfig = field(default_factory=LearningsConfig)
+    slack: SlackConfig = field(default_factory=SlackConfig)
 
     def get_model(self, phase: Phase) -> str:
         """Return the model for a phase, falling back to the global default."""
@@ -116,6 +127,29 @@ def _parse_project(raw: dict) -> ProjectInfo | None:
         name=raw.get("name", ""),
         description=raw.get("description", ""),
         stack=raw.get("stack", ""),
+    )
+
+
+_VALID_TRIGGER_MODES: frozenset[str] = frozenset({"mention", "reaction", "slash_command"})
+
+
+def _parse_slack_config(raw: dict) -> SlackConfig:
+    """Parse the ``slack`` section from config.yaml."""
+    if not raw:
+        return SlackConfig()
+    trigger_mode = raw.get("trigger_mode", "mention")
+    if trigger_mode not in _VALID_TRIGGER_MODES:
+        raise ValueError(
+            f"Invalid slack trigger_mode '{trigger_mode}'. "
+            f"Valid options: {sorted(_VALID_TRIGGER_MODES)}"
+        )
+    return SlackConfig(
+        enabled=bool(raw.get("enabled", False)),
+        channels=list(raw.get("channels", [])),
+        trigger_mode=trigger_mode,
+        auto_approve=bool(raw.get("auto_approve", False)),
+        max_runs_per_hour=int(raw.get("max_runs_per_hour", 3)),
+        allowed_user_ids=list(raw.get("allowed_user_ids", [])),
     )
 
 
@@ -195,6 +229,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
             enabled=bool(raw.get("learnings", {}).get("enabled", DEFAULTS["learnings"]["enabled"])),
             max_entries=int(raw.get("learnings", {}).get("max_entries", DEFAULTS["learnings"]["max_entries"])),
         ),
+        slack=_parse_slack_config(raw.get("slack", {})),
     )
 
 
@@ -249,6 +284,16 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         "enabled": config.learnings.enabled,
         "max_entries": config.learnings.max_entries,
     }
+
+    if config.slack.enabled or config.slack.channels:
+        data["slack"] = {
+            "enabled": config.slack.enabled,
+            "channels": list(config.slack.channels),
+            "trigger_mode": config.slack.trigger_mode,
+            "auto_approve": config.slack.auto_approve,
+            "max_runs_per_hour": config.slack.max_runs_per_hour,
+            "allowed_user_ids": list(config.slack.allowed_user_ids),
+        }
 
     if config.ceo_persona:
         data["ceo_persona"] = {

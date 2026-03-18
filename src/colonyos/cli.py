@@ -943,6 +943,24 @@ def status(limit: int) -> None:
             except (json.JSONDecodeError, KeyError):
                 click.echo(f"  {log_file.name}: (corrupted)")
 
+    # --- Slack watch state summaries ---
+    watch_files = sorted(runs_dir.glob("watch_state_*.json"), reverse=True)
+    if watch_files:
+        click.echo("=== Slack Watch Sessions ===\n")
+        for wf in watch_files[:3]:
+            try:
+                data = json.loads(wf.read_text(encoding="utf-8"))
+                wid = data.get("watch_id", "?")
+                runs_count = data.get("runs_triggered", 0)
+                cost = data.get("aggregate_cost_usd", 0)
+                click.echo(
+                    f"  Watch {wid}: {runs_count} runs triggered, "
+                    f"${cost:.4f} spent"
+                )
+            except (json.JSONDecodeError, KeyError):
+                click.echo(f"  {wf.name}: (corrupted)")
+        click.echo()
+
     # --- Learnings ledger ---
     from colonyos.learnings import count_learnings, learnings_path as _learnings_path
 
@@ -981,3 +999,218 @@ def stats(last: int | None, phase: str | None) -> None:
     console = RichConsole()
     result = compute_stats(runs, phase_filter=phase)
     render_dashboard(console, result)
+
+
+# ---------------------------------------------------------------------------
+# Watch command (Slack integration)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+@click.option("--max-hours", type=float, default=None, help="Maximum wall-clock hours for the watcher.")
+@click.option("--max-budget", type=float, default=None, help="Maximum aggregate USD spend.")
+@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
+@click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
+@click.option("--dry-run", is_flag=True, help="Log triggers without executing pipeline.")
+def watch(
+    max_hours: float | None,
+    max_budget: float | None,
+    verbose: bool,
+    quiet: bool,
+    dry_run: bool,
+) -> None:
+    """Watch Slack channels and trigger pipeline runs from messages."""
+    import signal
+    import threading
+
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+
+    if not config.project:
+        click.echo("No ColonyOS config found. Run `colonyos init` first.", err=True)
+        sys.exit(1)
+
+    if not config.slack.enabled:
+        click.echo(
+            "Slack integration is not enabled. "
+            "Set `slack.enabled: true` in .colonyos/config.yaml.",
+            err=True,
+        )
+        sys.exit(1)
+
+    if not config.slack.channels:
+        click.echo(
+            "No Slack channels configured. "
+            "Add channels to `slack.channels` in .colonyos/config.yaml.",
+            err=True,
+        )
+        sys.exit(1)
+
+    from colonyos.slack import (
+        SlackUI,
+        SlackWatchState,
+        check_rate_limit,
+        create_slack_app,
+        extract_prompt_from_mention,
+        format_slack_as_prompt,
+        increment_hourly_count,
+        post_acknowledgment,
+        post_run_summary,
+        react_to_message,
+        save_watch_state,
+        should_process_message,
+        start_socket_mode,
+    )
+
+    try:
+        bolt_app = create_slack_app(config.slack)
+    except (ImportError, RuntimeError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    effective_max_hours = max_hours if max_hours is not None else config.budget.max_duration_hours
+    effective_max_budget = max_budget if max_budget is not None else config.budget.max_total_usd
+
+    watch_id = f"watch-{generate_timestamp()}"
+    watch_state = SlackWatchState(watch_id=watch_id)
+
+    # Retrieve the bot user ID for mention detection
+    try:
+        auth_response = bolt_app.client.auth_test()
+        bot_user_id = auth_response["user_id"]
+    except Exception as exc:
+        click.echo(f"Failed to authenticate with Slack: {exc}", err=True)
+        sys.exit(1)
+
+    shutdown_event = threading.Event()
+
+    def _handle_mention(event: dict, client: object) -> None:
+        """Handle app_mention events from Slack."""
+        if not should_process_message(event, config.slack, bot_user_id):
+            return
+
+        channel = event.get("channel", "")
+        ts = event.get("ts", "")
+        user = event.get("user", "unknown")
+
+        if watch_state.is_processed(channel, ts):
+            logger.info("Message %s:%s already processed, skipping", channel, ts)
+            return
+
+        if not check_rate_limit(watch_state, config.slack):
+            logger.warning("Rate limit reached, skipping message %s:%s", channel, ts)
+            try:
+                client.chat_postMessage(  # type: ignore[union-attr]
+                    channel=channel,
+                    thread_ts=ts,
+                    text=":warning: Rate limit reached. Try again later.",
+                )
+            except Exception:
+                pass
+            return
+
+        raw_text = event.get("text", "")
+        prompt_text = extract_prompt_from_mention(raw_text, bot_user_id)
+        if not prompt_text.strip():
+            return
+
+        if dry_run:
+            click.echo(f"[dry-run] Would trigger pipeline for: {prompt_text[:100]}")
+            return
+
+        # Acknowledge
+        try:
+            react_to_message(client, channel, ts, "eyes")  # type: ignore[arg-type]
+        except Exception:
+            pass
+
+        formatted_prompt = format_slack_as_prompt(prompt_text, channel, user)
+
+        # Run pipeline in a background thread so the Bolt handler returns quickly
+        def _run_pipeline() -> None:
+            run_id = f"slack-{generate_timestamp()}"
+            watch_state.mark_processed(channel, ts, run_id)
+            increment_hourly_count(watch_state)
+            watch_state.runs_triggered += 1
+
+            try:
+                if not config.slack.auto_approve:
+                    try:
+                        client.chat_postMessage(  # type: ignore[union-attr]
+                            channel=channel,
+                            thread_ts=ts,
+                            text=":question: Awaiting approval — react with :thumbsup: to proceed.",
+                        )
+                    except Exception:
+                        pass
+
+                post_acknowledgment(client, channel, ts, prompt_text)  # type: ignore[arg-type]
+
+                _touch_heartbeat(repo_root)
+                log = run_orchestrator(
+                    formatted_prompt,
+                    repo_root=repo_root,
+                    config=config,
+                    verbose=verbose,
+                    quiet=quiet,
+                )
+                watch_state.aggregate_cost_usd += log.total_cost_usd
+                save_watch_state(repo_root, watch_state)
+
+                emoji = "white_check_mark" if log.status.value == "completed" else "x"
+                try:
+                    react_to_message(client, channel, ts, emoji)  # type: ignore[arg-type]
+                except Exception:
+                    pass
+
+                post_run_summary(
+                    client,  # type: ignore[arg-type]
+                    channel,
+                    ts,
+                    status=log.status.value,
+                    total_cost=log.total_cost_usd,
+                    branch_name=log.branch_name,
+                )
+            except Exception:
+                logger.exception("Pipeline run failed for Slack message %s:%s", channel, ts)
+                try:
+                    react_to_message(client, channel, ts, "x")  # type: ignore[arg-type]
+                except Exception:
+                    pass
+                save_watch_state(repo_root, watch_state)
+
+        thread = threading.Thread(target=_run_pipeline, daemon=True)
+        thread.start()
+
+    bolt_app.event("app_mention")(_handle_mention)
+
+    # Graceful shutdown
+    def _signal_handler(signum: int, frame: object) -> None:
+        click.echo("\nShutting down Slack watcher...")
+        shutdown_event.set()
+        save_watch_state(repo_root, watch_state)
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+    click.echo(f"ColonyOS Slack watcher started (ID: {watch_id})")
+    click.echo(f"Monitoring channels: {', '.join(config.slack.channels)}")
+    click.echo(f"Trigger mode: {config.slack.trigger_mode}")
+    if dry_run:
+        click.echo("DRY RUN MODE — triggers will be logged but not executed")
+
+    save_watch_state(repo_root, watch_state)
+
+    try:
+        handler = start_socket_mode(bolt_app)
+        handler.start()
+    except ImportError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        click.echo("\nShutting down Slack watcher...")
+        save_watch_state(repo_root, watch_state)
+    except Exception as exc:
+        click.echo(f"Slack watcher error: {exc}", err=True)
+        save_watch_state(repo_root, watch_state)
+        sys.exit(1)

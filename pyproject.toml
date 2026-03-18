@@ -26,6 +26,7 @@ colonyos = ["instructions/*.md"]
 
 [project.optional-dependencies]
 dev = ["pre-commit>=4.0", "pytest>=8.0"]
+slack = ["slack-bolt[socket-mode]>=1.18"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
