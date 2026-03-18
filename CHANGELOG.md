@@ -1,5 +1,31 @@
 # Changelog
 
+## 20260319_001000 — Fix CI Failures & Interactive Dashboard Control Plane
+
+Fixed CI test failures caused by missing `fastapi`/`uvicorn` in dev dependencies, and
+transformed the read-only web dashboard into a full interactive control plane with write
+API endpoints, inline config/persona editing, run launching, artifact previews, and
+frontend test infrastructure (Vitest + React Testing Library).
+
+**Created:**
+- `web/src/components/ArtifactPreview.tsx`, `AuthTokenPrompt.tsx`, `InlineEdit.tsx`, `RunLauncher.tsx` — Interactive UI components
+- `web/src/pages/Proposals.tsx`, `Reviews.tsx` — New dashboard pages for browsing artifacts
+- `web/src/__tests__/` — Component, page, and API client tests (Vitest + RTL)
+- `web/vitest.config.ts`, `web/src/setupTests.ts` — Frontend test infrastructure
+- `tests/test_server_write.py` — Write API endpoint tests
+- `tests/conftest.py` — Shared test fixtures
+
+**Modified:**
+- `pyproject.toml` — Added UI deps (`fastapi`, `uvicorn`) to dev extras for CI
+- `.github/workflows/ci.yml` — Added `web-build` CI job
+- `src/colonyos/server.py` — Write API endpoints (PUT config, POST runs, GET artifacts) with bearer token auth
+- `web/src/pages/Config.tsx`, `Dashboard.tsx`, `RunDetail.tsx` — Transformed to interactive with inline editing
+- `web/src/api.ts`, `web/src/types.ts` — Extended API client and type definitions
+- `web/package.json` — Added Vitest, RTL, and test script
+
+**PRD:** `cOS_prds/20260318_233254_prd_the_ui_tests_are_failing_on_the_ci_there_is_no_module_found_fastapi_and_there_ar.md`
+**Tasks:** `cOS_tasks/20260318_233254_tasks_the_ui_tests_are_failing_on_the_ci_there_is_no_module_found_fastapi_and_there_ar.md`
+
 ## 20260318_181500 — ColonyOS Web Dashboard (`colonyos ui`)
 
 Added a read-only web dashboard launched via `colonyos ui` that surfaces run history,
