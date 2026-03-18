@@ -20,6 +20,7 @@ from colonyos.telemetry import (
     capture_run_failed,
     capture_run_started,
     init_telemetry,
+    is_initialized,
     shutdown,
 )
 
@@ -71,7 +72,17 @@ class TestAnonymousIdGeneration:
         id1 = _generate_anonymous_id(config_dir)
         id2 = _generate_anonymous_id(config_dir)
         assert id1 == id2
-        assert len(id1) == 64  # SHA-256 hex digest
+        assert len(id1) == 36  # UUID4 format (xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx)
+
+    def test_generates_random_uuid(self, tmp_path: Path):
+        """IDs from different directories should differ (random UUID, not deterministic)."""
+        dir1 = tmp_path / "a"
+        dir1.mkdir()
+        dir2 = tmp_path / "b"
+        dir2.mkdir()
+        id1 = _generate_anonymous_id(dir1)
+        id2 = _generate_anonymous_id(dir2)
+        assert id1 != id2
 
     def test_persists_to_file(self, tmp_path: Path):
         config_dir = tmp_path / ".colonyos"
@@ -114,23 +125,54 @@ class TestInitTelemetry:
     def test_enabled_with_key_and_sdk(self, tmp_path: Path):
         import colonyos.telemetry as mod
 
-        mock_posthog = MagicMock()
+        mock_client = MagicMock()
+        mock_posthog_module = MagicMock()
+        mock_posthog_module.Posthog.return_value = mock_client
         with patch.dict(os.environ, {"COLONYOS_POSTHOG_API_KEY": "phc_test123"}):
-            with patch.dict("sys.modules", {"posthog": mock_posthog}):
+            with patch.dict("sys.modules", {"posthog": mock_posthog_module}):
                 init_telemetry(PostHogConfig(enabled=True), tmp_path / ".colonyos")
         assert mod._enabled is True
-        assert mod._posthog_client is mock_posthog
-        assert mock_posthog.project_api_key == "phc_test123"
+        assert mod._posthog_client is mock_client
+        mock_posthog_module.Posthog.assert_called_once_with(
+            "phc_test123", host="https://us.i.posthog.com"
+        )
 
     def test_custom_host(self, tmp_path: Path):
-        mock_posthog = MagicMock()
+        import colonyos.telemetry as mod
+
+        mock_client = MagicMock()
+        mock_posthog_module = MagicMock()
+        mock_posthog_module.Posthog.return_value = mock_client
         with patch.dict(os.environ, {
             "COLONYOS_POSTHOG_API_KEY": "phc_test123",
             "COLONYOS_POSTHOG_HOST": "https://custom.posthog.com",
         }):
-            with patch.dict("sys.modules", {"posthog": mock_posthog}):
+            with patch.dict("sys.modules", {"posthog": mock_posthog_module}):
                 init_telemetry(PostHogConfig(enabled=True), tmp_path)
-        assert mock_posthog.host == "https://custom.posthog.com"
+        mock_posthog_module.Posthog.assert_called_once_with(
+            "phc_test123", host="https://custom.posthog.com"
+        )
+
+    def test_skips_reinit_when_already_enabled(self, tmp_path: Path):
+        """init_telemetry is a no-op when already initialized."""
+        import colonyos.telemetry as mod
+
+        mock_client = MagicMock()
+        mod._posthog_client = mock_client
+        mod._enabled = True
+        mod._distinct_id = "original-id"
+
+        init_telemetry(PostHogConfig(enabled=True), tmp_path)
+        # State should be unchanged
+        assert mod._distinct_id == "original-id"
+        assert mod._posthog_client is mock_client
+
+    def test_is_initialized(self, tmp_path: Path):
+        import colonyos.telemetry as mod
+
+        assert is_initialized() is False
+        mod._enabled = True
+        assert is_initialized() is True
 
 
 class TestCapture:
@@ -209,6 +251,18 @@ class TestShutdown:
 
         # Should not raise
         shutdown()
+
+    def test_idempotent_double_shutdown(self):
+        """Second shutdown call should be a silent no-op."""
+        import colonyos.telemetry as mod
+
+        mock_posthog = MagicMock()
+        mod._posthog_client = mock_posthog
+        mod._enabled = True
+
+        shutdown()
+        shutdown()  # second call — should not raise or call SDK again
+        mock_posthog.shutdown.assert_called_once()
 
 
 class TestConvenienceFunctions:

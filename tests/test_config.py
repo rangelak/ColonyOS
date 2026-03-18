@@ -750,13 +750,14 @@ class TestPostHogConfig:
         loaded = load_config(tmp_repo)
         assert loaded.posthog.enabled is True
 
-    def test_not_serialized_when_disabled(self, tmp_repo: Path):
-        """PostHog section is omitted from YAML when disabled."""
+    def test_serialized_when_disabled(self, tmp_repo: Path):
+        """PostHog section is always present in YAML, even when disabled."""
         original = ColonyConfig(posthog=PostHogConfig(enabled=False))
         save_config(tmp_repo, original)
         config_path = tmp_repo / ".colonyos" / "config.yaml"
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert "posthog" not in raw
+        assert "posthog" in raw
+        assert raw["posthog"]["enabled"] is False
 
     def test_defaults_dict_has_posthog(self):
         assert DEFAULTS["posthog"]["enabled"] is False

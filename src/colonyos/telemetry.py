@@ -12,10 +12,9 @@ Environment variables
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
-import platform
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -67,9 +66,10 @@ _distinct_id: str = ""
 def _generate_anonymous_id(config_dir: Path) -> str:
     """Generate or load a stable anonymous installation ID.
 
-    The ID is a SHA-256 hash of a random UUID, persisted in
-    ``.colonyos/telemetry_id`` so it remains stable across runs
-    but contains no personally identifiable information.
+    The ID is a random UUID persisted in ``.colonyos/telemetry_id`` so it
+    remains stable across runs but contains no personally identifiable
+    information.  Uses atomic write (temp file + rename) to avoid TOCTOU
+    races when concurrent processes first create the file.
     """
     telemetry_id_path = config_dir / "telemetry_id"
     if telemetry_id_path.exists():
@@ -77,14 +77,29 @@ def _generate_anonymous_id(config_dir: Path) -> str:
         if stored:
             return stored
 
-    # Generate from machine identifier + config dir path for stability,
-    # but hash it to anonymize.
-    raw = f"{platform.node()}:{config_dir}"
-    anonymous_id = hashlib.sha256(raw.encode()).hexdigest()
+    # Generate a fully random UUID — no machine identifiers involved.
+    anonymous_id = str(uuid.uuid4())
 
     try:
         telemetry_id_path.parent.mkdir(parents=True, exist_ok=True)
-        telemetry_id_path.write_text(anonymous_id + "\n", encoding="utf-8")
+        # Atomic write: write to temp file then rename to avoid races.
+        fd, tmp = tempfile.mkstemp(
+            dir=str(telemetry_id_path.parent), prefix=".telemetry_id_"
+        )
+        closed = False
+        try:
+            os.write(fd, (anonymous_id + "\n").encode())
+            os.close(fd)
+            closed = True
+            os.rename(tmp, str(telemetry_id_path))
+        except BaseException:
+            if not closed:
+                os.close(fd)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
     except OSError:
         logger.debug("Failed to persist telemetry ID to %s", telemetry_id_path)
 
@@ -96,6 +111,11 @@ def _filter_properties(properties: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in properties.items() if k in _ALLOWED_PROPERTIES}
 
 
+def is_initialized() -> bool:
+    """Return True if telemetry has already been initialized."""
+    return _enabled
+
+
 def init_telemetry(config: PostHogConfig, config_dir: Path | None = None) -> None:
     """Initialize the telemetry subsystem.
 
@@ -103,8 +123,15 @@ def init_telemetry(config: PostHogConfig, config_dir: Path | None = None) -> Non
     optionally the host from ``COLONYOS_POSTHOG_HOST``.  If the SDK is
     not installed or the key is missing, telemetry silently remains
     disabled.
+
+    If telemetry is already initialized, this function is a no-op to
+    avoid overwriting state (e.g. ``_distinct_id``) mid-run.
     """
     global _posthog_client, _enabled, _distinct_id  # noqa: PLW0603
+
+    # Guard: don't re-initialize if already active.
+    if _enabled:
+        return
 
     _enabled = False
     _posthog_client = None
@@ -118,7 +145,7 @@ def init_telemetry(config: PostHogConfig, config_dir: Path | None = None) -> Non
         return
 
     try:
-        import posthog as posthog_sdk
+        from posthog import Posthog
     except ImportError:
         logger.debug(
             "PostHog telemetry enabled but posthog SDK not installed. "
@@ -126,20 +153,18 @@ def init_telemetry(config: PostHogConfig, config_dir: Path | None = None) -> Non
         )
         return
 
-    host = os.environ.get("COLONYOS_POSTHOG_HOST", "").strip()
-    if host:
-        posthog_sdk.host = host
-    posthog_sdk.project_api_key = api_key
+    host = os.environ.get("COLONYOS_POSTHOG_HOST", "").strip() or "https://us.i.posthog.com"
 
-    _posthog_client = posthog_sdk
+    # Use an isolated Client instance rather than mutating the posthog
+    # module's global state, to avoid leaking config to/from other code
+    # that may import posthog.
+    _posthog_client = Posthog(api_key, host=host)
     _enabled = True
 
     if config_dir is not None:
         _distinct_id = _generate_anonymous_id(config_dir)
     else:
-        _distinct_id = hashlib.sha256(
-            f"{platform.node()}:unknown".encode()
-        ).hexdigest()
+        _distinct_id = str(uuid.uuid4())
 
     logger.debug("PostHog telemetry initialized (distinct_id=%s...)", _distinct_id[:12])
 
@@ -167,10 +192,18 @@ def capture(event_name: str, properties: dict[str, Any] | None = None) -> None:
 def shutdown() -> None:
     """Flush the PostHog event queue and shut down.
 
-    Called once at CLI exit.  Silently no-ops if telemetry is not active.
+    Idempotent: subsequent calls after the first are silent no-ops,
+    so it is safe to call from both ``atexit`` handlers and explicit
+    orchestrator exit paths.
     """
+    global _enabled  # noqa: PLW0603
+
     if not _enabled or _posthog_client is None:
         return
+
+    # Mark as disabled *before* calling SDK shutdown so that a second
+    # call (e.g. from atexit) is a no-op.
+    _enabled = False
 
     try:
         _posthog_client.shutdown()

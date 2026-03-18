@@ -1429,7 +1429,8 @@ def run(
     # --- Telemetry ---
     from colonyos import telemetry
 
-    telemetry.init_telemetry(config.posthog, config_dir_path(repo_root))
+    if not telemetry.is_initialized():
+        telemetry.init_telemetry(config.posthog, config_dir_path(repo_root))
     telemetry.capture_run_started(
         model=config.model,
         phase_config={
@@ -1616,6 +1617,13 @@ def run(
                         subdirectory=artifact.subdirectory,
                     )
                     log.phases.append(result)
+                    telemetry.capture_phase_completed(
+                        phase_name="review",
+                        model=config.get_model(Phase.REVIEW),
+                        cost_usd=result.cost_usd or 0.0,
+                        duration_ms=result.duration_ms or 0,
+                        success=result.success,
+                    )
 
                 last_findings = _collect_review_findings(results, reviewers)
 
@@ -1660,7 +1668,18 @@ def run(
                         ui=fix_ui,
                     )
                     log.phases.append(fix_result)
+                    telemetry.capture_phase_completed(
+                        phase_name="fix",
+                        model=config.get_model(Phase.FIX),
+                        cost_usd=fix_result.cost_usd or 0.0,
+                        duration_ms=fix_result.duration_ms or 0,
+                        success=fix_result.success,
+                    )
                     if not fix_result.success:
+                        telemetry.capture_run_failed(
+                            failing_phase_name="fix",
+                            colonyos_version=__version__,
+                        )
                         if fix_ui is None:
                             _log(f"  Fix phase failed: {fix_result.error}")
                         break
@@ -1683,6 +1702,13 @@ def run(
                 ui=decision_ui,
             )
             log.phases.append(decision_result)
+            telemetry.capture_phase_completed(
+                phase_name="decision",
+                model=config.get_model(Phase.DECISION),
+                cost_usd=decision_result.cost_usd or 0.0,
+                duration_ms=decision_result.duration_ms or 0,
+                success=decision_result.success,
+            )
 
             verdict_text = decision_result.artifacts.get("result", "")
             verdict = _extract_verdict(verdict_text)
