@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -32,8 +33,8 @@ logger = logging.getLogger(__name__)
 # Path to the built Vite SPA assets (committed to repo)
 _WEB_DIST_DIR = Path(__file__).parent / "web_dist"
 
-# Fields that may contain secrets and should be redacted from config output
-_SENSITIVE_CONFIG_FIELDS = {"slack"}
+# Fields that may contain secrets and must be redacted from config API output.
+_SENSITIVE_CONFIG_FIELDS = {"slack", "ceo_persona"}
 
 
 def _sanitize_run_log(log: dict[str, Any]) -> dict[str, Any]:
@@ -48,71 +49,10 @@ def _sanitize_run_log(log: dict[str, Any]) -> dict[str, Any]:
 
 def _config_to_dict(config: Any) -> dict[str, Any]:
     """Serialize a ColonyConfig to a JSON-safe dict, redacting sensitive fields."""
-    result: dict[str, Any] = {
-        "model": config.model,
-        "phase_models": dict(config.phase_models),
-        "budget": asdict(config.budget),
-        "phases": asdict(config.phases),
-        "branch_prefix": config.branch_prefix,
-        "prds_dir": config.prds_dir,
-        "tasks_dir": config.tasks_dir,
-        "reviews_dir": config.reviews_dir,
-        "proposals_dir": config.proposals_dir,
-        "max_fix_iterations": config.max_fix_iterations,
-        "auto_approve": config.auto_approve,
-        "learnings": asdict(config.learnings),
-        "ci_fix": asdict(config.ci_fix),
-        "vision": config.vision,
-    }
-    if config.project:
-        result["project"] = {
-            "name": config.project.name,
-            "description": config.project.description,
-            "stack": config.project.stack,
-        }
-    else:
-        result["project"] = None
-    result["personas"] = [
-        {
-            "role": p.role,
-            "expertise": p.expertise,
-            "perspective": p.perspective,
-            "reviewer": p.reviewer,
-        }
-        for p in config.personas
-    ]
-    return result
-
-
-def _stats_result_to_dict(result: Any) -> dict[str, Any]:
-    """Serialize a StatsResult to a JSON-safe dict."""
-    return {
-        "summary": asdict(result.summary),
-        "cost_breakdown": [asdict(r) for r in result.cost_breakdown],
-        "failure_hotspots": [asdict(r) for r in result.failure_hotspots],
-        "review_loop": asdict(result.review_loop),
-        "duration_stats": [asdict(r) for r in result.duration_stats],
-        "recent_trend": [asdict(r) for r in result.recent_trend],
-        "phase_detail": [asdict(r) for r in result.phase_detail],
-        "phase_filter": result.phase_filter,
-        "model_usage": [asdict(r) for r in result.model_usage],
-    }
-
-
-def _show_result_to_dict(result: Any) -> dict[str, Any]:
-    """Serialize a ShowResult to a JSON-safe dict."""
-    return {
-        "header": asdict(result.header),
-        "timeline": [asdict(e) for e in result.timeline],
-        "review_summary": asdict(result.review_summary) if result.review_summary else None,
-        "has_decision": result.has_decision,
-        "decision_success": result.decision_success,
-        "has_ci_fix": result.has_ci_fix,
-        "ci_fix_attempts": result.ci_fix_attempts,
-        "ci_fix_final_success": result.ci_fix_final_success,
-        "phase_filter": result.phase_filter,
-        "phase_detail": [asdict(e) for e in result.phase_detail],
-    }
+    raw = asdict(config)
+    for field_name in _SENSITIVE_CONFIG_FIELDS:
+        raw.pop(field_name, None)
+    return raw
 
 
 def create_app(repo_root: Path) -> FastAPI:
@@ -131,13 +71,14 @@ def create_app(repo_root: Path) -> FastAPI:
         redoc_url=None,
     )
 
-    # CORS for local dev (Vite dev server on different port)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-        allow_methods=["GET"],
-        allow_headers=["Content-Type", "Accept"],
-    )
+    # CORS for local dev only (Vite dev server on a different port)
+    if os.environ.get("COLONYOS_DEV"):
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+            allow_methods=["GET"],
+            allow_headers=["Content-Type", "Accept"],
+        )
 
     runs_dir = runs_dir_path(repo_root)
 
@@ -176,13 +117,13 @@ def create_app(repo_root: Path) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
         show_result = compute_show_result(run_data)
-        return _show_result_to_dict(show_result)
+        return asdict(show_result)
 
     @app.get("/api/stats")
     def get_stats() -> dict[str, Any]:
         logs = load_run_logs(runs_dir)
         result = compute_stats(logs)
-        return _stats_result_to_dict(result)
+        return asdict(result)
 
     @app.get("/api/config")
     def get_config() -> dict[str, Any]:

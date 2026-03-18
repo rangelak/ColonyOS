@@ -388,6 +388,59 @@ class TestConfigRedaction:
         # Sensitive fields like slack should not be exposed
         assert "slack" not in data
 
+    def test_config_excludes_ceo_persona(self, tmp_repo: Path):
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get("/api/config")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "ceo_persona" not in data
+
+    def test_sensitive_fields_constant_used(self):
+        """Verify _SENSITIVE_CONFIG_FIELDS is actively used in _config_to_dict."""
+        from colonyos.server import _SENSITIVE_CONFIG_FIELDS, _config_to_dict
+        from colonyos.config import ColonyConfig
+
+        config = ColonyConfig()
+        result = _config_to_dict(config)
+        for field_name in _SENSITIVE_CONFIG_FIELDS:
+            assert field_name not in result
+
+
+class TestCORSDevOnly:
+    """Verify CORS middleware is only active when COLONYOS_DEV is set."""
+
+    def test_no_cors_headers_in_production(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.delenv("COLONYOS_DEV", raising=False)
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get(
+            "/api/health",
+            headers={"Origin": "http://localhost:5173"},
+        )
+        assert resp.status_code == 200
+        assert "access-control-allow-origin" not in resp.headers
+
+    def test_cors_headers_in_dev(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.setenv("COLONYOS_DEV", "1")
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get(
+            "/api/health",
+            headers={"Origin": "http://localhost:5173"},
+        )
+        assert resp.status_code == 200
+        assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
 
 class TestErrorMessageSafety:
     """Verify error responses do not leak internal paths."""

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { fetchRun } from "../api";
 import type { ShowResult } from "../types";
@@ -11,6 +11,12 @@ export default function RunDetail() {
   const { id } = useParams<{ id: string }>();
   const [data, setData] = useState<ShowResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const statusRef = useRef<string | undefined>(undefined);
+
+  // Keep ref in sync so the interval always reads the latest status
+  useEffect(() => {
+    statusRef.current = data?.header.status;
+  }, [data?.header.status]);
 
   useEffect(() => {
     if (!id) return;
@@ -29,16 +35,19 @@ export default function RunDetail() {
     }
 
     load();
-    // Only poll while run is still in progress
+    // Poll while the run is still in progress; read status via ref to
+    // avoid stale closure captures and unnecessary effect re-runs.
     const timer = setInterval(() => {
-      if (data?.header.status === "running") load();
+      if (statusRef.current === "running" || statusRef.current === undefined) {
+        load();
+      }
     }, POLL_INTERVAL_MS);
 
     return () => {
       active = false;
       clearInterval(timer);
     };
-  }, [id, data?.header.status]);
+  }, [id]);
 
   if (error) {
     return (
