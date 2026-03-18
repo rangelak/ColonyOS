@@ -5,13 +5,19 @@ import pytest
 from colonyos.naming import (
     PlanningNames,
     ProposalNames,
+    ReviewArtifactPath,
     ReviewNames,
+    decision_artifact_path,
+    generate_timestamp,
+    persona_review_artifact_path,
     planning_names,
     proposal_names,
     review_names,
     slugify,
+    standalone_decision_artifact_path,
+    summary_artifact_path,
     task_filename_from_prd,
-    generate_timestamp,
+    task_review_artifact_path,
 )
 
 
@@ -119,3 +125,96 @@ class TestGenerateTimestamp:
     def test_auto(self):
         ts = generate_timestamp()
         assert len(ts) == 15
+
+
+class TestReviewArtifactPath:
+    def test_relative_path_joins_subdirectory_and_filename(self):
+        path = ReviewArtifactPath(subdirectory="decisions", filename="test.md")
+        assert path.relative_path == "decisions/test.md"
+
+    def test_frozen(self):
+        path = ReviewArtifactPath(subdirectory="decisions", filename="test.md")
+        with pytest.raises(AttributeError):
+            path.subdirectory = "changed"
+
+    def test_nested_subdirectory(self):
+        path = ReviewArtifactPath(subdirectory="reviews/engineer", filename="f.md")
+        assert path.relative_path == "reviews/engineer/f.md"
+
+
+class TestDecisionArtifactPath:
+    def test_basic(self):
+        result = decision_artifact_path("Add auth", timestamp="20260318_110000")
+        assert result.subdirectory == "decisions"
+        assert result.filename == "20260318_110000_decision_add_auth.md"
+        assert result.relative_path == "decisions/20260318_110000_decision_add_auth.md"
+
+    def test_auto_timestamp(self):
+        result = decision_artifact_path("some feature")
+        assert result.filename.endswith("_decision_some_feature.md")
+        assert len(result.filename.split("_decision_")[0]) == 15
+
+    def test_slug_sanitization(self):
+        result = decision_artifact_path("feat: OAuth 2.0!", timestamp="20260318_110000")
+        assert result.filename == "20260318_110000_decision_feat_oauth_2_0.md"
+
+
+class TestPersonaReviewArtifactPath:
+    def test_basic(self):
+        result = persona_review_artifact_path(
+            "Add auth", "staff_security_engineer", 1, timestamp="20260318_110000"
+        )
+        assert result.subdirectory == "reviews/staff_security_engineer"
+        assert result.filename == "20260318_110000_round1_add_auth.md"
+
+    def test_persona_slug_sanitization(self):
+        result = persona_review_artifact_path(
+            "Add auth", "Staff Security Engineer!", 2, timestamp="20260318_110000"
+        )
+        assert result.subdirectory == "reviews/staff_security_engineer"
+        assert result.filename == "20260318_110000_round2_add_auth.md"
+
+    def test_auto_timestamp(self):
+        result = persona_review_artifact_path("feat", "engineer", 1)
+        assert result.filename.endswith("_round1_feat.md")
+
+    def test_relative_path(self):
+        result = persona_review_artifact_path(
+            "Add auth", "linus_torvalds", 3, timestamp="20260318_110000"
+        )
+        assert result.relative_path == "reviews/linus_torvalds/20260318_110000_round3_add_auth.md"
+
+
+class TestTaskReviewArtifactPath:
+    def test_basic(self):
+        result = task_review_artifact_path("Add auth", 2, timestamp="20260318_110000")
+        assert result.subdirectory == "reviews/tasks"
+        assert result.filename == "20260318_110000_review_task_2_add_auth.md"
+
+    def test_auto_timestamp(self):
+        result = task_review_artifact_path("feat", 1)
+        assert result.filename.endswith("_review_task_1_feat.md")
+
+
+class TestStandaloneDecisionArtifactPath:
+    def test_basic(self):
+        result = standalone_decision_artifact_path(
+            "feature-branch", timestamp="20260318_110000"
+        )
+        assert result.subdirectory == "decisions"
+        assert result.filename == "20260318_110000_decision_standalone_feature_branch.md"
+
+    def test_auto_timestamp(self):
+        result = standalone_decision_artifact_path("my-branch")
+        assert result.filename.endswith("_decision_standalone_my_branch.md")
+
+
+class TestSummaryArtifactPath:
+    def test_basic(self):
+        result = summary_artifact_path("Add auth", timestamp="20260318_110000")
+        assert result.subdirectory == "reviews"
+        assert result.filename == "20260318_110000_summary_add_auth.md"
+
+    def test_auto_timestamp(self):
+        result = summary_artifact_path("some feature")
+        assert result.filename.endswith("_summary_some_feature.md")

@@ -120,6 +120,30 @@ class TestRunInitReviewsDir:
         assert reviews_dir.exists()
         assert reviews_dir.is_dir()
 
+    def test_creates_review_subdirectories(self, tmp_path: Path):
+        """run_init creates decisions/ and reviews/ subdirectories with .gitkeep."""
+        with patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+            mock_click.prompt.side_effect = [
+                "TestApp", "A test app", "Python", "", 1, 5.0, 15.0
+            ]
+            mock_click.IntRange = click.IntRange
+            mock_click.echo = click.echo
+            mock_personas.return_value = [
+                Persona(role="Engineer", expertise="Backend", perspective="Scale")
+            ]
+            config = run_init(tmp_path)
+
+        reviews_dir = tmp_path / config.reviews_dir
+        decisions_dir = reviews_dir / "decisions"
+        reviews_subdir = reviews_dir / "reviews"
+        assert decisions_dir.exists()
+        assert decisions_dir.is_dir()
+        assert (decisions_dir / ".gitkeep").exists()
+        assert reviews_subdir.exists()
+        assert reviews_subdir.is_dir()
+        assert (reviews_subdir / ".gitkeep").exists()
+
     def test_gitignore_has_cos_pattern(self, tmp_path: Path):
         """run_init adds cOS_*/ pattern to .gitignore."""
         with patch("colonyos.init.click") as mock_click, \

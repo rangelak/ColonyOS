@@ -10,7 +10,7 @@ You are the **Decision Maker** — the final authority on whether an implementat
 
 ## Process
 
-1. Read the review artifacts in `{reviews_dir}/` for this branch
+1. Read the persona review artifacts in `{reviews_dir}/reviews/` (each persona has its own subfolder)
 2. Examine the actual code changes on the branch (`git diff {base_branch}...{branch_name}`)
 3. Tally the persona verdicts (approve vs request-changes)
 4. Assess the severity of findings (CRITICAL > HIGH > MEDIUM > LOW)

@@ -318,7 +318,7 @@ class TestRunStandaloneReview:
         # Check artifacts saved
         reviews_dir = tmp_path / config.reviews_dir
         assert reviews_dir.exists()
-        summary = list(reviews_dir.glob("review_standalone_*_summary.md"))
+        summary = list(reviews_dir.glob("**/*_summary_*.md"))
         assert len(summary) == 1
 
     @patch("colonyos.orchestrator.run_phase_sync")
@@ -397,7 +397,7 @@ class TestRunStandaloneReview:
         assert mock_phase.called
         # Decision artifact saved
         reviews_dir = tmp_path / config.reviews_dir
-        decision_files = list(reviews_dir.glob("decision_standalone_*.md"))
+        decision_files = list(reviews_dir.glob("**/*_decision_standalone_*.md"))
         assert len(decision_files) == 1
 
     @patch("colonyos.orchestrator.run_phase_sync")
@@ -428,7 +428,7 @@ class TestRunStandaloneReview:
         run_standalone_review("feat", "main", tmp_path, config, quiet=True)
 
         reviews_dir = tmp_path / config.reviews_dir
-        summary = list(reviews_dir.glob("*_summary.md"))[0]
+        summary = list(reviews_dir.glob("**/*_summary_*.md"))[0]
         content = summary.read_text()
         assert "Engineer" in content
         assert "Security" in content
@@ -519,13 +519,13 @@ class TestArtifactFilenames:
         run_standalone_review("feature/my-thing", "main", tmp_path, config, quiet=True)
 
         reviews_dir = tmp_path / config.reviews_dir
-        files = sorted(f.name for f in reviews_dir.iterdir())
+        all_files = sorted(f.name for f in reviews_dir.glob("**/*.md"))
         # Should have: 2 review files + 1 summary
-        review_files = [f for f in files if f.startswith("review_standalone_") and "summary" not in f]
-        summary_files = [f for f in files if "summary" in f]
+        review_files = [f for f in all_files if "round1" in f]
+        summary_files = [f for f in all_files if "summary" in f]
         assert len(review_files) == 2
         assert len(summary_files) == 1
-        # Branch slug
+        # Feature slug present in filenames
         assert "feature_my_thing" in review_files[0]
         assert "round1" in review_files[0]
 

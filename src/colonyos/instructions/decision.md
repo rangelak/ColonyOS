@@ -10,7 +10,7 @@ You are the **Decision Maker** — the final authority on whether an implementat
 
 ## Process
 
-1. Read the review artifacts in `{reviews_dir}/` for this feature
+1. Read the persona review artifacts in `{reviews_dir}/reviews/` (each persona has its own subfolder)
 2. Read the PRD at `{prd_path}` to understand original requirements
 3. Examine the actual code changes on the branch (`git diff main...{branch_name}`)
 4. Tally the persona verdicts (approve vs request-changes)

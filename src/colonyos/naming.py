@@ -96,6 +96,93 @@ def proposal_names(
     )
 
 
+@dataclass(frozen=True)
+class ReviewArtifactPath:
+    """Encodes the subdirectory and filename for a review artifact."""
+
+    subdirectory: str
+    filename: str
+
+    @property
+    def relative_path(self) -> str:
+        """Return the path relative to the reviews root directory."""
+        return f"{self.subdirectory}/{self.filename}"
+
+
+def decision_artifact_path(
+    feature_name: str,
+    *,
+    timestamp: str | None = None,
+) -> ReviewArtifactPath:
+    """Return artifact path for a decision gate file."""
+    ts = timestamp or generate_timestamp()
+    slug = slugify(feature_name)
+    return ReviewArtifactPath(
+        subdirectory="decisions",
+        filename=f"{ts}_decision_{slug}.md",
+    )
+
+
+def persona_review_artifact_path(
+    feature_name: str,
+    persona_slug: str,
+    round_num: int,
+    *,
+    timestamp: str | None = None,
+) -> ReviewArtifactPath:
+    """Return artifact path for a persona review file."""
+    ts = timestamp or generate_timestamp()
+    slug = slugify(feature_name)
+    sanitized_persona = slugify(persona_slug)
+    return ReviewArtifactPath(
+        subdirectory=f"reviews/{sanitized_persona}",
+        filename=f"{ts}_round{round_num}_{slug}.md",
+    )
+
+
+def task_review_artifact_path(
+    feature_name: str,
+    task_num: int,
+    *,
+    timestamp: str | None = None,
+) -> ReviewArtifactPath:
+    """Return artifact path for a task-level review file."""
+    ts = timestamp or generate_timestamp()
+    slug = slugify(feature_name)
+    return ReviewArtifactPath(
+        subdirectory="reviews/tasks",
+        filename=f"{ts}_review_task_{task_num}_{slug}.md",
+    )
+
+
+def standalone_decision_artifact_path(
+    branch_slug: str,
+    *,
+    timestamp: str | None = None,
+) -> ReviewArtifactPath:
+    """Return artifact path for a standalone review-branch decision."""
+    ts = timestamp or generate_timestamp()
+    slug = slugify(branch_slug)
+    return ReviewArtifactPath(
+        subdirectory="decisions",
+        filename=f"{ts}_decision_standalone_{slug}.md",
+    )
+
+
+def summary_artifact_path(
+    feature_name: str,
+    *,
+    timestamp: str | None = None,
+) -> ReviewArtifactPath:
+    """Return artifact path for a review round summary."""
+    ts = timestamp or generate_timestamp()
+    slug = slugify(feature_name)
+    return ReviewArtifactPath(
+        subdirectory="reviews",
+        filename=f"{ts}_summary_{slug}.md",
+    )
+
+
 def task_filename_from_prd(prd_filename: str) -> str:
     match = PRD_FILENAME_RE.match(prd_filename)
     if not match:

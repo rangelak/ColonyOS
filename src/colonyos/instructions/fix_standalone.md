@@ -22,7 +22,7 @@ The following are the consolidated findings from all reviewer personas that flag
 
 Read the review findings above carefully. Identify every specific issue that reviewers flagged as needing changes.
 
-For additional context, read the individual review artifacts in `{reviews_dir}/`.
+For additional context, read the individual review artifacts in `{reviews_dir}/reviews/` (each persona has its own subfolder).
 
 ### Step 2: Make Targeted Fixes
 

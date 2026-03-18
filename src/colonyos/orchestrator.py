@@ -20,7 +20,16 @@ from colonyos.learnings import (
     parse_learnings,
 )
 from colonyos.models import Persona, Phase, PhaseResult, ResumeState, RunLog, RunStatus
-from colonyos.naming import generate_timestamp, planning_names, proposal_names, slugify
+from colonyos.naming import (
+    decision_artifact_path,
+    generate_timestamp,
+    persona_review_artifact_path,
+    planning_names,
+    proposal_names,
+    slugify,
+    standalone_decision_artifact_path,
+    summary_artifact_path,
+)
 from colonyos.ui import NullUI, PhaseUI, make_reviewer_prefix, print_reviewer_legend
 
 
@@ -516,9 +525,25 @@ def _save_review_artifact(
     reviews_dir: str,
     filename: str,
     content: str,
+    *,
+    subdirectory: str | None = None,
 ) -> Path:
-    """Save a review markdown file to the reviews directory."""
-    target_dir = repo_root / reviews_dir
+    """Save a review markdown file to the reviews directory.
+
+    When *subdirectory* is provided, the file is written to
+    ``repo_root / reviews_dir / subdirectory / filename``.  The resolved
+    path is validated to stay within ``repo_root / reviews_dir``.
+    """
+    reviews_root = repo_root / reviews_dir
+    if subdirectory:
+        target_dir = reviews_root / subdirectory
+    else:
+        target_dir = reviews_root
+    # Path-traversal guard
+    if not target_dir.resolve().is_relative_to(reviews_root.resolve()):
+        raise ValueError(
+            f"Subdirectory {subdirectory!r} escapes the reviews directory"
+        )
     target_dir.mkdir(parents=True, exist_ok=True)
     path = target_dir / filename
     path.write_text(content, encoding="utf-8")
@@ -972,12 +997,15 @@ def run_standalone_review(
         for persona, result in zip(reviewers, results):
             p_slug = _persona_slug(persona.role)
             text = result.artifacts.get("result", "")
-            fname = f"review_standalone_{branch_s}_round{round_num}_{p_slug}.md"
+            artifact = persona_review_artifact_path(
+                branch_s, p_slug, round_num,
+            )
             _save_review_artifact(
                 repo_root,
                 config.reviews_dir,
-                fname,
+                artifact.filename,
                 f"# Review by {persona.role} (Round {round_num})\n\n{text}",
+                subdirectory=artifact.subdirectory,
             )
             phase_results.append(result)
             total_cost += result.cost_usd or 0
@@ -1072,11 +1100,13 @@ def run_standalone_review(
             decision_verdict = _extract_verdict(verdict_text)
             _log(f"  Decision: {decision_verdict}")
 
+            decision_art = standalone_decision_artifact_path(branch_s)
             _save_review_artifact(
                 repo_root,
                 config.reviews_dir,
-                f"decision_standalone_{branch_s}.md",
+                decision_art.filename,
                 f"# Decision Gate\n\nVerdict: **{decision_verdict}**\n\n{verdict_text}",
+                subdirectory=decision_art.subdirectory,
             )
 
             if decision_verdict == "GO":
@@ -1097,11 +1127,13 @@ def run_standalone_review(
     if decision_verdict:
         summary_lines.append(f"\n**Decision**: {decision_verdict}")
 
+    summary_art = summary_artifact_path(branch_s)
     _save_review_artifact(
         repo_root,
         config.reviews_dir,
-        f"review_standalone_{branch_s}_summary.md",
+        summary_art.filename,
         "\n".join(summary_lines),
+        subdirectory=summary_art.subdirectory,
     )
 
     return all_approved, phase_results, total_cost, decision_verdict
@@ -1389,12 +1421,15 @@ def run(
                 for persona, result in zip(reviewers, results):
                     p_slug = _persona_slug(persona.role)
                     text = result.artifacts.get("result", "")
-                    fname = f"review_round{iteration + 1}_{p_slug}.md"
+                    artifact = persona_review_artifact_path(
+                        prompt, p_slug, iteration + 1,
+                    )
                     _save_review_artifact(
                         repo_root,
                         config.reviews_dir,
-                        fname,
+                        artifact.filename,
                         f"# Review by {persona.role} (Round {iteration + 1})\n\n{text}",
+                        subdirectory=artifact.subdirectory,
                     )
                     log.phases.append(result)
 
@@ -1469,11 +1504,13 @@ def run(
             verdict = _extract_verdict(verdict_text)
             _log(f"  Decision: {verdict}")
 
+            decision_art = decision_artifact_path(prompt)
             _save_review_artifact(
                 repo_root,
                 config.reviews_dir,
-                f"decision_{slugify(prompt)}.md",
+                decision_art.filename,
                 f"# Decision Gate\n\nVerdict: **{verdict}**\n\n{verdict_text}",
+                subdirectory=decision_art.subdirectory,
             )
 
             if verdict == "NO-GO":
