@@ -251,16 +251,8 @@ def _run_repl() -> None:
                 click.echo()
                 break
             except KeyboardInterrupt:
-                now = time.time()
-                if now - last_interrupt_time < 2.0:
-                    click.echo()
-                    break
-                last_interrupt_time = now
-                click.echo(click.style(
-                    "\nPress Ctrl+C again to exit",
-                    dim=True,
-                ))
-                continue
+                click.echo()
+                break
 
             stripped = user_input.strip()
             if not stripped:
