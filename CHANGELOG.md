@@ -1,5 +1,23 @@
 # Changelog
 
+## 20260318_170000 — `colonyos show <run-id>` Single-Run Inspector
+
+Added a `colonyos show <run-id>` CLI command that loads a single run log and renders
+a rich, readable breakdown: header metadata, phase-by-phase timeline with cost/duration/status,
+review details, decision gate, CI section, and artifact links. Supports prefix-based
+run ID lookup with disambiguation, `--json` for machine-readable output, and `--phase`
+filtering for drill-down into specific phases.
+
+**Created:**
+- `src/colonyos/show.py` — Data-layer (pure functions returning dataclasses) and render-layer (Rich output) for single-run inspection
+- `tests/test_show.py` — Comprehensive unit tests for resolution, collapsing, rendering, `--json`, and `--phase` filtering
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `show` subcommand with `--json` and `--phase` flags
+
+**PRD:** `cOS_prds/20260318_162724_prd_add_a_colonyos_show_run_id_cli_command_that_renders_a_detailed_single_run_inspec.md`
+**Tasks:** `cOS_tasks/20260318_162724_tasks_add_a_colonyos_show_run_id_cli_command_that_renders_a_detailed_single_run_inspec.md`
+
 ## 20260318_164500 — `colonyos ci-fix` Command & CI-Aware Deliver Phase
 
 Added a standalone `colonyos ci-fix <pr-number>` CLI command that detects CI failures,
