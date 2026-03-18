@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 import yaml
+import click
 from click.testing import CliRunner
 
 from colonyos.cli import app, _save_loop_state, _load_latest_loop_state, _compute_elapsed_hours
@@ -1383,17 +1384,25 @@ class TestRepl:
 
         input_iter = iter(["feat 1", "", "feat 2", "", "quit"])
 
+        echo_calls: list[str] = []
+        original_echo = click.echo
+
+        def capture_echo(*args, **kwargs):
+            if args:
+                echo_calls.append(str(args[0]))
+            return original_echo(*args, **kwargs)
+
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
              patch("builtins.input", side_effect=capture_input), \
              patch("colonyos.cli.readline", create=True), \
+             patch("colonyos.cli.click.echo", side_effect=capture_echo), \
              patch("colonyos.cli.run_orchestrator", side_effect=[fake_log_1, fake_log_2]):
             from colonyos.cli import _run_repl
             _run_repl()
 
-        # Check that the prompt included accumulated cost after first run
-        cost_prompts = [p for p in prompt_values if "$" in p and ">" in p]
-        # After first run ($1.50), should show $1.50 in the next prompt
-        assert any("1.50" in p for p in cost_prompts)
+        # After first run ($1.50), the cost prompt should show $1.50
+        cost_outputs = [c for c in echo_calls if "1.50" in c]
+        assert cost_outputs
 
     def test_repl_uninitialized_project(self, tmp_path: Path):
         """Uninitialized project prints error and does not enter REPL."""
