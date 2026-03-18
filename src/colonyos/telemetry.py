@@ -57,6 +57,8 @@ _ALLOWED_PROPERTIES: frozenset[str] = frozenset({
 
 # ---------------------------------------------------------------------------
 # Module-level state
+# NOTE: not thread-safe. ColonyOS is single-threaded; if concurrency is
+# added in the future, guard these globals with a threading.Lock.
 # ---------------------------------------------------------------------------
 _posthog_client: Any = None
 _enabled: bool = False

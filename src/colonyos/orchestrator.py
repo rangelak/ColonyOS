@@ -1444,6 +1444,39 @@ def run(
         colonyos_version=__version__,
     )
 
+    try:  # ensure telemetry.shutdown() runs on every exit path
+        return _run_pipeline_phases(
+            prompt, repo_root=repo_root, config=config, log=log,
+            branch_name=branch_name, prd_rel=prd_rel, task_rel=task_rel,
+            skip_phases=skip_phases, plan_only=plan_only, from_prd=from_prd,
+            is_resume=is_resume, _make_ui=_make_ui, quiet=quiet,
+        )
+    finally:
+        telemetry.shutdown()
+
+
+def _run_pipeline_phases(
+    prompt: str,
+    *,
+    repo_root: Path,
+    config: ColonyConfig,
+    log: RunLog,
+    branch_name: str,
+    prd_rel: str,
+    task_rel: str,
+    skip_phases: set[str],
+    plan_only: bool,
+    from_prd: str | None,
+    is_resume: bool,
+    _make_ui: object,
+    quiet: bool,
+) -> RunLog:
+    """Execute all pipeline phases. Called within a try/finally that ensures
+    telemetry.shutdown() runs on every exit path."""
+    from colonyos import telemetry
+
+    names = planning_names(prompt)
+
     # --- Phase 1: Plan ---
     _touch_heartbeat(repo_root)
     if "plan" in skip_phases:
@@ -1495,7 +1528,6 @@ def run(
             log.mark_finished()
             _save_run_log(repo_root, log)
             telemetry.capture_run_failed(failing_phase_name="plan", colonyos_version=__version__)
-            telemetry.shutdown()
             if plan_ui is None:
                 _log(f"Plan phase failed: {plan_result.error}")
             return log
@@ -1540,7 +1572,6 @@ def run(
             log.mark_finished()
             _save_run_log(repo_root, log)
             telemetry.capture_run_failed(failing_phase_name="implement", colonyos_version=__version__)
-            telemetry.shutdown()
             if impl_ui is None:
                 _log(f"Implement phase failed: {impl_result.error}")
             return log
@@ -1729,7 +1760,6 @@ def run(
                 log.mark_finished()
                 _save_run_log(repo_root, log)
                 telemetry.capture_run_failed(failing_phase_name="decision", colonyos_version=__version__)
-                telemetry.shutdown()
                 _log("Decision gate: NO-GO. Pipeline stopped before deliver.")
                 return log
 
@@ -1774,7 +1804,6 @@ def run(
             log.mark_finished()
             _save_run_log(repo_root, log)
             telemetry.capture_run_failed(failing_phase_name="deliver", colonyos_version=__version__)
-            telemetry.shutdown()
             if deliver_ui is None:
                 _log(f"Deliver phase failed: {deliver_result.error}")
             return log
@@ -1800,7 +1829,6 @@ def run(
         fix_iteration_count=fix_iterations,
         colonyos_version=__version__,
     )
-    telemetry.shutdown()
 
     _log(f"Run complete. Total cost: ${log.total_cost_usd:.4f}")
     return log

@@ -363,9 +363,10 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "allowed_user_ids": list(config.slack.allowed_user_ids),
         }
 
-    data["posthog"] = {
-        "enabled": config.posthog.enabled,
-    }
+    if config.posthog.enabled:
+        data["posthog"] = {
+            "enabled": config.posthog.enabled,
+        }
 
     if config.ceo_persona:
         data["ceo_persona"] = {

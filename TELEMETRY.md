@@ -56,7 +56,7 @@ Only anonymized structural metadata. The following properties are on the allowli
 | `run_failed` | `failing_phase_name`, `colonyos_version` |
 | `cli_command` | `command_name`, `colonyos_version` |
 
-Each event includes an anonymous `distinct_id` (SHA-256 hash of machine identifier + config directory path). This ID contains no personally identifiable information.
+Each event includes an anonymous `distinct_id` (random UUID v4 persisted in `.colonyos/telemetry_id`). This ID contains no personally identifiable information — it is generated once via `uuid.uuid4()` and reused across runs.
 
 ## What is never sent
 
