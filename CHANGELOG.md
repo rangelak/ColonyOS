@@ -1,5 +1,35 @@
 # Changelog
 
+## 20260318_154500 — Reorganize cOS_reviews Directory Structure
+
+Reorganized `cOS_reviews/` from a flat directory into a structured hierarchy with
+`decisions/` and `reviews/<persona_slug>/` subdirectories. All review artifact filenames
+are now timestamp-prefixed and generated through centralized `naming.py` functions,
+eliminating ad-hoc filename construction in the orchestrator.
+
+**Created:**
+- `cOS_reviews/decisions/` — Decision gate verdicts, timestamped
+- `cOS_reviews/reviews/<persona_slug>/` — Per-persona review history with timestamped filenames
+
+**Modified:**
+- `src/colonyos/naming.py` — Added `ReviewArtifactPath` dataclass, `decision_artifact_path()`, `persona_review_artifact_path()`, `task_review_artifact_path()`
+- `src/colonyos/orchestrator.py` — Updated `_save_review_artifact()` with subdirectory support; replaced all ad-hoc filename construction with `naming.py` calls
+- `src/colonyos/init.py` — Creates `decisions/` and `reviews/` subdirectories with `.gitkeep` during init
+- `src/colonyos/instructions/base.md`, `decision.md`, `decision_standalone.md`, `fix.md`, `fix_standalone.md`, `learn.md` — Updated to reference nested directory structure
+- `tests/test_naming.py`, `tests/test_orchestrator.py`, `tests/test_init.py` — Extended with new tests
+
+**PRD:** `cOS_prds/20260318_150423_prd_let_s_change_the_way_the_reviews_directory_is_organized_reviews_by_specific_pers.md`
+**Tasks:** `cOS_tasks/20260318_150423_tasks_let_s_change_the_way_the_reviews_directory_is_organized_reviews_by_specific_pers.md`
+
+## 20260318_113000 — Theme-Safe Markdown Rendering
+
+Removed hardcoded dark backgrounds from `rich.Markdown` inline-code and code-block
+styles so terminal output is readable on both light and dark themes.
+
+**Modified:**
+- `src/colonyos/ui.py` — Custom `Theme` on module-level `Console` overriding `markdown.code` / `markdown.code_block`
+- `src/colonyos/cli.py` — Same theme applied to the CEO-proposal `Console` instance
+
 ## 20260318_110000 — Package Publishing & Multi-Channel Installation
 
 Added CI/CD pipeline, automated release workflow, curl installer, and Homebrew tap so

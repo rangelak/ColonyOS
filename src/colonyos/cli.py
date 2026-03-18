@@ -695,8 +695,13 @@ def _run_single_iteration(
     from rich.console import Console
     from rich.markdown import Markdown
     from rich.panel import Panel
+    from rich.theme import Theme
 
-    _console = Console()
+    _md_theme = Theme({
+        "markdown.code": "bold cyan",
+        "markdown.code_block": "dim",
+    })
+    _console = Console(theme=_md_theme)
     _console.print()
     _console.print(
         Panel(

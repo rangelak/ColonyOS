@@ -1,22 +1,69 @@
 # Review by Principal Systems Engineer (Google/Stripe caliber) (Round 2)
 
-All tests pass, shellcheck is clean, no secrets. Here is my review:
+Now let me write the review output. I have all the information I need.
+
+---
+
+## Review: Principal Systems Engineer (Google/Stripe caliber)
+
+### Completeness Assessment
+
+**FR-1 (Directory structure)**: ✅ Implemented. `init.py` creates `decisions/` and `reviews/` subdirectories with `.gitkeep` files. The nested `reviews/<persona_slug>/` structure is created dynamically by `_save_review_artifact()` via `mkdir(parents=True)`.
+
+**FR-2 (Timestamp prefixes)**: ✅ All artifact paths use `generate_timestamp()`.
+
+**FR-3 (Decision filename pattern)**: ✅ `decision_artifact_path()` produces `{ts}_decision_{slug}.md` under `decisions/`.
+
+**FR-4 (Persona review pattern)**: ✅ `persona_review_artifact_path()` produces `{ts}_round{N}_{slug}.md` under `reviews/{persona_slug}/`.
+
+**FR-5 (Task review pattern)**: ✅ `task_review_artifact_path()` defined and tested. Not yet wired into orchestrator, but the PRD notes this is for "legacy pipeline task-level reviews" and the orchestrator doesn't currently produce these artifacts. The function exists for forward compatibility.
+
+**FR-6 (ReviewArtifactPath dataclass)**: ✅ Frozen dataclass with `subdirectory`, `filename`, and `relative_path` property.
+
+**FR-7, FR-8, FR-9**: ✅ All three factory functions implemented with proper slug sanitization.
+
+**FR-10 (_save_review_artifact subdirectory param)**: ✅ Optional `subdirectory` parameter added with path-traversal validation via `is_relative_to()`.
+
+**FR-11 (Replace ad-hoc filenames)**: ✅ All 5 call sites in orchestrator.py now use naming.py functions. Zero ad-hoc f-string filename construction remains (confirmed by grep for inline `.md` construction).
+
+**FR-12 (Instruction templates)**: ✅ All 6 templates updated. `base.md` documents the subdirectory structure. `decision.md`, `decision_standalone.md`, `fix.md`, `fix_standalone.md` point to `{reviews_dir}/reviews/`. `learn.md` instructs recursive reading.
+
+**FR-13 (Forward-only migration)**: ✅ No migration utility. `.gitkeep` files created for new subdirectories.
+
+### Quality Assessment
+
+- **192 tests pass**, 0 failures, 0.45s runtime.
+- **No linter errors** observed.
+- **Code follows existing conventions**: frozen dataclasses, same timestamp format, same slugify function, consistent docstring style.
+- **No unnecessary dependencies** added.
+- **Test coverage is solid**: `TestReviewArtifactPath` (3 tests), `TestDecisionArtifactPath` (3), `TestPersonaReviewArtifactPath` (4), `TestTaskReviewArtifactPath` (2), `TestStandaloneDecisionArtifactPath` (2), `TestSummaryArtifactPath` (2), `TestSaveReviewArtifact` (4 including path traversal).
+
+### Safety Assessment
+
+- **Path traversal guard**: Present and tested. `_save_review_artifact()` validates `target_dir.resolve().is_relative_to(reviews_root.resolve())` before writing. This is the right defense-in-depth pattern.
+- **No secrets or credentials** in committed code.
+- **No destructive operations**: Forward-only, existing files untouched.
+
+### Observations from Systems Engineering Perspective
+
+1. **Bonus functions**: `standalone_decision_artifact_path()` and `summary_artifact_path()` go beyond the PRD's 3 required functions (FR-7/8/9). These are reasonable extensions that centralize naming for artifact types that the orchestrator already produces. Good engineering judgment.
+
+2. **Unrelated commits on branch**: The branch carries 5 commits from a prior feature (CI/CD pipeline, install script, releases). These are not part of this PRD's scope. In a production setting, this stacked-branch pattern creates merge risk, but for the purposes of reviewing the PRD implementation, the relevant commit (39b0cdb) is clean and scoped.
+
+3. **Race condition analysis**: The `generate_timestamp()` uses second-level granularity. If two concurrent runs fire within the same second for the same feature/persona, filenames would collide. This is pre-existing behavior (not introduced by this change) and acceptable given the single-orchestrator execution model.
+
+4. **Debuggability**: The nested structure significantly improves 3am debugging. `ls cOS_reviews/decisions/` gives you an instant chronological view of all gate verdicts. `ls cOS_reviews/reviews/staff_security_engineer/` shows full review history for one persona. This is the right data model for incident response.
+
+5. **`task_review_artifact_path` not wired**: Defined and tested but not called from orchestrator. The PRD explicitly scopes this as forward compatibility for legacy task-level reviews. No concern — dead code with a clear purpose is preferable to ad-hoc construction when the need arises.
 
 ---
 
 VERDICT: approve
 
 FINDINGS:
-- [.github/workflows/ci.yml]: Solid. Top-level `permissions: {}` with per-job scoping, actions pinned to SHA hashes, concurrency group with cancel-in-progress. This is production-grade CI.
-- [.github/workflows/release.yml]: Well-structured multi-job pipeline (test → build → publish → release → update-homebrew). SHA256SUMS correctly moved out of `dist/` before PyPI upload. OIDC Trusted Publisher with `id-token: write` only on the publish job — good blast-radius containment. Concurrency set to `cancel-in-progress: false` which is correct for releases (you never want to cancel a half-finished publish).
-- [.github/workflows/release.yml]: The `update-homebrew` job pushes directly to `main` via `git push` with bot credentials. This bypasses branch protection rules if they exist. A PR-based approach would be safer, but for a pre-1.0 project with a single maintainer this is acceptable. Worth revisiting when branch protection is enforced.
-- [install.sh]: Well-defended script. `set -euo pipefail`, proper TTY detection (`[ -t 0 ]`) with `read < /dev/tty` for interactive prompts so `curl | sh` doesn't hang. PEP 668 `--break-system-packages` fallback is pragmatic. `--dry-run` mode enables safe testing.
-- [install.sh]: The `--break-system-packages` fallback (lines ~104-106) silently escalates when `pip --user` fails. In the worst case this mutates system Python. The script documents this behavior but could benefit from a warning message to the user. Minor concern.
-- [pyproject.toml]: Clean `setuptools-scm` integration. `local_scheme = "no-local-version"` prevents dirty-tag suffixes from reaching PyPI. `version_scheme = "guess-next-dev"` is the right default.
-- [src/colonyos/__init__.py]: `importlib.metadata` with `PackageNotFoundError` fallback to `0.0.0.dev0` is the canonical pattern. Doctor check correctly flags this degraded state.
-- [Formula/colonyos.rb]: Contains `PLACEHOLDER_SHA256_UPDATED_BY_RELEASE_WORKFLOW` — this is intentional and documented; the release workflow `sed`s in the real value. Not a defect.
-- [tests/]: 44 new tests covering workflow YAML structure, version consistency, install script behavior (dry-run, stdin handling, shellcheck, unknown options), and doctor version check. Good coverage of the new functionality. Tests are structural (parsing YAML, checking file contents) which is appropriate — you can't functionally test GitHub Actions in pytest.
-- [tests/test_ci_workflows.py]: Smart to test that all actions are SHA-pinned. This is effectively a supply-chain guardrail encoded as a test.
+- [src/colonyos/naming.py]: Two bonus functions (standalone_decision_artifact_path, summary_artifact_path) beyond PRD scope — reasonable extensions, fully tested
+- [src/colonyos/orchestrator.py]: task_review_artifact_path not imported — intentional per PRD, exists for forward compatibility
+- [branch]: 5 unrelated commits from prior feature (CI/CD pipeline) included on branch — stacked branch pattern, not a blocker
 
 SYNTHESIS:
-This is a clean, well-considered implementation. The architecture follows established patterns: OIDC Trusted Publishers over stored secrets, SHA-pinned actions, least-privilege permissions, and single-source versioning via `setuptools-scm`. The install script handles the `curl | sh` anti-pattern about as safely as possible — TTY detection, dry-run mode, and graceful fallbacks. The test suite is structural but appropriate for CI/CD YAML and shell scripts. The two areas I'd flag for future hardening are: (1) the Homebrew auto-update job bypassing branch protection by pushing directly to `main`, and (2) the `--break-system-packages` escalation path in the installer could use a visible warning. Neither is a blocker at this maturity level. All PRD functional requirements (FR-1 through FR-6) are implemented and all tasks are marked complete. 44 new tests pass. No secrets, no TODOs, no lint issues.
+This is a clean, well-scoped implementation that hits every functional requirement in the PRD. The `ReviewArtifactPath` dataclass is appropriately minimal — a frozen value object with a convenience property, no overengineering. The path-traversal guard in `_save_review_artifact()` is exactly the kind of defense-in-depth a security-minded reviewer would want. All 6 instruction templates are updated consistently, and the `learn.md` template correctly instructs recursive discovery. Test coverage is comprehensive, including the path-traversal rejection case. The implementation follows the project's existing patterns (frozen dataclasses, optional timestamp injection for testability, slug sanitization). From a reliability perspective, the forward-only migration strategy is the right call — no blast radius from botched file moves, and agents are explicitly pointed at the new structure. This is ready to ship.

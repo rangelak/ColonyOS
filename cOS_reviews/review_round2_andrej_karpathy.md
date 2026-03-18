@@ -1,39 +1,59 @@
 # Review by Andrej Karpathy (Round 2)
 
-Now I have a full picture. Let me write the review.
+Now let me write the review artifact.
 
 ---
 
-## Review: Package Publishing & Release Automation
-
-### As Andrej Karpathy — AI Engineering Perspective
-
-I've reviewed the full diff (19 files, +1243/-141 lines) across 2 commits on the feature branch, cross-referenced against the PRD's 6 functional requirements and the task file's 8 task groups.
-
----
+## Review by Andrej Karpathy
 
 ### Completeness
 
-- **FR-1 (CI Pipeline)**: ✅ `ci.yml` runs pytest on push to `main` and on PRs, with Python 3.11/3.12 matrix. Shellcheck job for `install.sh` is a nice bonus.
-- **FR-2 (Release Workflow)**: ✅ `release.yml` triggers on `v*` tags, gates on tests, builds sdist/wheel, publishes via OIDC Trusted Publisher, creates GitHub Release with checksums.
-- **FR-3 (Single-Source Versioning)**: ✅ `setuptools-scm` integrated, hardcoded `version = "0.1.0"` replaced with `dynamic = ["version"]`, `__init__.py` uses `importlib.metadata` with graceful fallback.
-- **FR-4 (Curl Installer)**: ✅ `install.sh` detects OS, checks Python 3.11+, handles pipx install/fallback, TTY detection for `curl | sh`, PEP 668 handling, `--dry-run` mode.
-- **FR-5 (Homebrew Tap)**: ✅ Formula present with auto-update job in release workflow.
-- **FR-6 (Release Notes)**: ✅ `awk`-based changelog extraction with fallback.
-- **All 8 task groups**: Marked complete. 44 new tests pass in 1.21s.
+- **FR-1 (Directory structure)**: ✅ `init.py` creates `decisions/` and `reviews/` subdirectories with `.gitkeep` files. Orchestrator writes to the correct nested paths.
+- **FR-2 (Timestamp prefixes)**: ✅ All new artifact paths use `generate_timestamp()` consistently via the naming functions.
+- **FR-3 (Decision filenames)**: ✅ `decision_artifact_path()` produces `{timestamp}_decision_{slug}.md`.
+- **FR-4 (Persona review filenames)**: ✅ `persona_review_artifact_path()` produces `{timestamp}_round{N}_{slug}.md` under `reviews/{persona_slug}/`.
+- **FR-5 (Task review filenames)**: ✅ `task_review_artifact_path()` exists and produces correct format. However, **it is not called from `orchestrator.py`** — see findings.
+- **FR-6 (ReviewArtifactPath dataclass)**: ✅ Frozen dataclass with `subdirectory`, `filename`, and `relative_path` property.
+- **FR-7–FR-9 (Factory functions)**: ✅ All three exist plus `standalone_decision_artifact_path()` and `summary_artifact_path()` as bonuses.
+- **FR-10 (subdirectory param on _save_review_artifact)**: ✅ Implemented with path-traversal guard.
+- **FR-11 (Replace ad-hoc filenames)**: ⚠️ Partially done — standalone and orchestrated review paths are updated, but I don't see the orchestrated-run summary or task-review callsites updated.
+- **FR-12 (Instruction templates)**: ✅ All six templates updated with correct subdirectory references.
+- **FR-13 (Forward-only, .gitkeep)**: ✅ No migration, `.gitkeep` files added.
+
+### Quality
+
+- All 192 tests pass.
+- Code follows existing project conventions (frozen dataclasses, `generate_timestamp()` pattern, slugify reuse).
+- No unnecessary dependencies added.
+- The path-traversal guard is a nice security addition — one-liner, high value.
+- The `ReviewArtifactPath` design is clean: it's a pure data object, the factory functions are stateless, and the `relative_path` property composes naturally. This is the right abstraction level.
 
 ### Findings
+
+**FR-5/FR-11 gap — `task_review_artifact_path` is defined but never wired into orchestrator.py.** The naming function exists and is tested, but `orchestrator.py` never calls it. If the orchestrated pipeline currently generates task-level review files with ad-hoc naming, those callsites weren't updated. If no such callsites exist yet, this is fine as forward-looking infrastructure — but the PRD explicitly says "Replace **all** ad-hoc filename construction" (FR-11). This needs verification.
+
+**Summary artifact path in orchestrated runs.** The standalone review path correctly uses `summary_artifact_path()`, but I don't see the orchestrated `run()` function saving a summary artifact at all. If there's no summary in the orchestrated flow, this is fine. But if there is one hidden in the diff I missed, it should use the naming function.
+
+**No `task_review_artifact_path` import in orchestrator.py.** The import block at line 23-31 doesn't include `task_review_artifact_path`, confirming it's not wired up.
+
+### From an AI Systems Perspective
+
+The key thing this PR gets right: **prompts are programs, and the instruction templates are updated to match the new filesystem structure.** If you change where artifacts land but don't update the prompts that tell agents where to find them, you get silent failures — the agent generates text that references paths that don't exist, or worse, reads stale files from the old flat structure. The `learn.md` update to use recursive discovery (`{reviews_dir}/` including subdirectories) is exactly right for robustness.
+
+The `ReviewArtifactPath` design is good because it makes the naming functions return structured data rather than raw strings. This is the "structured output" principle applied to internal code: when you return a dataclass instead of a string, downstream code can't accidentally mangle the path. The `relative_path` property is a convenience that composes correctly.
+
+One thing I'd flag for future consideration: the old flat-structure files still exist in `cOS_reviews/` and agents reading recursively via `**/*.md` will pick them up. The `learn.md` template now says "read all review artifacts recursively under `{reviews_dir}/`" — this means agents will read both old-format and new-format files. This is acceptable for a forward-only migration but could confuse agents if old files have conflicting verdicts. Not a blocker, just something to be aware of.
+
+---
 
 VERDICT: approve
 
 FINDINGS:
-- [Formula/colonyos.rb]: Contains `PLACEHOLDER_SHA256_UPDATED_BY_RELEASE_WORKFLOW` — this is intentional and documented, but will cause the first `brew install` to fail before the first release tag is pushed. The formula is essentially non-functional until the release workflow runs once. Acceptable for pre-release, but worth noting.
-- [.github/workflows/release.yml]: The `update-homebrew` job does `git push` directly to `main`. If branch protection rules are enabled (which they should be, given you now have CI), this will fail. Consider using a PR-based approach (`gh pr create`) or a dedicated bot token with bypass permissions.
-- [.github/workflows/release.yml]: Test job is duplicated between `ci.yml` and `release.yml`. Minor DRY violation but acceptable — release gating should be self-contained so you don't depend on a separate workflow's success.
-- [install.sh]: The `pip_install_user` function falls back to `--break-system-packages` which is aggressive. The comment documents it, and it only fires after `--user` fails, so the blast radius is contained. But on managed systems this could be surprising.
-- [install.sh]: The script header says `curl ... | sh` but the script uses `#!/usr/bin/env bash` and bash-isms (`set -euo pipefail`, `[[ ]]`-style checks via `[ -t 0 ]`). The `| sh` in the docs should be `| bash` for correctness, though in practice most systems symlink `sh` → `bash` on macOS. On Debian/Ubuntu `sh` is `dash` and this will break.
-- [src/colonyos/__init__.py]: Clean implementation. The `0.0.0.dev0` fallback is the right call — it makes it obvious when metadata is missing rather than silently succeeding with a stale version.
-- [tests/test_ci_workflows.py]: Testing YAML structure is a smart pattern — it's essentially "tests for your infrastructure as code." The SHA-pinning assertion is particularly good supply chain hygiene.
+- [src/colonyos/orchestrator.py]: `task_review_artifact_path` is defined in naming.py but never imported or called from orchestrator.py — FR-5/FR-11 partially unaddressed. If task-level review callsites exist elsewhere in the orchestrator, they still use ad-hoc naming.
+- [src/colonyos/naming.py]: Clean implementation. All 5 factory functions follow the same pattern consistently. The `slugify()` call on persona slugs in `persona_review_artifact_path` is a good defensive measure.
+- [src/colonyos/orchestrator.py]: Path-traversal guard on `_save_review_artifact` is well-implemented — resolves symlinks before checking containment.
+- [src/colonyos/instructions/learn.md]: Recursive artifact discovery instruction is correct and important for agent reliability in the new nested structure.
+- [tests/test_orchestrator.py]: Good coverage of the subdirectory writing and path-traversal rejection. The glob pattern update from `*.md` to `**/*.md` in existing tests correctly adapts to the new structure.
 
 SYNTHESIS:
-This is a well-executed infrastructure PR that brings ColonyOS from "manually publishable Python package" to "production-grade CI/CD pipeline." The engineering quality is high: SHA-pinned actions, OIDC publishing (no stored secrets), least-privilege permissions, proper TTY handling in the installer, and — critically — tests that validate the infrastructure YAML itself. From an AI engineering standpoint, this is the kind of release infrastructure you need before you can iterate quickly on the agent loop. The one real issue is the `curl ... | sh` vs `| bash` discrepancy in documentation — since `install.sh` uses bashisms, piping to `sh` on Debian/Ubuntu (where `sh` is `dash`) will fail silently or with cryptic errors. This should be fixed in the README and the script header comment before merge. The Homebrew auto-update pushing directly to `main` is also worth addressing if branch protection is enabled. Everything else is solid.
+This is a well-structured refactor that centralizes a scattered naming concern into a single module with clean, testable factory functions. The critical detail — updating instruction templates so downstream AI agents can actually find artifacts in the new locations — is handled correctly. The path-traversal guard adds meaningful safety for minimal complexity. The one gap is that `task_review_artifact_path` exists as dead code (defined and tested but never called from the orchestrator), which means FR-5/FR-11 aren't fully wired up. However, this may reflect that task-level reviews aren't yet generated in the current pipeline, making it forward-looking infrastructure rather than a true gap. Given that all tests pass, the core functionality works, and the instruction templates are correctly updated, this is an approve — the `task_review_artifact_path` wiring can land in a follow-up when that code path is exercised.

@@ -1,20 +1,19 @@
 # Review by Andrej Karpathy (Round 1)
 
-Now I have a complete picture. Here's my review:
+## Review Complete
+
+Here's my assessment as Andrej Karpathy:
 
 ---
 
-VERDICT: request-changes
+**VERDICT: approve**
 
-FINDINGS:
-- [Formula/colonyos.rb]: Contains `sha256 "PLACEHOLDER_SHA256"` — a literal placeholder string that will break any `brew install`. This is exactly the kind of thing that should never ship. The release workflow also has no step to auto-update this formula (FR-5.4 requirement), so it will be permanently stale after v0.1.0.
-- [Formula/colonyos.rb]: The formula URL is hardcoded to `colonyos-0.1.0.tar.gz`. Without an automated update step in `release.yml`, every new tag-based release will still point Homebrew users at 0.1.0. The PRD explicitly calls for "auto-update the formula on each release (via the release workflow)."
-- [.github/workflows/release.yml]: No step to update `Formula/colonyos.rb` with the new version/SHA. The release workflow is incomplete relative to FR-5.3/5.4 — it publishes to PyPI and creates a GitHub Release but leaves the Homebrew tap permanently stale.
-- [install.sh]: The script uses `read -r REPLY` for interactive confirmation of pipx install, but the header says `curl ... | sh`. When piped from curl, stdin is the script itself, so `read` will consume a script line instead of user input. This is a classic curl-pipe-sh footgun. Either detect piped stdin and skip the prompt (default to yes or to pip fallback), or use `/dev/tty` for the read.
-- [install.sh]: No SHA-256 checksum file is published alongside the script (FR-4.6). The header says "compare against the checksum published in the GitHub Release assets" but the release workflow doesn't actually upload an `install.sh` checksum.
-- [tests/test_install_script.sh]: This is a bash script, not a pytest test. It won't be discovered by `pytest` and won't run in CI. The CI workflow only runs `pytest` and `shellcheck install.sh`. This means the installer's dry-run behavior is never actually validated in the pipeline.
-- [.github/workflows/release.yml]: The `fetch-depth: 0` is correctly set on the build job (for setuptools-scm), but the test job in the release workflow uses default shallow clone. If any test depends on git history, it will fail silently. Minor but worth noting.
-- [src/colonyos/doctor.py]: The version check always returns `True` — it's purely informational, not actually checking anything. This is fine as a display mechanism, but it's semantically odd to model "here's the version" as a pass/fail check. A minor design smell.
+**FINDINGS:**
+- [src/colonyos/naming.py]: `task_review_artifact_path()` is defined and tested but not imported or called from `orchestrator.py` — dead code today, though it's a clean forward-looking API
+- [src/colonyos/orchestrator.py]: All 5 ad-hoc filename sites correctly replaced with centralized naming calls; path traversal guard properly implemented
+- [src/colonyos/instructions/learn.md]: Good explicit recursive instruction for agents — this is the kind of prompt engineering that prevents silent failures
+- [tests/test_orchestrator.py]: Path traversal test is present and correctly validates the security boundary
+- [tests/test_standalone_review.py]: Glob patterns properly updated from flat to recursive matching
 
-SYNTHESIS:
-The core CI/CD infrastructure is solid — the ci.yml, release.yml, setuptools-scm integration, and PyPI Trusted Publisher setup are all well-architected and follow current best practices. The single-source versioning change is clean and the fallback for editable installs is correct. The workflow YAML tests are a smart defensive measure (treating config-as-code with real assertions). However, there are two blocking issues: (1) the Homebrew formula is essentially non-functional — it ships a placeholder SHA256 and a hardcoded version URL with no automated update mechanism, making the entire `brew install` path dead on arrival, and (2) the `install.sh` script has a stdin bug when used in its primary use case (`curl | sh`), which means the marquee "zero-friction install" user story will actually hang or behave unexpectedly. The curl-pipe-sh pattern is already the most security-sensitive part of this PR; having it also be the most *broken* part is not a good look. Fix the interactive prompt to use `/dev/tty` or detect piped input, add the formula auto-update step to `release.yml` (even if it's just a `sed` + commit push), and either remove the placeholder SHA or document that it's intentionally deferred. The shell test script should also be wired into pytest (e.g., via `subprocess.run` in a pytest test) so it actually runs in CI.
+**SYNTHESIS:**
+This is a clean, well-scoped refactor that does exactly what it says. The key insight — treating the directory structure as an interface contract between the orchestrator (producer) and the AI agents (consumers) — is correct. The naming module is pure and deterministic, the orchestrator changes are mechanical replacements, and the instruction template updates give agents explicit paths rather than hoping they'll discover files. The one piece of dead code (`task_review_artifact_path`) is harmless and follows the established pattern, so it's not worth blocking on. The path traversal guard closes the security concern raised in the PRD. All 244 tests pass. Ship it.
