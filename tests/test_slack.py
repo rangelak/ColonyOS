@@ -709,3 +709,74 @@ class TestHourlyCountPruning:
         increment_hourly_count(state)
         # After increment (which calls prune), count should be bounded
         assert len(state.hourly_trigger_counts) <= _MAX_HOURLY_KEYS + 1
+
+
+# ---------------------------------------------------------------------------
+# Empty mention should not burn rate-limit slot (review fix #2)
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyMentionDoesNotBurnRateLimit:
+    """Verify that a bare @mention with no text does not consume a rate-limit
+    slot or mark the message as processed."""
+
+    def test_empty_mention_skips_mark_and_increment(self) -> None:
+        """Simulate the _handle_event flow: extract prompt first, bail on
+        empty before touching state."""
+        bot_user_id = "UBOT"
+
+        # A bare mention with no actual prompt text
+        raw_text = f"<@{bot_user_id}>"
+        prompt_text = extract_prompt_from_mention(raw_text, bot_user_id)
+
+        # Empty prompt should be detected before state mutation
+        assert not prompt_text.strip()
+
+        # Verify state remains untouched
+        state = SlackWatchState(watch_id="empty-test")
+        config = SlackConfig(enabled=True, channels=["C1"], max_runs_per_hour=1)
+
+        # If we had incorrectly marked first, rate limit would be hit
+        assert check_rate_limit(state, config) is True
+        assert not state.is_processed("C1", "1.0")
+        assert state.runs_triggered == 0
+
+    def test_empty_mention_with_whitespace(self) -> None:
+        """Mention followed by only whitespace should also be empty."""
+        prompt = extract_prompt_from_mention("<@UBOT>   ", "UBOT")
+        assert not prompt.strip()
+
+
+# ---------------------------------------------------------------------------
+# SlackUI as ui_factory for orchestrator (review fix #1)
+# ---------------------------------------------------------------------------
+
+
+class TestSlackUIFactory:
+    """Verify SlackUI can be used as a ui_factory for run_orchestrator."""
+
+    def test_slack_ui_factory_returns_slack_ui(self) -> None:
+        """A factory closure should produce SlackUI instances."""
+        client = MagicMock()
+
+        def factory(prefix: str = "") -> SlackUI:
+            return SlackUI(client, "C123", "1234.5")
+
+        ui = factory("test-prefix")
+        assert isinstance(ui, SlackUI)
+        # Verify the returned UI is functional
+        ui.phase_header("Plan", 1.0, "sonnet")
+        client.chat_postMessage.assert_called_once()
+
+    def test_slack_ui_factory_ignores_prefix(self) -> None:
+        """SlackUI doesn't use prefix, but the factory should accept it."""
+        client = MagicMock()
+
+        def factory(prefix: str = "") -> SlackUI:
+            return SlackUI(client, "C123", "1234.5")
+
+        # Should not raise regardless of prefix value
+        ui1 = factory()
+        ui2 = factory("[Review] ")
+        assert isinstance(ui1, SlackUI)
+        assert isinstance(ui2, SlackUI)

@@ -1047,6 +1047,7 @@ def watch(
         sys.exit(1)
 
     from colonyos.slack import (
+        SlackUI,
         SlackWatchState,
         check_rate_limit,
         create_slack_app,
@@ -1123,6 +1124,13 @@ def watch(
         ts = event.get("ts", "")
         user = event.get("user", "unknown")
 
+        # Extract prompt before acquiring lock so a bare @mention with no
+        # text does not burn a rate-limit slot (review finding #2).
+        raw_text = event.get("text", "")
+        prompt_text = extract_prompt_from_mention(raw_text, bot_user_id)
+        if not prompt_text.strip():
+            return
+
         with state_lock:
             if watch_state.is_processed(channel, ts):
                 logger.info("Message %s:%s already processed, skipping", channel, ts)
@@ -1147,11 +1155,6 @@ def watch(
             watch_state.mark_processed(channel, ts, run_id)
             increment_hourly_count(watch_state)
             watch_state.runs_triggered += 1
-
-        raw_text = event.get("text", "")
-        prompt_text = extract_prompt_from_mention(raw_text, bot_user_id)
-        if not prompt_text.strip():
-            return
 
         if dry_run:
             click.echo(f"[dry-run] Would trigger pipeline for: {prompt_text[:100]}")
@@ -1203,6 +1206,11 @@ def watch(
 
                 post_acknowledgment(client, channel, ts, prompt_text)  # type: ignore[arg-type]
 
+                # Build a UI factory that creates SlackUI instances so
+                # phase progress appears as threaded Slack replies (FR-6.3).
+                def _slack_ui_factory(prefix: str = "") -> SlackUI:
+                    return SlackUI(client, channel, ts)
+
                 _touch_heartbeat(repo_root)
                 log = run_orchestrator(
                     formatted_prompt,
@@ -1210,6 +1218,7 @@ def watch(
                     config=config,
                     verbose=verbose,
                     quiet=quiet,
+                    ui_factory=_slack_ui_factory,
                 )
 
                 with state_lock:
