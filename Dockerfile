@@ -9,7 +9,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Node dependencies — install Claude Code CLI globally
 # ---------------------------------------------------------------------------
-FROM node:20-slim AS node-deps
+FROM node:20-slim@sha256:17281e8d1dc4d671976c6b89a12f47a44c2f390b63a989e2e327631041f544fd AS node-deps
 
 RUN npm install -g @anthropic-ai/claude-code && \
     npm cache clean --force
@@ -17,7 +17,7 @@ RUN npm install -g @anthropic-ai/claude-code && \
 # ---------------------------------------------------------------------------
 # Stage 2: Web build — compile the Vite React SPA
 # ---------------------------------------------------------------------------
-FROM node:20-slim AS web-build
+FROM node:20-slim@sha256:17281e8d1dc4d671976c6b89a12f47a44c2f390b63a989e2e327631041f544fd AS web-build
 
 WORKDIR /build/web
 COPY web/package.json web/package-lock.json ./
@@ -30,7 +30,7 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 # Stage 3: Final runtime image
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS runtime
+FROM python:3.11-slim@sha256:6d98ca198cea726f2c86da2699594339a7b7ff08e49728797b4ed6e3b5c3b62a AS runtime
 
 # Prevent Python from writing .pyc files and enable unbuffered output
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -73,6 +73,11 @@ COPY src/ src/
 RUN cp -r /tmp/web_dist/ src/colonyos/web_dist/ && \
     rm -rf /tmp/web_dist/
 
+# Inject version from build arg to avoid needing .git/ in build context
+# (setuptools-scm requires .git/ which is excluded by .dockerignore)
+ARG COLONYOS_VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${COLONYOS_VERSION}
+
 RUN pip install --no-cache-dir ".[ui,posthog,slack]"
 
 # Create non-root user for security
@@ -85,7 +90,10 @@ RUN groupadd --gid 1000 colonyos && \
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Configure git safe directory for the workspace (avoids ownership warnings)
+# TRUST BOUNDARY: Disable git's ownership safety checks for /workspace.
+# This is required because the volume-mounted workspace may be owned by a
+# different UID than the container's colonyos user. This means git operations
+# in /workspace will proceed regardless of directory ownership.
 RUN git config --system --add safe.directory /workspace
 
 WORKDIR /workspace

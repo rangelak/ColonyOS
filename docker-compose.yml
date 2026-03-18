@@ -3,8 +3,15 @@ services:
     build: .
     image: ghcr.io/rangelak/colonyos:latest
     ports:
-      - "7400:7400"
+      # WARNING: Binds to localhost only by default. The dashboard has no
+      # built-in authentication — place behind a reverse proxy with auth
+      # before exposing to untrusted networks. To bind to all interfaces,
+      # change to "0.0.0.0:7400:7400".
+      - "127.0.0.1:7400:7400"
     volumes:
+      # WARNING: If COLONYOS_WORKSPACE points to the ColonyOS source checkout,
+      # your .env file (containing secrets) will be readable inside the
+      # container at /workspace/.env. Use a dedicated repo path instead.
       - ${COLONYOS_WORKSPACE:-./}:/workspace
     env_file:
       - .env

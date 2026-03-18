@@ -150,6 +150,15 @@ docker run --rm --env-file .env -v /path/to/repo:/workspace \
 
 Mount your target repository at `/workspace`. The `.colonyos/` directory inside it persists run history, learnings, and configuration across container restarts.
 
+### Security & Trust Model
+
+> **⚠️ Important**: ColonyOS runs an AI agent with full shell access (`bypassPermissions`) inside the container. Any environment variable injected into the container (API keys, tokens) is accessible to the agent via shell commands like `env` or `printenv`. Treat the container as having the same trust level as the credentials you inject.
+
+- **Network exposure**: The dashboard binds to `127.0.0.1` by default. It has **no built-in authentication**. If you need to expose it to other hosts, place it behind a reverse proxy (e.g., nginx, Caddy, Traefik) with authentication enabled.
+- **Write mode**: Setting `COLONYOS_WRITE_ENABLED=1` allows the dashboard to trigger pipeline runs. Only enable this behind authenticated access.
+- **Workspace isolation**: Do not mount a directory containing your `.env` file as the workspace — the agent can read any file in `/workspace`. Use a dedicated repository path.
+- **`COLONYOS_REPO_URL`**: Only `https://` and `git@` URL schemes are accepted to prevent SSRF attacks against internal network endpoints.
+
 ### Troubleshooting
 
 - **Git permission errors**: The container runs as UID 1000. Ensure your mounted repo is accessible by this user, or run with `--user $(id -u):$(id -g)`.

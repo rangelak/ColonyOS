@@ -38,6 +38,14 @@ class TestDockerfileValidity:
             f"found {len(from_statements)}"
         )
 
+    def test_dockerfile_base_images_pinned_to_digest(self) -> None:
+        content = DOCKERFILE.read_text()
+        from_statements = [l for l in content.splitlines() if l.startswith("FROM ")]
+        for stmt in from_statements:
+            assert "@sha256:" in stmt, (
+                f"Base image must be pinned to digest (FR-1.2): {stmt}"
+            )
+
     def test_dockerfile_exposes_port_7400(self) -> None:
         content = DOCKERFILE.read_text()
         assert "EXPOSE 7400" in content
@@ -54,6 +62,11 @@ class TestDockerfileValidity:
         content = DOCKERFILE.read_text()
         assert "ENTRYPOINT" in content
         assert "docker-entrypoint.sh" in content
+
+    def test_dockerfile_has_version_build_arg(self) -> None:
+        content = DOCKERFILE.read_text()
+        assert "ARG COLONYOS_VERSION" in content
+        assert "SETUPTOOLS_SCM_PRETEND_VERSION" in content
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +125,11 @@ class TestEntrypointScript:
         assert "COLONYOS_REPO_URL" in content
         assert "git clone" in content
 
+    def test_entrypoint_validates_repo_url_scheme(self) -> None:
+        content = ENTRYPOINT.read_text()
+        assert "https://" in content
+        assert "git@" in content
+
     def test_entrypoint_defaults_to_dashboard(self) -> None:
         content = ENTRYPOINT.read_text()
         assert "colonyos ui" in content
@@ -139,6 +157,23 @@ class TestEntrypointExecution:
         )
         assert result.returncode != 0
         assert "ANTHROPIC_API_KEY" in result.stderr
+
+    def test_invalid_repo_url_scheme_exits_with_error(self) -> None:
+        """Entrypoint must reject repo URLs that don't use https:// or git@."""
+        result = subprocess.run(
+            ["bash", str(ENTRYPOINT), "echo", "hello"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={
+                **os.environ,
+                "ANTHROPIC_API_KEY": "test-key",
+                "GH_TOKEN": "test-token",
+                "COLONYOS_REPO_URL": "http://169.254.169.254/metadata",
+            },
+        )
+        assert result.returncode != 0
+        assert "https://" in result.stderr or "git@" in result.stderr
 
     def test_missing_gh_token_warns_but_continues(self) -> None:
         """Entrypoint should warn about missing GH_TOKEN but not exit."""
@@ -172,7 +207,7 @@ class TestDockerCompose:
 
     def test_compose_maps_port_7400(self) -> None:
         content = COMPOSE_FILE.read_text()
-        assert "7400:7400" in content
+        assert "127.0.0.1:7400:7400" in content
 
     def test_compose_has_healthcheck(self) -> None:
         import yaml
@@ -232,10 +267,16 @@ class TestDoctorDockerChecks:
             os.environ.pop("COLONYOS_DOCKER", None)
             with patch("colonyos.doctor.Path") as mock_path:
                 mock_path.return_value.exists.return_value = True
-                # Without COLONYOS_DOCKER, falls through to file check
-                # The actual Path("/.dockerenv").exists() is called directly
-                # so we test the env var path instead
-                pass
+                assert is_running_in_docker() is True
+
+    def test_is_running_in_docker_no_dockerenv_file(self) -> None:
+        from colonyos.doctor import is_running_in_docker
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("COLONYOS_DOCKER", None)
+            with patch("colonyos.doctor.Path") as mock_path:
+                mock_path.return_value.exists.return_value = False
+                assert is_running_in_docker() is False
 
     def test_is_not_running_in_docker(self) -> None:
         from colonyos.doctor import is_running_in_docker

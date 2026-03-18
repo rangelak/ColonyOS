@@ -30,6 +30,16 @@ fi
 # 3. Clone or fetch the target repository
 # ---------------------------------------------------------------------------
 if [ -n "${COLONYOS_REPO_URL:-}" ] && [ ! -d /workspace/.git ]; then
+    # Validate URL scheme to prevent SSRF via git clone to internal endpoints
+    case "${COLONYOS_REPO_URL}" in
+        https://*|git@*)
+            ;;
+        *)
+            echo "ERROR: COLONYOS_REPO_URL must use https:// or git@ scheme." >&2
+            echo "Received: ${COLONYOS_REPO_URL}" >&2
+            exit 1
+            ;;
+    esac
     echo "INFO: Cloning ${COLONYOS_REPO_URL} into /workspace"
     git clone "${COLONYOS_REPO_URL}" /workspace
 elif [ -d /workspace/.git ]; then
