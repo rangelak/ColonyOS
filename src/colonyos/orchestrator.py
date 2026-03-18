@@ -303,6 +303,30 @@ def _build_fix_prompt(
     return system, user
 
 
+def _build_ci_fix_prompt(
+    config: ColonyConfig,
+    branch_name: str,
+    ci_failure_context: str,
+    fix_attempt: int,
+    max_retries: int,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the CI fix phase."""
+    ci_fix_template = _load_instruction("ci_fix.md")
+
+    system = _format_base(config) + "\n\n" + ci_fix_template.format(
+        branch_name=branch_name,
+        ci_failure_context=ci_failure_context,
+        fix_attempt=fix_attempt,
+        max_retries=max_retries,
+    )
+
+    user = (
+        f"Fix the CI failures on branch `{branch_name}`. "
+        f"This is attempt {fix_attempt} of {max_retries}."
+    )
+    return system, user
+
+
 # ---------------------------------------------------------------------------
 # Deliver, CEO, and other prompt builders
 # ---------------------------------------------------------------------------
@@ -1214,6 +1238,126 @@ def _run_learn_phase(
         )
 
 
+def _extract_pr_number_from_log(log: RunLog) -> int | None:
+    """Extract PR number from the deliver phase artifacts in a run log."""
+    for phase in log.phases:
+        if phase.phase == Phase.DELIVER:
+            pr_url = phase.artifacts.get("pr_url", "")
+            if pr_url:
+                match = re.search(r"/pull/(\d+)", pr_url)
+                if match:
+                    return int(match.group(1))
+    return None
+
+
+def _run_ci_fix_loop(
+    config: ColonyConfig,
+    repo_root: Path,
+    log: RunLog,
+    branch_name: str,
+) -> None:
+    """Post-deliver CI fix loop: wait for CI, fix failures, retry.
+
+    Gated by ``config.ci_fix.enabled``.  Runs up to ``config.ci_fix.max_retries``
+    fix-push-wait cycles.  Each CI fix attempt is recorded as a
+    ``PhaseResult`` with ``Phase.CI_FIX``.
+
+    Respects ``config.budget.per_run`` — refuses to start a new fix attempt
+    if the cumulative run cost leaves insufficient budget for a phase.
+    """
+    from colonyos.ci import (
+        all_checks_pass,
+        collect_ci_failure_context,
+        format_ci_failures_as_prompt,
+        poll_pr_checks,
+    )
+
+    pr_number = _extract_pr_number_from_log(log)
+    if pr_number is None:
+        _log("CI fix: could not determine PR number from deliver phase, skipping.")
+        return
+
+    _log(f"CI fix: waiting for initial CI checks on PR #{pr_number}...")
+    try:
+        checks = poll_pr_checks(
+            pr_number, repo_root,
+            timeout=config.ci_fix.wait_timeout,
+        )
+    except Exception as exc:
+        _log(f"CI fix: failed to poll checks: {exc}")
+        return
+
+    if all_checks_pass(checks):
+        _log("CI fix: all checks pass, no fix needed.")
+        return
+
+    for attempt in range(1, config.ci_fix.max_retries + 1):
+        _log(f"CI fix: attempt {attempt}/{config.ci_fix.max_retries}")
+
+        # Budget guard: check cumulative run cost before each attempt
+        cost_so_far = sum(p.cost_usd for p in log.phases if p.cost_usd is not None)
+        remaining = config.budget.per_run - cost_so_far
+        if remaining < config.budget.per_phase:
+            _log(
+                f"CI fix: budget exhausted "
+                f"(${cost_so_far:.4f} spent of ${config.budget.per_run:.2f} per-run). "
+                "Stopping CI fix loop."
+            )
+            break
+
+        # Collect logs from failed checks (shared helper)
+        failures_for_prompt = collect_ci_failure_context(
+            checks, repo_root, config.ci_fix.log_char_cap,
+        )
+        ci_failure_context = format_ci_failures_as_prompt(failures_for_prompt)
+        system, user = _build_ci_fix_prompt(
+            config, branch_name, ci_failure_context,
+            attempt, config.ci_fix.max_retries,
+        )
+
+        phase_result = run_phase_sync(
+            Phase.CI_FIX,
+            user,
+            cwd=repo_root,
+            system_prompt=system,
+            model=config.get_model(Phase.CI_FIX),
+            budget_usd=min(config.budget.per_phase, remaining),
+            ui=None,
+        )
+        log.phases.append(phase_result)
+
+        if not phase_result.success:
+            _log(f"CI fix agent failed: {phase_result.error}")
+            continue
+
+        # Push the fix — abort loop on failure to avoid wasting retries
+        push_result = subprocess.run(
+            ["git", "push"],
+            capture_output=True, text=True, timeout=60, cwd=repo_root,
+        )
+        if push_result.returncode != 0:
+            _log(f"CI fix: git push failed: {push_result.stderr.strip()}")
+            break
+
+        # Wait for CI
+        try:
+            checks = poll_pr_checks(
+                pr_number, repo_root,
+                timeout=config.ci_fix.wait_timeout,
+            )
+        except Exception as exc:
+            _log(f"CI fix: failed to poll checks after fix: {exc}")
+            break
+
+        if all_checks_pass(checks):
+            _log("CI fix: all checks now pass!")
+            return
+
+        _log("CI fix: checks still failing after fix attempt.")
+
+    _log("CI fix: retries exhausted, CI still failing.")
+
+
 def run(
     prompt: str,
     *,
@@ -1564,6 +1708,13 @@ def run(
             if deliver_ui is None:
                 _log(f"Deliver phase failed: {deliver_result.error}")
             return log
+
+    # --- CI Fix Phase (post-deliver) ---
+    if config.ci_fix.enabled and config.phases.deliver:
+        # Persist the run log before entering the CI fix loop so that
+        # prior phase results are not lost if the loop crashes.
+        _save_run_log(repo_root, log)
+        _run_ci_fix_loop(config, repo_root, log, branch_name)
 
     log.status = RunStatus.COMPLETED
     log.mark_finished()

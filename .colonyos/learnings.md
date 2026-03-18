@@ -18,3 +18,12 @@ _Date: 2026-03-18 | Feature: add_a_colonyos_stats_cli_command_that_reads_all_per
 - **[architecture]** Keep feature branches single-purpose; unrelated changes increase rollback blast radius and pollute diffs.
 - **[code-quality]** Delete unreachable code guards (e.g., filters redundant with an upstream glob); dead code misleads maintainers.
 - **[code-quality]** Document implicit ordering contracts between components with comments to prevent silent breakage.
+
+## Run: run-20260318_154057-c28fc676a8
+_Date: 2026-03-18 | Feature: add_a_colonyos_ci_fix_command_and_integrate_ci_awareness_int_
+
+- **[security]** Sanitize user-controlled strings before interpolating into structured templates (XML, prompts) to prevent injection attacks.
+- **[architecture]** Private (_prefixed) functions imported across module boundaries should be made public or moved to a shared module.
+- **[testing]** Verify claimed test coverage actually exists in code; task descriptions listing tests don't guarantee implementation.
+- **[code-quality]** Functions returning True for empty collections (e.g., `all_pass([])`) create silent semantic bugs; handle empty inputs explicitly.
+- **[code-quality]** Silently swallowing network/IO failures (e.g., fetch, push) gives false confidence; log or propagate the error.

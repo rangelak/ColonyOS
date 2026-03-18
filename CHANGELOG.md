@@ -1,5 +1,30 @@
 # Changelog
 
+## 20260318_164500 — `colonyos ci-fix` Command & CI-Aware Deliver Phase
+
+Added a standalone `colonyos ci-fix <pr-number>` CLI command that detects CI failures,
+fetches failure logs, and runs an AI agent to fix the code and push a fix commit. Also
+integrated optional CI monitoring into the `auto` pipeline deliver phase so runs can
+wait for CI and auto-fix failures before marking complete.
+
+**Created:**
+- `src/colonyos/ci.py` — CI check fetching, log retrieval, sanitization, fix agent orchestration, retry loop
+- `src/colonyos/instructions/ci_fix.md` — Agent instruction template for CI fix sessions
+- `tests/test_ci.py` — Comprehensive tests for CI module (log truncation, sanitization, retry logic)
+- `tests/test_config.py` — Tests for CI fix configuration parsing
+- `tests/test_stats.py` — Tests for CI_FIX phase in stats display
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `ci-fix` subcommand with `--wait`, `--max-retries`, `--wait-timeout` flags
+- `src/colonyos/config.py` — Added `CIFixConfig` dataclass and config parsing
+- `src/colonyos/models.py` — Added `Phase.CI_FIX` enum member
+- `src/colonyos/orchestrator.py` — CI monitoring loop in deliver phase
+- `src/colonyos/sanitize.py` — Secret-pattern regex pass for CI log sanitization
+- `tests/test_cli.py`, `tests/test_orchestrator.py`, `tests/test_sanitize.py`, `tests/test_models.py` — Extended tests
+
+**PRD:** `cOS_prds/20260318_154057_prd_add_a_colonyos_ci_fix_command_and_integrate_ci_awareness_into_the_deliver_phase.md`
+**Tasks:** `cOS_tasks/20260318_154057_tasks_add_a_colonyos_ci_fix_command_and_integrate_ci_awareness_into_the_deliver_phase.md`
+
 ## 20260318_154500 — Reorganize cOS_reviews Directory Structure
 
 Reorganized `cOS_reviews/` from a flat directory into a structured hierarchy with

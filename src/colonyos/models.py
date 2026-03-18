@@ -18,6 +18,7 @@ class Phase(str, Enum):
     FIX = "fix"
     LEARN = "learn"
     DELIVER = "deliver"
+    CI_FIX = "ci_fix"
 
 
 class RunStatus(str, Enum):

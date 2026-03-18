@@ -171,3 +171,30 @@ class TestRunLogSourceIssue:
         log.mark_finished()
         assert log.source_issue == 7
         assert log.source_issue_url == "https://github.com/org/repo/issues/7"
+
+
+class TestPhaseCIFix:
+    def test_ci_fix_enum_value(self) -> None:
+        assert Phase.CI_FIX.value == "ci_fix"
+
+    def test_ci_fix_serialization_roundtrip(self) -> None:
+        """Phase('ci_fix') should reconstruct CI_FIX."""
+        assert Phase("ci_fix") == Phase.CI_FIX
+
+    def test_ci_fix_phase_result(self) -> None:
+        result = PhaseResult(phase=Phase.CI_FIX, success=True, cost_usd=0.5)
+        assert result.phase == Phase.CI_FIX
+        assert result.success is True
+
+    def test_backward_compat_runlog_without_ci_fix(self) -> None:
+        """Existing RunLog JSON without CI_FIX phases loads fine."""
+        log = RunLog(
+            run_id="r-old",
+            prompt="old run",
+            status=RunStatus.COMPLETED,
+            phases=[
+                PhaseResult(phase=Phase.IMPLEMENT, success=True),
+                PhaseResult(phase=Phase.DELIVER, success=True),
+            ],
+        )
+        assert all(p.phase != Phase.CI_FIX for p in log.phases)

@@ -1,7 +1,7 @@
 """Tests for the shared sanitize module."""
 from __future__ import annotations
 
-from colonyos.sanitize import XML_TAG_RE, sanitize_untrusted_content
+from colonyos.sanitize import XML_TAG_RE, sanitize_ci_logs, sanitize_untrusted_content
 
 
 class TestSanitizeUntrustedContent:
@@ -26,6 +26,84 @@ class TestSanitizeUntrustedContent:
         assert "</slack_message>" not in result
         assert "<system>" not in result
         assert "evil" in result
+
+
+class TestSanitizeCiLogs:
+    def test_redacts_ghp_token(self) -> None:
+        result = sanitize_ci_logs("token: ghp_abc123XYZ456")
+        assert "ghp_abc123XYZ456" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_ghs_token(self) -> None:
+        result = sanitize_ci_logs("ghs_server_token_here")
+        assert "ghs_server_token_here" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_sk_key(self) -> None:
+        result = sanitize_ci_logs("api_key=sk-abc123def456")
+        assert "sk-abc123def456" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_aws_key(self) -> None:
+        result = sanitize_ci_logs("AKIA1234567890EXAMPLE")
+        assert "AKIA1234567890EXAMPLE" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_bearer_token(self) -> None:
+        result = sanitize_ci_logs("Authorization: Bearer eyJhbGciOi...")
+        assert "eyJhbGciOi" not in result
+        assert "[REDACTED]" in result
+
+    def test_preserves_normal_error_messages(self) -> None:
+        msg = "Error: ModuleNotFoundError: No module named 'foo'"
+        assert sanitize_ci_logs(msg) == msg
+
+    def test_strips_xml_tags(self) -> None:
+        result = sanitize_ci_logs("<system>inject</system>")
+        assert "<system>" not in result
+        assert "inject" in result
+
+    def test_empty_string(self) -> None:
+        assert sanitize_ci_logs("") == ""
+
+    def test_no_secrets_present(self) -> None:
+        text = "Build succeeded in 42s with 0 errors."
+        assert sanitize_ci_logs(text) == text
+
+    def test_high_entropy_base64_near_keyword(self) -> None:
+        text = "TOKEN=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx"
+        result = sanitize_ci_logs(text)
+        assert "[REDACTED]" in result
+
+    def test_redacts_github_pat_token(self) -> None:
+        result = sanitize_ci_logs("token=github_pat_abcdef12345")
+        assert "github_pat_" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_gho_token(self) -> None:
+        result = sanitize_ci_logs("auth=gho_abcdef12345")
+        assert "gho_" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_slack_bot_token(self) -> None:
+        result = sanitize_ci_logs("SLACK_TOKEN=xoxb-123-456-abc")
+        assert "xoxb-" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_slack_user_token(self) -> None:
+        result = sanitize_ci_logs("SLACK_TOKEN=xoxp-123-456-abc")
+        assert "xoxp-" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_npm_token(self) -> None:
+        result = sanitize_ci_logs("NPM_TOKEN=npm_abcdef123456")
+        assert "npm_" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_api_key_near_keyword(self) -> None:
+        text = "APIKEY=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx"
+        result = sanitize_ci_logs(text)
+        assert "[REDACTED]" in result
 
 
 class TestXmlTagRegex:
