@@ -8,9 +8,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from colonyos.config import ColonyConfig, SlackConfig, load_config, save_config
+from colonyos.sanitize import XML_TAG_RE, sanitize_untrusted_content
 from colonyos.slack import (
     SlackUI,
     SlackWatchState,
+    _MAX_HOURLY_KEYS,
     check_rate_limit,
     extract_prompt_from_mention,
     format_acknowledgment,
@@ -22,6 +24,7 @@ from colonyos.slack import (
     sanitize_slack_content,
     save_watch_state,
     should_process_message,
+    wait_for_approval,
 )
 
 
@@ -303,12 +306,14 @@ class TestSlackUI:
         ui.phase_complete(1.5, 10, 30000)
         client.chat_postMessage.assert_called_once()
 
-    def test_phase_error_posts_message(self) -> None:
+    def test_phase_error_posts_generic_message(self) -> None:
         client = MagicMock()
         ui = SlackUI(client, "C123", "1234.5")
         ui.phase_error("something broke")
         call_kwargs = client.chat_postMessage.call_args[1]
-        assert "something broke" in call_kwargs["text"]
+        # Error details must NOT be echoed to Slack (security)
+        assert "something broke" not in call_kwargs["text"]
+        assert "Check server logs" in call_kwargs["text"]
 
     def test_noop_methods(self) -> None:
         """Streaming callbacks are no-ops and don't raise."""
@@ -566,3 +571,141 @@ class TestSlackIntegration:
 
         # Step 5: Rate limit check
         assert check_rate_limit(state, config) is True
+
+
+# ---------------------------------------------------------------------------
+# Shared sanitize module tests
+# ---------------------------------------------------------------------------
+
+
+class TestSharedSanitize:
+    """Verify the shared sanitize module is the single source of truth."""
+
+    def test_xml_tag_re_matches_github_pattern(self) -> None:
+        assert XML_TAG_RE.pattern == r"</?[a-zA-Z][a-zA-Z0-9_-]*(?:\s[^>]*)?>"
+
+    def test_sanitize_untrusted_content_strips_tags(self) -> None:
+        assert sanitize_untrusted_content("<b>bold</b>") == "bold"
+
+    def test_slack_uses_shared_sanitize(self) -> None:
+        """Confirm slack sanitization delegates to the shared module."""
+        assert sanitize_slack_content("<b>x</b>") == sanitize_untrusted_content("<b>x</b>")
+
+
+# ---------------------------------------------------------------------------
+# Prompt preamble security tests
+# ---------------------------------------------------------------------------
+
+
+class TestPromptPreambleSecurity:
+    def test_preamble_contains_role_anchoring(self) -> None:
+        result = format_slack_as_prompt("fix bug", "ch", "u")
+        assert "code assistant" in result
+        assert "adversarial" in result
+
+    def test_preamble_no_longer_says_treat_as_primary(self) -> None:
+        result = format_slack_as_prompt("fix bug", "ch", "u")
+        assert "Treat it as the primary specification" not in result
+
+
+# ---------------------------------------------------------------------------
+# SlackUI phase_error sanitization test
+# ---------------------------------------------------------------------------
+
+
+class TestSlackUIErrorSanitization:
+    def test_phase_error_does_not_echo_details(self) -> None:
+        client = MagicMock()
+        ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_error("/home/user/.env: permission denied")
+        call_kwargs = client.chat_postMessage.call_args[1]
+        # Internal path/details must NOT appear in the posted message
+        assert "/home/user" not in call_kwargs["text"]
+        assert "permission denied" not in call_kwargs["text"]
+        assert "Check server logs" in call_kwargs["text"]
+
+
+# ---------------------------------------------------------------------------
+# wait_for_approval tests
+# ---------------------------------------------------------------------------
+
+
+class TestWaitForApproval:
+    def test_approved_immediately(self) -> None:
+        client = MagicMock()
+        client.reactions_get.return_value = {
+            "message": {"reactions": [{"name": "+1", "count": 1}]},
+        }
+        assert wait_for_approval(client, "C1", "1.0", "2.0", timeout_seconds=1) is True
+
+    def test_timeout_no_reaction(self) -> None:
+        client = MagicMock()
+        client.reactions_get.return_value = {"message": {"reactions": []}}
+        assert wait_for_approval(
+            client, "C1", "1.0", "2.0",
+            timeout_seconds=0.1, poll_interval=0.05,
+        ) is False
+
+    def test_thumbsup_name_variant(self) -> None:
+        client = MagicMock()
+        client.reactions_get.return_value = {
+            "message": {"reactions": [{"name": "thumbsup", "count": 1}]},
+        }
+        assert wait_for_approval(client, "C1", "1.0", "2.0", timeout_seconds=1) is True
+
+    def test_wrong_reaction_not_approved(self) -> None:
+        client = MagicMock()
+        client.reactions_get.return_value = {
+            "message": {"reactions": [{"name": "eyes", "count": 1}]},
+        }
+        assert wait_for_approval(
+            client, "C1", "1.0", "2.0",
+            timeout_seconds=0.1, poll_interval=0.05,
+        ) is False
+
+    def test_api_error_during_poll_does_not_crash(self) -> None:
+        client = MagicMock()
+        client.reactions_get.side_effect = RuntimeError("network error")
+        assert wait_for_approval(
+            client, "C1", "1.0", "2.0",
+            timeout_seconds=0.1, poll_interval=0.05,
+        ) is False
+
+
+# ---------------------------------------------------------------------------
+# Hourly count pruning tests
+# ---------------------------------------------------------------------------
+
+
+class TestHourlyCountPruning:
+    def test_prune_old_hourly_counts(self) -> None:
+        state = SlackWatchState(watch_id="prune-test")
+        # Add more keys than the max
+        for i in range(_MAX_HOURLY_KEYS + 50):
+            state.hourly_trigger_counts[f"2026-01-01T{i:04d}"] = 1
+        assert len(state.hourly_trigger_counts) == _MAX_HOURLY_KEYS + 50
+        state.prune_old_hourly_counts()
+        assert len(state.hourly_trigger_counts) == _MAX_HOURLY_KEYS
+
+    def test_prune_keeps_newest_keys(self) -> None:
+        state = SlackWatchState(watch_id="prune-test")
+        for i in range(_MAX_HOURLY_KEYS + 10):
+            state.hourly_trigger_counts[f"2026-01-01T{i:04d}"] = 1
+        state.prune_old_hourly_counts()
+        # The newest _MAX_HOURLY_KEYS keys should remain (sorted lexically)
+        remaining = sorted(state.hourly_trigger_counts.keys())
+        assert remaining[0] == f"2026-01-01T{10:04d}"
+
+    def test_prune_noop_when_under_limit(self) -> None:
+        state = SlackWatchState(watch_id="prune-test")
+        state.hourly_trigger_counts["2026-01-01T00"] = 1
+        state.prune_old_hourly_counts()
+        assert len(state.hourly_trigger_counts) == 1
+
+    def test_increment_triggers_prune(self) -> None:
+        state = SlackWatchState(watch_id="prune-test")
+        for i in range(_MAX_HOURLY_KEYS + 10):
+            state.hourly_trigger_counts[f"2026-01-01T{i:04d}"] = 1
+        increment_hourly_count(state)
+        # After increment (which calls prune), count should be bounded
+        assert len(state.hourly_trigger_counts) <= _MAX_HOURLY_KEYS + 1

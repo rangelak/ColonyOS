@@ -36,16 +36,10 @@ import click
 
 logger = logging.getLogger(__name__)
 
-# Regex to strip XML-like tags from untrusted content to mitigate prompt
-# injection via crafted GitHub issues.  Removes anything that looks like
-# <tag>, </tag>, or <tag attr="…"> — prevents an attacker from closing
-# the <github_issue> wrapper or injecting new XML delimiters.
-_XML_TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9_-]*(?:\s[^>]*)?>")
-
-
-def _sanitize_untrusted_content(text: str) -> str:
-    """Strip XML-like tags from untrusted content to reduce prompt injection risk."""
-    return _XML_TAG_RE.sub("", text)
+# Import shared sanitization utilities — single source of truth for the
+# XML tag regex used across GitHub and Slack integrations.
+from colonyos.sanitize import XML_TAG_RE as _XML_TAG_RE  # noqa: F401
+from colonyos.sanitize import sanitize_untrusted_content as _sanitize_untrusted_content  # noqa: F401
 
 
 # Matches full GitHub issue URLs like https://github.com/owner/repo/issues/42

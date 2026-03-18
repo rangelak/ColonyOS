@@ -1047,7 +1047,6 @@ def watch(
         sys.exit(1)
 
     from colonyos.slack import (
-        SlackUI,
         SlackWatchState,
         check_rate_limit,
         create_slack_app,
@@ -1060,6 +1059,7 @@ def watch(
         save_watch_state,
         should_process_message,
         start_socket_mode,
+        wait_for_approval,
     )
 
     try:
@@ -1074,6 +1074,13 @@ def watch(
     watch_id = f"watch-{generate_timestamp()}"
     watch_state = SlackWatchState(watch_id=watch_id)
 
+    # Lock guards all watch_state mutations from concurrent event threads.
+    state_lock = threading.Lock()
+    # Semaphore limits concurrent pipeline runs to 1 to prevent git conflicts.
+    pipeline_semaphore = threading.Semaphore(1)
+    # Track active pipeline threads for graceful shutdown.
+    active_threads: list[threading.Thread] = []
+
     # Retrieve the bot user ID for mention detection
     try:
         auth_response = bolt_app.client.auth_test()
@@ -1083,31 +1090,63 @@ def watch(
         sys.exit(1)
 
     shutdown_event = threading.Event()
+    start_time = time.monotonic()
 
-    def _handle_mention(event: dict, client: object) -> None:
-        """Handle app_mention events from Slack."""
+    def _check_budget_exceeded() -> bool:
+        """Return True if aggregate spend exceeds the configured budget cap."""
+        if effective_max_budget is None:
+            return False
+        with state_lock:
+            return watch_state.aggregate_cost_usd >= effective_max_budget
+
+    def _check_time_exceeded() -> bool:
+        """Return True if wall-clock time exceeds the configured max hours."""
+        if effective_max_hours is None:
+            return False
+        elapsed_hours = (time.monotonic() - start_time) / 3600
+        return elapsed_hours >= effective_max_hours
+
+    def _handle_event(event: dict, client: object) -> None:
+        """Handle app_mention and reaction_added events from Slack."""
         if not should_process_message(event, config.slack, bot_user_id):
+            return
+
+        # Enforce time and budget caps
+        if _check_time_exceeded():
+            logger.warning("Max hours exceeded, ignoring event")
+            return
+        if _check_budget_exceeded():
+            logger.warning("Max budget exceeded, ignoring event")
             return
 
         channel = event.get("channel", "")
         ts = event.get("ts", "")
         user = event.get("user", "unknown")
 
-        if watch_state.is_processed(channel, ts):
-            logger.info("Message %s:%s already processed, skipping", channel, ts)
-            return
+        with state_lock:
+            if watch_state.is_processed(channel, ts):
+                logger.info("Message %s:%s already processed, skipping", channel, ts)
+                return
 
-        if not check_rate_limit(watch_state, config.slack):
-            logger.warning("Rate limit reached, skipping message %s:%s", channel, ts)
-            try:
-                client.chat_postMessage(  # type: ignore[union-attr]
-                    channel=channel,
-                    thread_ts=ts,
-                    text=":warning: Rate limit reached. Try again later.",
-                )
-            except Exception:
-                pass
-            return
+            if not check_rate_limit(watch_state, config.slack):
+                logger.warning("Rate limit reached, skipping message %s:%s", channel, ts)
+                try:
+                    client.chat_postMessage(  # type: ignore[union-attr]
+                        channel=channel,
+                        thread_ts=ts,
+                        text=":warning: Rate limit reached. Try again later.",
+                    )
+                except Exception:
+                    logger.debug("Failed to post rate-limit message", exc_info=True)
+                return
+
+            # Mark as processed early (under lock) to prevent TOCTOU races.
+            # If the pipeline fails, the message stays marked to prevent
+            # retrigger storms; operators can manually retry.
+            run_id = f"slack-{generate_timestamp()}"
+            watch_state.mark_processed(channel, ts, run_id)
+            increment_hourly_count(watch_state)
+            watch_state.runs_triggered += 1
 
         raw_text = event.get("text", "")
         prompt_text = extract_prompt_from_mention(raw_text, bot_user_id)
@@ -1122,27 +1161,45 @@ def watch(
         try:
             react_to_message(client, channel, ts, "eyes")  # type: ignore[arg-type]
         except Exception:
-            pass
+            logger.debug("Failed to add :eyes: reaction", exc_info=True)
 
         formatted_prompt = format_slack_as_prompt(prompt_text, channel, user)
 
         # Run pipeline in a background thread so the Bolt handler returns quickly
         def _run_pipeline() -> None:
-            run_id = f"slack-{generate_timestamp()}"
-            watch_state.mark_processed(channel, ts, run_id)
-            increment_hourly_count(watch_state)
-            watch_state.runs_triggered += 1
-
+            # Acquire semaphore to serialize pipeline runs (prevents git conflicts)
+            pipeline_semaphore.acquire()
             try:
+                # Approval gate: if auto_approve is false, wait for thumbsup
                 if not config.slack.auto_approve:
                     try:
-                        client.chat_postMessage(  # type: ignore[union-attr]
+                        approval_resp = client.chat_postMessage(  # type: ignore[union-attr]
                             channel=channel,
                             thread_ts=ts,
                             text=":question: Awaiting approval — react with :thumbsup: to proceed.",
                         )
+                        approval_ts = approval_resp.get("ts", "")
+                        approved = wait_for_approval(
+                            client, channel, ts, approval_ts,  # type: ignore[arg-type]
+                        )
+                        if not approved:
+                            try:
+                                client.chat_postMessage(  # type: ignore[union-attr]
+                                    channel=channel,
+                                    thread_ts=ts,
+                                    text=":no_entry: Approval timed out. Pipeline not executed.",
+                                )
+                            except Exception:
+                                logger.debug("Failed to post approval timeout message", exc_info=True)
+                            return
                     except Exception:
-                        pass
+                        logger.debug("Failed to post/poll approval message", exc_info=True)
+                        return
+
+                # Re-check budget after approval wait
+                if _check_budget_exceeded():
+                    logger.warning("Budget exceeded after approval wait")
+                    return
 
                 post_acknowledgment(client, channel, ts, prompt_text)  # type: ignore[arg-type]
 
@@ -1154,14 +1211,16 @@ def watch(
                     verbose=verbose,
                     quiet=quiet,
                 )
-                watch_state.aggregate_cost_usd += log.total_cost_usd
-                save_watch_state(repo_root, watch_state)
+
+                with state_lock:
+                    watch_state.aggregate_cost_usd += log.total_cost_usd
+                    save_watch_state(repo_root, watch_state)
 
                 emoji = "white_check_mark" if log.status.value == "completed" else "x"
                 try:
                     react_to_message(client, channel, ts, emoji)  # type: ignore[arg-type]
                 except Exception:
-                    pass
+                    logger.debug("Failed to add result reaction", exc_info=True)
 
                 post_run_summary(
                     client,  # type: ignore[arg-type]
@@ -1170,25 +1229,74 @@ def watch(
                     status=log.status.value,
                     total_cost=log.total_cost_usd,
                     branch_name=log.branch_name,
+                    pr_url=getattr(log, "pr_url", None),
                 )
             except Exception:
                 logger.exception("Pipeline run failed for Slack message %s:%s", channel, ts)
                 try:
                     react_to_message(client, channel, ts, "x")  # type: ignore[arg-type]
                 except Exception:
-                    pass
-                save_watch_state(repo_root, watch_state)
+                    logger.debug("Failed to add :x: reaction after failure", exc_info=True)
+                try:
+                    client.chat_postMessage(  # type: ignore[union-attr]
+                        channel=channel,
+                        thread_ts=ts,
+                        text=":x: Pipeline failed. Check server logs for details.",
+                    )
+                except Exception:
+                    logger.debug("Failed to post failure message", exc_info=True)
+                with state_lock:
+                    save_watch_state(repo_root, watch_state)
+            finally:
+                pipeline_semaphore.release()
 
-        thread = threading.Thread(target=_run_pipeline, daemon=True)
+        thread = threading.Thread(target=_run_pipeline, daemon=False)
+        active_threads.append(thread)
         thread.start()
 
-    bolt_app.event("app_mention")(_handle_mention)
+    # Register event handlers
+    bolt_app.event("app_mention")(_handle_event)
+
+    # Register reaction_added handler (FR-3.2) when trigger_mode includes reactions
+    if config.slack.trigger_mode in ("reaction", "all"):
+        def _handle_reaction(event: dict, client: object) -> None:
+            """Handle reaction_added events — re-fetch the original message and process."""
+            item = event.get("item", {})
+            if item.get("type") != "message":
+                return
+            channel = item.get("channel", "")
+            ts = item.get("ts", "")
+            # Re-fetch the original message to get its text
+            try:
+                result = client.conversations_history(  # type: ignore[union-attr]
+                    channel=channel, latest=ts, inclusive=True, limit=1,
+                )
+                messages = result.get("messages", [])
+                if not messages:
+                    return
+                msg = messages[0]
+                # Build a synthetic event dict compatible with _handle_event
+                synthetic_event = {
+                    "channel": channel,
+                    "ts": ts,
+                    "user": msg.get("user", "unknown"),
+                    "text": msg.get("text", ""),
+                }
+                _handle_event(synthetic_event, client)
+            except Exception:
+                logger.debug("Failed to fetch message for reaction event", exc_info=True)
+
+        bolt_app.event("reaction_added")(_handle_reaction)
 
     # Graceful shutdown
     def _signal_handler(signum: int, frame: object) -> None:
         click.echo("\nShutting down Slack watcher...")
         shutdown_event.set()
-        save_watch_state(repo_root, watch_state)
+        # Wait for active pipeline threads to complete (up to 60s)
+        for t in active_threads:
+            t.join(timeout=60)
+        with state_lock:
+            save_watch_state(repo_root, watch_state)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -1196,6 +1304,10 @@ def watch(
     click.echo(f"ColonyOS Slack watcher started (ID: {watch_id})")
     click.echo(f"Monitoring channels: {', '.join(config.slack.channels)}")
     click.echo(f"Trigger mode: {config.slack.trigger_mode}")
+    if effective_max_hours is not None:
+        click.echo(f"Max hours: {effective_max_hours}")
+    if effective_max_budget is not None:
+        click.echo(f"Max budget: ${effective_max_budget:.2f}")
     if dry_run:
         click.echo("DRY RUN MODE — triggers will be logged but not executed")
 
@@ -1203,14 +1315,29 @@ def watch(
 
     try:
         handler = start_socket_mode(bolt_app)
-        handler.start()
+        # Use start_async so we can check shutdown_event in a loop
+        handler.start_async()
+        while not shutdown_event.is_set():
+            # Check time/budget caps periodically
+            if _check_time_exceeded():
+                click.echo("Max hours reached. Shutting down watcher.")
+                break
+            if _check_budget_exceeded():
+                click.echo("Max budget reached. Shutting down watcher.")
+                break
+            shutdown_event.wait(timeout=5.0)
+        handler.close()
     except ImportError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
     except KeyboardInterrupt:
         click.echo("\nShutting down Slack watcher...")
-        save_watch_state(repo_root, watch_state)
     except Exception as exc:
         click.echo(f"Slack watcher error: {exc}", err=True)
-        save_watch_state(repo_root, watch_state)
         sys.exit(1)
+    finally:
+        # Wait for active threads and persist state
+        for t in active_threads:
+            t.join(timeout=30)
+        with state_lock:
+            save_watch_state(repo_root, watch_state)

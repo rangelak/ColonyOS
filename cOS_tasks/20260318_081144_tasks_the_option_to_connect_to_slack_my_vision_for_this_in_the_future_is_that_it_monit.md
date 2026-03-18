@@ -4,13 +4,15 @@
 
 - `src/colonyos/config.py` - Add `SlackConfig` dataclass, parse `slack` section from config.yaml, save slack config
 - `src/colonyos/models.py` - Add `SlackWatchState` dataclass for dedup ledger and watcher state tracking
+- `src/colonyos/sanitize.py` - **New file** — Shared XML tag sanitization (single source of truth for `_XML_TAG_RE`)
 - `src/colonyos/slack.py` - **New file** — Slack Bolt listener, message formatting, content sanitization, threaded reply helpers
 - `src/colonyos/cli.py` - Add `watch` CLI command with budget/time caps, heartbeat, graceful shutdown
 - `src/colonyos/doctor.py` - Add Slack token environment variable validation check
-- `src/colonyos/github.py` - Extract `_sanitize_untrusted_content` for shared reuse (or import from new location)
+- `src/colonyos/github.py` - Import sanitization from shared `sanitize.py` module
 - `src/colonyos/orchestrator.py` - Minor: ensure `run_orchestrator` can be called from Slack context (already works, verify)
 - `pyproject.toml` - Add `slack-bolt[socket-mode]` as optional dependency
 - `tests/test_slack.py` - **New file** — Unit tests for Slack message parsing, sanitization, formatting, dedup, config
+- `tests/test_sanitize.py` - **New file** — Unit tests for shared sanitize module
 - `tests/test_config.py` - Add tests for `SlackConfig` parsing and validation
 - `tests/test_doctor.py` - Add tests for Slack token doctor check (if doctor tests exist; otherwise add to test_slack.py)
 - `.colonyos/config.yaml` - Example: add `slack` section documentation
