@@ -1,5 +1,23 @@
 # Changelog
 
+## 20260318_002000 — `colonyos stats` Aggregate Analytics Dashboard
+
+Added a `colonyos stats` CLI command that reads all persisted `run-*.json` files from
+`.colonyos/runs/` and renders a multi-section analytics dashboard showing cost breakdown
+by phase, failure hotspots, review loop efficiency, duration stats, and recent run trends.
+Supports `--last N` and `--phase <name>` filtering options.
+
+**Created:**
+- `src/colonyos/stats.py` — Data computation layer (pure functions returning typed dataclasses) and rich rendering layer
+- `tests/test_stats.py` — Comprehensive unit tests (empty dir, single/multi run, corrupted files, null costs, filtering)
+
+**Modified:**
+- `src/colonyos/cli.py` — `stats` command with `--last` and `--phase` options
+- `src/colonyos/ui.py` — Exposed `_format_duration` for reuse
+
+**PRD:** `cOS_prds/20260318_001555_prd_add_a_colonyos_stats_cli_command_that_reads_all_persisted_runlog_json_files_from.md`
+**Tasks:** `cOS_tasks/20260318_001555_tasks_add_a_colonyos_stats_cli_command_that_reads_all_persisted_runlog_json_files_from.md`
+
 ## 20260318_000500 — GitHub Issue Integration
 
 Added `--issue` flag to `colonyos run` that fetches a GitHub issue (by number or URL)

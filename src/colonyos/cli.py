@@ -844,3 +844,32 @@ def status(limit: int) -> None:
         click.echo(f"\nLearnings ledger: {count} entries")
     else:
         click.echo("\nLearnings ledger: not found")
+
+
+@app.command()
+@click.option("-n", "--last", default=None, type=int, help="Limit to the N most recent runs.")
+@click.option("--phase", default=None, type=str, help="Drill into a specific phase.")
+def stats(last: int | None, phase: str | None) -> None:
+    """Show aggregate analytics dashboard across all runs."""
+    from colonyos.stats import (
+        compute_stats,
+        filter_runs,
+        load_run_logs,
+        render_dashboard,
+    )
+
+    repo_root = _find_repo_root()
+    runs_dir = runs_dir_path(repo_root)
+
+    runs = load_run_logs(runs_dir)
+    runs = filter_runs(runs, last=last, phase=phase)
+
+    if not runs:
+        click.echo("No runs found.")
+        return
+
+    from rich.console import Console as RichConsole
+
+    console = RichConsole()
+    result = compute_stats(runs, phase_filter=phase)
+    render_dashboard(console, result)

@@ -1,46 +1,25 @@
 # Review by Staff Security Engineer (Round 1)
 
-Here is my complete review from the **Staff Security Engineer** perspective:
+All 485 tests pass. Let me now perform the security-focused analysis.
 
 ---
 
-## Review: GitHub Issue Integration — Staff Security Engineer
+## Security Review: `colonyos stats` CLI Command
 
-### Checklist Assessment
-
-**Completeness**
-- [x] All 8 functional requirements (FR-1 through FR-8) from the PRD are implemented
-- [x] All 7 task groups (1.0–7.0) and all subtasks are marked complete  
-- [x] No placeholder or TODO code remains
-
-**Quality**
-- [x] All 57 new tests pass
-- [x] Code follows existing project conventions (dataclass pattern, subprocess pattern from `doctor.py`)
-- [x] No new Python dependencies added — uses existing `gh` CLI
-- [x] No unrelated changes included
-
-**Safety**
-- [x] No secrets or credentials in committed code
-- [x] No `shell=True` in any subprocess call — command arguments passed as list (safe from shell injection)
-- [x] Error handling present for all `gh` failure modes (not found, auth, timeout, network)
-- [x] `fetch_open_issues` wrapped in broad `except Exception` for non-blocking CEO flow
-
----
-
-### Security-Specific Findings
+### Assessment from Staff Security Engineer Perspective
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/github.py]: **Good** — All `subprocess.run` calls use list-form arguments (no `shell=True`), `capture_output=True`, `text=True`, and `timeout=10`. This follows the established `doctor.py` pattern and prevents shell injection through issue content or crafted issue numbers.
-- [src/colonyos/github.py]: **Good** — Issue content is wrapped in `<github_issue>` XML delimiters with a preamble instructing the agent to treat it as a feature description. Content is placed in the user prompt, never interpolated into system prompts. This matches the PRD's prompt injection defense strategy and the existing trust model where user-supplied prompts have the same privilege level.
-- [src/colonyos/github.py]: **Observation** — Comments from *any* GitHub user are included without author filtering. The PRD explicitly acknowledges this as a deferred decision (Open Question #1). An attacker could craft issue comments with adversarial prompt content. However, this is mitigated by: (a) the 5-comment / 8K-char cap, (b) the `<github_issue>` structural delimiting, and (c) the fact that the existing positional `prompt` argument already has the same trust level. This is an acceptable risk for v1 with the caveat that v2 should implement author-based filtering.
-- [src/colonyos/orchestrator.py]: **Good** — The CEO's `_build_ceo_prompt` wraps `fetch_open_issues` in a bare `except Exception` with a logged warning, ensuring a compromised or unavailable `gh` CLI cannot block autonomous operation. The CEO only receives issue titles and labels (not full bodies or comments), limiting the prompt injection surface for the autonomous path.
-- [src/colonyos/orchestrator.py]: **Good** — Issue number is used only as an `int` in f-string interpolation for `_build_plan_prompt` and `_build_deliver_prompt`. No risk of injection through the issue number itself since `parse_issue_ref` validates it as a positive integer.
-- [src/colonyos/cli.py]: **Good** — The `--issue` flag import of `colonyos.github` is deferred (inside the `if issue_ref:` block), so the module is only loaded when needed. Mutual exclusivity with `--from-prd` and `--resume` is properly enforced.
-- [src/colonyos/cli.py]: **Observation** — The `source_issue_url` displayed in `colonyos status` comes from the `gh` CLI output and is persisted in the run log JSON. There's no URL validation or sanitization, but since it's only displayed in a terminal (not rendered in a browser), the XSS risk is nil. If status output is ever rendered in a web UI, this should be revisited.
-- [src/colonyos/models.py]: **Good** — New fields default to `None` with backward-compatible `.get()` deserialization in `_load_run_log`, so existing run logs are unaffected.
-- [tests/]: **Good** — Comprehensive test coverage for all error paths, including `gh` not found, auth failure, timeout, closed issues, and malformed references. Mocks are applied at the `subprocess.run` boundary, which is the correct level for auditing subprocess interactions.
+- [src/colonyos/stats.py:131]: File I/O via `f.read_text()` uses `encoding="utf-8"` and is scoped to `runs_dir.glob("run-*.json")` — good. The glob pattern constrains file access to only `run-*.json` within the expected directory. No path traversal risk since `Path.glob()` does not follow symlinks by default in the matched pattern prefix.
+- [src/colonyos/stats.py:127-128]: The `loop_state_*.json` exclusion check is redundant since the glob is `run-*.json` (which would never match `loop_state_*`), but it's defensive and harmless — not a security issue, just dead code.
+- [src/colonyos/stats.py:133-134]: Error handling catches `json.JSONDecodeError` and `OSError` specifically (not bare `except Exception`), and warnings go to stderr. Good practice — no information leakage to stdout.
+- [src/colonyos/stats.py:296-302]: The `datetime.fromisoformat()` parsing is wrapped in `try/except (ValueError, TypeError)` — prevents malformed timestamp data from crashing the process. Good.
+- [src/colonyos/stats.py]: No secrets, credentials, session IDs, or prompt content are ever read, computed, or displayed — consistent with PRD §5 (Non-Goals) and the security concern explicitly resolved in PRD §8.4. The module only accesses: run_id, status, total_cost_usd, phases (phase name, success, cost_usd, duration_ms), started_at, finished_at. This is the minimum data needed — principle of least privilege is respected for data access.
+- [src/colonyos/cli.py:844-875]: The `stats` CLI command does no writes — it is read-only. No destructive operations. No network calls. No subprocess spawning. This is the ideal least-privilege profile for an analytics command.
+- [src/colonyos/stats.py]: No new dependencies introduced. Uses only `json`, `sys`, `pathlib`, `dataclasses`, `datetime` from stdlib plus `rich` (already a project dependency). Clean supply chain.
+- [tests/test_stats.py]: Tests use `tmp_path` fixtures for file I/O isolation — no test pollution risk. 65 tests covering all computation paths, edge cases (empty, corrupted, None values), and rendering.
+- [src/colonyos/cli.py:844-875]: The `--phase` parameter accepts arbitrary user string input but it's only used for string comparison (`phase_entry.get("phase", "") == phase_name`) — no injection vector. The `--last` parameter is typed as `int` by Click, preventing non-numeric input.
 
 SYNTHESIS:
-From a supply chain and least-privilege perspective, this implementation is well-executed. The critical security decisions — no `shell=True`, list-form subprocess arguments, timeout enforcement, structural prompt delimiting, fail-fast on `gh` errors, non-blocking degradation for the autonomous CEO path — are all sound. The trust model is clearly articulated: issue content occupies the same trust level as user-supplied prompts, never escalated to system prompt privilege. The main residual risk is unfiltered third-party comments flowing into prompts, which the PRD explicitly defers. The audit trail is strong — every issue-triggered run persists `source_issue` and `source_issue_url` in the run log, making it straightforward to trace what the agent was instructed to do and from where. No new dependencies are introduced, and all `gh` interactions go through the already-validated CLI tool. This is a clean, well-bounded feature with appropriate security guardrails for v1.
+This is a well-scoped, read-only analytics command with an excellent security profile. The implementation follows the principle of least privilege: it reads only the specific JSON fields needed for aggregation, performs no writes, makes no network calls, and spawns no subprocesses. Sensitive data (session IDs, prompt text, API keys) is never accessed or displayed. File access is constrained to a known directory with a specific glob pattern, and corrupted inputs are handled gracefully without information leakage. The two-layer architecture (data + rendering) cleanly separates concerns and makes the data access patterns auditable. No new dependencies are introduced. All functional requirements from the PRD are implemented, all tasks are complete, and all 485 tests pass with zero regressions. From a supply chain and secrets management perspective, this is a safe change to approve.

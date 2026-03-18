@@ -1161,6 +1161,79 @@ class TestRunIssueFlag:
         assert result.exit_code != 0
 
 
+class TestStats:
+    """CLI tests for the `colonyos stats` command."""
+
+    def test_no_runs(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0
+        assert "No runs found" in result.output
+
+    def test_single_run(self, runner: CliRunner, tmp_path: Path):
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        run_data = {
+            "run_id": "run-stats-test",
+            "prompt": "Add feature",
+            "status": "completed",
+            "total_cost_usd": 1.5,
+            "started_at": "2026-03-17T12:00:00+00:00",
+            "finished_at": "2026-03-17T12:10:00+00:00",
+            "phases": [
+                {"phase": "plan", "success": True, "cost_usd": 0.5, "duration_ms": 60000},
+                {"phase": "implement", "success": True, "cost_usd": 1.0, "duration_ms": 120000},
+            ],
+        }
+        (runs_dir / "run-stats-test.json").write_text(
+            json.dumps(run_data), encoding="utf-8",
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0
+        assert "Run Summary" in result.output
+
+    def test_last_flag(self, runner: CliRunner, tmp_path: Path):
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        for i in range(5):
+            run_data = {
+                "run_id": f"run-{i}",
+                "status": "completed",
+                "total_cost_usd": 1.0,
+                "started_at": f"2026-03-1{i}T12:00:00+00:00",
+                "phases": [],
+            }
+            (runs_dir / f"run-{i}.json").write_text(
+                json.dumps(run_data), encoding="utf-8",
+            )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["stats", "--last", "3"])
+        assert result.exit_code == 0
+        # Should show 3 total runs in the summary
+        assert "3" in result.output
+
+    def test_phase_flag(self, runner: CliRunner, tmp_path: Path):
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        run_data = {
+            "run_id": "run-phase-test",
+            "status": "completed",
+            "total_cost_usd": 1.0,
+            "started_at": "2026-03-17T12:00:00+00:00",
+            "phases": [
+                {"phase": "review", "success": True, "cost_usd": 0.5, "duration_ms": 30000},
+            ],
+        }
+        (runs_dir / "run-phase-test.json").write_text(
+            json.dumps(run_data), encoding="utf-8",
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["stats", "--phase", "review"])
+        assert result.exit_code == 0
+        assert "Phase Detail" in result.output
+
+
 class TestStatusSourceIssue:
     def test_shows_issue_in_status(self, runner: CliRunner, tmp_path: Path) -> None:
         runs_dir = tmp_path / ".colonyos" / "runs"
