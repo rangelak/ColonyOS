@@ -1611,3 +1611,94 @@ class TestCIFixCommand:
                  patch("colonyos.orchestrator._save_run_log"):
                 result = runner.invoke(app, ["ci-fix", "42"])
         assert "WARNING" in result.output or "mallory" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Show command tests
+# ---------------------------------------------------------------------------
+
+
+class TestShow:
+    def _setup_runs_dir(self, tmp_path: Path) -> Path:
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        return runs_dir
+
+    def _write_run(self, runs_dir: Path, run_id: str, **kwargs) -> None:
+        data = {
+            "run_id": run_id,
+            "status": kwargs.get("status", "completed"),
+            "total_cost_usd": kwargs.get("total_cost_usd", 1.0),
+            "started_at": "2026-03-17T12:00:00+00:00",
+            "finished_at": "2026-03-17T12:10:00+00:00",
+            "prompt": "test prompt",
+            "branch_name": "colonyos/test",
+            "prd_rel": "cOS_prds/prd.md",
+            "task_rel": "cOS_tasks/tasks.md",
+            "phases": kwargs.get("phases", [
+                {"phase": "plan", "success": True, "cost_usd": 0.5, "duration_ms": 30000},
+            ]),
+        }
+        (runs_dir / f"{run_id}.json").write_text(json.dumps(data), encoding="utf-8")
+
+    def test_show_full_id(self, runner: CliRunner, tmp_path: Path):
+        runs_dir = self._setup_runs_dir(tmp_path)
+        self._write_run(runs_dir, "run-20260317_120000-abc123")
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["show", "run-20260317_120000-abc123"])
+        assert result.exit_code == 0
+        assert "run-20260317_120000-abc123" in result.output
+
+    def test_show_prefix(self, runner: CliRunner, tmp_path: Path):
+        runs_dir = self._setup_runs_dir(tmp_path)
+        self._write_run(runs_dir, "run-20260317_120000-abc123")
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["show", "run-20260317_12"])
+        assert result.exit_code == 0
+        assert "abc123" in result.output
+
+    def test_show_bad_id(self, runner: CliRunner, tmp_path: Path):
+        self._setup_runs_dir(tmp_path)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["show", "nonexistent"])
+        assert result.exit_code != 0
+
+    def test_show_ambiguous(self, runner: CliRunner, tmp_path: Path):
+        runs_dir = self._setup_runs_dir(tmp_path)
+        self._write_run(runs_dir, "run-20260317_120000-abc123")
+        self._write_run(runs_dir, "run-20260317_120100-abc456")
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["show", "run-20260317_12"])
+        assert result.exit_code != 0
+        assert "Ambiguous" in result.output
+
+    def test_show_json_flag(self, runner: CliRunner, tmp_path: Path):
+        runs_dir = self._setup_runs_dir(tmp_path)
+        self._write_run(runs_dir, "run-20260317_120000-abc123")
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["show", "run-20260317_120000-abc123", "--json"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["run_id"] == "run-20260317_120000-abc123"
+
+    def test_show_phase_filter(self, runner: CliRunner, tmp_path: Path):
+        runs_dir = self._setup_runs_dir(tmp_path)
+        self._write_run(runs_dir, "run-20260317_120000-abc123", phases=[
+            {"phase": "plan", "success": True, "cost_usd": 0.5, "duration_ms": 30000, "model": "sonnet", "session_id": "s1"},
+            {"phase": "review", "success": True, "cost_usd": 1.0, "duration_ms": 60000, "model": "opus", "session_id": "s2"},
+        ])
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["show", "run-20260317_120000-abc123", "--phase", "review"])
+        assert result.exit_code == 0
+        assert "Phase Detail" in result.output
+
+    def test_show_no_runs_dir(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["show", "abc123"])
+        assert result.exit_code != 0

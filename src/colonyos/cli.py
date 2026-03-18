@@ -1038,6 +1038,61 @@ def stats(last: int | None, phase: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Show command (single-run inspector)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+@click.argument("run_id")
+@click.option("--json", "as_json", is_flag=True, help="Output run data as JSON.")
+@click.option("--phase", default=None, type=str, help="Show detail for a specific phase.")
+def show(run_id: str, as_json: bool, phase: str | None) -> None:
+    """Show detailed inspection of a single run."""
+    import json as json_mod
+
+    from colonyos.show import (
+        compute_show_result,
+        load_single_run,
+        render_show,
+        resolve_run_id,
+    )
+
+    repo_root = _find_repo_root()
+    runs_dir = runs_dir_path(repo_root)
+
+    try:
+        resolved = resolve_run_id(runs_dir, run_id)
+    except FileNotFoundError as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1)
+    except ValueError as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1)
+
+    if isinstance(resolved, list):
+        click.echo(f"Ambiguous run ID '{run_id}'. Matches:", err=True)
+        for match in resolved:
+            click.echo(f"  {match}", err=True)
+        raise SystemExit(1)
+
+    try:
+        run_data = load_single_run(runs_dir, resolved)
+    except (FileNotFoundError, json_mod.JSONDecodeError) as exc:
+        click.echo(f"Error loading run: {exc}", err=True)
+        raise SystemExit(1)
+
+    if as_json:
+        click.echo(json_mod.dumps(run_data, indent=2))
+        return
+
+    from rich.console import Console as RichConsole
+
+    console = RichConsole()
+    result = compute_show_result(run_data, phase_filter=phase)
+    render_show(console, result)
+
+
+# ---------------------------------------------------------------------------
 # Watch command (Slack integration)
 # ---------------------------------------------------------------------------
 
