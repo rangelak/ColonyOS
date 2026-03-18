@@ -17,7 +17,16 @@ def run_doctor_checks(repo_root: Path) -> list[tuple[str, bool, str]]:
     This is extracted as a reusable function so both ``colonyos doctor`` and
     ``colonyos init`` can call it without circular imports.
     """
+    from colonyos import __version__
+
     results: list[tuple[str, bool, str]] = []
+
+    # 0. ColonyOS version
+    results.append((
+        f"ColonyOS v{__version__}",
+        True,
+        "",
+    ))
 
     # 1. Python >= 3.11
     py_ok = sys.version_info.major >= 3 and sys.version_info.minor >= 11

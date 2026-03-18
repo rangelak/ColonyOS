@@ -26,10 +26,12 @@ def runner():
 
 class TestVersion:
     def test_version_flag(self, runner: CliRunner):
+        from colonyos import __version__
+
         result = runner.invoke(app, ["--version"])
         assert result.exit_code == 0
         assert "colonyos" in result.output
-        assert "0.1.0" in result.output
+        assert __version__ in result.output
 
 
 class TestStatus:

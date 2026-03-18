@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Note: PyPI Trusted Publisher Setup
+# 1. Go to https://pypi.org/manage/project/colonyos/settings/publishing/
+# 2. Add a new "GitHub Actions" publisher:
+#    - Owner: rangelak
+#    - Repository: ColonyOS
+#    - Workflow name: release.yml
+#    - Environment: pypi
+# 3. No API tokens needed — OIDC handles authentication automatically.
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest --tb=short -q
+
+  build:
+    name: Build distribution
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for setuptools-scm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Generate SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # Required for OIDC Trusted Publisher
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    name: Create GitHub Release
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Extract changelog for this release
+        id: changelog
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Extract the latest section from CHANGELOG.md (between first two ## headers)
+          NOTES=$(awk '/^## /{if(found) exit; found=1; next} found{print}' CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            NOTES="Release ${TAG}. See CHANGELOG.md for details."
+          fi
+          # Add installation instructions
+          NOTES="${NOTES}
+
+          ---
+
+          ## Installation
+
+          \`\`\`bash
+          # pip / pipx
+          pip install colonyos==${TAG#v}
+          # or: pipx install colonyos==${TAG#v}
+
+          # curl
+          curl -sSL https://raw.githubusercontent.com/rangelak/ColonyOS/main/install.sh | sh
+
+          # Homebrew
+          brew tap colonyos/tap
+          brew install colonyos
+          \`\`\`"
+
+          # Write to file to avoid quoting issues
+          echo "$NOTES" > /tmp/release_notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file /tmp/release_notes.md \
+            dist/*
