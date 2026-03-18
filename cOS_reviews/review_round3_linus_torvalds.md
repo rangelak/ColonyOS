@@ -1,77 +1,27 @@
 # Review by Linus Torvalds (Round 3)
 
-Now I have a complete picture. Let me write the review.
+I've now reviewed the full implementation. Here's my assessment:
 
 ---
 
-Alright. I've read the PRD, reviewed every line of the diff across 33 files, checked the task list, and run the full test suite. Here's my assessment.
-
-## The Good
-
-The core feature — `phase_models`, `VALID_MODELS`, `get_model()`, fail-fast validation, config round-trip, orchestrator rewiring — is **cleanly implemented**. The data structures are right: a simple dict for `phase_models`, a one-liner `get_model()` that does exactly what it should, validation at load time not at runtime. This is the correct approach. No over-engineering, no unnecessary abstraction layers.
-
-The test coverage is thorough: 341 tests just for the modified files, 537 total, all passing. The validation tests cover invalid models, invalid phase keys, the safety-critical phase warnings, backward compat with missing fields — all the edge cases that matter.
-
-The `_SAFETY_CRITICAL_PHASES` warning for haiku on review/decision/fix is a nice touch that the PRD didn't explicitly require but the Security Engineer recommended.
-
-## The Problems
-
-### 1. Unrelated Changes Stuffed Into This Branch
-
-This is the biggest problem. This branch contains **three separate features** stacked together:
-
-- **GitHub issue integration** (`github.py`, `--issue` flag, `source_issue` fields, CEO open-issues context) — commits `17bee4f` through `1fa42e6`
-- **Stats CLI** (`stats.py`, `colonyos stats` command) — commits `961aada` through `2ca0995`
-- **Per-phase model overrides** — commits `b729b80` through `0f2935b`
-
-The PRD for this review is specifically about per-phase model overrides. The GitHub issue integration is **completely unrelated** and has no business being in this diff. The stats work partially overlaps (FR-16 through FR-19 require model usage in stats), but the *entire* stats module (576 lines) was built in a prior commit and goes far beyond what this PRD requested.
-
-This makes the diff 3,923 lines instead of what should be ~400-500 lines. That's a 7x inflation that makes review harder and violates the principle of atomic, reviewable changes.
-
-### 2. Cost-Optimized Preset Deviates From PRD
-
-The PRD's FR-13 specifies: *"Cost-optimized (opus for implement, sonnet for plan/review/fix, haiku for decision/learn/deliver)"*
-
-The actual implementation:
-```python
-"Cost-optimized": {
-    "model": "sonnet",
-    "phase_models": {
-        "implement": "opus",
-        "learn": "haiku",
-        "deliver": "haiku",
-    },
-}
-```
-
-This keeps `decision` at `sonnet` (via the global default), not `haiku` as the PRD specifies. This is arguably a *better* choice given the security concerns about decision being a safety gate, but it's an undocumented deviation from the spec. The CEO phase also gets `sonnet` where the PRD doesn't specify it. If this was intentional, it should be called out.
-
-### 3. `load_run_logs` Has Dead Code
-
-```python
-for f in runs_dir.glob("run-*.json"):
-    if f.name.startswith("loop_state_"):
-        continue
-```
-
-A file matching `run-*.json` will never start with `loop_state_`. This is dead code.
-
-### 4. Import Inside Function Body (Duration Stats)
-
-In `compute_duration_stats()`, `from datetime import datetime, timezone` is imported inside the loop body. This import should be at module level. Importing inside a function is acceptable when avoiding circular imports or heavy optional dependencies — neither applies to `datetime`.
-
----
-
-## Review Output
-
-VERDICT: request-changes
+VERDICT: approve
 
 FINDINGS:
-- [branch-level]: Branch contains 3 stacked features (GitHub issue integration, stats CLI, per-phase model overrides). Only the last feature matches this PRD. The unrelated changes should be on separate branches or the base branch should be the prior feature's branch, not main.
-- [src/colonyos/init.py]: Cost-optimized preset keeps `decision` at `sonnet` instead of `haiku` as specified in PRD FR-13. If intentional (safety concern), document the deviation; if accidental, fix it.
-- [src/colonyos/stats.py line ~1155]: Dead code — `loop_state_*` filename check inside a `run-*.json` glob can never match.
-- [src/colonyos/stats.py line ~1325]: `from datetime import datetime, timezone` imported inside function body; should be at module level.
-- [src/colonyos/ui.py]: Changes to tool styles and `_AGENT_TOOLS` set are unrelated to per-phase model overrides.
+- [src/colonyos/slack.py]: Clean separation of concerns — pure functions for formatting/filtering, stateful class for UI, dataclass for persistence. The data structures tell the story clearly. Good.
+- [src/colonyos/slack.py]: `wait_for_approval` uses polling with `time.sleep` — crude but honest. A callback-based approach would be more elegant, but this is Socket Mode running locally, not a cloud service handling 10k concurrent users. The simple thing is the right thing for Phase 1.
+- [src/colonyos/slack.py]: `app._colonyos_config` and `app._colonyos_app_token` — monkey-patching private attributes onto the Bolt App instance is ugly. But the alternative (globals or a wrapper class) would be worse. Acceptable pragmatism with the `type: ignore` comments acknowledging the sin.
+- [src/colonyos/sanitize.py]: Good extraction. Single source of truth for the XML sanitization regex shared between GitHub and Slack. The github.py import aliases (`_XML_TAG_RE`, `_sanitize_untrusted_content`) preserve backward compatibility without any behavioral change.
+- [src/colonyos/cli.py]: The `_handle_event` function correctly extracts the prompt *before* acquiring the state lock and burning a rate-limit slot — the review fix for empty mentions is the right fix in the right place. TOCTOU race on `mark_processed` is handled by marking early under lock.
+- [src/colonyos/cli.py]: `_run_pipeline` uses a semaphore to serialize pipeline runs — correct, since `run_orchestrator` does git operations that would conflict. The `daemon=False` on pipeline threads combined with the shutdown handler's `join(timeout=60)` is proper lifecycle management.
+- [src/colonyos/cli.py]: The `_signal_handler` saves state and joins threads. The `finally` block in the main `watch` function *also* joins threads and saves state. Belt and suspenders — slightly redundant, but safe. I'll take redundant-but-correct over clever-but-fragile.
+- [src/colonyos/config.py]: `_parse_slack_config` validates trigger_mode against a frozen set — fails fast on bad config. `save_config` omits the slack section entirely when disabled — clean.
+- [src/colonyos/doctor.py]: Slack token check is properly guarded behind `slack.enabled` — doesn't nag users who haven't opted in.
+- [src/colonyos/orchestrator.py]: The `ui_factory` parameter is the minimal invasion needed — a single optional argument that defaults to None, with a two-line check in `_make_ui`. This is how you extend an interface without breaking it.
+- [pyproject.toml]: `slack-bolt` as an optional dependency under `[slack]` — correct. Don't force websocket dependencies on users who don't need Slack.
+- [tests/test_slack.py]: 79 tests covering config parsing, sanitization, filtering, formatting, dedup, rate limiting, approval polling, pruning, error sanitization, and the integration flow. Thorough without being bloated. The `test_phase_error_does_not_echo_details` test is exactly the kind of security-boundary test that matters.
+- [src/colonyos/slack.py]: `phase_error` logs the real error but posts a generic message to Slack — correct. Never reflect internal details to an untrusted channel.
+- [src/colonyos/slack.py]: `SlackWatchState.prune_old_hourly_counts` prevents unbounded dict growth — the kind of thing that only matters at 3am on day 30 of a long-running watcher, but when it matters, you're glad someone thought of it.
+- [src/colonyos/cli.py]: The REPL and dynamic banner changes are unrelated to Slack but appear on this branch from an earlier merge. Not ideal git hygiene, but the changes are small and harmless.
 
 SYNTHESIS:
-The per-phase model override feature itself is well-implemented — correct data structures, clean validation, thorough tests, proper backward compatibility. The `get_model()` method is a single line that does exactly what it should, the validation catches errors at config load time as the PRD mandates, and the orchestrator rewiring is mechanical and complete. However, this branch is carrying the weight of two prior, unrelated features that inflate the diff from ~500 to ~4000 lines. The right fix is to rebase this so the per-phase model work stands alone (or at minimum, clearly document that this is a stacked branch). The preset deviation from the PRD and the minor code quality issues (dead code, misplaced import) should be cleaned up. None of these are blocking bugs — the code is functionally correct and all 537 tests pass — but shipping a 4000-line diff that's 85% unrelated changes is how technical debt accumulates.
+This is a well-structured implementation that does the simple, obvious thing at every decision point. The data structures are clear — `SlackConfig` for configuration, `SlackWatchState` for persistence, `SlackUI` for output routing. The code follows the existing patterns (`colonyos auto` → `colonyos watch`, `format_issue_as_prompt` → `format_slack_as_prompt`, `LoopState` → `SlackWatchState`) rather than inventing new abstractions. The security posture is correct: untrusted Slack content gets the same XML-stripping treatment as GitHub issues, error details stay in server logs instead of being reflected to Slack, channel allowlists are enforced before any processing, and the approval gate is opt-out rather than opt-in. The threading model is simple but correct — semaphore serializes pipeline runs, lock guards shared state, signal handler drains active threads. The sanitize.py extraction eliminates the duplicated regex between GitHub and Slack without any behavioral change. All 633 tests pass, including 79 new ones with good coverage of edge cases (empty mentions, approval timeouts, API errors during polling, hourly count pruning). The only thing I'd nitpick is the monkey-patching of Bolt app attributes, but the alternatives are worse. Ship it.

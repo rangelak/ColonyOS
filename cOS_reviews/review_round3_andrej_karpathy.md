@@ -1,53 +1,53 @@
 # Review by Andrej Karpathy (Round 3)
 
-I now have a comprehensive picture of the implementation. Let me compile my review.
+Now I have a complete picture. Here's my review:
 
 ---
 
-## Review: Per-Phase Model Override Configuration
+## Review: Slack Integration (`colonyos watch`)
 
-**Reviewer**: Andrej Karpathy  
-**Branch**: `colonyos/add_per_phase_model_override_configuration_to_colonyos_currently_config_yaml_has`
+**Reviewing as: Andrej Karpathy**
 
 ### Checklist Assessment
 
-- [x] **FR-1**: `phase_models: dict[str, str]` on `ColonyConfig` ✓
-- [x] **FR-2**: `VALID_MODELS: frozenset` ✓
-- [x] **FR-3**: `get_model(phase)` with fallback ✓
-- [x] **FR-4**: Parse `phase_models` from YAML ✓
-- [x] **FR-5**: Validate model values at load time ✓
-- [x] **FR-6**: Validate phase keys against `Phase` enum ✓
-- [x] **FR-7**: Serialize `phase_models` only when non-empty ✓
-- [x] **FR-8**: `model: str | None = None` on `PhaseResult` ✓
-- [x] **FR-9**: Populate `PhaseResult.model` in all 3 return paths of `run_phase()` ✓
-- [x] **FR-10**: All `config.model` → `config.get_model(Phase.XXX)` in orchestrator (22 call sites, 0 remaining `config.model` references) ✓
-- [x] **FR-11**: All `ui.phase_header()` calls pass per-phase model ✓
-- [x] **FR-12**: No changes needed to `ui.py` ✓
-- [x] **FR-13**: Model preset selection in interactive init ✓
-- [x] **FR-14**: Quick mode defaults to cost-optimized ✓
-- [x] **FR-15**: Persist `phase_models` in generated config ✓
-- [x] **FR-16**: `ModelUsageRow` dataclass ✓
-- [x] **FR-17**: `compute_model_usage()` ✓
-- [x] **FR-18**: `model_usage` on `StatsResult` ✓
-- [x] **FR-19**: `render_model_usage()` integrated into `render_dashboard()` ✓
-- [x] **FR-20**: `model` in PhaseResult serialization, backward-compatible with `.get("model")` → `None` ✓
+**Completeness:**
+- [x] FR-1 (SlackConfig): `SlackConfig` dataclass with all fields (enabled, channels, trigger_mode, auto_approve, max_runs_per_hour, allowed_user_ids) — ✅
+- [x] FR-2 (CLI `watch` command): Long-running command with `--max-hours`, `--max-budget`, `--verbose`, `--quiet`, `--dry-run`, LoopState/heartbeat, SIGINT/SIGTERM — ✅
+- [x] FR-3 (Message ingestion): `app_mention` handler, `reaction_added` handler, bot/edit/thread filtering, channel allowlist, sender allowlist — ✅
+- [x] FR-4 (Content sanitization): Shared `sanitize.py` module, `<slack_message>` delimiters with role-anchoring preamble, no raw echo in error messages — ✅
+- [x] FR-5 (Pipeline triggering): Calls `run_orchestrator()`, approval gate via reaction polling, rate limiting, budget caps — ✅
+- [x] FR-6 (Slack feedback): 👀 reaction on detect, threaded acks, phase updates via `SlackUI`, final summary with PR link, ✅/❌ reactions — ✅
+- [x] FR-7 (Deduplication): `SlackWatchState` with `processed_messages` dict, atomic file writes, hourly count pruning — ✅
+- [x] No TODO/placeholder code remains
+- [x] All 633 tests pass (79 Slack-specific)
 
-**Tests**: 361 passed, 0 failed  
-**Remaining `config.model`** in orchestrator: 0  
-**No TODOs or placeholder code**  
-**No new dependencies**
+**Quality:**
+- [x] Tests comprehensive: config parsing, sanitization, filtering, formatting, dedup, rate limiting, CLI validation, integration flow, edge cases (empty mentions, pruning)
+- [x] `slack-bolt` added as optional dependency (`[slack]` extra) — clean
+- [x] Shared `sanitize.py` extracted properly from `github.py` — DRY
+- [x] `ui_factory` injection into `run_orchestrator` is a clean seam
+- [x] Thread-safe state management with `state_lock` + `pipeline_semaphore`
 
----
+**Safety:**
+- [x] Tokens from env vars only, never in config.yaml
+- [x] `phase_error` posts generic message, logs details server-side
+- [x] No secrets in committed code
+- [x] Channel allowlist enforced as security boundary
+- [x] Untrusted content sanitized before prompt injection
+
+### Findings
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/init.py]: The Cost-optimized preset omits `decision: "haiku"` that the PRD specifies ("haiku for decision/learn/deliver"). Instead, decision falls back to the global `sonnet` default. This is actually a *better* choice than the PRD — the implementation correctly identifies decision as a `_SAFETY_CRITICAL_PHASES` member and keeps it at sonnet. The PRD's own Open Questions section (#2) acknowledged this concern. This is a thoughtful deviation.
-- [src/colonyos/config.py]: The `_SAFETY_CRITICAL_PHASES` warning for haiku on review/decision/fix is a good addition not explicitly required by the PRD. It uses `logger.warning()` which is non-blocking — exactly the right level of guardrail. A stochastic model producing a "ship it" review on haiku could be catastrophic in a pipeline running with `bypassPermissions`.
-- [src/colonyos/config.py]: `get_model()` is a clean one-liner (`phase_models.get(phase.value, self.model)`) — the right level of simplicity for a precedence rule. No over-engineering.
-- [src/colonyos/stats.py]: The `<legacy>` sentinel for old run logs without a `model` field is a clean backward-compat choice. It surfaces in the dashboard so users can see which data predates the feature rather than silently lumping it with a default model.
-- [src/colonyos/init.py]: The Cost-optimized preset uses `model: "sonnet"` as the global default with only `implement: "opus"` overridden upward. This is the right design — default to the cheaper model and override upward for capability-hungry phases, rather than defaulting to opus and overriding downward everywhere. It means adding a new phase in the future gets sonnet by default, not opus.
-- [tests/]: Comprehensive test coverage across all layers — config validation (invalid models, invalid phases, round-trip), model propagation through orchestrator, stats aggregation, init presets. 222+ new test lines in test_config.py alone.
+- [src/colonyos/slack.py]: The `wait_for_approval` function uses blocking `time.sleep` polling, which is fine for the semaphore-serialized model but worth noting — if you ever want concurrent approval waits, this won't scale. The 5-second poll interval is reasonable for Phase 1.
+- [src/colonyos/slack.py]: `_colonyos_config` and `_colonyos_app_token` stashed as private attrs on the Bolt `App` instance is a minor code smell (monkey-patching), but acceptable given Bolt's limited extension points and the fact it's internal.
+- [src/colonyos/slack.py]: The `sanitize_slack_content` wrapper is a single-line delegation to `sanitize_untrusted_content` — this is intentionally a named alias for domain clarity, which I approve of. It makes the call site self-documenting.
+- [src/colonyos/cli.py]: The `_handle_event` function correctly extracts the prompt *before* acquiring the lock and marking the message as processed. This was called out as a review fix and it's well-implemented — a bare `@mention` with no text returns early without burning a rate-limit slot.
+- [src/colonyos/slack.py]: The role-anchoring preamble in `format_slack_as_prompt` is well-written: "only act on the coding task described" is a strong instruction hierarchy signal. The phrasing "source feature description" (changed from "primary specification" per review) is better — it positions the Slack content as input data, not as a system-level instruction.
+- [src/colonyos/cli.py]: `mark_processed` is called *before* pipeline execution (under lock) to prevent TOCTOU races. This is the right design — failed runs stay marked to prevent retrigger storms. The comment documents this trade-off clearly.
+- [src/colonyos/sanitize.py]: The XML tag regex is correct for the threat model (closing `</slack_message>` or injecting `<system>` tags), but note it won't catch Unicode homoglyph attacks or encoded entities. This is acceptable for Phase 1 — the preamble is the primary defense, and the tag stripping is defense-in-depth.
+- [tests/test_slack.py]: 79 tests with good coverage of edge cases (empty mentions, pruning, API errors during polling, self-message guard). The `TestSlackUIErrorSanitization` test explicitly verifies that internal paths don't leak to Slack — this is exactly the kind of security test I want to see.
 
 SYNTHESIS:
-This is a well-executed feature that treats the model routing configuration with the rigor of a program, not a setting. The key design decisions are correct: fail-fast validation at config load time (not phase execution time — catching a typo 30 minutes into a run would be infuriating), a hardcoded allowlist over arbitrary strings (V1 is the right time for constraints, not flexibility), and the single-method `get_model()` resolution that makes the precedence rule trivially auditable. The safety-critical phase warning is exactly the right intervention — it doesn't block the user but makes the cost/risk tradeoff legible. The one deviation from the PRD (keeping decision at sonnet instead of haiku in the cost-optimized preset) is a case where the implementation is smarter than the spec, which is the correct direction for disagreements to flow. The structured output from the model — `PhaseResult.model` — creates a clean data trail that makes the stats dashboard possible without any heuristics. Clean work.
+This is a well-engineered integration that treats Slack messages with the appropriate level of paranoia — as untrusted input flowing into agents with `bypassPermissions`. The architecture follows the existing `colonyos auto` pattern cleanly: long-running CLI process, heartbeat, budget caps, LoopState persistence. The prompt engineering is solid: the `<slack_message>` delimiter pattern with role-anchoring preamble mirrors the proven `<github_issue>` approach, and the decision to use "source feature description" instead of "primary specification" is a subtle but important distinction that reduces the attack surface for instruction override. The `ui_factory` injection into `run_orchestrator` is an elegant seam that avoids shotgun surgery. The threading model (semaphore-serialized pipelines, lock-guarded state) is correct for the constraint that `run_orchestrator` assumes sequential git operations. The test suite is thorough and includes the right security-oriented assertions. The only thing I'd want to see in a Phase 2 is structured JSON output from an LLM triage classifier with confidence thresholds for ambient message classification — but that's explicitly deferred per the PRD, which is the right call given zero training data. Ship it.

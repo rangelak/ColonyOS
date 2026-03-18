@@ -1,56 +1,70 @@
 # Review by Staff Security Engineer (Round 2)
 
-Now I have a thorough understanding of the implementation. Here's my review:
+Here is my review:
 
 ---
 
-## Staff Security Engineer Review
+## Staff Security Engineer Review — Slack Integration
 
 ### Checklist Assessment
 
 **Completeness:**
-- [x] All functional requirements FR-1 through FR-20 are implemented
-- [x] All 8 task groups marked complete in the task file
-- [x] No placeholder or TODO code remains
+- [x] FR-1 (Slack Configuration): `SlackConfig` dataclass with all fields, validation, env-var-only tokens — ✅
+- [x] FR-2 (CLI `watch` command): Implemented with `--max-hours`, `--max-budget`, `--verbose`, `--quiet`, `--dry-run`, `LoopState`/heartbeat reuse, graceful shutdown — ✅
+- [x] FR-3 (Message Ingestion): `app_mention` handler, `reaction_added` handler, channel allowlist, bot/edit/thread filtering, sender allowlist — ✅
+- [x] FR-4 (Content Sanitization): Shared `sanitize.py` module, `<slack_message>` delimiters with role-anchoring preamble, no raw echo in error messages — ✅
+- [x] FR-5 (Pipeline Triggering): Calls `run_orchestrator()`, approval gate via reaction polling, rate limiting, budget enforcement — ✅
+- [x] FR-6 (Slack Feedback): `:eyes:` acknowledgment, phase updates via `SlackUI`, final summary with PR link, ✅/❌ reactions — ✅
+- [x] FR-7 (Deduplication): `SlackWatchState` with `{channel_id:message_ts}` key, atomic writes, hourly count pruning — ✅
 
 **Quality:**
-- [x] All 219 tests pass (0.52s)
-- [x] Code follows existing project conventions (`.get()` patterns, conditional serialization)
-- [x] No unnecessary dependencies added
-- [x] Unrelated changes present (this branch carries 3 features — github, stats, model overrides) — but the model override commits are clean
+- [x] All 75 tests pass
+- [x] Code follows existing project conventions (dataclass patterns, atomic writes, CLI structure)
+- [x] `slack-bolt` added as optional dependency (`[slack]` extra) — good, doesn't burden non-Slack users
+- [x] No commented-out code or TODOs
 
-**Safety:**
-- [x] No secrets or credentials in committed code
-- [x] No destructive database operations
-- [x] Error handling present (fail-fast validation at config load time)
+**Safety — detailed findings:**
 
-### Security-Specific Findings
+### Security Findings
 
-**[src/colonyos/config.py]**: **GOOD** — `_SAFETY_CRITICAL_PHASES` warning when haiku is assigned to review/decision/fix. However, this is **only a warning**, not a block. Given that `run_phase` in `agent.py:52` runs with `permission_mode="bypassPermissions"`, a user assigning `haiku` to the `review` or `decision` phase means a less capable model is making safety-critical judgment calls about code that will be executed with full permissions. The PRD explicitly marked "minimum model floor" as a non-goal, and the warning is a reasonable V1 compromise, but this remains a latent risk.
+1. **[src/colonyos/slack.py:478-480] — Token stashed on app object as private attribute**: The bot token and app token are stashed as `_colonyos_app_token` on the Bolt `App` instance. This is an in-memory reference only and doesn't persist to disk. **Low risk** — acceptable pattern for passing config to handlers.
 
-**[src/colonyos/config.py]**: **GOOD** — `VALID_MODELS` is a hardcoded `frozenset` allowlist. This is the right approach for V1 — it prevents injection of arbitrary model strings that could cause unexpected behavior downstream. Validation happens at `load_config()` time (fail-fast), not at phase execution time.
+2. **[src/colonyos/slack.py:60-76] — `format_slack_as_prompt` preamble is well-constructed**: The role-anchoring preamble explicitly warns the model about adversarial content and scopes it as "source feature description." The preamble language was improved from round 1 — it no longer says "treat as primary specification" which could be weaponized. **Good.**
 
-**[src/colonyos/config.py]**: **GOOD** — Phase keys are validated against `Phase` enum values, preventing injection of arbitrary keys into `phase_models`. The dict is parsed via `yaml.safe_load()` (no arbitrary code execution from YAML).
+3. **[src/colonyos/slack.py:263-268] — `phase_error` does not echo internal details**: Error messages posted to Slack are generic ("Check server logs for details") while actual errors are logged server-side. This prevents information leakage (file paths, stack traces, env vars) through Slack. **Good — tested at line 620.**
 
-**[src/colonyos/init.py]**: **GOOD** — The cost-optimized preset correctly assigns `sonnet` (not `haiku`) to `decision`, `review`, and `fix` phases. This shows awareness of the security concern. `learn` and `deliver` get `haiku`, which is appropriate for mechanical tasks.
+4. **[src/colonyos/cli.py:1131-1143] — Pipeline failure messages are also generic**: On exception, the Slack message says ":x: Pipeline failed. Check server logs for details." — no exception details echoed. **Good.**
 
-**[src/colonyos/agent.py]**: **GOOD** — `PhaseResult.model` is populated on all three return paths (success, subprocess error, no-result error). This ensures audit trail completeness — you can always trace which model made which decision.
+5. **[src/colonyos/cli.py:1069-1076] — Early dedup marking prevents TOCTOU races**: Messages are marked as processed under the lock *before* the pipeline thread starts. This prevents a race where the same message triggers two concurrent pipelines. The trade-off (a failed run stays marked, requiring manual retry) is documented and correct for security. **Good.**
 
-**[src/colonyos/orchestrator.py]**: **GOOD** — The `model` field is serialized in run log JSON (`_save_run_log`) and deserialized with backward-compatible `.get("model")` defaulting to `None`. This provides auditability — you can retroactively check which model ran each phase in every historical run.
+6. **[src/colonyos/cli.py:1039-1041] — No channel name validation**: `config.slack.channels` accepts arbitrary strings. A typo wouldn't be caught until runtime when messages from the intended channel are silently ignored. This is a usability issue, not a security issue — the allowlist is still enforced.
 
-**[src/colonyos/init.py]**: **MINOR CONCERN** — Quick mode defaults to cost-optimized preset without any user confirmation. PRD Open Question #1 flagged this tension. For automated/CI setups, this silently changes the model assignment. Not a security vulnerability per se, but reduces the quality of safety-critical phases from whatever the user's existing config had to sonnet.
+7. **[src/colonyos/sanitize.py] — XML tag stripping is necessary but not sufficient**: The regex strips `<tag>`, `</tag>`, and `<tag attr="...">` patterns. This mitigates the most common prompt injection vector (closing `</slack_message>` delimiters). However, Slack's mrkdwn format allows URL links like `<https://evil.com|click here>` which *would not* be caught by this regex since `https://...` doesn't match `[a-zA-Z][a-zA-Z0-9_-]*`. This is actually correct behavior — stripping URLs would break legitimate content. The preamble-based defense is the primary mitigation here, and XML tag stripping is defense-in-depth. **Acceptable.**
 
-**[Branch hygiene]**: **NOTE** — This branch carries changes from 3 features (GitHub integration, stats, model overrides). The model override changes themselves are clean and isolated to their commits, but the combined diff makes auditing harder. Future runs should use single-purpose branches.
+8. **[src/colonyos/slack.py:206-225] — `wait_for_approval` uses polling with `time.sleep`**: This blocks a thread for up to 300 seconds (5 minutes) polling every 5 seconds. With the `pipeline_semaphore` set to 1, only one pipeline runs at a time, so at most one thread is blocked here. If approval is never granted, the thread is blocked for the full timeout before the semaphore is released. **Low risk** — bounded by timeout and semaphore.
+
+9. **[src/colonyos/config.py] — `auto_approve` defaults to `false`**: This is critical — it means the approval gate is *on by default*. Pipeline runs from Slack require a human thumbs-up before executing. This is the correct secure default for untrusted input flowing into `bypassPermissions` agents. **Good.**
+
+10. **[pyproject.toml] — Dependency added as optional**: `slack-bolt[socket-mode]>=1.18` is behind the `[slack]` extra. This limits supply chain exposure — users who don't use Slack don't pull in `slack-bolt`, `websocket-client`, or their transitive dependencies. **Good.**
+
+11. **[src/colonyos/cli.py:1160-1170] — Reaction handler fetches original message via `conversations_history`**: When a reaction triggers the bot, it re-fetches the original message text. This is correct — the reaction event itself doesn't contain the message text. However, there's no additional permission check on *who* added the reaction. Any user in the channel can add a reaction to trigger the pipeline on someone else's message. The `allowed_user_ids` filter in `should_process_message` checks the *message author*, not the *reactor*. **Medium risk** — a user not in `allowed_user_ids` could trigger a pipeline by reacting to a message authored by an allowed user. This should be documented or the reactor's user ID should also be checked.
+
+12. **[src/colonyos/cli.py] — No audit log of what the agent did**: When a Slack-triggered pipeline completes, the `RunLog` is persisted (via `run_orchestrator`), but there's no explicit link from the Slack message metadata (who triggered it, from which channel) back to the run log. The `SlackWatchState` stores `{channel:ts} -> run_id` but the `RunLog` itself doesn't record the Slack origin. **Low-medium risk** — for post-incident forensics, you'd need to cross-reference two files.
+
+### Unrelated Changes
+
+The diff includes REPL mode (`_run_repl`), dynamic banner generation, `CHANGELOG.md`, `README.md`, and review artifacts from other PRDs. These are from prior commits on this branch. They don't introduce security issues but do bloat the diff.
+
+---
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/config.py]: Safety-critical phase warning for haiku is informational only (log warning), not enforced as a block. This is per-PRD (non-goal), but means a user can silently assign haiku to review/decision phases that run with bypassPermissions. Acceptable for V1, should revisit.
-- [src/colonyos/config.py]: VALID_MODELS allowlist and fail-fast validation at load time is well-implemented — prevents arbitrary string injection and catches typos early.
-- [src/colonyos/agent.py]: Model field populated on all PhaseResult return paths — provides complete audit trail of which model made which decision.
-- [src/colonyos/orchestrator.py]: Run log serialization includes model field with backward-compatible deserialization — enables retrospective auditing.
-- [src/colonyos/init.py]: Cost-optimized preset correctly keeps sonnet for safety-critical phases (review, decision, fix), only assigns haiku to mechanical phases (learn, deliver).
-- [src/colonyos/init.py]: Quick mode silently defaults to cost-optimized preset — may surprise users expecting uniform model assignment in automated setups.
+- [src/colonyos/cli.py:1160-1170]: Reaction trigger checks message author against `allowed_user_ids` but does not check the reactor's identity — any channel member can trigger a pipeline by reacting to an allowed user's message
+- [src/colonyos/cli.py / src/colonyos/slack.py]: No Slack origin metadata (triggering user, channel, message permalink) stored in the `RunLog` — limits post-incident audit capability
+- [src/colonyos/sanitize.py]: XML tag stripping is defense-in-depth only; the role-anchoring preamble is the primary prompt injection mitigation — this is correctly documented but worth noting for future hardening
+- [src/colonyos/config.py]: `auto_approve: false` default is correct — ensures human approval gate is on by default for untrusted Slack input
+- [src/colonyos/slack.py:263-268]: Error details are correctly suppressed from Slack output — tested and verified
 
 SYNTHESIS:
-From a security perspective, this implementation is well-executed for a V1 feature. The key security properties are: (1) a hardcoded model allowlist prevents arbitrary string injection, (2) fail-fast validation catches misconfigurations before budget is burned, (3) the model field in PhaseResult creates a complete audit trail, and (4) safety-critical phases get a logged warning when downgraded to haiku. The primary residual risk is that warnings for haiku on safety-critical phases are non-blocking — a user can still assign haiku to the review/decision phases that run with `bypassPermissions`, which could reduce the quality of security judgments. The PRD explicitly scoped enforcement as a non-goal, and the cost-optimized preset correctly avoids this pitfall. The implementation adds no new dependencies, introduces no credential handling, and follows existing code patterns faithfully. I recommend approval with a note to revisit enforcement of minimum model floors for safety-critical phases in V2.
+From a supply chain and secrets management perspective, this implementation makes the right architectural choices: tokens are environment-variable-only (never persisted to config files), `slack-bolt` is an optional dependency behind an extras group, and the channel allowlist + sender allowlist + approval gate provide layered access control. The content sanitization correctly reuses the battle-tested GitHub issue sanitization path via a shared module, and error messages are scrubbed before posting to Slack. The most significant gap is that reaction-based triggers don't validate the *reactor's* identity against `allowed_user_ids` — only the original message author is checked — which could allow privilege escalation in teams using sender allowlists. The lack of Slack origin metadata in `RunLog` is a minor audit gap. Neither finding is blocking for Phase 1, but both should be addressed before production deployment to security-conscious teams. Overall, the security posture is strong for a first implementation, with correct defaults (approval required, no auto-approve) and defense-in-depth throughout.

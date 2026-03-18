@@ -234,6 +234,7 @@ def print_reviewer_legend(reviewers: list[tuple[int, str]]) -> None:
     console.print()
 
 
+
 def _looks_like_markdown(text: str) -> bool:
     """Return True if text contains markdown formatting worth rendering."""
     return bool(_MD_PATTERN.search(text))

@@ -1,5 +1,29 @@
 # Changelog
 
+## 20260318_091500 — Slack Integration (`colonyos watch`)
+
+Added Slack as a fourth input source for the ColonyOS pipeline. Team members can trigger
+pipeline runs directly from Slack via `@ColonyOS` mentions, emoji reactions, or slash
+commands — eliminating the context-switch between discussion and execution. The watcher
+runs as a long-lived CLI command (`colonyos watch`) using Slack Bolt SDK with Socket Mode.
+
+**Created:**
+- `cOS_prds/20260318_081144_prd_the_option_to_connect_to_slack_my_vision_for_this_in_the_future_is_that_it_monit.md` — PRD
+- `cOS_tasks/20260318_081144_tasks_the_option_to_connect_to_slack_my_vision_for_this_in_the_future_is_that_it_monit.md` — Tasks
+- `src/colonyos/slack.py` — Slack Bolt listener, dedup ledger, threaded progress replies
+- `tests/test_slack.py` — Comprehensive Slack integration tests
+- `src/colonyos/sanitize.py` — Input sanitization for untrusted Slack content
+- `tests/test_sanitize.py` — Sanitization tests
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `colonyos watch` command with budget/time caps
+- `src/colonyos/config.py` — `SlackConfig` model with channels, trigger_mode, rate limits
+- `src/colonyos/doctor.py` — Slack token validation check
+- `pyproject.toml` — Added `slack-bolt` dependency
+
+**PRD:** `cOS_prds/20260318_081144_prd_the_option_to_connect_to_slack_my_vision_for_this_in_the_future_is_that_it_monit.md`
+**Tasks:** `cOS_tasks/20260318_081144_tasks_the_option_to_connect_to_slack_my_vision_for_this_in_the_future_is_that_it_monit.md`
+
 ## 20260318_080000 — Interactive REPL Mode & Command Registry Sync Enforcement
 
 Added an interactive REPL mode so that bare `colonyos` invocations drop users into a

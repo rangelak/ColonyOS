@@ -1188,10 +1188,20 @@ def run(
     quiet: bool = False,
     source_issue: int | None = None,
     source_issue_url: str | None = None,
+    ui_factory: object | None = None,
 ) -> RunLog:
-    """Execute the full orchestration loop: plan -> implement -> review -> deliver."""
+    """Execute the full orchestration loop: plan -> implement -> review -> deliver.
+
+    Args:
+        ui_factory: Optional callable ``(prefix: str) -> UI | None`` that
+            overrides the default terminal UI.  Used by the Slack watcher to
+            inject :class:`SlackUI` so phase progress appears as threaded
+            replies.
+    """
 
     def _make_ui(prefix: str = "") -> PhaseUI | NullUI | None:
+        if ui_factory is not None:
+            return ui_factory(prefix)  # type: ignore[operator]
         if quiet:
             return None
         return PhaseUI(verbose=verbose, prefix=prefix)
