@@ -36,6 +36,12 @@ DEFAULTS = {
     "proposals_dir": "cOS_proposals",
     "max_fix_iterations": 2,
     "learnings": {"enabled": True, "max_entries": 100},
+    "ci_fix": {
+        "enabled": False,
+        "max_retries": 2,
+        "wait_timeout": 600,
+        "log_char_cap": 12_000,
+    },
 }
 
 
@@ -59,6 +65,14 @@ class PhasesConfig:
 class LearningsConfig:
     enabled: bool = True
     max_entries: int = 100
+
+
+@dataclass
+class CIFixConfig:
+    enabled: bool = False
+    max_retries: int = 2
+    wait_timeout: int = 600
+    log_char_cap: int = 12_000
 
 
 @dataclass
@@ -89,6 +103,7 @@ class ColonyConfig:
     max_fix_iterations: int = 2
     auto_approve: bool = False
     learnings: LearningsConfig = field(default_factory=LearningsConfig)
+    ci_fix: CIFixConfig = field(default_factory=CIFixConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
 
     def get_model(self, phase: Phase) -> str:
@@ -150,6 +165,33 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
         auto_approve=bool(raw.get("auto_approve", False)),
         max_runs_per_hour=int(raw.get("max_runs_per_hour", 3)),
         allowed_user_ids=list(raw.get("allowed_user_ids", [])),
+    )
+
+
+def _parse_ci_fix_config(raw: dict) -> CIFixConfig:
+    """Parse the ``ci_fix`` section from config.yaml."""
+    if not raw:
+        return CIFixConfig()
+    max_retries = int(raw.get("max_retries", DEFAULTS["ci_fix"]["max_retries"]))
+    if max_retries < 0:
+        raise ValueError(
+            f"ci_fix.max_retries must be non-negative, got {max_retries}"
+        )
+    wait_timeout = int(raw.get("wait_timeout", DEFAULTS["ci_fix"]["wait_timeout"]))
+    if wait_timeout < 0:
+        raise ValueError(
+            f"ci_fix.wait_timeout must be non-negative, got {wait_timeout}"
+        )
+    log_char_cap = int(raw.get("log_char_cap", DEFAULTS["ci_fix"]["log_char_cap"]))
+    if log_char_cap < 0:
+        raise ValueError(
+            f"ci_fix.log_char_cap must be non-negative, got {log_char_cap}"
+        )
+    return CIFixConfig(
+        enabled=bool(raw.get("enabled", False)),
+        max_retries=max_retries,
+        wait_timeout=wait_timeout,
+        log_char_cap=log_char_cap,
     )
 
 
@@ -229,6 +271,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
             enabled=bool(raw.get("learnings", {}).get("enabled", DEFAULTS["learnings"]["enabled"])),
             max_entries=int(raw.get("learnings", {}).get("max_entries", DEFAULTS["learnings"]["max_entries"])),
         ),
+        ci_fix=_parse_ci_fix_config(raw.get("ci_fix", {})),
         slack=_parse_slack_config(raw.get("slack", {})),
     )
 
@@ -284,6 +327,14 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         "enabled": config.learnings.enabled,
         "max_entries": config.learnings.max_entries,
     }
+
+    if config.ci_fix.enabled or config.ci_fix.max_retries != DEFAULTS["ci_fix"]["max_retries"]:
+        data["ci_fix"] = {
+            "enabled": config.ci_fix.enabled,
+            "max_retries": config.ci_fix.max_retries,
+            "wait_timeout": config.ci_fix.wait_timeout,
+            "log_char_cap": config.ci_fix.log_char_cap,
+        }
 
     if config.slack.enabled or config.slack.channels:
         data["slack"] = {

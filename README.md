@@ -180,6 +180,9 @@ Each reviewer persona runs concurrently with its own expertise and perspective. 
 | `colonyos stats -n/--last N` | Limit analytics to the N most recent runs |
 | `colonyos stats --phase <name>` | Drill into a specific phase |
 | `colonyos status` | Show recent runs, loop summaries, and cost breakdown |
+| `colonyos ci-fix <pr>` | Fix CI failures on a pull request using AI |
+| `colonyos ci-fix <pr> --wait` | Fix CI then wait for re-run to complete |
+| `colonyos ci-fix <pr> --max-retries N` | Retry fix-push-wait cycle up to N times |
 | `colonyos watch` | Watch Slack channels and trigger pipeline runs from messages |
 | `colonyos watch --max-hours N` | Maximum wall-clock hours for the watcher |
 | `colonyos watch --max-budget N` | Maximum aggregate USD spend |

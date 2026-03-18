@@ -6,6 +6,7 @@ import yaml
 import logging
 
 from colonyos.config import (
+    CIFixConfig,
     ColonyConfig,
     BudgetConfig,
     DEFAULTS,
@@ -641,5 +642,81 @@ class TestPhaseModels:
         )
         with pytest.raises(ValueError, match="short names"):
             load_config(tmp_repo)
+
+
+class TestCIFixConfig:
+    def test_default_values(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.ci_fix.enabled is False
+        assert config.ci_fix.max_retries == 2
+        assert config.ci_fix.wait_timeout == 600
+        assert config.ci_fix.log_char_cap == 12_000
+
+    def test_parsed_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "ci_fix": {
+                    "enabled": True,
+                    "max_retries": 3,
+                    "wait_timeout": 900,
+                    "log_char_cap": 8000,
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.ci_fix.enabled is True
+        assert config.ci_fix.max_retries == 3
+        assert config.ci_fix.wait_timeout == 900
+        assert config.ci_fix.log_char_cap == 8000
+
+    def test_missing_section_gets_defaults(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "sonnet"}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.ci_fix.enabled is False
+        assert config.ci_fix.max_retries == 2
+
+    def test_negative_retries_raises(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"ci_fix": {"max_retries": -1}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="non-negative"):
+            load_config(tmp_repo)
+
+    def test_negative_timeout_raises(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"ci_fix": {"wait_timeout": -1}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="non-negative"):
+            load_config(tmp_repo)
+
+    def test_roundtrip(self, tmp_repo: Path):
+        original = ColonyConfig(
+            ci_fix=CIFixConfig(enabled=True, max_retries=5, wait_timeout=300),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.ci_fix.enabled is True
+        assert loaded.ci_fix.max_retries == 5
+        assert loaded.ci_fix.wait_timeout == 300
+
+    def test_defaults_dict_has_ci_fix(self):
+        assert DEFAULTS["ci_fix"]["enabled"] is False
+        assert DEFAULTS["ci_fix"]["max_retries"] == 2
+        assert DEFAULTS["ci_fix"]["wait_timeout"] == 600
+        assert DEFAULTS["ci_fix"]["log_char_cap"] == 12_000
 
 

@@ -689,3 +689,37 @@ class TestRenderModelUsage:
         render_dashboard(console, result)
         output = _get_output(console)
         assert "Model Usage" in output
+
+
+class TestCIFixPhaseInStats:
+    def test_ci_fix_appears_in_cost_breakdown(self):
+        runs = [
+            _make_run(phases=[
+                _make_phase("implement", cost_usd=1.0),
+                _make_phase("ci_fix", cost_usd=0.5),
+            ]),
+        ]
+        rows = compute_cost_breakdown(runs)
+        phase_names = [r.phase for r in rows]
+        assert "ci_fix" in phase_names
+
+    def test_ci_fix_appears_in_failure_hotspots(self):
+        runs = [
+            _make_run(phases=[
+                _make_phase("ci_fix", success=False, cost_usd=0.5),
+            ]),
+        ]
+        rows = compute_failure_hotspots(runs)
+        phase_names = [r.phase for r in rows]
+        assert "ci_fix" in phase_names
+        assert rows[0].failures == 1
+
+    def test_ci_fix_appears_in_duration_stats(self):
+        runs = [
+            _make_run(phases=[
+                _make_phase("ci_fix", duration_ms=30000),
+            ]),
+        ]
+        rows = compute_duration_stats(runs)
+        labels = [r.label for r in rows]
+        assert "ci_fix" in labels

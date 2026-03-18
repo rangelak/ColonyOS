@@ -1504,3 +1504,35 @@ class TestRepl:
             _run_repl()  # Should not raise; returns to prompt then quits
 
 
+class TestCIFixCommand:
+    def test_help_shows_options(self, runner: CliRunner):
+        result = runner.invoke(app, ["ci-fix", "--help"])
+        assert result.exit_code == 0
+        assert "--max-retries" in result.output
+        assert "--wait" in result.output
+        assert "--wait-timeout" in result.output
+        assert "PR_REF" in result.output
+
+    def test_all_checks_pass(self, runner: CliRunner, tmp_path: Path):
+        """When all checks pass, ci-fix exits successfully."""
+        from colonyos.ci import CheckResult
+
+        checks = [CheckResult(name="test", state="completed", conclusion="success")]
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.load_config", return_value=ColonyConfig()), \
+             patch("colonyos.ci.subprocess.run") as mock_run:
+            # validate_clean_worktree
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            with patch("colonyos.ci.fetch_pr_checks", return_value=checks):
+                result = runner.invoke(app, ["ci-fix", "42"])
+        assert result.exit_code == 0
+        assert "pass" in result.output.lower()
+
+    def test_invalid_pr_ref(self, runner: CliRunner, tmp_path: Path):
+        """Invalid PR ref should error."""
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.load_config", return_value=ColonyConfig()), \
+             patch("colonyos.ci.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            result = runner.invoke(app, ["ci-fix", "not-a-number"])
+        assert result.exit_code != 0

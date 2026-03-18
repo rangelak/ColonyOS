@@ -303,6 +303,30 @@ def _build_fix_prompt(
     return system, user
 
 
+def _build_ci_fix_prompt(
+    config: ColonyConfig,
+    branch_name: str,
+    ci_failure_context: str,
+    fix_attempt: int,
+    max_retries: int,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the CI fix phase."""
+    ci_fix_template = _load_instruction("ci_fix.md")
+
+    system = _format_base(config) + "\n\n" + ci_fix_template.format(
+        branch_name=branch_name,
+        ci_failure_context=ci_failure_context,
+        fix_attempt=fix_attempt,
+        max_retries=max_retries,
+    )
+
+    user = (
+        f"Fix the CI failures on branch `{branch_name}`. "
+        f"This is attempt {fix_attempt} of {max_retries}."
+    )
+    return system, user
+
+
 # ---------------------------------------------------------------------------
 # Deliver, CEO, and other prompt builders
 # ---------------------------------------------------------------------------
@@ -1214,6 +1238,128 @@ def _run_learn_phase(
         )
 
 
+def _run_ci_fix_loop(
+    config: ColonyConfig,
+    repo_root: Path,
+    log: RunLog,
+    branch_name: str,
+    _make_ui: object,
+) -> None:
+    """Post-deliver CI fix loop: wait for CI, fix failures, retry.
+
+    Gated by ``config.ci_fix.enabled``.  Runs up to ``config.ci_fix.max_retries``
+    fix-push-wait cycles.  Each CI fix attempt is recorded as a
+    ``PhaseResult`` with ``Phase.CI_FIX``.
+    """
+    from colonyos.ci import (
+        all_checks_pass,
+        fetch_check_logs,
+        fetch_pr_checks,
+        format_ci_failures_as_prompt,
+        get_failed_checks,
+        poll_pr_checks,
+        _extract_run_id_from_url,
+    )
+
+    # Extract PR number from deliver phase artifacts
+    pr_number = None
+    for phase in log.phases:
+        if phase.phase == Phase.DELIVER:
+            pr_url = phase.artifacts.get("pr_url", "")
+            if pr_url:
+                import re as _re
+                match = _re.search(r"/pull/(\d+)", pr_url)
+                if match:
+                    pr_number = int(match.group(1))
+    if pr_number is None:
+        _log("CI fix: could not determine PR number from deliver phase, skipping.")
+        return
+
+    _log(f"CI fix: waiting for initial CI checks on PR #{pr_number}...")
+    try:
+        checks = poll_pr_checks(
+            pr_number, repo_root,
+            timeout=config.ci_fix.wait_timeout,
+        )
+    except Exception as exc:
+        _log(f"CI fix: failed to poll checks: {exc}")
+        return
+
+    if all_checks_pass(checks):
+        _log("CI fix: all checks pass, no fix needed.")
+        return
+
+    for attempt in range(1, config.ci_fix.max_retries + 1):
+        _log(f"CI fix: attempt {attempt}/{config.ci_fix.max_retries}")
+
+        failed = get_failed_checks(checks)
+        failures_for_prompt: list[dict[str, str]] = []
+        for check in failed:
+            run_id_from_url = _extract_run_id_from_url(check.details_url)
+            if run_id_from_url:
+                step_logs = fetch_check_logs(
+                    run_id_from_url, repo_root, config.ci_fix.log_char_cap,
+                )
+                for step_name, log_text in step_logs.items():
+                    failures_for_prompt.append({
+                        "name": f"{check.name} / {step_name}",
+                        "conclusion": check.conclusion,
+                        "log": log_text,
+                    })
+            else:
+                failures_for_prompt.append({
+                    "name": check.name,
+                    "conclusion": check.conclusion,
+                    "log": "(Could not fetch logs)",
+                })
+
+        ci_failure_context = format_ci_failures_as_prompt(failures_for_prompt)
+        system, user = _build_ci_fix_prompt(
+            config, branch_name, ci_failure_context,
+            attempt, config.ci_fix.max_retries,
+        )
+
+        phase_result = run_phase_sync(
+            Phase.CI_FIX,
+            user,
+            cwd=repo_root,
+            system_prompt=system,
+            model=config.get_model(Phase.CI_FIX),
+            budget_usd=config.budget.per_phase,
+            ui=None,
+        )
+        log.phases.append(phase_result)
+
+        if not phase_result.success:
+            _log(f"CI fix agent failed: {phase_result.error}")
+            continue
+
+        # Push the fix
+        import subprocess as _sp
+        _sp.run(
+            ["git", "push"],
+            capture_output=True, text=True, timeout=60, cwd=repo_root,
+        )
+
+        # Wait for CI
+        try:
+            checks = poll_pr_checks(
+                pr_number, repo_root,
+                timeout=config.ci_fix.wait_timeout,
+            )
+        except Exception as exc:
+            _log(f"CI fix: failed to poll checks after fix: {exc}")
+            break
+
+        if all_checks_pass(checks):
+            _log("CI fix: all checks now pass!")
+            return
+
+        _log("CI fix: checks still failing after fix attempt.")
+
+    _log("CI fix: retries exhausted, CI still failing.")
+
+
 def run(
     prompt: str,
     *,
@@ -1564,6 +1710,10 @@ def run(
             if deliver_ui is None:
                 _log(f"Deliver phase failed: {deliver_result.error}")
             return log
+
+    # --- CI Fix Phase (post-deliver) ---
+    if config.ci_fix.enabled and config.phases.deliver:
+        _run_ci_fix_loop(config, repo_root, log, branch_name, _make_ui)
 
     log.status = RunStatus.COMPLETED
     log.mark_finished()
