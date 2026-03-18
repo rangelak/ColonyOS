@@ -9,8 +9,14 @@ import time
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.padding import Padding
+from rich.theme import Theme
 
-console = Console(stderr=True)
+_theme = Theme({
+    "markdown.code": "bold cyan",
+    "markdown.code_block": "dim",
+})
+
+console = Console(stderr=True, theme=_theme)
 
 TOOL_STYLE: dict[str, str] = {
     "Read": "cyan",

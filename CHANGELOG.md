@@ -1,5 +1,60 @@
 # Changelog
 
+## 20260318_154500 — Reorganize cOS_reviews Directory Structure
+
+Reorganized `cOS_reviews/` from a flat directory into a structured hierarchy with
+`decisions/` and `reviews/<persona_slug>/` subdirectories. All review artifact filenames
+are now timestamp-prefixed and generated through centralized `naming.py` functions,
+eliminating ad-hoc filename construction in the orchestrator.
+
+**Created:**
+- `cOS_reviews/decisions/` — Decision gate verdicts, timestamped
+- `cOS_reviews/reviews/<persona_slug>/` — Per-persona review history with timestamped filenames
+
+**Modified:**
+- `src/colonyos/naming.py` — Added `ReviewArtifactPath` dataclass, `decision_artifact_path()`, `persona_review_artifact_path()`, `task_review_artifact_path()`
+- `src/colonyos/orchestrator.py` — Updated `_save_review_artifact()` with subdirectory support; replaced all ad-hoc filename construction with `naming.py` calls
+- `src/colonyos/init.py` — Creates `decisions/` and `reviews/` subdirectories with `.gitkeep` during init
+- `src/colonyos/instructions/base.md`, `decision.md`, `decision_standalone.md`, `fix.md`, `fix_standalone.md`, `learn.md` — Updated to reference nested directory structure
+- `tests/test_naming.py`, `tests/test_orchestrator.py`, `tests/test_init.py` — Extended with new tests
+
+**PRD:** `cOS_prds/20260318_150423_prd_let_s_change_the_way_the_reviews_directory_is_organized_reviews_by_specific_pers.md`
+**Tasks:** `cOS_tasks/20260318_150423_tasks_let_s_change_the_way_the_reviews_directory_is_organized_reviews_by_specific_pers.md`
+
+## 20260318_113000 — Theme-Safe Markdown Rendering
+
+Removed hardcoded dark backgrounds from `rich.Markdown` inline-code and code-block
+styles so terminal output is readable on both light and dark themes.
+
+**Modified:**
+- `src/colonyos/ui.py` — Custom `Theme` on module-level `Console` overriding `markdown.code` / `markdown.code_block`
+- `src/colonyos/cli.py` — Same theme applied to the CEO-proposal `Console` instance
+
+## 20260318_110000 — Package Publishing & Multi-Channel Installation
+
+Added CI/CD pipeline, automated release workflow, curl installer, and Homebrew tap so
+ColonyOS can be installed via `pip`, `curl | sh`, or `brew install`. Adopted `setuptools-scm`
+for single-source versioning from git tags, eliminating hardcoded version duplication.
+
+**Created:**
+- `.github/workflows/ci.yml` — CI pipeline running pytest on Python 3.11/3.12 for every push/PR
+- `.github/workflows/release.yml` — Automated release on `v*` tags: test → build → publish to PyPI → GitHub Release
+- `install.sh` — Curl one-liner installer (detects OS, installs via pipx/pip, runs `colonyos doctor`)
+- `Formula/colonyos.rb` — Homebrew tap formula
+- `tests/test_ci_workflows.py` — CI/release workflow validation tests
+- `tests/test_install_script.sh` — Shell-based installer tests
+- `tests/test_install_script_integration.py` — Python integration tests for install.sh
+- `tests/test_version.py` — Version consistency tests
+
+**Modified:**
+- `pyproject.toml` — Dynamic versioning via `setuptools-scm`, added `build` dependency
+- `src/colonyos/__init__.py` — Version from `importlib.metadata` instead of hardcoded string
+- `src/colonyos/doctor.py` — Added pipx availability check
+- `README.md` — Added installation channels section (pip, curl, brew)
+
+**PRD:** `cOS_prds/20260318_105239_prd_there_should_be_an_easy_way_to_install_this_on_a_repository_with_curl_npm_pip_br.md`
+**Tasks:** `cOS_tasks/20260318_105239_tasks_there_should_be_an_easy_way_to_install_this_on_a_repository_with_curl_npm_pip_br.md`
+
 ## 20260318_091500 — Slack Integration (`colonyos watch`)
 
 Added Slack as a fourth input source for the ColonyOS pipeline. Team members can trigger

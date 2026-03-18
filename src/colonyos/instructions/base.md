@@ -13,7 +13,9 @@ You are an autonomous coding agent operating as part of the ColonyOS pipeline. Y
 
 - PRDs go to the `{prds_dir}/` directory with filename `YYYYMMDD_HHMMSS_prd_<slug>.md`
 - Task files go to the `{tasks_dir}/` directory with filename `YYYYMMDD_HHMMSS_tasks_<slug>.md`
-- Review artifacts go to the `{reviews_dir}/` directory
+- Review artifacts go to the `{reviews_dir}/` directory, organized into subdirectories:
+  - `{reviews_dir}/decisions/` — decision gate verdicts
+  - `{reviews_dir}/reviews/<persona_slug>/` — persona reviews by round
 - Feature branches use the prefix `{branch_prefix}`
 - Do not commit directly to main/master
 

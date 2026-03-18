@@ -9,9 +9,10 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/rangelak/ColonyOS/actions/workflows/ci.yml"><img src="https://github.com/rangelak/ColonyOS/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://pypi.org/project/colonyos/"><img src="https://img.shields.io/pypi/v/colonyos?color=blue" alt="PyPI version" /></a>
   <a href="https://github.com/rangelak/ColonyOS/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" /></a>
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue" alt="Python 3.11+" /></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11%20|%203.12-blue" alt="Python 3.11 | 3.12" /></a>
 </p>
 
 <p align="center">
@@ -40,8 +41,11 @@ It orchestrates Claude agent sessions via the [Claude Agent SDK](https://docs.an
 Three commands. Under 2 minutes of human effort.
 
 ```bash
-# 1. Install (30 seconds)
-pipx install colonyos          # or: pip install colonyos
+# 1. Install (30 seconds) — pick one:
+pipx install colonyos                          # recommended
+pip install colonyos                           # alternative
+curl -sSL https://raw.githubusercontent.com/rangelak/ColonyOS/main/install.sh | sh  # one-liner
+brew tap colonyos/tap && brew install colonyos # Homebrew (macOS/Linux)
 
 # 2. Check prerequisites (10 seconds)
 colonyos doctor                # validates Python, Claude Code, Git, GitHub CLI
@@ -70,6 +74,8 @@ Or verify manually:
 - **GitHub CLI** — `gh auth status`
 
 > **Recommended**: Install ColonyOS globally with `pipx install colonyos` so it's available in any project directory.
+> Also available via `curl -sSL https://raw.githubusercontent.com/rangelak/ColonyOS/main/install.sh | sh`
+> or `brew tap colonyos/tap && brew install colonyos`.
 
 ### Setup
 
@@ -312,6 +318,24 @@ source .venv/bin/activate
 pip install -e .
 pip install pytest
 pytest
+```
+
+## Releasing
+
+ColonyOS uses tag-based automated releases. The version is derived from git tags
+via [setuptools-scm](https://github.com/pypa/setuptools-scm) — there is no
+hardcoded version string anywhere in the codebase.
+
+```bash
+# 1. Create and push a version tag
+git tag v0.2.0
+git push origin v0.2.0
+
+# 2. The release workflow automatically:
+#    - Runs the full test suite on Python 3.11 and 3.12
+#    - Builds sdist and wheel
+#    - Publishes to PyPI via Trusted Publisher (OIDC)
+#    - Creates a GitHub Release with changelog notes and checksums
 ```
 
 ## License

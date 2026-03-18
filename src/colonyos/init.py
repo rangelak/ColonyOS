@@ -275,6 +275,13 @@ def run_init(
     prds_dir.mkdir(parents=True, exist_ok=True)
     tasks_dir.mkdir(parents=True, exist_ok=True)
     reviews_dir.mkdir(parents=True, exist_ok=True)
+    # Create review subdirectories with .gitkeep files
+    for subdir in ("decisions", "reviews"):
+        sub = reviews_dir / subdir
+        sub.mkdir(parents=True, exist_ok=True)
+        gitkeep = sub / ".gitkeep"
+        if not gitkeep.exists():
+            gitkeep.touch()
     proposals_dir.mkdir(parents=True, exist_ok=True)
 
     # Warn if old non-prefixed directories exist alongside new cOS_ dirs
@@ -301,7 +308,7 @@ def run_init(
         gitignore.write_text("\n".join(entries_needed) + "\n", encoding="utf-8")
 
     click.echo(f"\nConfig saved to {config_path}")
-    click.echo(f"Created {prds_dir}/, {tasks_dir}/, {reviews_dir}/, and {proposals_dir}/ directories")
+    click.echo(f"Created {prds_dir}/, {tasks_dir}/, {reviews_dir}/ (with decisions/ and reviews/ subdirs), and {proposals_dir}/ directories")
     click.echo(f"Defined {len(config.personas)} personas")
     click.echo('\nNext step:\n  colonyos run "Add a health check endpoint"')
 

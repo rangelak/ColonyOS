@@ -1,20 +1,19 @@
 # Review by Principal Systems Engineer (Google/Stripe caliber) (Round 3)
 
-I now have a comprehensive view of the implementation. Let me compile my review.
-
 ---
 
-VERDICT: request-changes
+## Review Complete
+
+Here is my assessment as **Principal Systems Engineer (Google/Stripe caliber)**:
+
+VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/cli.py:1270]: **`"all"` trigger mode is unreachable dead code.** The reaction handler registers when `config.slack.trigger_mode in ("reaction", "all")`, but `_VALID_TRIGGER_MODES` in config.py is `{"mention", "reaction", "slash_command"}` — `"all"` would be rejected at config parse time. Either add `"all"` to the valid set or remove the `"all"` check. This is the kind of silent inconsistency that causes a 3am page when someone sets `trigger_mode: all` expecting both mentions and reactions and gets a config validation error.
-- [src/colonyos/cli.py:1261-1263]: **`active_threads` list mutated without a lock.** `active_threads.append(thread)` is called from Slack Bolt's event handler threads (potentially concurrent), and iterated in `_signal_handler`. This is a race condition. Wrap with `state_lock` or use a dedicated lock.
-- [src/colonyos/slack.py — SlackWatchState.processed_messages]: **Dedup ledger grows unboundedly.** Unlike `hourly_trigger_counts` which has `prune_old_hourly_counts()`, the `processed_messages` dict is never pruned. A watcher running for days/weeks will accumulate entries forever, bloating the JSON state file on every save. Add a max-entries cap or TTL-based pruning analogous to the hourly count pruning.
-- [src/colonyos/slack.py:219-237 / cli.py:1220-1243]: **Approval wait blocks the pipeline semaphore.** `wait_for_approval()` sleeps up to 300s while the calling thread holds the `pipeline_semaphore`. During that window, no other Slack-triggered pipeline can start, even if the next message doesn't need approval. Consider acquiring the semaphore *after* approval completes, or releasing/re-acquiring around the approval wait.
-- [src/colonyos/orchestrator.py:1189]: **`ui_factory` typed as `object | None`** rather than `Callable[[str], Any] | None`. The `type: ignore[operator]` on the call site is a red flag — use a proper callable type to get static checking. This is the kind of loose typing that makes debugging a broken run from logs harder.
-- [src/colonyos/slack.py:455-457 / cli.py:1339-1352]: **No explicit WebSocket reconnection handling or logging.** The implementation relies entirely on slack-bolt's built-in reconnection. At minimum, add a `connection_error` handler or log when the socket disconnects/reconnects, so operators can debug connectivity issues from logs. Silent reconnection = silent failure at 3am.
+- [src/colonyos/orchestrator.py]: `task_review_artifact_path()` defined in naming.py but never wired into the orchestrator — dead code path for task-level reviews
+- [cOS_reviews/]: `decisions/` subdirectory not yet created on disk (will auto-create on first use; `.gitkeep` convention incomplete until init re-run)
+- [Branch scope]: ~1500 lines of unrelated CI/CD/install changes included on this feature branch
+- [src/colonyos/naming.py]: `ReviewNames` dataclass is now effectively superseded by `ReviewArtifactPath` — cleanup candidate
+- [src/colonyos/instructions/decision.md]: Decision templates don't reference `decisions/` subdirectory for discovering prior decision gate verdicts
 
 SYNTHESIS:
-This is a well-structured implementation that follows established codebase patterns effectively. The architecture — long-running CLI command mirroring `colonyos auto`, shared sanitization extracted to `sanitize.py`, `SlackUI` implementing the same interface as `PhaseUI`, dedup ledger with atomic file writes — is sound. The test suite is thorough (79 Slack-specific tests, 633 total, all passing) and covers sanitization, config parsing, dedup, rate limiting, and message filtering. Security is handled correctly: channel allowlist, sender allowlist, XML tag stripping, role-anchoring preamble, and tokens as env vars only. The `slack-bolt` dependency is correctly placed in optional extras.
-
-However, there are several reliability concerns that would cause operational pain in production: the `active_threads` race condition is a real concurrency bug; unbounded `processed_messages` growth will degrade long-running watchers; the approval-blocks-semaphore design means one unapproved message can stall the entire pipeline queue for 5 minutes; and the `"all"` trigger mode inconsistency is exactly the kind of config drift that erodes trust in the system. None of these are architectural — they're all fixable with targeted patches. I'd want the race condition and the trigger mode inconsistency fixed before merge; the others can be tracked as fast-follows if there's schedule pressure.
+This is a clean, well-structured reorganization that achieves its primary goals: centralized naming, consistent timestamps, persona-grouped reviews, and path-safe artifact writing. The implementation covers all 13 functional requirements with appropriate test coverage (193 tests passing). The defense-in-depth path traversal protection is exactly the kind of paranoia I want to see in a system where AI agents construct file paths. The `task_review_artifact_path()` dead code and missing `decisions/` directory on disk are minor loose ends — the former is a future integration point, and the latter self-heals on first use via `mkdir(parents=True, exist_ok=True)`. The unrelated CI/CD changes on this branch are a process issue, not a code quality issue. From a systems reliability perspective, this change reduces operational risk by making the review directory scannable and forensically useful, which directly helps the "debug a broken run at 3am" scenario. Approved.

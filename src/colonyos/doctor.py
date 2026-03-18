@@ -17,7 +17,18 @@ def run_doctor_checks(repo_root: Path) -> list[tuple[str, bool, str]]:
     This is extracted as a reusable function so both ``colonyos doctor`` and
     ``colonyos init`` can call it without circular imports.
     """
+    from colonyos import __version__
+
     results: list[tuple[str, bool, str]] = []
+
+    # 0. ColonyOS version — flag degraded state when using fallback version
+    version_ok = "dev" not in __version__ and __version__ != "0.0.0"
+    results.append((
+        f"ColonyOS v{__version__}",
+        version_ok,
+        "Version appears to be a development fallback. "
+        "Reinstall with: pipx install colonyos" if not version_ok else "",
+    ))
 
     # 1. Python >= 3.11
     py_ok = sys.version_info.major >= 3 and sys.version_info.minor >= 11

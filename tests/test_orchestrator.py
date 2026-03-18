@@ -28,6 +28,7 @@ from colonyos.orchestrator import (
     _build_persona_review_prompt,
     extract_review_verdict,
     _collect_review_findings,
+    _save_review_artifact,
     _save_run_log,
     _validate_resume_preconditions,
     _compute_next_phase,
@@ -354,7 +355,7 @@ class TestRun:
 
         reviews_dir = tmp_repo / config.reviews_dir
         assert reviews_dir.exists()
-        review_files = list(reviews_dir.glob("*.md"))
+        review_files = list(reviews_dir.glob("**/*.md"))
         assert len(review_files) >= 2  # 1 persona review + 1 decision
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
@@ -757,8 +758,11 @@ class TestFixLoop:
         run("Add feature", repo_root=tmp_repo, config=config)
 
         reviews_dir = tmp_repo / config.reviews_dir
-        filenames = {f.name for f in reviews_dir.glob("*.md")}
-        assert any("review_round1_engineer" in f for f in filenames)
+        filenames = {f.name for f in reviews_dir.glob("**/*.md")}
+        assert any("round1_" in f for f in filenames)
+        # Verify persona subdirectory was created
+        persona_dirs = [d.name for d in (reviews_dir / "reviews").iterdir() if d.is_dir()]
+        assert any("engineer" in d for d in persona_dirs)
 
 
 class TestRunLogResumeFields:
@@ -1842,5 +1846,46 @@ class TestPerPhaseModelRouting:
         call_dicts = parallel_call.args[0]
         for call_dict in call_dicts:
             assert call_dict["model"] == "opus"
+
+
+class TestSaveReviewArtifact:
+    """Tests for _save_review_artifact subdirectory support."""
+
+    def test_saves_to_root_when_no_subdirectory(self, tmp_path: Path):
+        path = _save_review_artifact(
+            tmp_path, "cOS_reviews", "test.md", "content"
+        )
+        assert path == tmp_path / "cOS_reviews" / "test.md"
+        assert path.read_text(encoding="utf-8") == "content"
+
+    def test_saves_to_subdirectory(self, tmp_path: Path):
+        path = _save_review_artifact(
+            tmp_path, "cOS_reviews", "decision.md", "verdict",
+            subdirectory="decisions",
+        )
+        assert path == tmp_path / "cOS_reviews" / "decisions" / "decision.md"
+        assert path.read_text(encoding="utf-8") == "verdict"
+
+    def test_creates_nested_subdirectories(self, tmp_path: Path):
+        path = _save_review_artifact(
+            tmp_path, "cOS_reviews", "round1.md", "review",
+            subdirectory="reviews/staff_engineer",
+        )
+        expected = tmp_path / "cOS_reviews" / "reviews" / "staff_engineer" / "round1.md"
+        assert path == expected
+        assert path.exists()
+
+    def test_rejects_path_traversal(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="escapes"):
+            _save_review_artifact(
+                tmp_path, "cOS_reviews", "bad.md", "evil",
+                subdirectory="../../etc",
+            )
+
+    def test_rejects_path_traversal_in_filename(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="escapes"):
+            _save_review_artifact(
+                tmp_path, "cOS_reviews", "../../etc/passwd", "evil",
+            )
 
 

@@ -11,7 +11,7 @@ You are an extraction agent. Your job is to read review artifacts and extract ac
 
 ### Step 1: Read Review Artifacts
 
-Read all review artifacts in `{reviews_dir}/`. Focus on findings where reviewers requested changes.
+Read all review artifacts recursively under `{reviews_dir}/` (including `{reviews_dir}/reviews/` and `{reviews_dir}/decisions/`). Focus on findings where reviewers requested changes.
 
 ### Step 2: Read Existing Learnings
 
