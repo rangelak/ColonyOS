@@ -183,16 +183,13 @@ class TestReleaseWorkflow:
             "Release workflow must have an update-homebrew job (FR-5.4)"
         )
 
-    def test_update_homebrew_uses_pr_not_direct_push(self):
-        """Homebrew update must use a PR, not push directly to main."""
+    def test_update_homebrew_pushes_to_main(self):
+        """Homebrew update must push directly to main."""
         homebrew_job = self.workflow["jobs"]["update-homebrew"]
         steps = homebrew_job.get("steps", [])
         all_run = " ".join(str(s.get("run", "")) for s in steps)
-        assert "gh pr create" in all_run, (
-            "update-homebrew must create a PR, not push directly to main"
-        )
-        assert "git push origin" in all_run, (
-            "update-homebrew must push branch to origin (not directly to main)"
+        assert "git push origin main" in all_run, (
+            "update-homebrew must push directly to main"
         )
 
     def test_update_homebrew_validates_version_format(self):
@@ -204,12 +201,12 @@ class TestReleaseWorkflow:
             "update-homebrew must validate VERSION format before sed substitution"
         )
 
-    def test_update_homebrew_has_pr_permissions(self):
-        """Homebrew update job must have pull-requests: write permission."""
+    def test_update_homebrew_has_contents_write(self):
+        """Homebrew update job must have contents: write permission."""
         homebrew_job = self.workflow["jobs"]["update-homebrew"]
         permissions = homebrew_job.get("permissions", {})
-        assert permissions.get("pull-requests") == "write", (
-            "update-homebrew must have pull-requests: write for PR creation"
+        assert permissions.get("contents") == "write", (
+            "update-homebrew must have contents: write to push to main"
         )
 
     def test_checksums_not_in_pypi_upload_path(self):
