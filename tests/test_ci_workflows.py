@@ -57,6 +57,24 @@ class TestCIWorkflow:
         step_texts = " ".join(str(s.get("run", "")) for s in steps)
         assert "dev" in step_texts, "Dev dependencies not installed in CI"
 
+    def test_has_top_level_permissions(self):
+        """CI workflow must have top-level permissions: {} for least privilege."""
+        assert "permissions" in self.workflow, (
+            "CI workflow must set top-level permissions: {} for least privilege"
+        )
+
+    def test_actions_pinned_to_shas(self):
+        """All 'uses' steps must reference commit SHAs, not mutable tags."""
+        import re
+        for job_name, job in self.workflow.get("jobs", {}).items():
+            for step in job.get("steps", []):
+                uses = step.get("uses", "")
+                if uses:
+                    assert re.search(r"@[0-9a-f]{40}", uses), (
+                        f"Action '{uses}' in job '{job_name}' is not pinned "
+                        f"to a commit SHA — supply chain risk"
+                    )
+
 
 class TestReleaseWorkflow:
     """Verify .github/workflows/release.yml structure."""
@@ -114,4 +132,58 @@ class TestReleaseWorkflow:
         )
         assert "release" in step_texts.lower(), (
             "Release job must create a GitHub Release"
+        )
+
+    def test_has_top_level_permissions(self):
+        """Release workflow must have top-level permissions: {} for least privilege."""
+        assert "permissions" in self.workflow, (
+            "Release workflow must set top-level permissions: {} for least privilege"
+        )
+
+    def test_has_concurrency_control(self):
+        """Release workflow must have concurrency control to prevent racing releases."""
+        assert "concurrency" in self.workflow, (
+            "Release workflow must have concurrency control"
+        )
+
+    def test_actions_pinned_to_shas(self):
+        """All 'uses' steps must reference commit SHAs, not mutable tags."""
+        import re
+        for job_name, job in self.workflow.get("jobs", {}).items():
+            for step in job.get("steps", []):
+                uses = step.get("uses", "")
+                if uses:
+                    assert re.search(r"@[0-9a-f]{40}", uses), (
+                        f"Action '{uses}' in job '{job_name}' is not pinned "
+                        f"to a commit SHA — supply chain risk"
+                    )
+
+    def test_has_update_homebrew_job(self):
+        """Release workflow must include a job to auto-update the Homebrew formula."""
+        assert "update-homebrew" in self.workflow["jobs"], (
+            "Release workflow must have an update-homebrew job (FR-5.4)"
+        )
+
+    def test_checksums_not_in_pypi_upload_path(self):
+        """SHA256SUMS.txt must not be in the dist/ artifact uploaded to PyPI."""
+        build_job = self.workflow["jobs"]["build"]
+        steps = build_job.get("steps", [])
+        all_run = " ".join(str(s.get("run", "")) for s in steps)
+        assert "mv SHA256SUMS.txt" in all_run or "cp SHA256SUMS.txt" in all_run, (
+            "Build job must move SHA256SUMS.txt out of dist/ before upload"
+        )
+
+
+class TestHomebrewFormula:
+    """Verify Formula/colonyos.rb structure."""
+
+    def setup_method(self):
+        self.formula_path = REPO_ROOT / "Formula" / "colonyos.rb"
+        assert self.formula_path.exists(), "Homebrew formula not found"
+        self.content = self.formula_path.read_text(encoding="utf-8")
+
+    def test_formula_documents_auto_update(self):
+        """Formula must document that it is auto-updated by the release workflow."""
+        assert "release workflow" in self.content.lower() or "auto" in self.content.lower(), (
+            "Formula should document that it is auto-updated by the release workflow"
         )

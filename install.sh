@@ -91,6 +91,23 @@ fi
 
 ok "Python $PY_VERSION"
 
+# --- Helpers: pip with PEP 668 fallback ---
+
+pip_install_user() {
+  # Try pip install --user; fall back to --break-system-packages for PEP 668
+  # (externally-managed-environment on Debian 12+, Ubuntu 23.04+, etc.)
+  if "$PYTHON" -m pip install --user "$@" 2>/dev/null; then
+    return 0
+  fi
+  info "pip --user failed (PEP 668?), retrying with --break-system-packages..."
+  "$PYTHON" -m pip install --user --break-system-packages "$@"
+}
+
+install_pipx() {
+  pip_install_user pipx
+  "$PYTHON" -m pipx ensurepath
+}
+
 # --- pipx Detection / Installation ---
 
 if command -v pipx >/dev/null 2>&1; then
@@ -101,9 +118,10 @@ else
   if [ "$DRY_RUN" = true ]; then
     info "(dry-run) would install pipx, then use it to install colonyos"
     INSTALLER="pipx"
-  else
+  elif [ -t 0 ]; then
+    # Interactive terminal — ask the user
     printf "  Install pipx for isolated package management? [Y/n] "
-    read -r REPLY
+    read -r REPLY < /dev/tty
     case "$REPLY" in
       [nN]*)
         info "Falling back to pip install --user"
@@ -111,11 +129,15 @@ else
         ;;
       *)
         info "Installing pipx..."
-        "$PYTHON" -m pip install --user pipx
-        "$PYTHON" -m pipx ensurepath
+        install_pipx
         INSTALLER="pipx"
         ;;
     esac
+  else
+    # Non-interactive (e.g. curl | sh) — default to installing pipx
+    info "Non-interactive mode detected. Installing pipx automatically..."
+    install_pipx
+    INSTALLER="pipx"
   fi
 fi
 
@@ -126,7 +148,11 @@ info "Installing ColonyOS via $INSTALLER..."
 if [ "$INSTALLER" = "pipx" ]; then
   run_cmd pipx install colonyos
 else
-  run_cmd "$PYTHON" -m pip install --user colonyos
+  if [ "$DRY_RUN" = true ]; then
+    info "(dry-run) would run: pip_install_user colonyos"
+  else
+    pip_install_user colonyos
+  fi
 fi
 
 # --- Post-Install ---
