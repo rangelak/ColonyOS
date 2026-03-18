@@ -41,17 +41,55 @@ def _find_repo_root() -> Path:
 
 def _print_run_summary(log: RunLog) -> None:
     """Print a formatted run summary to stdout."""
-    click.echo(f"\n{'=' * 60}")
-    click.echo(f"Run: {log.run_id}")
-    click.echo(f"Status: {log.status.value}")
-    click.echo(f"Total cost: ${log.total_cost_usd:.4f}")
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    con = Console()
+
+    status_style = "green" if log.status == RunStatus.COMPLETED else "red"
+    status_icon = "✓" if log.status == RunStatus.COMPLETED else "✗"
+
+    table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    table.add_column("Phase", style="bold")
+    table.add_column("Status", justify="center")
+    table.add_column("Cost", justify="right")
+    table.add_column("Duration", justify="right")
+
     for phase in log.phases:
-        status = "ok" if phase.success else "FAILED"
-        click.echo(
-            f"  {phase.phase.value}: {status} "
-            f"(${phase.cost_usd or 0:.4f}, {phase.duration_ms}ms)"
+        if phase.success:
+            st = Text("✓ ok", style="green")
+        else:
+            st = Text("✗ FAIL", style="red bold")
+        cost = f"${phase.cost_usd or 0:.2f}"
+        dur_ms = phase.duration_ms or 0
+        if dur_ms >= 60_000:
+            mins, secs = divmod(dur_ms // 1000, 60)
+            dur = f"{mins}m {secs}s"
+        else:
+            dur = f"{dur_ms // 1000}s"
+        table.add_row(phase.phase.value, st, cost, dur)
+
+    header = Text()
+    header.append(f" {status_icon} ", style=status_style)
+    header.append(log.run_id, style="bold")
+    header.append(f"  │  ", style="dim")
+    header.append(f"${log.total_cost_usd:.2f}", style="bold cyan")
+    header.append(f"  │  ", style="dim")
+    header.append(log.status.value, style=f"bold {status_style}")
+
+    con.print()
+    con.print(
+        Panel(
+            table,
+            title=header,
+            title_align="left",
+            border_style="bright_black",
+            padding=(1, 2),
+            expand=True,
         )
-    click.echo(f"{'=' * 60}")
+    )
 
 
 # ---------------------------------------------------------------------------
