@@ -16,6 +16,9 @@ from colonyos.orchestrator import (
     _build_implement_prompt,
     _build_fix_prompt,
     _build_learn_prompt,
+    _build_plan_prompt,
+    _build_deliver_prompt,
+    _build_ceo_prompt,
     _build_run_id,
     _load_run_log,
     _parse_learn_output,
@@ -1649,5 +1652,115 @@ class TestLearnPhaseWiring:
                 assert "Write" not in tools
                 assert "Bash" not in tools
                 break
+
+
+# ---------------------------------------------------------------------------
+# GitHub issue integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPlanPromptWithIssue:
+    def test_without_issue(self, config: ColonyConfig) -> None:
+        system, user = _build_plan_prompt("test prompt", config, "prd.md", "tasks.md")
+        assert "GitHub issue" not in system
+
+    def test_with_issue(self, config: ColonyConfig) -> None:
+        system, user = _build_plan_prompt(
+            "test prompt", config, "prd.md", "tasks.md",
+            source_issue=42,
+            source_issue_url="https://github.com/org/repo/issues/42",
+        )
+        assert "#42" in system
+        assert "https://github.com/org/repo/issues/42" in system
+        assert "Source Issue" in system
+
+    def test_user_prompt_unchanged(self, config: ColonyConfig) -> None:
+        _, user = _build_plan_prompt(
+            "my feature", config, "prd.md", "tasks.md",
+            source_issue=1,
+        )
+        assert "my feature" in user
+
+
+class TestBuildDeliverPromptWithIssue:
+    def test_without_issue(self, config: ColonyConfig) -> None:
+        system, _ = _build_deliver_prompt(config, "prd.md", "branch")
+        assert "Closes" not in system
+
+    def test_with_issue(self, config: ColonyConfig) -> None:
+        system, _ = _build_deliver_prompt(config, "prd.md", "branch", source_issue=42)
+        assert "Closes #42" in system
+        assert "#42" in system
+
+
+class TestSaveRunLogSourceIssue:
+    def test_persists_source_issue_fields(self, tmp_repo: Path) -> None:
+        log = RunLog(
+            run_id="r-issue", prompt="test", status=RunStatus.COMPLETED,
+            source_issue=42,
+            source_issue_url="https://github.com/org/repo/issues/42",
+        )
+        path = _save_run_log(tmp_repo, log)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["source_issue"] == 42
+        assert data["source_issue_url"] == "https://github.com/org/repo/issues/42"
+
+    def test_persists_none_when_no_issue(self, tmp_repo: Path) -> None:
+        log = RunLog(run_id="r-no-issue", prompt="test", status=RunStatus.COMPLETED)
+        path = _save_run_log(tmp_repo, log)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["source_issue"] is None
+        assert data["source_issue_url"] is None
+
+
+class TestLoadRunLogSourceIssue:
+    def test_loads_source_issue(self, tmp_repo: Path) -> None:
+        log = RunLog(
+            run_id="r-load", prompt="test", status=RunStatus.FAILED,
+            source_issue=7,
+            source_issue_url="https://github.com/org/repo/issues/7",
+        )
+        _save_run_log(tmp_repo, log)
+        loaded = _load_run_log(tmp_repo, "r-load")
+        assert loaded.source_issue == 7
+        assert loaded.source_issue_url == "https://github.com/org/repo/issues/7"
+
+    def test_backward_compat_missing_fields(self, tmp_repo: Path) -> None:
+        runs_dir = tmp_repo / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "old.json").write_text(json.dumps({
+            "run_id": "old", "prompt": "test", "status": "failed",
+            "phases": [], "total_cost_usd": 0.0,
+        }), encoding="utf-8")
+        loaded = _load_run_log(tmp_repo, "old")
+        assert loaded.source_issue is None
+        assert loaded.source_issue_url is None
+
+
+class TestBuildCeoPromptWithIssues:
+    @patch("colonyos.github.fetch_open_issues")
+    def test_injects_open_issues(self, mock_fetch, tmp_repo: Path, config: ColonyConfig) -> None:
+        from colonyos.github import GitHubIssue
+        mock_fetch.return_value = [
+            GitHubIssue(number=1, title="Bug fix", body="", labels=["bug"]),
+            GitHubIssue(number=2, title="New feature", body="", labels=[]),
+        ]
+        _, user = _build_ceo_prompt(config, "proposal.md", tmp_repo)
+        assert "## Open Issues" in user
+        assert "#1: Bug fix" in user
+        assert "#2: New feature" in user
+        assert "Issue: #N" in user
+
+    @patch("colonyos.github.fetch_open_issues")
+    def test_no_issues_no_section(self, mock_fetch, tmp_repo: Path, config: ColonyConfig) -> None:
+        mock_fetch.return_value = []
+        _, user = _build_ceo_prompt(config, "proposal.md", tmp_repo)
+        assert "## Open Issues" not in user
+
+    @patch("colonyos.github.fetch_open_issues", side_effect=Exception("fail"))
+    def test_exception_non_blocking(self, mock_fetch, tmp_repo: Path, config: ColonyConfig) -> None:
+        _, user = _build_ceo_prompt(config, "proposal.md", tmp_repo)
+        # Should not raise — just proceed without issues
+        assert "Analyze this project" in user
 
 

@@ -121,6 +121,9 @@ def _build_plan_prompt(
     config: ColonyConfig,
     prd_filename: str,
     task_filename: str,
+    *,
+    source_issue: int | None = None,
+    source_issue_url: str | None = None,
 ) -> tuple[str, str]:
     """Build the system prompt and user prompt for the plan phase."""
     plan_template = _load_instruction("plan.md")
@@ -132,6 +135,14 @@ def _build_plan_prompt(
         prd_filename=prd_filename,
         task_filename=task_filename,
     )
+
+    if source_issue is not None:
+        issue_url = source_issue_url or ""
+        system += (
+            f"\n\nThis feature request originates from GitHub issue "
+            f"#{source_issue} ({issue_url}). The generated PRD must include "
+            f"a '## Source Issue' section linking back to the issue."
+        )
 
     user = f"Feature request:\n\n{prompt}"
     return system, user
@@ -292,6 +303,8 @@ def _build_deliver_prompt(
     config: ColonyConfig,
     prd_path: str,
     branch_name: str,
+    *,
+    source_issue: int | None = None,
 ) -> tuple[str, str]:
     deliver_template = _load_instruction("deliver.md")
 
@@ -299,6 +312,13 @@ def _build_deliver_prompt(
         prd_path=prd_path,
         branch_name=branch_name,
     )
+
+    if source_issue is not None:
+        system += (
+            f"\n\nThis implementation addresses GitHub issue #{source_issue}. "
+            f"The PR body MUST include 'Closes #{source_issue}' to auto-close "
+            f"the issue on merge. Reference the issue in the summary section."
+        )
 
     user = (
         f"Push branch `{branch_name}` and open a pull request for the "
@@ -377,12 +397,39 @@ def _build_ceo_prompt(
     if changelog_path.exists():
         changelog = changelog_path.read_text(encoding="utf-8")
 
+    # Fetch open issues for CEO context (non-blocking)
+    issues_section = ""
+    try:
+        from colonyos.github import fetch_open_issues
+
+        open_issues = fetch_open_issues(repo_root)
+        if open_issues:
+            lines = ["## Open Issues\n"]
+            lines.append(
+                "Consider these open issues as candidates. You may select one "
+                "as the basis for your proposal (cite it with `Issue: #N`), "
+                "or propose a novel feature if no open issue is high-impact enough.\n"
+            )
+            for iss in open_issues:
+                label_str = (
+                    " [" + ", ".join(iss.labels) + "]" if iss.labels else ""
+                )
+                lines.append(f"- #{iss.number}: {iss.title}{label_str}")
+            issues_section = "\n".join(lines) + "\n\n"
+    except Exception:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "Failed to fetch open issues for CEO context, proceeding without."
+        )
+
     user = (
         "## Development History\n\n"
         "Below is the complete changelog of features already built. "
         "Your proposal MUST NOT duplicate any of these. "
         "Your proposal MUST build upon or complement existing work.\n\n"
         f"{changelog}\n\n---\n\n"
+        f"{issues_section}"
         "Analyze this project and propose the single most impactful feature to build next. "
         "Output your proposal in the format described in the instructions."
     )
@@ -513,6 +560,8 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
                 "branch_name": log.branch_name,
                 "prd_rel": log.prd_rel,
                 "task_rel": log.task_rel,
+                "source_issue": log.source_issue,
+                "source_issue_url": log.source_issue_url,
                 "last_successful_phase": last_successful_phase,
                 "resume_events": resume_events,
                 "phases": [
@@ -593,6 +642,8 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
             branch_name=data.get("branch_name"),
             prd_rel=data.get("prd_rel"),
             task_rel=data.get("task_rel"),
+            source_issue=data.get("source_issue"),
+            source_issue_url=data.get("source_issue_url"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise click.ClickException(
@@ -1131,6 +1182,8 @@ def run(
     resume_from: ResumeState | None = None,
     verbose: bool = False,
     quiet: bool = False,
+    source_issue: int | None = None,
+    source_issue_url: str | None = None,
 ) -> RunLog:
     """Execute the full orchestration loop: plan -> implement -> review -> deliver."""
 
@@ -1156,7 +1209,13 @@ def run(
         _save_run_log(repo_root, log, resumed=True)
     else:
         run_id = _build_run_id(prompt)
-        log = RunLog(run_id=run_id, prompt=prompt, status=RunStatus.RUNNING)
+        log = RunLog(
+            run_id=run_id,
+            prompt=prompt,
+            status=RunStatus.RUNNING,
+            source_issue=source_issue,
+            source_issue_url=source_issue_url,
+        )
         skip_phases: set[str] = set()
 
         slug = slugify(prompt)
@@ -1194,7 +1253,9 @@ def run(
                 _log(f"  {len(persona_agents)} persona subagents configured for parallel Q&A")
 
         system, user = _build_plan_prompt(
-            prompt, config, names.prd_filename, names.task_filename
+            prompt, config, names.prd_filename, names.task_filename,
+            source_issue=log.source_issue,
+            source_issue_url=log.source_issue_url,
         )
         plan_result = run_phase_sync(
             Phase.PLAN,
@@ -1422,7 +1483,10 @@ def run(
         else:
             phase_num = 5 if config.phases.review else 3
             _log(f"=== Phase {phase_num}: Deliver ===")
-        system, user = _build_deliver_prompt(config, prd_rel, branch_name)
+        system, user = _build_deliver_prompt(
+            config, prd_rel, branch_name,
+            source_issue=log.source_issue,
+        )
         deliver_result = run_phase_sync(
             Phase.DELIVER,
             user,

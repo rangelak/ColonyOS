@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from colonyos.models import LoopState, LoopStatus, Phase
+from colonyos.models import LoopState, LoopStatus, Phase, RunLog, RunStatus
 
 
 class TestLoopState:
@@ -108,3 +108,33 @@ class TestLoopStatePersistence:
         path = tmp_path / "loop_state_nonexistent.json"
         assert not path.exists()
         # from_dict should handle this gracefully at the caller level
+
+
+class TestRunLogSourceIssue:
+    def test_default_none(self) -> None:
+        log = RunLog(run_id="r-1", prompt="test", status=RunStatus.RUNNING)
+        assert log.source_issue is None
+        assert log.source_issue_url is None
+
+    def test_with_source_issue(self) -> None:
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.RUNNING,
+            source_issue=42,
+            source_issue_url="https://github.com/org/repo/issues/42",
+        )
+        assert log.source_issue == 42
+        assert log.source_issue_url == "https://github.com/org/repo/issues/42"
+
+    def test_mark_finished_preserves_fields(self) -> None:
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.RUNNING,
+            source_issue=7,
+            source_issue_url="https://github.com/org/repo/issues/7",
+        )
+        log.mark_finished()
+        assert log.source_issue == 7
+        assert log.source_issue_url == "https://github.com/org/repo/issues/7"

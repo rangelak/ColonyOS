@@ -1,5 +1,25 @@
 # Changelog
 
+## 20260318_000500 — GitHub Issue Integration
+
+Added `--issue` flag to `colonyos run` that fetches a GitHub issue (by number or URL)
+and uses it as the pipeline prompt. The CEO autonomous phase now sees open issues as
+context for its proposals. Issue-triggered runs produce PRs with `Closes #N` for
+auto-close on merge, and `colonyos status` displays source issue URLs.
+
+**Created:**
+- `src/colonyos/github.py` — `GitHubIssue` dataclass, `fetch_issue()`, `parse_issue_ref()`, `format_issue_as_prompt()`, `fetch_open_issues()`
+- `tests/test_github.py` — Unit tests for all GitHub module functions
+
+**Modified:**
+- `src/colonyos/cli.py` — `--issue` flag on `run` command, status display with issue URLs
+- `src/colonyos/orchestrator.py` — Plan/deliver/CEO prompts enriched with issue context
+- `src/colonyos/models.py` — `RunLog.source_issue` and `source_issue_url` fields
+- `tests/test_cli.py`, `tests/test_orchestrator.py`, `tests/test_ceo.py`, `tests/test_models.py` — Extended tests
+
+**PRD:** `cOS_prds/20260317_235155_prd_add_github_issue_integration_to_colonyos_so_users_can_point_the_pipeline_at_an_i.md`
+**Tasks:** `cOS_tasks/20260317_235155_tasks_add_github_issue_integration_to_colonyos_so_users_can_point_the_pipeline_at_an_i.md`
+
 ## 20260317_215200 — Pre-commit hook for test suite
 
 Added a `pre-commit` hook that runs `pytest` before every commit to prevent

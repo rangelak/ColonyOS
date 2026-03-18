@@ -280,3 +280,32 @@ class TestCeoIntegration:
         assert "Write" not in tools
         assert "Edit" not in tools
         assert "Bash" not in tools
+
+
+class TestCeoOpenIssuesContext:
+    """Task 6.1: CEO prompt with open issues context."""
+
+    @patch("colonyos.github.fetch_open_issues")
+    def test_open_issues_injected(self, mock_fetch, tmp_repo: Path, config: ColonyConfig) -> None:
+        from colonyos.github import GitHubIssue
+        mock_fetch.return_value = [
+            GitHubIssue(number=10, title="Support dark mode", body="", labels=["enhancement"]),
+            GitHubIssue(number=11, title="Fix login bug", body="", labels=["bug"]),
+        ]
+        _, user = _build_ceo_prompt(config, "proposal.md", tmp_repo)
+        assert "## Open Issues" in user
+        assert "#10: Support dark mode" in user
+        assert "#11: Fix login bug" in user
+        assert "Issue: #N" in user
+
+    @patch("colonyos.github.fetch_open_issues")
+    def test_empty_issues_no_section(self, mock_fetch, tmp_repo: Path, config: ColonyConfig) -> None:
+        mock_fetch.return_value = []
+        _, user = _build_ceo_prompt(config, "proposal.md", tmp_repo)
+        assert "## Open Issues" not in user
+
+    @patch("colonyos.github.fetch_open_issues", side_effect=RuntimeError("network"))
+    def test_failure_non_blocking(self, mock_fetch, tmp_repo: Path, config: ColonyConfig) -> None:
+        _, user = _build_ceo_prompt(config, "proposal.md", tmp_repo)
+        assert "Analyze this project" in user
+        assert "## Open Issues" not in user

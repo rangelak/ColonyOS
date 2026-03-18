@@ -93,6 +93,8 @@ class RunLog:
     branch_name: str | None = None
     prd_rel: str | None = None
     task_rel: str | None = None
+    source_issue: int | None = None
+    source_issue_url: str | None = None
 
     def mark_finished(self) -> None:
         self.finished_at = datetime.now(timezone.utc).isoformat()
