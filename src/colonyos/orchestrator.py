@@ -1255,13 +1255,15 @@ def _run_ci_fix_loop(
     repo_root: Path,
     log: RunLog,
     branch_name: str,
-    _make_ui: object,
 ) -> None:
     """Post-deliver CI fix loop: wait for CI, fix failures, retry.
 
     Gated by ``config.ci_fix.enabled``.  Runs up to ``config.ci_fix.max_retries``
     fix-push-wait cycles.  Each CI fix attempt is recorded as a
     ``PhaseResult`` with ``Phase.CI_FIX``.
+
+    Respects ``config.budget.per_run`` — refuses to start a new fix attempt
+    if the cumulative run cost leaves insufficient budget for a phase.
     """
     from colonyos.ci import (
         all_checks_pass,
@@ -1292,6 +1294,17 @@ def _run_ci_fix_loop(
     for attempt in range(1, config.ci_fix.max_retries + 1):
         _log(f"CI fix: attempt {attempt}/{config.ci_fix.max_retries}")
 
+        # Budget guard: check cumulative run cost before each attempt
+        cost_so_far = sum(p.cost_usd for p in log.phases if p.cost_usd is not None)
+        remaining = config.budget.per_run - cost_so_far
+        if remaining < config.budget.per_phase:
+            _log(
+                f"CI fix: budget exhausted "
+                f"(${cost_so_far:.4f} spent of ${config.budget.per_run:.2f} per-run). "
+                "Stopping CI fix loop."
+            )
+            break
+
         # Collect logs from failed checks (shared helper)
         failures_for_prompt = collect_ci_failure_context(
             checks, repo_root, config.ci_fix.log_char_cap,
@@ -1308,7 +1321,7 @@ def _run_ci_fix_loop(
             cwd=repo_root,
             system_prompt=system,
             model=config.get_model(Phase.CI_FIX),
-            budget_usd=config.budget.per_phase,
+            budget_usd=min(config.budget.per_phase, remaining),
             ui=None,
         )
         log.phases.append(phase_result)
@@ -1698,7 +1711,10 @@ def run(
 
     # --- CI Fix Phase (post-deliver) ---
     if config.ci_fix.enabled and config.phases.deliver:
-        _run_ci_fix_loop(config, repo_root, log, branch_name, _make_ui)
+        # Persist the run log before entering the CI fix loop so that
+        # prior phase results are not lost if the loop crashes.
+        _save_run_log(repo_root, log)
+        _run_ci_fix_loop(config, repo_root, log, branch_name)
 
     log.status = RunStatus.COMPLETED
     log.mark_finished()

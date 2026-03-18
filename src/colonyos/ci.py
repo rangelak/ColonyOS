@@ -266,13 +266,20 @@ def validate_branch_not_behind(repo_root: Path) -> None:
     """Raise ``click.ClickException`` if the local branch is behind the remote."""
     try:
         # First fetch to ensure we have the latest remote state
-        subprocess.run(
+        fetch_result = subprocess.run(
             ["git", "fetch"],
             capture_output=True,
             text=True,
             timeout=30,
             cwd=repo_root,
         )
+        if fetch_result.returncode != 0:
+            logger.warning(
+                "git fetch failed (rc=%d): %s — branch-behind check "
+                "may use stale data",
+                fetch_result.returncode,
+                fetch_result.stderr.strip(),
+            )
         result = subprocess.run(
             ["git", "rev-list", "HEAD..@{u}"],
             capture_output=True,
@@ -374,10 +381,17 @@ def collect_ci_failure_context(
     """
     failed = get_failed_checks(checks)
     failures: list[dict[str, str]] = []
+    # Deduplicate by run_id: multiple check results (e.g. matrix builds)
+    # can share the same workflow run, so we only fetch logs once per run.
+    fetched_logs_by_run_id: dict[str, dict[str, str]] = {}
     for check in failed:
         run_id = extract_run_id_from_url(check.details_url)
         if run_id:
-            step_logs = fetch_check_logs(run_id, repo_root, log_char_cap)
+            if run_id not in fetched_logs_by_run_id:
+                fetched_logs_by_run_id[run_id] = fetch_check_logs(
+                    run_id, repo_root, log_char_cap,
+                )
+            step_logs = fetched_logs_by_run_id[run_id]
             for step_name, log_text in step_logs.items():
                 failures.append({
                     "name": f"{check.name} / {step_name}",
@@ -385,6 +399,10 @@ def collect_ci_failure_context(
                     "log": log_text,
                 })
         else:
+            logger.warning(
+                "No GitHub Actions run ID in details URL for check %r: %s",
+                check.name, check.details_url,
+            )
             failures.append({
                 "name": check.name,
                 "conclusion": check.conclusion,

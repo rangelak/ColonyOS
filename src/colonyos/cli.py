@@ -1454,6 +1454,13 @@ def ci_fix(
         status=RunStatus.RUNNING,
     )
 
+    # Branch name is invariant across retries — resolve once before the loop.
+    branch_result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True, timeout=10, cwd=repo_root,
+    )
+    branch_name = branch_result.stdout.strip() or "unknown"
+
     for attempt in range(1, max_retries + 1):
         click.echo(f"[colonyos] CI fix attempt {attempt}/{max_retries} for PR #{pr_number}")
 
@@ -1471,13 +1478,6 @@ def ci_fix(
             checks, repo_root, config.ci_fix.log_char_cap,
         )
         ci_failure_context = format_ci_failures_as_prompt(failures_for_prompt)
-
-        # Get current branch name
-        branch_result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, timeout=10, cwd=repo_root,
-        )
-        branch_name = branch_result.stdout.strip() or "unknown"
 
         # Build prompt and run agent
         system, user = _build_ci_fix_prompt(

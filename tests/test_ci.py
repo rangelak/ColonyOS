@@ -166,6 +166,18 @@ class TestPreflightChecks:
             with pytest.raises(click.ClickException, match="behind the remote"):
                 validate_branch_not_behind(tmp_path)
 
+    def test_fetch_failure_logs_warning(self, tmp_path: Path, caplog) -> None:
+        """git fetch failure should log a warning but still proceed."""
+        import logging
+        with patch("colonyos.ci.subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=128, stdout="", stderr="network unreachable"),  # fetch fails
+                MagicMock(returncode=0, stdout="", stderr=""),  # rev-list passes
+            ]
+            with caplog.at_level(logging.WARNING, logger="colonyos.ci"):
+                validate_branch_not_behind(tmp_path)  # Should not raise
+        assert any("git fetch failed" in r.message for r in caplog.records)
+
 
 class TestExtractRunId:
     def test_extracts_from_url(self) -> None:
@@ -297,6 +309,35 @@ class TestCollectCiFailureContext:
         result = collect_ci_failure_context(checks, tmp_path)
         assert len(result) == 1
         assert "Could not fetch logs" in result[0]["log"]
+
+    def test_no_run_id_logs_warning(self, tmp_path: Path, caplog) -> None:
+        """Non-Actions check URLs should emit a warning for debuggability."""
+        import logging
+        checks = [
+            CheckResult(name="codecov", state="completed", conclusion="failure",
+                        details_url="https://codecov.io/report/123"),
+        ]
+        with caplog.at_level(logging.WARNING, logger="colonyos.ci"):
+            collect_ci_failure_context(checks, tmp_path)
+        assert any("No GitHub Actions run ID" in r.message for r in caplog.records)
+
+    def test_deduplicates_shared_run_ids(self, tmp_path: Path) -> None:
+        """Matrix builds sharing a run_id should only fetch logs once."""
+        checks = [
+            CheckResult(name="test-py39", state="completed", conclusion="failure",
+                        details_url="https://github.com/o/r/actions/runs/555/jobs/1"),
+            CheckResult(name="test-py310", state="completed", conclusion="failure",
+                        details_url="https://github.com/o/r/actions/runs/555/jobs/2"),
+        ]
+        mock_logs = {"step1": "Error in step"}
+        with patch("colonyos.ci.fetch_check_logs", return_value=mock_logs) as mock_fetch:
+            result = collect_ci_failure_context(checks, tmp_path)
+        # fetch_check_logs should only be called once for run_id 555
+        mock_fetch.assert_called_once_with("555", tmp_path, 12_000)
+        # But both check names should appear in the results
+        names = [f["name"] for f in result]
+        assert any("test-py39" in n for n in names)
+        assert any("test-py310" in n for n in names)
 
 
 class TestFormatCiFailuresTotalCap:

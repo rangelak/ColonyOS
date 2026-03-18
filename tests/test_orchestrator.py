@@ -1953,7 +1953,7 @@ class TestRunCiFixLoop:
         config = ColonyConfig()
         log = RunLog(run_id="test", prompt="test", status=RunStatus.RUNNING)
         # No deliver phase → should return immediately
-        _run_ci_fix_loop(config, tmp_path, log, "main", None)
+        _run_ci_fix_loop(config, tmp_path, log, "main")
         # No CI_FIX phases should be added
         assert not any(p.phase == Phase.CI_FIX for p in log.phases)
 
@@ -1963,7 +1963,7 @@ class TestRunCiFixLoop:
         log = self._make_log_with_deliver()
         checks = [CheckResult(name="test", state="completed", conclusion="success")]
         with patch("colonyos.ci.poll_pr_checks", return_value=checks):
-            _run_ci_fix_loop(config, tmp_path, log, "main", None)
+            _run_ci_fix_loop(config, tmp_path, log, "main")
         assert not any(p.phase == Phase.CI_FIX for p in log.phases)
 
     def test_runs_fix_cycle_on_failure(self, tmp_path: Path) -> None:
@@ -1982,7 +1982,7 @@ class TestRunCiFixLoop:
              patch("colonyos.orchestrator.run_phase_sync", return_value=mock_phase), \
              patch("colonyos.orchestrator.subprocess.run") as mock_sp:
             mock_sp.return_value = MagicMock(returncode=0)  # git push
-            _run_ci_fix_loop(config, tmp_path, log, "main", None)
+            _run_ci_fix_loop(config, tmp_path, log, "main")
 
         ci_fix_phases = [p for p in log.phases if p.phase == Phase.CI_FIX]
         assert len(ci_fix_phases) == 1
@@ -2004,7 +2004,7 @@ class TestRunCiFixLoop:
              patch("colonyos.orchestrator.run_phase_sync", return_value=mock_phase), \
              patch("colonyos.orchestrator.subprocess.run") as mock_sp:
             mock_sp.return_value = MagicMock(returncode=1, stderr="push rejected")  # git push fails
-            _run_ci_fix_loop(config, tmp_path, log, "main", None)
+            _run_ci_fix_loop(config, tmp_path, log, "main")
 
         # Only one attempt should have been made despite max_retries=3
         ci_fix_phases = [p for p in log.phases if p.phase == Phase.CI_FIX]
@@ -2024,11 +2024,116 @@ class TestRunCiFixLoop:
         with patch("colonyos.ci.poll_pr_checks", return_value=failed_checks), \
              patch("colonyos.ci.fetch_check_logs", return_value={"step": "error"}), \
              patch("colonyos.orchestrator.run_phase_sync", return_value=fail_phase):
-            _run_ci_fix_loop(config, tmp_path, log, "main", None)
+            _run_ci_fix_loop(config, tmp_path, log, "main")
 
         # Both attempts should have been recorded
         ci_fix_phases = [p for p in log.phases if p.phase == Phase.CI_FIX]
         assert len(ci_fix_phases) == 2
         assert all(not p.success for p in ci_fix_phases)
+
+    def test_budget_guard_stops_loop(self, tmp_path: Path) -> None:
+        """CI fix loop must stop when per-run budget is exhausted (FR21)."""
+        from colonyos.ci import CheckResult
+        config = ColonyConfig()
+        config.ci_fix.max_retries = 3
+        # per_run=0.20, per_phase=0.10, prior cost=0.15 → remaining=0.05
+        # which is < per_phase → first attempt should already be blocked.
+        config.budget.per_run = 0.20
+        config.budget.per_phase = 0.10
+
+        log = self._make_log_with_deliver()
+        log.phases.append(PhaseResult(phase=Phase.IMPLEMENT, success=True, cost_usd=0.15))
+
+        failed_checks = [
+            CheckResult(name="test", state="completed", conclusion="failure",
+                        details_url="https://github.com/o/r/actions/runs/1/jobs/1"),
+        ]
+
+        with patch("colonyos.ci.poll_pr_checks", return_value=failed_checks), \
+             patch("colonyos.ci.fetch_check_logs", return_value={"step": "error"}):
+            _run_ci_fix_loop(config, tmp_path, log, "main")
+
+        # No CI fix attempts should have been made — budget exhausted
+        ci_fix_phases = [p for p in log.phases if p.phase == Phase.CI_FIX]
+        assert len(ci_fix_phases) == 0
+
+    def test_budget_guard_allows_then_stops(self, tmp_path: Path) -> None:
+        """Budget guard allows first attempt but blocks second when exhausted."""
+        from colonyos.ci import CheckResult
+        config = ColonyConfig()
+        config.ci_fix.max_retries = 3
+        # per_run=1.00, per_phase=0.50, prior cost=0.20 → remaining=0.80
+        # Attempt 1 ok. After attempt 1 cost = 0.20+0.50=0.70, remaining=0.30
+        # which is < per_phase(0.50) → attempt 2 blocked.
+        config.budget.per_run = 1.00
+        config.budget.per_phase = 0.50
+
+        log = self._make_log_with_deliver()
+        log.phases.append(PhaseResult(phase=Phase.IMPLEMENT, success=True, cost_usd=0.20))
+
+        failed_checks = [
+            CheckResult(name="test", state="completed", conclusion="failure",
+                        details_url="https://github.com/o/r/actions/runs/1/jobs/1"),
+        ]
+        mock_phase = PhaseResult(phase=Phase.CI_FIX, success=True, cost_usd=0.50)
+
+        with patch("colonyos.ci.poll_pr_checks", return_value=failed_checks), \
+             patch("colonyos.ci.fetch_check_logs", return_value={"step": "error"}), \
+             patch("colonyos.orchestrator.run_phase_sync", return_value=mock_phase), \
+             patch("colonyos.orchestrator.subprocess.run") as mock_sp:
+            mock_sp.return_value = MagicMock(returncode=0)
+            _run_ci_fix_loop(config, tmp_path, log, "main")
+
+        # Only 1 attempt ran; second blocked by budget
+        ci_fix_phases = [p for p in log.phases if p.phase == Phase.CI_FIX]
+        assert len(ci_fix_phases) == 1
+
+    def test_budget_guard_caps_phase_budget(self, tmp_path: Path) -> None:
+        """run_phase_sync budget should be min(per_phase, remaining)."""
+        from colonyos.ci import CheckResult
+        config = ColonyConfig()
+        config.ci_fix.max_retries = 1
+        config.budget.per_run = 1.00
+        config.budget.per_phase = 0.50
+
+        log = self._make_log_with_deliver()
+        # Already spent 0.60 → remaining is 0.40 which is ≥ per_phase? No,
+        # 0.40 < 0.50 so the guard would block.  Use 0.30 instead →
+        # remaining = 0.70 > per_phase so attempt runs, but budget_usd
+        # should be min(0.50, 0.70) = 0.50.  That doesn't test the cap.
+        # Use per_run=0.80, per_phase=0.50, spent=0.40 → remaining=0.40
+        # which is < per_phase → blocked.  We need remaining ≥ per_phase
+        # but < per_phase too, which is impossible.  The cap only matters
+        # when remaining ≥ per_phase (otherwise we break out).
+        # So test: per_run=1.00, per_phase=0.80, spent=0.60 →
+        # remaining=0.40 < 0.80 → blocked.
+        # Ok — we can only observe the cap when remaining ≥ per_phase AND
+        # remaining < per_phase.  That's contradictory for a single call.
+        # The cap is: min(per_phase, remaining). When remaining ≥ per_phase,
+        # cap = per_phase.  When remaining < per_phase, we break.
+        # So the min() only produces a different value if remaining < per_phase,
+        # but in that case the guard blocks.  The min() is thus a
+        # belt-and-suspenders safety; we can still verify it's passed.
+        # Use: per_run=1.00, per_phase=0.50, spent=0.20 → remaining=0.80
+        # budget_usd = min(0.50, 0.80) = 0.50.
+        log.phases.append(PhaseResult(phase=Phase.IMPLEMENT, success=True, cost_usd=0.20))
+
+        failed_checks = [
+            CheckResult(name="test", state="completed", conclusion="failure",
+                        details_url="https://github.com/o/r/actions/runs/1/jobs/1"),
+        ]
+        pass_checks = [CheckResult(name="test", state="completed", conclusion="success")]
+        mock_phase = PhaseResult(phase=Phase.CI_FIX, success=True, cost_usd=0.10)
+
+        with patch("colonyos.ci.poll_pr_checks", side_effect=[failed_checks, pass_checks]), \
+             patch("colonyos.ci.fetch_check_logs", return_value={"step": "error"}), \
+             patch("colonyos.orchestrator.run_phase_sync", return_value=mock_phase) as mock_rps, \
+             patch("colonyos.orchestrator.subprocess.run") as mock_sp:
+            mock_sp.return_value = MagicMock(returncode=0)
+            _run_ci_fix_loop(config, tmp_path, log, "main")
+
+        # budget_usd = min(per_phase=0.50, remaining=0.80) = 0.50
+        call_kwargs = mock_rps.call_args[1]
+        assert call_kwargs["budget_usd"] == pytest.approx(0.50, abs=0.01)
 
 
