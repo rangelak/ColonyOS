@@ -105,6 +105,58 @@ colonyos auto --loop 5
 colonyos auto --loop 50 --max-hours 24 --max-budget 500 --no-confirm
 ```
 
+## Docker Deployment
+
+Run ColonyOS as a self-hosted service with Docker — no local Python, Node.js, or CLI installations needed.
+
+### Quick Start
+
+```bash
+# 1. Configure environment
+cp .env.example .env
+# Edit .env — set ANTHROPIC_API_KEY and GH_TOKEN
+
+# 2. Launch the dashboard
+COLONYOS_WORKSPACE=/path/to/your/repo docker compose up
+```
+
+The dashboard is accessible at `http://localhost:7400`.
+
+### Running One-Off Commands
+
+```bash
+# Run a directed pipeline
+docker run --rm --env-file .env -v /path/to/repo:/workspace \
+  ghcr.io/rangelak/colonyos:latest colonyos run "Add health check endpoint"
+
+# Autonomous mode
+docker run --rm --env-file .env -v /path/to/repo:/workspace \
+  ghcr.io/rangelak/colonyos:latest colonyos auto
+```
+
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude agent execution |
+| `GH_TOKEN` | Yes | GitHub personal access token for PR creation |
+| `COLONYOS_REPO_URL` | No | Git URL to clone if `/workspace` is empty |
+| `COLONYOS_WRITE_ENABLED` | No | Set to `1` to enable dashboard write endpoints |
+| `COLONYOS_POSTHOG_API_KEY` | No | PostHog API key for opt-in telemetry |
+| `COLONYOS_SLACK_BOT_TOKEN` | No | Slack bot token for notifications |
+| `COLONYOS_SLACK_APP_TOKEN` | No | Slack app token for socket mode |
+
+### Volume Mounts
+
+Mount your target repository at `/workspace`. The `.colonyos/` directory inside it persists run history, learnings, and configuration across container restarts.
+
+### Troubleshooting
+
+- **Git permission errors**: The container runs as UID 1000. Ensure your mounted repo is accessible by this user, or run with `--user $(id -u):$(id -g)`.
+- **Claude CLI auth**: The container uses `ANTHROPIC_API_KEY` for headless authentication — no interactive login required.
+- **GitHub auth**: Set `GH_TOKEN` in your `.env` file. The `gh` CLI uses this automatically.
+- **Stale git locks**: The entrypoint automatically cleans `.git/index.lock` files left by container crashes.
+
 ## How It Works
 
 ColonyOS has two operating modes:

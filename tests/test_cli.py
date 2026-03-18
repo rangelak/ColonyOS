@@ -1737,7 +1737,7 @@ class TestUI:
              patch("webbrowser.open"):
             result = runner.invoke(app, ["ui"])
         assert result.exit_code == 0
-        assert "127.0.0.1:7400" in result.output
+        assert "localhost:7400" in result.output
         mock_run.assert_called_once()
         call_kwargs = mock_run.call_args
         assert call_kwargs.kwargs["host"] == "127.0.0.1"
@@ -1749,8 +1749,26 @@ class TestUI:
              patch("webbrowser.open"):
             result = runner.invoke(app, ["ui", "--port", "9000"])
         assert result.exit_code == 0
-        assert "127.0.0.1:9000" in result.output
+        assert "localhost:9000" in result.output
         assert mock_run.call_args.kwargs["port"] == 9000
+
+    def test_custom_host(self, runner: CliRunner, tmp_path: Path):
+        """Verify --host flag is passed to uvicorn."""
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("uvicorn.run") as mock_run, \
+             patch("webbrowser.open"):
+            result = runner.invoke(app, ["ui", "--host", "0.0.0.0"])
+        assert result.exit_code == 0
+        assert mock_run.call_args.kwargs["host"] == "0.0.0.0"
+
+    def test_host_0000_displays_localhost(self, runner: CliRunner, tmp_path: Path):
+        """When host is 0.0.0.0, the displayed URL should show localhost."""
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("uvicorn.run"), \
+             patch("webbrowser.open"):
+            result = runner.invoke(app, ["ui", "--host", "0.0.0.0"])
+        assert result.exit_code == 0
+        assert "localhost:7400" in result.output
 
     def test_no_open_flag(self, runner: CliRunner, tmp_path: Path):
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \

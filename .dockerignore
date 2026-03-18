@@ -1,0 +1,39 @@
+# Version control
+.git/
+.gitignore
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+
+# Node
+web/node_modules/
+
+# Environment and secrets
+.env
+
+# ColonyOS runtime data (should be volume-mounted, not baked into image)
+.colonyos/runs/
+.colonyos/queue.json
+
+# IDE and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# CI/CD artifacts
+cOS_prds/
+cOS_tasks/
+cOS_reviews/
+cOS_proposals/
+
+# Docker (prevent recursive context)
+Dockerfile
+docker-compose.yml

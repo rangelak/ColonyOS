@@ -11,6 +11,13 @@ import sys
 from pathlib import Path
 
 
+def is_running_in_docker() -> bool:
+    """Detect if the current process is running inside a Docker container."""
+    if os.environ.get("COLONYOS_DOCKER") == "1":
+        return True
+    return Path("/.dockerenv").exists()
+
+
 def run_doctor_checks(repo_root: Path) -> list[tuple[str, bool, str]]:
     """Run all prerequisite checks and return a list of (name, passed, fix_hint).
 
@@ -20,6 +27,7 @@ def run_doctor_checks(repo_root: Path) -> list[tuple[str, bool, str]]:
     from colonyos import __version__
 
     results: list[tuple[str, bool, str]] = []
+    in_docker = is_running_in_docker()
 
     # 0. ColonyOS version — flag degraded state when using fallback version
     version_ok = "dev" not in __version__ and __version__ != "0.0.0"
@@ -147,6 +155,43 @@ def run_doctor_checks(repo_root: Path) -> list[tuple[str, bool, str]]:
                 False,
                 f"Missing environment variables: {', '.join(missing)}. "
                 "Set them before running `colonyos watch`.",
+            ))
+
+    # 8. Docker-specific checks (only when running inside a container)
+    if in_docker:
+        results.append(("Docker runtime", True, ""))
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if api_key:
+            results.append(("ANTHROPIC_API_KEY", True, ""))
+        else:
+            results.append((
+                "ANTHROPIC_API_KEY",
+                False,
+                "Missing environment variable: ANTHROPIC_API_KEY. "
+                "Pass it via -e or .env file.",
+            ))
+
+        gh_token = os.environ.get("GH_TOKEN", "").strip()
+        if gh_token:
+            results.append(("GH_TOKEN", True, ""))
+        else:
+            results.append((
+                "GH_TOKEN",
+                False,
+                "Missing environment variable: GH_TOKEN. "
+                "Pass it via -e or .env file for GitHub operations.",
+            ))
+
+        workspace_git = repo_root / ".git"
+        if workspace_git.exists():
+            results.append(("Workspace git repo", True, ""))
+        else:
+            results.append((
+                "Workspace git repo",
+                False,
+                "/workspace is not a git repository. "
+                "Mount a repo volume or set COLONYOS_REPO_URL.",
             ))
 
     return results
