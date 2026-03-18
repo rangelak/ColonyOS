@@ -50,6 +50,32 @@ describe("ArtifactPreview", () => {
     });
   });
 
+  it("neutralizes HTML tags in content to prevent XSS", async () => {
+    // Content containing raw HTML tags that should be HTML-entity-escaped
+    mockFetchArtifact.mockResolvedValueOnce({
+      content: '<script>alert("xss")</script>\n\n# Safe Heading\n\n<img onerror="alert(1)" src=x>',
+      path: "cOS_prds/xss.md",
+      filename: "xss.md",
+    });
+
+    render(<ArtifactPreview path="cOS_prds/xss.md" />);
+    fireEvent.click(screen.getByText("cOS_prds/xss.md"));
+
+    await waitFor(() => {
+      const contentDiv = document.querySelector(".prose");
+      expect(contentDiv).not.toBeNull();
+      const html = contentDiv!.innerHTML;
+      // Raw script/img tags must be HTML-entity-escaped, not rendered as DOM elements
+      expect(html).not.toContain("<script>");
+      expect(html).not.toContain("<img");
+      // The escaped versions should be present (proving content is preserved but safe)
+      expect(html).toContain("&lt;script&gt;");
+      expect(html).toContain("&lt;img");
+      // Safe markdown rendering should still work
+      expect(html).toContain("<h1");
+    });
+  });
+
   it("shows error message on fetch failure", async () => {
     mockFetchArtifact.mockRejectedValueOnce(new Error("Not found"));
 

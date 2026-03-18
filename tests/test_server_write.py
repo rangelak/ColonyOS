@@ -230,6 +230,43 @@ class TestPostRuns:
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "launched"
+        assert "run_id" in data
+        assert data["run_id"].startswith("run-")
+
+    def test_launch_run_rate_limit(self, tmp_repo: Path, write_env):
+        """Semaphore prevents concurrent runs."""
+        client, token = _create_app_with_token(tmp_repo)
+        _write_config(tmp_repo)
+        # Acquire the semaphore externally to simulate an in-progress run
+        from colonyos.server import create_app
+        app, token2 = create_app(tmp_repo)
+        from starlette.testclient import TestClient
+        client2 = TestClient(app)
+        # We need a fresh app; the semaphore is per-app instance.
+        # Instead, patch the thread so the first run's semaphore stays held.
+        import threading
+        hold_semaphore = threading.Event()
+        original_thread_init = threading.Thread.__init__
+
+        def blocking_run(*args, **kwargs):
+            hold_semaphore.wait(timeout=5)
+
+        with patch("colonyos.server.threading.Thread") as mock_thread:
+            mock_thread.return_value.start.return_value = None
+            # First launch succeeds (acquires semaphore)
+            resp1 = client.post(
+                "/api/runs",
+                json={"prompt": "First run"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp1.status_code == 200
+            # Second launch should be rejected (semaphore held)
+            resp2 = client.post(
+                "/api/runs",
+                json={"prompt": "Second run"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp2.status_code == 429
 
 
 class TestGetArtifacts:

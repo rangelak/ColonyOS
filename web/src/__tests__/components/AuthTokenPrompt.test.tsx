@@ -14,8 +14,14 @@ const mockGetAuthToken = vi.mocked(getAuthToken);
 const mockSetAuthToken = vi.mocked(setAuthToken);
 const mockFetchHealth = vi.mocked(fetchHealth);
 
+// Mock global fetch for token verification calls
+const mockGlobalFetch = vi.fn();
+vi.stubGlobal("fetch", mockGlobalFetch);
+
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: token verification succeeds (status 200)
+  mockGlobalFetch.mockResolvedValue({ status: 200 });
 });
 
 describe("AuthTokenPrompt", () => {
@@ -60,13 +66,15 @@ describe("AuthTokenPrompt", () => {
     });
   });
 
-  it("saves token and closes on submit", async () => {
+  it("saves token and closes on submit after validation", async () => {
     mockGetAuthToken.mockReturnValue(null);
     mockFetchHealth.mockResolvedValueOnce({
       status: "ok",
       version: "1.0.0",
       write_enabled: "true",
     });
+    // Token verification returns 200 (valid)
+    mockGlobalFetch.mockResolvedValueOnce({ status: 200 });
 
     render(<AuthTokenPrompt />);
 
@@ -78,7 +86,37 @@ describe("AuthTokenPrompt", () => {
     fireEvent.change(input, { target: { value: "my-secret-token" } });
     fireEvent.click(screen.getByText("Save Token"));
 
-    expect(mockSetAuthToken).toHaveBeenCalledWith("my-secret-token");
+    // Wait for async token verification to complete
+    await waitFor(() => {
+      expect(mockSetAuthToken).toHaveBeenCalledWith("my-secret-token");
+    });
+  });
+
+  it("shows error for invalid token", async () => {
+    mockGetAuthToken.mockReturnValue(null);
+    mockFetchHealth.mockResolvedValueOnce({
+      status: "ok",
+      version: "1.0.0",
+      write_enabled: "true",
+    });
+    // Token verification returns 401 (invalid)
+    mockGlobalFetch.mockResolvedValueOnce({ status: 401 });
+
+    render(<AuthTokenPrompt />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Save Token")).toBeDefined();
+    });
+
+    const input = screen.getByPlaceholderText("Paste bearer token here...");
+    fireEvent.change(input, { target: { value: "bad-token" } });
+    fireEvent.click(screen.getByText("Save Token"));
+
+    // Should show error and NOT save the token
+    await waitFor(() => {
+      expect(screen.getByText(/Invalid token/)).toBeDefined();
+    });
+    expect(mockSetAuthToken).not.toHaveBeenCalled();
   });
 
   it("dismisses without saving when Skip is clicked", async () => {

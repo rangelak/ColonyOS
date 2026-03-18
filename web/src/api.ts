@@ -97,8 +97,8 @@ export function updatePersonas(personas: Persona[]): Promise<ConfigResult> {
   return writeJSON<ConfigResult>("PUT", "/config/personas", personas);
 }
 
-export function launchRun(prompt: string): Promise<{ status: string }> {
-  return writeJSON<{ status: string }>("POST", "/runs", { prompt });
+export function launchRun(prompt: string): Promise<{ status: string; run_id: string }> {
+  return writeJSON<{ status: string; run_id: string }>("POST", "/runs", { prompt });
 }
 
 export function fetchArtifact(path: string): Promise<ArtifactResult> {

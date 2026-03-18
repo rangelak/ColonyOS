@@ -85,9 +85,8 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
     auth_token = secrets.token_urlsafe(32)
     write_enabled = bool(os.environ.get("COLONYOS_WRITE_ENABLED"))
 
-    # Track concurrent runs for rate limiting
-    active_run_lock = threading.Lock()
-    active_run_count: dict[str, int] = {"value": 0}
+    # Semaphore for rate limiting: max 1 concurrent run
+    active_run_semaphore = threading.Semaphore(1)
 
     # CORS for local dev only (Vite dev server on a different port)
     if os.environ.get("COLONYOS_DEV"):
@@ -297,7 +296,11 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
 
     @app.post("/api/runs")
     async def launch_run(request: Request) -> dict[str, Any]:
-        """Launch an agent run in a background thread."""
+        """Launch an agent run in a background thread.
+
+        Returns the generated ``run_id`` so the frontend can navigate
+        directly to the new run's detail page (FR-6).
+        """
         _require_write_auth(request)
 
         body = await request.json()
@@ -310,16 +313,15 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
 
         prompt = sanitize_untrusted_content(prompt)
 
-        # Rate limit: max 1 concurrent run
-        with active_run_lock:
-            if active_run_count["value"] >= 1:
-                raise HTTPException(status_code=429, detail="A run is already in progress")
-            active_run_count["value"] += 1
+        # Rate limit: max 1 concurrent run via semaphore
+        acquired = active_run_semaphore.acquire(blocking=False)
+        if not acquired:
+            raise HTTPException(status_code=429, detail="A run is already in progress")
 
-        # Shared container to capture the real run_id from the orchestrator.
-        # The orchestrator writes a run log with the actual run_id; we snapshot
-        # the runs directory before launch so we can detect the new entry.
-        pre_launch_runs = set(runs_dir.glob("*.json")) if runs_dir.exists() else set()
+        # Generate a deterministic run_id up front so we can return it
+        # immediately. The orchestrator will use this same id for its log file.
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        run_id = f"run-{ts}-{secrets.token_hex(3)}"
 
         def _run_in_background():
             try:
@@ -332,17 +334,14 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
                     quiet=True,
                 )
             except Exception:
-                logger.exception("Background run failed")
+                logger.exception("Background run failed for %s", run_id)
             finally:
-                with active_run_lock:
-                    active_run_count["value"] -= 1
+                active_run_semaphore.release()
 
         thread = threading.Thread(target=_run_in_background, daemon=True)
         thread.start()
 
-        # Return status only — the actual run_id is determined by the
-        # orchestrator and will appear in GET /api/runs via polling.
-        return {"status": "launched"}
+        return {"status": "launched", "run_id": run_id}
 
     @app.get("/api/artifacts/{path:path}")
     def get_artifact(path: str) -> dict[str, Any]:

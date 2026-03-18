@@ -7,11 +7,37 @@ interface ArtifactPreviewProps {
 }
 
 /**
+ * Allowlisted HTML tags that renderMarkdown is permitted to produce.
+ * sanitizeHtml strips everything else as defense-in-depth against XSS.
+ */
+const ALLOWED_TAGS = new Set([
+  "h1", "h2", "h3", "h4", "h5", "h6",
+  "strong", "em", "code", "pre",
+  "ul", "li", "div", "br",
+]);
+
+/**
+ * Strip any HTML tag not on the allowlist. Attributes are preserved only for
+ * tags we create ourselves (class names for Tailwind styling). This acts as a
+ * second layer of protection on top of HTML-entity escaping in renderMarkdown.
+ */
+function sanitizeHtml(html: string): string {
+  // Match opening/closing tags; keep only those whose tag name is allowlisted.
+  return html.replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*\/?>/g, (match, tag) => {
+    return ALLOWED_TAGS.has(tag.toLowerCase()) ? match : "";
+  });
+}
+
+/**
  * Convert a subset of markdown to HTML for rendering artifact content.
  * Handles headings, bold, italic, inline code, code blocks, and lists.
+ *
+ * Security: input is HTML-entity-escaped first so user content cannot inject
+ * tags. The output is further filtered through sanitizeHtml (allowlisted tags
+ * only) before being set via dangerouslySetInnerHTML.
  */
 function renderMarkdown(md: string): string {
-  // Escape HTML entities first
+  // Escape HTML entities first to neutralize any raw HTML in the source
   let html = md
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -94,7 +120,8 @@ function renderMarkdown(md: string): string {
   // Convert single newlines to line breaks (except inside pre)
   html = html.replace(/\n/g, "<br/>");
 
-  return html;
+  // Defense-in-depth: strip any tags not in the allowlist
+  return sanitizeHtml(html);
 }
 
 export default function ArtifactPreview({ path, title }: ArtifactPreviewProps) {
