@@ -42,6 +42,7 @@ DEFAULTS = {
         "wait_timeout": 600,
         "log_char_cap": 12_000,
     },
+    "posthog": {"enabled": False},
 }
 
 
@@ -76,6 +77,11 @@ class CIFixConfig:
 
 
 @dataclass
+class PostHogConfig:
+    enabled: bool = False
+
+
+@dataclass
 class SlackConfig:
     enabled: bool = False
     channels: list[str] = field(default_factory=list)
@@ -105,6 +111,7 @@ class ColonyConfig:
     learnings: LearningsConfig = field(default_factory=LearningsConfig)
     ci_fix: CIFixConfig = field(default_factory=CIFixConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
+    posthog: PostHogConfig = field(default_factory=PostHogConfig)
 
     def get_model(self, phase: Phase) -> str:
         """Return the model for a phase, falling back to the global default."""
@@ -165,6 +172,15 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
         auto_approve=bool(raw.get("auto_approve", False)),
         max_runs_per_hour=int(raw.get("max_runs_per_hour", 3)),
         allowed_user_ids=list(raw.get("allowed_user_ids", [])),
+    )
+
+
+def _parse_posthog_config(raw: dict) -> PostHogConfig:
+    """Parse the ``posthog`` section from config.yaml."""
+    if not raw:
+        return PostHogConfig()
+    return PostHogConfig(
+        enabled=bool(raw.get("enabled", False)),
     )
 
 
@@ -273,6 +289,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         ),
         ci_fix=_parse_ci_fix_config(raw.get("ci_fix", {})),
         slack=_parse_slack_config(raw.get("slack", {})),
+        posthog=_parse_posthog_config(raw.get("posthog", {})),
     )
 
 
@@ -344,6 +361,11 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "auto_approve": config.slack.auto_approve,
             "max_runs_per_hour": config.slack.max_runs_per_hour,
             "allowed_user_ids": list(config.slack.allowed_user_ids),
+        }
+
+    if config.posthog.enabled:
+        data["posthog"] = {
+            "enabled": config.posthog.enabled,
         }
 
     if config.ceo_persona:

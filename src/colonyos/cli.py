@@ -205,6 +205,25 @@ REPL_HISTORY_PATH = Path.home() / ".colonyos_history"
 REPL_HISTORY_LENGTH = 1000
 
 
+def _init_cli_telemetry(command_name: str) -> None:
+    """Initialize telemetry and capture a cli_command event."""
+    import atexit
+
+    from colonyos import telemetry
+    from colonyos.config import config_dir_path, PostHogConfig
+
+    repo_root = _find_repo_root()
+    try:
+        config = load_config(repo_root)
+        posthog_config = config.posthog
+    except Exception:
+        posthog_config = PostHogConfig()
+
+    telemetry.init_telemetry(posthog_config, config_dir_path(repo_root))
+    atexit.register(telemetry.shutdown)
+    telemetry.capture_cli_command(command_name=command_name, colonyos_version=__version__)
+
+
 @click.group(invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="colonyos")
 @click.pass_context
@@ -312,6 +331,7 @@ def _run_repl() -> None:
 @app.command()
 def doctor() -> None:
     """Check prerequisites and environment health."""
+    _init_cli_telemetry("doctor")
     repo_root = _find_repo_root()
     checks = run_doctor_checks(repo_root)
 
@@ -351,6 +371,7 @@ def init(
     project_stack: str | None,
 ) -> None:
     """Initialize ColonyOS in the current repository."""
+    _init_cli_telemetry("init")
     repo_root = _find_repo_root()
     run_init(
         repo_root,
@@ -373,6 +394,7 @@ def init(
 @click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
 def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool) -> None:
     """Run the autonomous agent loop for a feature prompt."""
+    _init_cli_telemetry("run")
     # Mutual exclusivity checks
     if resume_run_id:
         if prompt or plan_only or from_prd or issue_ref:
@@ -513,6 +535,7 @@ def _print_review_summary(
 @click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
 def review(branch: str, base: str, no_fix: bool, decide: bool, verbose: bool, quiet: bool) -> None:
     """Run standalone multi-persona code review on a branch."""
+    _init_cli_telemetry("review")
     repo_root = _find_repo_root()
     config = load_config(repo_root)
 
@@ -985,6 +1008,7 @@ def auto(
     quiet: bool,
 ) -> None:
     """Autonomously decide what to build next and run the pipeline."""
+    _init_cli_telemetry("auto")
     repo_root = _find_repo_root()
     config = load_config(repo_root)
 
@@ -1099,6 +1123,7 @@ def auto(
 @click.option("-n", "--limit", default=10, help="Number of recent runs to show.")
 def status(limit: int) -> None:
     """Show recent ColonyOS runs and loop summaries."""
+    _init_cli_telemetry("status")
     repo_root = _find_repo_root()
     runs_dir = runs_dir_path(repo_root)
 
@@ -1509,6 +1534,7 @@ def clear() -> None:
 @click.option("--phase", default=None, type=str, help="Drill into a specific phase.")
 def stats(last: int | None, phase: str | None) -> None:
     """Show aggregate analytics dashboard across all runs."""
+    _init_cli_telemetry("stats")
     from colonyos.stats import (
         compute_stats,
         filter_runs,
@@ -1544,6 +1570,7 @@ def stats(last: int | None, phase: str | None) -> None:
 @click.option("--phase", default=None, type=str, help="Show detail for a specific phase.")
 def show(run_id: str, as_json: bool, phase: str | None) -> None:
     """Show detailed inspection of a single run."""
+    _init_cli_telemetry("show")
     import json as json_mod
 
     from colonyos.show import (
@@ -1607,6 +1634,7 @@ def watch(
     dry_run: bool,
 ) -> None:
     """Watch Slack channels and trigger pipeline runs from messages."""
+    _init_cli_telemetry("watch")
     import signal
     import threading
 
@@ -1963,6 +1991,7 @@ def ci_fix(
     Fetches failed check logs, runs an AI agent to fix the code, and
     pushes a fix commit.
     """
+    _init_cli_telemetry("ci-fix")
     from colonyos.ci import (
         all_checks_pass,
         check_pr_author_mismatch,
@@ -2108,6 +2137,7 @@ def ci_fix(
 @click.option("--write", is_flag=True, help="Enable write endpoints (config editing, run launching)")
 def ui(port: int, no_open: bool, write: bool) -> None:
     """Launch the local web dashboard (requires colonyos[ui])."""
+    _init_cli_telemetry("ui")
     if write:
         os.environ["COLONYOS_WRITE_ENABLED"] = "1"
     try:

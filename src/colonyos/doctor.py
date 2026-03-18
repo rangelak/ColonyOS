@@ -103,7 +103,27 @@ def run_doctor_checks(repo_root: Path) -> list[tuple[str, bool, str]]:
             "No config found. Run `colonyos init` to set up.",
         ))
 
-    # 6. Slack tokens (soft check — only when slack is enabled)
+    # 6. PostHog API key (soft check — only when posthog is enabled)
+    try:
+        from colonyos.config import load_config as _load_cfg
+
+        posthog_config = _load_cfg(repo_root).posthog
+    except Exception:
+        posthog_config = None
+
+    if posthog_config is not None and posthog_config.enabled:
+        api_key = os.environ.get("COLONYOS_POSTHOG_API_KEY", "").strip()
+        if api_key:
+            results.append(("PostHog API key", True, ""))
+        else:
+            results.append((
+                "PostHog API key",
+                False,
+                "Missing environment variable: COLONYOS_POSTHOG_API_KEY. "
+                "Set it to enable telemetry.",
+            ))
+
+    # 7. Slack tokens (soft check — only when slack is enabled)
     try:
         from colonyos.config import load_config
 

@@ -12,6 +12,7 @@ from colonyos.config import (
     DEFAULTS,
     LearningsConfig,
     PhasesConfig,
+    PostHogConfig,
     VALID_MODELS,
     _SAFETY_CRITICAL_PHASES,
     load_config,
@@ -718,5 +719,57 @@ class TestCIFixConfig:
         assert DEFAULTS["ci_fix"]["max_retries"] == 2
         assert DEFAULTS["ci_fix"]["wait_timeout"] == 600
         assert DEFAULTS["ci_fix"]["log_char_cap"] == 12_000
+
+
+class TestPostHogConfig:
+    def test_defaults_when_no_section(self, tmp_repo: Path):
+        """PostHogConfig defaults to disabled when no posthog section in YAML."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "sonnet"}), encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.posthog.enabled is False
+
+    def test_parsed_from_yaml(self, tmp_repo: Path):
+        """PostHogConfig is parsed correctly from YAML."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "sonnet", "posthog": {"enabled": True}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.posthog.enabled is True
+
+    def test_serialization_roundtrip(self, tmp_repo: Path):
+        """PostHogConfig survives save → load round-trip."""
+        original = ColonyConfig(posthog=PostHogConfig(enabled=True))
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.posthog.enabled is True
+
+    def test_not_serialized_when_disabled(self, tmp_repo: Path):
+        """PostHog section is omitted from YAML when disabled."""
+        original = ColonyConfig(posthog=PostHogConfig(enabled=False))
+        save_config(tmp_repo, original)
+        config_path = tmp_repo / ".colonyos" / "config.yaml"
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "posthog" not in raw
+
+    def test_defaults_dict_has_posthog(self):
+        assert DEFAULTS["posthog"]["enabled"] is False
+
+    def test_backwards_compat_no_posthog_field(self, tmp_repo: Path):
+        """Configs created before posthog was added still load."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "sonnet", "budget": {"per_phase": 5.0, "per_run": 15.0}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.posthog.enabled is False
 
 

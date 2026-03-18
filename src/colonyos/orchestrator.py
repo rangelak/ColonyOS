@@ -10,8 +10,9 @@ from pathlib import Path
 import click
 from claude_agent_sdk import AgentDefinition
 
+from colonyos import __version__
 from colonyos.agent import run_phase_sync, run_phases_parallel_sync
-from colonyos.config import ColonyConfig, runs_dir_path
+from colonyos.config import ColonyConfig, config_dir_path, runs_dir_path
 from colonyos.learnings import (
     LearningEntry,
     append_learnings,
@@ -1425,6 +1426,23 @@ def run(
     log.prd_rel = prd_rel
     log.task_rel = task_rel
 
+    # --- Telemetry ---
+    from colonyos import telemetry
+
+    telemetry.init_telemetry(config.posthog, config_dir_path(repo_root))
+    telemetry.capture_run_started(
+        model=config.model,
+        phase_config={
+            "plan": config.phases.plan,
+            "implement": config.phases.implement,
+            "review": config.phases.review,
+            "deliver": config.phases.deliver,
+        },
+        persona_count=len(config.personas),
+        budget_per_run=config.budget.per_run,
+        colonyos_version=__version__,
+    )
+
     # --- Phase 1: Plan ---
     _touch_heartbeat(repo_root)
     if "plan" in skip_phases:
@@ -1464,11 +1482,19 @@ def run(
             ui=plan_ui,
         )
         log.phases.append(plan_result)
+        telemetry.capture_phase_completed(
+            phase_name="plan", model=config.get_model(Phase.PLAN),
+            cost_usd=plan_result.cost_usd or 0.0,
+            duration_ms=plan_result.duration_ms or 0,
+            success=plan_result.success,
+        )
 
         if not plan_result.success:
             log.status = RunStatus.FAILED
             log.mark_finished()
             _save_run_log(repo_root, log)
+            telemetry.capture_run_failed(failing_phase_name="plan", colonyos_version=__version__)
+            telemetry.shutdown()
             if plan_ui is None:
                 _log(f"Plan phase failed: {plan_result.error}")
             return log
@@ -1501,11 +1527,19 @@ def run(
             ui=impl_ui,
         )
         log.phases.append(impl_result)
+        telemetry.capture_phase_completed(
+            phase_name="implement", model=config.get_model(Phase.IMPLEMENT),
+            cost_usd=impl_result.cost_usd or 0.0,
+            duration_ms=impl_result.duration_ms or 0,
+            success=impl_result.success,
+        )
 
         if not impl_result.success:
             log.status = RunStatus.FAILED
             log.mark_finished()
             _save_run_log(repo_root, log)
+            telemetry.capture_run_failed(failing_phase_name="implement", colonyos_version=__version__)
+            telemetry.shutdown()
             if impl_ui is None:
                 _log(f"Implement phase failed: {impl_result.error}")
             return log
@@ -1668,6 +1702,8 @@ def run(
                 log.status = RunStatus.FAILED
                 log.mark_finished()
                 _save_run_log(repo_root, log)
+                telemetry.capture_run_failed(failing_phase_name="decision", colonyos_version=__version__)
+                telemetry.shutdown()
                 _log("Decision gate: NO-GO. Pipeline stopped before deliver.")
                 return log
 
@@ -1700,11 +1736,19 @@ def run(
             ui=deliver_ui,
         )
         log.phases.append(deliver_result)
+        telemetry.capture_phase_completed(
+            phase_name="deliver", model=config.get_model(Phase.DELIVER),
+            cost_usd=deliver_result.cost_usd or 0.0,
+            duration_ms=deliver_result.duration_ms or 0,
+            success=deliver_result.success,
+        )
 
         if not deliver_result.success:
             log.status = RunStatus.FAILED
             log.mark_finished()
             _save_run_log(repo_root, log)
+            telemetry.capture_run_failed(failing_phase_name="deliver", colonyos_version=__version__)
+            telemetry.shutdown()
             if deliver_ui is None:
                 _log(f"Deliver phase failed: {deliver_result.error}")
             return log
@@ -1719,5 +1763,18 @@ def run(
     log.status = RunStatus.COMPLETED
     log.mark_finished()
     _save_run_log(repo_root, log)
+
+    fix_iterations = sum(1 for p in log.phases if p.phase == Phase.FIX)
+    total_duration_ms = sum(p.duration_ms for p in log.phases if p.duration_ms is not None)
+    telemetry.capture_run_completed(
+        status=log.status.value,
+        total_cost_usd=log.total_cost_usd,
+        total_duration_ms=total_duration_ms,
+        phase_count=len(log.phases),
+        fix_iteration_count=fix_iterations,
+        colonyos_version=__version__,
+    )
+    telemetry.shutdown()
+
     _log(f"Run complete. Total cost: ${log.total_cost_usd:.4f}")
     return log
