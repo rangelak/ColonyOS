@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -663,12 +666,20 @@ def _compute_queue_elapsed_hours(state: QueueState) -> float:
     return (now - original_start).total_seconds() / 3600.0
 
 
+_NOGO_VERDICT_RE = re.compile(r"VERDICT:\s*NO-GO", re.IGNORECASE)
+
+
 def _is_nogo_verdict(log: RunLog) -> bool:
-    """Check if a run log has a NO-GO decision verdict."""
+    """Check if a run log has a NO-GO decision verdict.
+
+    Uses the same ``VERDICT: NO-GO`` regex pattern as the orchestrator's
+    ``_extract_verdict()`` to stay in sync with the decision phase output
+    contract.
+    """
     for phase in log.phases:
         if phase.phase.value == "decision":
             verdict_text = phase.artifacts.get("result", "")
-            if "VERDICT:" in verdict_text.upper() and "NO-GO" in verdict_text.upper():
+            if _NOGO_VERDICT_RE.search(verdict_text):
                 return True
     return False
 
@@ -1253,10 +1264,8 @@ def add(prompts: tuple[str, ...], issue_refs: tuple[str, ...]) -> None:
 
     # Add free-text prompts
     for prompt_text in prompts:
-        import uuid as _uuid
-
         item = QueueItem(
-            id=str(_uuid.uuid4()),
+            id=str(uuid.uuid4()),
             source_type="prompt",
             source_value=prompt_text,
             status=QueueItemStatus.PENDING,
@@ -1270,10 +1279,8 @@ def add(prompts: tuple[str, ...], issue_refs: tuple[str, ...]) -> None:
         number = parse_issue_ref(ref)
         issue = fetch_issue(number, repo_root)
 
-        import uuid as _uuid
-
         item = QueueItem(
-            id=str(_uuid.uuid4()),
+            id=str(uuid.uuid4()),
             source_type="issue",
             source_value=str(issue.number),
             status=QueueItemStatus.PENDING,
@@ -1312,6 +1319,17 @@ def queue_start(
         click.echo("No queue found. Run `colonyos queue add` first.", err=True)
         sys.exit(1)
 
+    # Recover any items left in RUNNING state from a prior crash/interrupt.
+    # A RUNNING item in persisted state always means the prior run was killed.
+    recovered = 0
+    for item in state.items:
+        if item.status == QueueItemStatus.RUNNING:
+            item.status = QueueItemStatus.PENDING
+            recovered += 1
+    if recovered:
+        _save_queue_state(repo_root, state)
+        click.echo(f"Recovered {recovered} interrupted item(s) back to pending.")
+
     pending_items = [i for i in state.items if i.status == QueueItemStatus.PENDING]
     if not pending_items:
         click.echo("No pending items in queue.")
@@ -1330,101 +1348,118 @@ def queue_start(
 
     click.echo(f"Starting queue {state.queue_id}: {len(pending_items)} pending item(s)")
 
-    for item in state.items:
-        if item.status != QueueItemStatus.PENDING:
-            continue
+    # Track the item currently being processed so we can revert it on interrupt.
+    current_item: QueueItem | None = None
 
-        # --- Time cap check ---
-        elapsed = _compute_queue_elapsed_hours(state)
-        if elapsed >= effective_max_hours:
-            click.echo(
-                f"\nTime limit reached ({elapsed:.1f}h / {effective_max_hours:.1f}h). "
-                f"Halting queue."
-            )
-            state.status = QueueStatus.INTERRUPTED
+    try:
+        for item in state.items:
+            if item.status != QueueItemStatus.PENDING:
+                continue
+
+            # --- Time cap check ---
+            elapsed = _compute_queue_elapsed_hours(state)
+            if elapsed >= effective_max_hours:
+                click.echo(
+                    f"\nTime limit reached ({elapsed:.1f}h / {effective_max_hours:.1f}h). "
+                    f"Halting queue."
+                )
+                state.status = QueueStatus.INTERRUPTED
+                _save_queue_state(repo_root, state)
+                break
+
+            # --- Budget cap check ---
+            if state.aggregate_cost_usd >= effective_max_cost:
+                click.echo(
+                    f"\nBudget limit reached (${state.aggregate_cost_usd:.2f} / "
+                    f"${effective_max_cost:.2f}). Halting queue."
+                )
+                state.status = QueueStatus.INTERRUPTED
+                _save_queue_state(repo_root, state)
+                break
+
+            # Mark item as running
+            item.status = QueueItemStatus.RUNNING
+            current_item = item
             _save_queue_state(repo_root, state)
-            break
 
-        # --- Budget cap check ---
-        if state.aggregate_cost_usd >= effective_max_cost:
-            click.echo(
-                f"\nBudget limit reached (${state.aggregate_cost_usd:.2f} / "
-                f"${effective_max_cost:.2f}). Halting queue."
-            )
-            state.status = QueueStatus.INTERRUPTED
-            _save_queue_state(repo_root, state)
-            break
+            source_display = _format_queue_item_source(item)
+            click.echo(f"\n--- Processing: {source_display} ---")
 
-        # Mark item as running
-        item.status = QueueItemStatus.RUNNING
-        _save_queue_state(repo_root, state)
+            start_ms = int(time.time() * 1000)
 
-        source_display = _format_queue_item_source(item)
-        click.echo(f"\n--- Processing: {source_display} ---")
+            try:
+                # Resolve prompt
+                if item.source_type == "issue":
+                    from colonyos.github import fetch_issue, format_issue_as_prompt
 
-        start_ms = int(time.time() * 1000)
+                    issue = fetch_issue(int(item.source_value), repo_root)
+                    prompt_text = format_issue_as_prompt(issue)
+                    source_issue = issue.number
+                    source_issue_url = issue.url
+                else:
+                    prompt_text = item.source_value
+                    source_issue = None
+                    source_issue_url = None
 
-        try:
-            # Resolve prompt
-            if item.source_type == "issue":
-                from colonyos.github import fetch_issue, format_issue_as_prompt
+                log = run_orchestrator(
+                    prompt_text,
+                    repo_root=repo_root,
+                    config=config,
+                    verbose=verbose,
+                    quiet=quiet,
+                    source_issue=source_issue,
+                    source_issue_url=source_issue_url,
+                )
 
-                issue = fetch_issue(int(item.source_value), repo_root)
-                prompt_text = format_issue_as_prompt(issue)
-                source_issue = issue.number
-                source_issue_url = issue.url
-            else:
-                prompt_text = item.source_value
-                source_issue = None
-                source_issue_url = None
+                end_ms = int(time.time() * 1000)
+                item.run_id = log.run_id
+                item.cost_usd = log.total_cost_usd
+                item.duration_ms = end_ms - start_ms
 
-            log = run_orchestrator(
-                prompt_text,
-                repo_root=repo_root,
-                config=config,
-                verbose=verbose,
-                quiet=quiet,
-                source_issue=source_issue,
-                source_issue_url=source_issue_url,
-            )
+                # Determine outcome
+                if log.status == RunStatus.FAILED and _is_nogo_verdict(log):
+                    item.status = QueueItemStatus.REJECTED
+                    click.echo("  Item rejected (NO-GO verdict).")
+                elif log.status == RunStatus.FAILED:
+                    item.status = QueueItemStatus.FAILED
+                    item.error = "Pipeline failed"
+                    click.echo("  Item failed.")
+                else:
+                    item.status = QueueItemStatus.COMPLETED
+                    item.pr_url = _extract_pr_url_from_log(log)
+                    click.echo(f"  Item completed. PR: {item.pr_url or 'N/A'}")
 
-            end_ms = int(time.time() * 1000)
-            item.run_id = log.run_id
-            item.cost_usd = log.total_cost_usd
-            item.duration_ms = end_ms - start_ms
-
-            # Determine outcome
-            if log.status == RunStatus.FAILED and _is_nogo_verdict(log):
-                item.status = QueueItemStatus.REJECTED
-                click.echo(f"  Item rejected (NO-GO verdict).")
-            elif log.status == RunStatus.FAILED:
+            except Exception as exc:
+                end_ms = int(time.time() * 1000)
                 item.status = QueueItemStatus.FAILED
-                item.error = "Pipeline failed"
-                click.echo(f"  Item failed.")
-            else:
-                item.status = QueueItemStatus.COMPLETED
-                item.pr_url = _extract_pr_url_from_log(log)
-                click.echo(f"  Item completed. PR: {item.pr_url or 'N/A'}")
+                # Truncate error to avoid persisting sensitive info from tracebacks.
+                item.error = str(exc)[:500]
+                item.duration_ms = end_ms - start_ms
+                click.echo(f"  Item failed: {exc}", err=True)
 
-        except Exception as exc:
-            end_ms = int(time.time() * 1000)
-            item.status = QueueItemStatus.FAILED
-            item.error = str(exc)
-            item.duration_ms = end_ms - start_ms
-            click.echo(f"  Item failed: {exc}", err=True)
-
-        state.aggregate_cost_usd += item.cost_usd
-        _save_queue_state(repo_root, state)
-
-        # --- Post-item budget cap check ---
-        if state.aggregate_cost_usd >= effective_max_cost:
-            click.echo(
-                f"\nBudget limit reached (${state.aggregate_cost_usd:.2f} / "
-                f"${effective_max_cost:.2f}). Halting queue."
-            )
-            state.status = QueueStatus.INTERRUPTED
+            current_item = None
+            state.aggregate_cost_usd += item.cost_usd
             _save_queue_state(repo_root, state)
-            break
+
+            # --- Post-item budget cap check ---
+            if state.aggregate_cost_usd >= effective_max_cost:
+                click.echo(
+                    f"\nBudget limit reached (${state.aggregate_cost_usd:.2f} / "
+                    f"${effective_max_cost:.2f}). Halting queue."
+                )
+                state.status = QueueStatus.INTERRUPTED
+                _save_queue_state(repo_root, state)
+                break
+
+    except KeyboardInterrupt:
+        click.echo("\nQueue interrupted by user.")
+        # Revert the in-progress item back to PENDING so it can be retried.
+        if current_item is not None and current_item.status == QueueItemStatus.RUNNING:
+            current_item.status = QueueItemStatus.PENDING
+        state.status = QueueStatus.INTERRUPTED
+        _save_queue_state(repo_root, state)
+        _print_queue_summary(state)
+        return
 
     # Mark completed if all items processed
     all_done = all(

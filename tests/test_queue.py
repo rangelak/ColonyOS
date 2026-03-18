@@ -714,6 +714,175 @@ class TestQueueStart:
 
 
 # ===========================================================================
+# Fix iteration 1: Crash recovery and signal handling tests
+# ===========================================================================
+
+
+class TestQueueCrashRecovery:
+    def test_running_items_reset_to_pending_on_start(self, runner: CliRunner, configured_repo: Path):
+        """Items stuck in RUNNING from a prior crash are reset to PENDING on queue start."""
+        state = QueueState(
+            queue_id="q-test",
+            items=[
+                _make_queue_item(id="i1", source_value="Feature A", status=QueueItemStatus.RUNNING),
+                _make_queue_item(id="i2", source_value="Feature B", status=QueueItemStatus.PENDING),
+            ],
+        )
+        _save_queue_state(configured_repo, state)
+
+        mock_log = _make_successful_runlog()
+
+        with (
+            patch("colonyos.cli._find_repo_root", return_value=configured_repo),
+            patch("colonyos.cli.run_orchestrator", return_value=mock_log),
+        ):
+            result = runner.invoke(app, ["queue", "start"])
+
+        assert result.exit_code == 0
+        assert "Recovered 1 interrupted item(s)" in result.output
+        loaded = _load_queue_state(configured_repo)
+        assert loaded is not None
+        # Both items should now be completed (the RUNNING one was reset to PENDING first)
+        assert all(item.status == QueueItemStatus.COMPLETED for item in loaded.items)
+
+    def test_multiple_running_items_recovered(self, runner: CliRunner, configured_repo: Path):
+        """Multiple stuck RUNNING items are all recovered."""
+        state = QueueState(
+            queue_id="q-test",
+            items=[
+                _make_queue_item(id="i1", source_value="Feature A", status=QueueItemStatus.RUNNING),
+                _make_queue_item(id="i2", source_value="Feature B", status=QueueItemStatus.RUNNING),
+                _make_queue_item(id="i3", source_value="Feature C", status=QueueItemStatus.COMPLETED),
+            ],
+        )
+        _save_queue_state(configured_repo, state)
+
+        mock_log = _make_successful_runlog()
+
+        with (
+            patch("colonyos.cli._find_repo_root", return_value=configured_repo),
+            patch("colonyos.cli.run_orchestrator", return_value=mock_log),
+        ):
+            result = runner.invoke(app, ["queue", "start"])
+
+        assert result.exit_code == 0
+        assert "Recovered 2 interrupted item(s)" in result.output
+        loaded = _load_queue_state(configured_repo)
+        assert loaded is not None
+        assert loaded.items[0].status == QueueItemStatus.COMPLETED
+        assert loaded.items[1].status == QueueItemStatus.COMPLETED
+        assert loaded.items[2].status == QueueItemStatus.COMPLETED
+
+    def test_keyboard_interrupt_reverts_running_item(self, runner: CliRunner, configured_repo: Path):
+        """Ctrl+C during processing reverts the current item to PENDING."""
+        state = QueueState(
+            queue_id="q-test",
+            items=[
+                _make_queue_item(id="i1", source_value="Feature A"),
+                _make_queue_item(id="i2", source_value="Feature B"),
+            ],
+        )
+        _save_queue_state(configured_repo, state)
+
+        def interrupt_on_call(*args, **kwargs):
+            raise KeyboardInterrupt()
+
+        with (
+            patch("colonyos.cli._find_repo_root", return_value=configured_repo),
+            patch("colonyos.cli.run_orchestrator", side_effect=interrupt_on_call),
+        ):
+            result = runner.invoke(app, ["queue", "start"])
+
+        loaded = _load_queue_state(configured_repo)
+        assert loaded is not None
+        # The interrupted item should be reverted to PENDING
+        assert loaded.items[0].status == QueueItemStatus.PENDING
+        assert loaded.items[1].status == QueueItemStatus.PENDING
+        assert loaded.status == QueueStatus.INTERRUPTED
+
+    def test_error_message_truncated(self, runner: CliRunner, configured_repo: Path):
+        """Exception messages stored in queue state are truncated to 500 chars."""
+        state = QueueState(
+            queue_id="q-test",
+            items=[_make_queue_item(id="i1", source_value="Feature A")],
+        )
+        _save_queue_state(configured_repo, state)
+
+        long_error = "x" * 1000
+
+        def raise_long_error(*args, **kwargs):
+            raise RuntimeError(long_error)
+
+        with (
+            patch("colonyos.cli._find_repo_root", return_value=configured_repo),
+            patch("colonyos.cli.run_orchestrator", side_effect=raise_long_error),
+        ):
+            result = runner.invoke(app, ["queue", "start"])
+
+        assert result.exit_code == 0
+        loaded = _load_queue_state(configured_repo)
+        assert loaded is not None
+        assert loaded.items[0].status == QueueItemStatus.FAILED
+        assert len(loaded.items[0].error) == 500
+
+
+class TestNogoVerdictDetection:
+    """Tests for the improved NO-GO verdict regex detection."""
+
+    def test_standard_nogo_format(self):
+        """Standard VERDICT: NO-GO is detected."""
+        from colonyos.cli import _is_nogo_verdict
+
+        log = _make_rejected_runlog()
+        assert _is_nogo_verdict(log) is True
+
+    def test_nogo_with_extra_whitespace(self):
+        """VERDICT:  NO-GO (extra space) is detected."""
+        from colonyos.cli import _is_nogo_verdict
+
+        log = RunLog(
+            run_id="run-test",
+            prompt="test",
+            status=RunStatus.FAILED,
+            phases=[
+                PhaseResult(
+                    phase=Phase.DECISION,
+                    success=True,
+                    cost_usd=0.1,
+                    artifacts={"result": "VERDICT:  NO-GO\nReason here."},
+                ),
+            ],
+        )
+        assert _is_nogo_verdict(log) is True
+
+    def test_go_verdict_not_matched(self):
+        """VERDICT: GO should NOT trigger NO-GO detection."""
+        from colonyos.cli import _is_nogo_verdict
+
+        log = RunLog(
+            run_id="run-test",
+            prompt="test",
+            status=RunStatus.FAILED,
+            phases=[
+                PhaseResult(
+                    phase=Phase.DECISION,
+                    success=True,
+                    cost_usd=0.1,
+                    artifacts={"result": "VERDICT: GO\nAll good."},
+                ),
+            ],
+        )
+        assert _is_nogo_verdict(log) is False
+
+    def test_no_decision_phase(self):
+        """Log without a decision phase returns False."""
+        from colonyos.cli import _is_nogo_verdict
+
+        log = _make_failed_runlog()
+        assert _is_nogo_verdict(log) is False
+
+
+# ===========================================================================
 # Task 7: Summary and status integration tests
 # ===========================================================================
 
