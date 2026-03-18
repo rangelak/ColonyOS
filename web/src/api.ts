@@ -97,12 +97,14 @@ export function updatePersonas(personas: Persona[]): Promise<ConfigResult> {
   return writeJSON<ConfigResult>("PUT", "/config/personas", personas);
 }
 
-export function launchRun(prompt: string): Promise<{ run_id: string; status: string }> {
-  return writeJSON<{ run_id: string; status: string }>("POST", "/runs", { prompt });
+export function launchRun(prompt: string): Promise<{ status: string }> {
+  return writeJSON<{ status: string }>("POST", "/runs", { prompt });
 }
 
 export function fetchArtifact(path: string): Promise<ArtifactResult> {
-  return fetchJSON<ArtifactResult>(`/artifacts/${encodeURIComponent(path)}`);
+  // Do not use encodeURIComponent here — the path contains forward slashes
+  // that FastAPI's {path:path} parameter expects as literal slashes.
+  return fetchJSON<ArtifactResult>(`/artifacts/${path}`);
 }
 
 export function fetchProposals(): Promise<ProposalEntry[]> {

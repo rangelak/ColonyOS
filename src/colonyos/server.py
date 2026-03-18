@@ -87,7 +87,7 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
 
     # Track concurrent runs for rate limiting
     active_run_lock = threading.Lock()
-    active_run_count = [0]  # mutable container for closure
+    active_run_count: dict[str, int] = {"value": 0}
 
     # CORS for local dev only (Vite dev server on a different port)
     if os.environ.get("COLONYOS_DEV"):
@@ -312,13 +312,14 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
 
         # Rate limit: max 1 concurrent run
         with active_run_lock:
-            if active_run_count[0] >= 1:
+            if active_run_count["value"] >= 1:
                 raise HTTPException(status_code=429, detail="A run is already in progress")
-            active_run_count[0] += 1
+            active_run_count["value"] += 1
 
-        # Generate run ID
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        run_id = f"run-{ts}-api"
+        # Shared container to capture the real run_id from the orchestrator.
+        # The orchestrator writes a run log with the actual run_id; we snapshot
+        # the runs directory before launch so we can detect the new entry.
+        pre_launch_runs = set(runs_dir.glob("*.json")) if runs_dir.exists() else set()
 
         def _run_in_background():
             try:
@@ -331,15 +332,17 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
                     quiet=True,
                 )
             except Exception:
-                logger.exception("Background run failed: %s", run_id)
+                logger.exception("Background run failed")
             finally:
                 with active_run_lock:
-                    active_run_count[0] -= 1
+                    active_run_count["value"] -= 1
 
         thread = threading.Thread(target=_run_in_background, daemon=True)
         thread.start()
 
-        return {"run_id": run_id, "status": "launched"}
+        # Return status only — the actual run_id is determined by the
+        # orchestrator and will appear in GET /api/runs via polling.
+        return {"status": "launched"}
 
     @app.get("/api/artifacts/{path:path}")
     def get_artifact(path: str) -> dict[str, Any]:

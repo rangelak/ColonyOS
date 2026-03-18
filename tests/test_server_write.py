@@ -229,8 +229,7 @@ class TestPostRuns:
             )
         assert resp.status_code == 200
         data = resp.json()
-        assert "run_id" in data
-        assert data["run_id"].startswith("run-")
+        assert data["status"] == "launched"
 
 
 class TestGetArtifacts:

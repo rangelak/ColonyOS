@@ -171,10 +171,10 @@ describe("updatePersonas", () => {
 describe("launchRun", () => {
   it("sends POST to /api/runs", async () => {
     setAuthToken("test-token");
-    mockFetch.mockResolvedValueOnce(okResponse({ run_id: "run-123", status: "launched" }));
+    mockFetch.mockResolvedValueOnce(okResponse({ status: "launched" }));
 
     const result = await launchRun("Add login");
-    expect(result.run_id).toBe("run-123");
+    expect(result.status).toBe("launched");
     expect(mockFetch).toHaveBeenCalledWith("/api/runs", expect.objectContaining({
       method: "POST",
     }));
@@ -187,6 +187,14 @@ describe("fetchArtifact", () => {
 
     const result = await fetchArtifact("cOS_prds/test.md");
     expect(result.content).toBe("# PRD");
+  });
+
+  it("preserves forward slashes in the path (no encodeURIComponent)", async () => {
+    mockFetch.mockResolvedValueOnce(okResponse({ content: "ok", path: "cOS_reviews/decisions/gate.md" }));
+
+    await fetchArtifact("cOS_reviews/decisions/gate.md");
+    // Slashes must be literal — FastAPI {path:path} expects them unencoded
+    expect(mockFetch).toHaveBeenCalledWith("/api/artifacts/cOS_reviews/decisions/gate.md");
   });
 });
 

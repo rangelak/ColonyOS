@@ -14,9 +14,11 @@ export default function RunLauncher() {
     setLoading(true);
     setError(null);
     try {
-      const result = await launchRun(prompt);
+      await launchRun(prompt);
       setPrompt("");
-      navigate(`/runs/${encodeURIComponent(result.run_id)}`);
+      // Navigate to dashboard — the new run will appear via polling.
+      // The orchestrator assigns the actual run_id asynchronously.
+      navigate("/");
     } catch (err) {
       setError(String(err));
     } finally {

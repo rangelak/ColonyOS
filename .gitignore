@@ -10,4 +10,3 @@ build/
 .colonyos/runs/
 .colonyos/queue.json
 web/node_modules/
-web/package-lock.json
