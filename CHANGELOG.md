@@ -1,5 +1,25 @@
 # Changelog
 
+## 20260318_173000 — `colonyos queue` Durable Multi-Item Execution Queue
+
+Added a `colonyos queue` command that lets users enqueue multiple feature prompts
+and/or GitHub issue references into a durable, file-backed queue, then execute them
+sequentially through the full pipeline. Supports crash recovery (resume from first
+pending item), aggregate budget/time caps, signal handling for graceful shutdown,
+and a rich status display showing per-item progress and costs.
+
+**Created:**
+- `src/colonyos/models.py` — `QueueItem`, `QueueFile` dataclasses, `QueueItemStatus` enum, queue persistence logic
+- `tests/test_queue.py` — Comprehensive tests for queue management, execution, crash recovery, signal handling
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `queue` command group with `add`, `start`, `status`, `clear` subcommands
+- `src/colonyos/orchestrator.py` — Queue execution loop with per-item error isolation and budget enforcement
+- `src/colonyos/config.py` — Queue-related configuration fields
+
+**PRD:** `cOS_prds/20260318_164532_prd_add_a_colonyos_queue_command_that_accepts_multiple_feature_prompts_and_or_github.md`
+**Tasks:** `cOS_tasks/20260318_164532_tasks_add_a_colonyos_queue_command_that_accepts_multiple_feature_prompts_and_or_github.md`
+
 ## 20260318_170000 — `colonyos show <run-id>` Single-Run Inspector
 
 Added a `colonyos show <run-id>` CLI command that loads a single run log and renders

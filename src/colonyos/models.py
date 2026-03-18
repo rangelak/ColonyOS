@@ -153,3 +153,120 @@ class LoopState:
             failed_run_ids=list(data.get("failed_run_ids", [])),
             status=status,
         )
+
+
+class QueueItemStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    REJECTED = "rejected"
+
+
+@dataclass
+class QueueItem:
+    """A single item in the execution queue."""
+
+    id: str
+    source_type: str  # "prompt" or "issue"
+    source_value: str  # prompt text or issue number
+    status: QueueItemStatus
+    added_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    run_id: str | None = None
+    cost_usd: float = 0.0
+    duration_ms: int = 0
+    pr_url: str | None = None
+    error: str | None = None
+    issue_title: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "source_type": self.source_type,
+            "source_value": self.source_value,
+            "status": self.status.value,
+            "added_at": self.added_at,
+            "run_id": self.run_id,
+            "cost_usd": self.cost_usd,
+            "duration_ms": self.duration_ms,
+            "pr_url": self.pr_url,
+            "error": self.error,
+            "issue_title": self.issue_title,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> QueueItem:
+        raw_status = data.get("status", "pending")
+        try:
+            status = QueueItemStatus(raw_status)
+        except ValueError:
+            logger.warning(
+                "Unknown queue item status %r, defaulting to PENDING",
+                raw_status,
+            )
+            status = QueueItemStatus.PENDING
+        return cls(
+            id=data["id"],
+            source_type=data.get("source_type", "prompt"),
+            source_value=data.get("source_value", ""),
+            status=status,
+            added_at=data.get("added_at", ""),
+            run_id=data.get("run_id"),
+            cost_usd=data.get("cost_usd", 0.0),
+            duration_ms=data.get("duration_ms", 0),
+            pr_url=data.get("pr_url"),
+            error=data.get("error"),
+            issue_title=data.get("issue_title"),
+        )
+
+
+class QueueStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    INTERRUPTED = "interrupted"
+
+
+@dataclass
+class QueueState:
+    """Persistent state for the execution queue."""
+
+    queue_id: str
+    items: list[QueueItem] = field(default_factory=list)
+    aggregate_cost_usd: float = 0.0
+    start_time_iso: str | None = None
+    status: QueueStatus = QueueStatus.PENDING
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "queue_id": self.queue_id,
+            "items": [item.to_dict() for item in self.items],
+            "aggregate_cost_usd": self.aggregate_cost_usd,
+            "start_time_iso": self.start_time_iso,
+            "status": self.status.value,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> QueueState:
+        raw_status = data.get("status", "pending")
+        try:
+            status = QueueStatus(raw_status)
+        except ValueError:
+            logger.warning(
+                "Unknown queue status %r, defaulting to PENDING",
+                raw_status,
+            )
+            status = QueueStatus.PENDING
+        items = [
+            QueueItem.from_dict(item_data)
+            for item_data in data.get("items", [])
+        ]
+        return cls(
+            queue_id=data["queue_id"],
+            items=items,
+            aggregate_cost_usd=data.get("aggregate_cost_usd", 0.0),
+            start_time_iso=data.get("start_time_iso"),
+            status=status,
+        )

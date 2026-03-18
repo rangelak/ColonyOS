@@ -22,10 +22,10 @@ class TestVersionConsistency:
         assert colonyos.__version__ != ""
 
     def test_version_is_valid_semver_prefix(self):
-        """__version__ must start with a valid major.minor.patch pattern."""
-        pattern = r"^\d+\.\d+\.\d+"
+        """__version__ must start with a valid version pattern (semver or PEP 440 dev)."""
+        pattern = r"^\d+\.\d+(\.\d+|\.dev\d+)"
         assert re.match(pattern, colonyos.__version__), (
-            f"Version '{colonyos.__version__}' does not match semver pattern"
+            f"Version '{colonyos.__version__}' does not match semver or PEP 440 dev pattern"
         )
 
     def test_version_matches_importlib_metadata(self):

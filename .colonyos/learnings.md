@@ -36,3 +36,12 @@ _Date: 2026-03-18 | Feature: add_a_colonyos_show_run_id_cli_command_that_renders
 - **[security]** Validate inputs at public function boundaries even when current callers pre-validate; defense-in-depth prevents future misuse.
 - **[code-quality]** Implemented but never-called functions are dead code; wire them in or document them as forward-looking with a comment.
 - **[style]** Duplicate near-identical branches (differing by one variable) should be collapsed into a single branch with a parameter.
+
+## Run: run-20260318_164532-71a1390a74
+_Date: 2026-03-18 | Feature: add_a_colonyos_queue_command_that_accepts_multiple_feature_p_
+
+- **[security]** Exception messages persisted verbatim may leak secrets from tracebacks; redact or truncate before writing to disk.
+- **[architecture]** Register signal/cleanup handlers before marking mutable state transitions to prevent crash-orphaned resources.
+- **[code-quality]** Use enums instead of plain strings for fields with a fixed set of valid values to enable type-checking.
+- **[architecture]** Extract feature logic from CLI entry-point files into dedicated modules; god files (>500 LOC) hinder review and testing.
+- **[testing]** Test cross-command integration points; a subcommand passing its own tests doesn't guarantee correct parent output.
