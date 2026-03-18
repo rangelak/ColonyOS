@@ -313,3 +313,113 @@ class TestReadOnly:
         client = TestClient(app)
         resp = client.delete("/api/runs/run-123")
         assert resp.status_code == 405
+
+
+class TestSanitization:
+    """Verify user-generated content is sanitized in API responses."""
+
+    def test_run_prompt_sanitized(self, tmp_repo: Path):
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        runs_dir = tmp_repo / ".colonyos" / "runs"
+        run_data = {
+            "run_id": "run-20260318_120000-sanitize",
+            "prompt": "Hello <script>alert(1)</script> world",
+            "status": "completed",
+            "phases": [],
+            "total_cost_usd": 0.0,
+            "started_at": "2026-03-18T12:00:00+00:00",
+            "finished_at": "2026-03-18T12:01:00+00:00",
+            "branch_name": "colonyos/test",
+        }
+        _write_run(runs_dir, run_data)
+
+        app = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get("/api/runs")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        # XML-like tags should be stripped
+        assert "<script>" not in data[0]["prompt"]
+        assert "Hello" in data[0]["prompt"]
+        assert "world" in data[0]["prompt"]
+
+    def test_run_error_sanitized(self, tmp_repo: Path):
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        runs_dir = tmp_repo / ".colonyos" / "runs"
+        run_data = {
+            "run_id": "run-20260318_120000-errsanitize",
+            "prompt": "test",
+            "error": "Failed <injected_tag>bad</injected_tag>",
+            "status": "failed",
+            "phases": [],
+            "total_cost_usd": 0.0,
+            "started_at": "2026-03-18T12:00:00+00:00",
+            "finished_at": "2026-03-18T12:01:00+00:00",
+            "branch_name": "colonyos/test",
+        }
+        _write_run(runs_dir, run_data)
+
+        app = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get("/api/runs")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "<injected_tag>" not in data[0]["error"]
+        assert "Failed" in data[0]["error"]
+
+
+class TestConfigRedaction:
+    """Verify sensitive fields are redacted from config output."""
+
+    def test_config_excludes_slack(self, tmp_repo: Path):
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get("/api/config")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Sensitive fields like slack should not be exposed
+        assert "slack" not in data
+
+
+class TestErrorMessageSafety:
+    """Verify error responses do not leak internal paths."""
+
+    def test_invalid_run_id_no_path_leak(self, tmp_repo: Path):
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app = create_app(tmp_repo)
+        client = TestClient(app)
+        # Use dotdot without slashes — slashes are consumed by the HTTP router
+        resp = client.get("/api/runs/..%5C..%5Cetc%5Cpasswd")
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        # Should not contain filesystem paths
+        assert "Invalid" in detail
+        assert "/" not in detail or "Run" in detail  # only the generic message
+
+
+class TestSPAPathTraversal:
+    """Verify SPA catch-all route blocks path traversal."""
+
+    def test_spa_path_traversal_returns_index(self, tmp_repo: Path):
+        from colonyos.server import create_app, _WEB_DIST_DIR
+        from starlette.testclient import TestClient
+
+        if not _WEB_DIST_DIR.exists() or not (_WEB_DIST_DIR / "index.html").exists():
+            pytest.skip("web_dist not built")
+
+        app = create_app(tmp_repo)
+        client = TestClient(app)
+        # Attempt path traversal via the SPA catch-all
+        resp = client.get("/..%2F..%2Fetc%2Fpasswd")
+        # Should return 200 with index.html, not serve arbitrary files
+        assert resp.status_code == 200

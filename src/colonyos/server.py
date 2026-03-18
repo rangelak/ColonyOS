@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from colonyos import __version__
 from colonyos.config import load_config, runs_dir_path
+from colonyos.sanitize import sanitize_untrusted_content
 from colonyos.show import (
     compute_show_result,
     resolve_run_id,
@@ -31,9 +32,22 @@ logger = logging.getLogger(__name__)
 # Path to the built Vite SPA assets (committed to repo)
 _WEB_DIST_DIR = Path(__file__).parent / "web_dist"
 
+# Fields that may contain secrets and should be redacted from config output
+_SENSITIVE_CONFIG_FIELDS = {"slack"}
+
+
+def _sanitize_run_log(log: dict[str, Any]) -> dict[str, Any]:
+    """Sanitize user-generated content in a run log dict."""
+    sanitized = dict(log)
+    if "prompt" in sanitized and isinstance(sanitized["prompt"], str):
+        sanitized["prompt"] = sanitize_untrusted_content(sanitized["prompt"])
+    if "error" in sanitized and isinstance(sanitized["error"], str):
+        sanitized["error"] = sanitize_untrusted_content(sanitized["error"])
+    return sanitized
+
 
 def _config_to_dict(config: Any) -> dict[str, Any]:
-    """Serialize a ColonyConfig to a JSON-safe dict."""
+    """Serialize a ColonyConfig to a JSON-safe dict, redacting sensitive fields."""
     result: dict[str, Any] = {
         "model": config.model,
         "phase_models": dict(config.phase_models),
@@ -122,7 +136,7 @@ def create_app(repo_root: Path) -> FastAPI:
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
         allow_methods=["GET"],
-        allow_headers=["*"],
+        allow_headers=["Content-Type", "Accept"],
     )
 
     runs_dir = runs_dir_path(repo_root)
@@ -134,15 +148,14 @@ def create_app(repo_root: Path) -> FastAPI:
     @app.get("/api/runs")
     def list_runs() -> list[dict[str, Any]]:
         logs = load_run_logs(runs_dir)
-        # Return lightweight summaries (the raw dicts from JSON files)
-        return logs
+        return [_sanitize_run_log(log) for log in logs]
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> dict[str, Any]:
         try:
             validate_run_id_input(run_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid run ID format")
 
         try:
             resolved = resolve_run_id(runs_dir, run_id)
@@ -152,7 +165,7 @@ def create_app(repo_root: Path) -> FastAPI:
         if isinstance(resolved, list):
             raise HTTPException(
                 status_code=400,
-                detail=f"Ambiguous run ID {run_id!r}: matches {resolved}",
+                detail=f"Ambiguous run ID: matches multiple runs",
             )
 
         from colonyos.show import load_single_run
@@ -202,12 +215,20 @@ def create_app(repo_root: Path) -> FastAPI:
                 name="assets",
             )
 
+        _resolved_dist_dir = _WEB_DIST_DIR.resolve()
+
         @app.get("/{full_path:path}")
         def serve_spa(full_path: str) -> FileResponse:
             """Serve the SPA index.html for all non-API routes."""
             # Check if a static file exists at the path first
             file_path = _WEB_DIST_DIR / full_path
-            if full_path and file_path.exists() and file_path.is_file():
+            # Defense-in-depth: verify resolved path stays within web_dist
+            if (
+                full_path
+                and file_path.resolve().is_relative_to(_resolved_dist_dir)
+                and file_path.exists()
+                and file_path.is_file()
+            ):
                 return FileResponse(str(file_path))
             return FileResponse(str(_WEB_DIST_DIR / "index.html"))
 
