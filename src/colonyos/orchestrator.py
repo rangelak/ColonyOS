@@ -21,7 +21,7 @@ from colonyos.learnings import (
 )
 from colonyos.models import Persona, Phase, PhaseResult, ResumeState, RunLog, RunStatus
 from colonyos.naming import generate_timestamp, planning_names, proposal_names, slugify
-from colonyos.ui import NullUI, PhaseUI
+from colonyos.ui import NullUI, PhaseUI, make_reviewer_prefix, print_reviewer_legend
 
 
 def _touch_heartbeat(repo_root: Path) -> None:
@@ -945,14 +945,16 @@ def run_standalone_review(
 
         round_num = iteration + 1
         _log(f"  Review round {round_num}/{config.max_fix_iterations + 1}")
+        if not quiet:
+            print_reviewer_legend([(i, p.role) for i, p in enumerate(reviewers)])
 
         # Build parallel review calls
         review_calls = []
-        for persona in reviewers:
+        for i, persona in enumerate(reviewers):
             sys_prompt, usr_prompt = _build_standalone_review_prompt(
                 persona, config, branch, base, diff_text,
             )
-            persona_ui = _make_ui(prefix=f"[{persona.role}] ")
+            persona_ui = _make_ui(prefix=make_reviewer_prefix(i))
             review_calls.append(dict(
                 phase=Phase.REVIEW,
                 prompt=usr_prompt,
@@ -1351,13 +1353,15 @@ def run(
                     break
 
                 _log(f"  Review round {iteration + 1}/{config.max_fix_iterations + 1}")
+                if not quiet:
+                    print_reviewer_legend([(i, p.role) for i, p in enumerate(reviewers)])
 
                 review_calls = []
-                for persona in reviewers:
+                for i, persona in enumerate(reviewers):
                     sys_prompt, usr_prompt = _build_persona_review_prompt(
                         persona, config, prd_rel, branch_name
                     )
-                    persona_ui = _make_ui(prefix=f"[{persona.role}] ")
+                    persona_ui = _make_ui(prefix=make_reviewer_prefix(i))
                     review_calls.append(dict(
                         phase=Phase.REVIEW,
                         prompt=usr_prompt,

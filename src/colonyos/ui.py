@@ -148,7 +148,10 @@ class PhaseUI:
         if not raw:
             return
         if _looks_like_markdown(raw):
-            console.print()
+            if self._prefix:
+                console.print(f"\n  {self._prefix}─────", highlight=False)
+            else:
+                console.print()
             console.print(Padding(Markdown(raw), (0, 4)))
         else:
             for line in raw.splitlines():
@@ -199,6 +202,36 @@ class NullUI:
     def on_tool_done(self) -> None: ...
     def on_text_delta(self, *a: object) -> None: ...
     def on_turn_complete(self) -> None: ...
+
+
+# -- reviewer tag helpers --------------------------------------------------
+
+REVIEWER_COLORS = [
+    "bright_cyan", "bright_magenta", "bright_yellow", "bright_green",
+    "bright_blue", "bright_red", "bright_white",
+]
+
+
+def _reviewer_color(index: int) -> str:
+    return REVIEWER_COLORS[index % len(REVIEWER_COLORS)]
+
+
+def make_reviewer_prefix(index: int) -> str:
+    """Build a short numbered prefix like '[cyan]R1[/cyan] '."""
+    color = _reviewer_color(index)
+    return f"[{color}]R{index + 1}[/{color}] "
+
+
+def print_reviewer_legend(reviewers: list[tuple[int, str]]) -> None:
+    """Print legend mapping R1..RN -> full role name before review starts."""
+    console.print()
+    for i, role in reviewers:
+        color = _reviewer_color(i)
+        console.print(
+            f"  [{color}]R{i + 1}[/{color}] {role}",
+            highlight=False,
+        )
+    console.print()
 
 
 def _looks_like_markdown(text: str) -> bool:
