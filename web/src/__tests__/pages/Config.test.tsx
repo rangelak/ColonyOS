@@ -4,13 +4,18 @@ import Config from "../../pages/Config";
 
 vi.mock("../../api", () => ({
   fetchConfig: vi.fn(),
+  fetchHealth: vi.fn(),
+  updateConfig: vi.fn(),
+  updatePersonas: vi.fn(),
 }));
 
-import { fetchConfig } from "../../api";
+import { fetchConfig, fetchHealth } from "../../api";
 const mockFetchConfig = vi.mocked(fetchConfig);
+const mockFetchHealth = vi.mocked(fetchHealth);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockFetchHealth.mockResolvedValue({ status: "ok", version: "1.0", write_enabled: "false" });
 });
 
 const mockConfig = {
@@ -58,7 +63,6 @@ describe("Config", () => {
     await waitFor(() => {
       expect(screen.getByText("test-project")).toBeInTheDocument();
     });
-    expect(screen.getByText("sonnet")).toBeInTheDocument();
     expect(screen.getByText("Security Engineer")).toBeInTheDocument();
   });
 
@@ -76,9 +80,9 @@ describe("Config", () => {
     render(<Config />);
 
     await waitFor(() => {
-      expect(screen.getByText("$5.00")).toBeInTheDocument();
-      expect(screen.getByText("$15.00")).toBeInTheDocument();
-      expect(screen.getByText("$100.00")).toBeInTheDocument();
+      expect(screen.getByText("5.00")).toBeInTheDocument();
+      expect(screen.getByText("15.00")).toBeInTheDocument();
+      expect(screen.getByText("100.00")).toBeInTheDocument();
     });
   });
 

@@ -4,6 +4,8 @@ import type { ReactNode } from "react";
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard" },
   { to: "/config", label: "Config" },
+  { to: "/proposals", label: "Proposals" },
+  { to: "/reviews", label: "Reviews" },
 ];
 
 export default function Layout({ children }: { children: ReactNode }) {

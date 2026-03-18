@@ -7,6 +7,7 @@ name = "colonyos"
 dynamic = ["version"]
 description = "Autonomous agent loop that turns prompts into shipped PRs."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1",

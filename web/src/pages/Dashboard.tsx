@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { fetchRuns, fetchStats } from "../api";
+import { fetchRuns, fetchStats, fetchHealth } from "../api";
 import type { RunLog, StatsResult } from "../types";
 import StatsPanel from "../components/StatsPanel";
 import RunList from "../components/RunList";
+import RunLauncher from "../components/RunLauncher";
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -10,6 +11,13 @@ export default function Dashboard() {
   const [runs, setRuns] = useState<RunLog[]>([]);
   const [stats, setStats] = useState<StatsResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [writeEnabled, setWriteEnabled] = useState(false);
+
+  useEffect(() => {
+    fetchHealth()
+      .then((h) => setWriteEnabled(h.write_enabled === "true"))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -45,6 +53,7 @@ export default function Dashboard() {
         </div>
       )}
 
+      {writeEnabled && <RunLauncher />}
       {stats && <StatsPanel summary={stats.summary} />}
       <RunList runs={runs} />
     </div>

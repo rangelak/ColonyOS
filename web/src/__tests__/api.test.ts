@@ -6,12 +6,21 @@ import {
   fetchConfig,
   fetchQueue,
   fetchHealth,
+  updateConfig,
+  updatePersonas,
+  launchRun,
+  fetchArtifact,
+  fetchProposals,
+  fetchReviews,
+  setAuthToken,
+  clearAuthToken,
 } from "../api";
 
 const mockFetch = vi.fn();
 
 beforeEach(() => {
   vi.stubGlobal("fetch", mockFetch);
+  clearAuthToken();
 });
 
 afterEach(() => {
@@ -119,5 +128,84 @@ describe("fetchHealth", () => {
     const result = await fetchHealth();
     expect(result).toEqual(health);
     expect(mockFetch).toHaveBeenCalledWith("/api/health");
+  });
+});
+
+describe("updateConfig", () => {
+  it("sends PUT to /api/config with auth header", async () => {
+    setAuthToken("test-token");
+    mockFetch.mockResolvedValueOnce(okResponse({ model: "opus" }));
+
+    await updateConfig({ model: "opus" });
+    expect(mockFetch).toHaveBeenCalledWith("/api/config", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer test-token",
+      },
+      body: JSON.stringify({ model: "opus" }),
+    });
+  });
+
+  it("throws on error with detail message", async () => {
+    setAuthToken("test-token");
+    mockFetch.mockResolvedValueOnce(errorResponse(400, "Invalid model"));
+
+    await expect(updateConfig({ model: "invalid" })).rejects.toThrow("Invalid model");
+  });
+});
+
+describe("updatePersonas", () => {
+  it("sends PUT to /api/config/personas", async () => {
+    setAuthToken("test-token");
+    const personas = [{ role: "Dev", expertise: "Code", perspective: "quality", reviewer: true }];
+    mockFetch.mockResolvedValueOnce(okResponse({ personas }));
+
+    await updatePersonas(personas);
+    expect(mockFetch).toHaveBeenCalledWith("/api/config/personas", expect.objectContaining({
+      method: "PUT",
+    }));
+  });
+});
+
+describe("launchRun", () => {
+  it("sends POST to /api/runs", async () => {
+    setAuthToken("test-token");
+    mockFetch.mockResolvedValueOnce(okResponse({ run_id: "run-123", status: "launched" }));
+
+    const result = await launchRun("Add login");
+    expect(result.run_id).toBe("run-123");
+    expect(mockFetch).toHaveBeenCalledWith("/api/runs", expect.objectContaining({
+      method: "POST",
+    }));
+  });
+});
+
+describe("fetchArtifact", () => {
+  it("fetches artifact content", async () => {
+    mockFetch.mockResolvedValueOnce(okResponse({ content: "# PRD", path: "cOS_prds/test.md" }));
+
+    const result = await fetchArtifact("cOS_prds/test.md");
+    expect(result.content).toBe("# PRD");
+  });
+});
+
+describe("fetchProposals", () => {
+  it("fetches proposals list", async () => {
+    mockFetch.mockResolvedValueOnce(okResponse([{ filename: "p.md", path: "cOS_proposals/p.md" }]));
+
+    const result = await fetchProposals();
+    expect(result).toHaveLength(1);
+    expect(mockFetch).toHaveBeenCalledWith("/api/proposals");
+  });
+});
+
+describe("fetchReviews", () => {
+  it("fetches reviews list", async () => {
+    mockFetch.mockResolvedValueOnce(okResponse([{ filename: "r.md", path: "cOS_reviews/r.md" }]));
+
+    const result = await fetchReviews();
+    expect(result).toHaveLength(1);
+    expect(mockFetch).toHaveBeenCalledWith("/api/reviews");
   });
 });

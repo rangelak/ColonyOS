@@ -6,14 +6,17 @@ import Dashboard from "../../pages/Dashboard";
 vi.mock("../../api", () => ({
   fetchRuns: vi.fn(),
   fetchStats: vi.fn(),
+  fetchHealth: vi.fn(),
 }));
 
-import { fetchRuns, fetchStats } from "../../api";
+import { fetchRuns, fetchStats, fetchHealth } from "../../api";
 const mockFetchRuns = vi.mocked(fetchRuns);
 const mockFetchStats = vi.mocked(fetchStats);
+const mockFetchHealth = vi.mocked(fetchHealth);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockFetchHealth.mockResolvedValue({ status: "ok", version: "1.0", write_enabled: "false" });
 });
 
 const mockStats = {

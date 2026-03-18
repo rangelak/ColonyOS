@@ -3,6 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { fetchRun } from "../api";
 import type { ShowResult } from "../types";
 import PhaseTimeline from "../components/PhaseTimeline";
+import ArtifactPreview from "../components/ArtifactPreview";
 import { formatDuration, statusColor, statusIcon, formatTimestamp } from "../util";
 
 const POLL_INTERVAL_MS = 5000;
@@ -124,6 +125,19 @@ export default function RunDetail() {
           </div>
         )}
       </div>
+
+      {/* Artifact previews */}
+      {(h.prd_rel || h.task_rel) && (
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-6">
+          <h3 className="text-sm font-semibold text-gray-300 mb-2">Artifacts</h3>
+          {h.prd_rel && (
+            <ArtifactPreview path={h.prd_rel} title="PRD" />
+          )}
+          {h.task_rel && (
+            <ArtifactPreview path={h.task_rel} title="Task List" />
+          )}
+        </div>
+      )}
 
       {/* Review summary */}
       {data.review_summary && (

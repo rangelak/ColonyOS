@@ -204,3 +204,22 @@ export interface QueueState {
   start_time_iso: string | null;
   status: string;
 }
+
+export interface ArtifactResult {
+  path: string;
+  content: string;
+  filename: string;
+}
+
+export interface ProposalEntry {
+  filename: string;
+  path: string;
+  modified_at: string;
+}
+
+export interface ReviewEntry {
+  filename: string;
+  path: string;
+  subdirectory: string;
+  modified_at: string;
+}

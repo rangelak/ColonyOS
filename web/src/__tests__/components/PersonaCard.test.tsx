@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import PersonaCard from "../../components/PersonaCard";
 import type { Persona } from "../../types";
 
@@ -30,5 +31,29 @@ describe("PersonaCard", () => {
     render(<PersonaCard persona={basePersona} />);
 
     expect(screen.queryByText("Reviewer")).not.toBeInTheDocument();
+  });
+
+  it("shows remove button when editable", () => {
+    const onRemove = vi.fn();
+    render(<PersonaCard persona={basePersona} editable onRemove={onRemove} />);
+
+    expect(screen.getByText("Remove")).toBeInTheDocument();
+  });
+
+  it("does not show remove button when not editable", () => {
+    render(<PersonaCard persona={basePersona} />);
+
+    expect(screen.queryByText("Remove")).not.toBeInTheDocument();
+  });
+
+  it("enters edit mode when clicked and editable", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    render(<PersonaCard persona={basePersona} editable onSave={onSave} />);
+
+    await user.click(screen.getByText("Security Engineer"));
+    expect(screen.getByDisplayValue("Security Engineer")).toBeInTheDocument();
+    expect(screen.getByText("Save")).toBeInTheDocument();
+    expect(screen.getByText("Cancel")).toBeInTheDocument();
   });
 });
