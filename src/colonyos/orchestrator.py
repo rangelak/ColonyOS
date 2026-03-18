@@ -546,6 +546,12 @@ def _save_review_artifact(
         )
     target_dir.mkdir(parents=True, exist_ok=True)
     path = target_dir / filename
+    # Defense-in-depth: validate the final path (including filename) stays
+    # within the reviews root to guard against malicious filenames.
+    if not path.resolve().is_relative_to(reviews_root.resolve()):
+        raise ValueError(
+            f"Filename {filename!r} escapes the reviews directory"
+        )
     path.write_text(content, encoding="utf-8")
     return path
 

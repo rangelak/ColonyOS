@@ -1882,4 +1882,10 @@ class TestSaveReviewArtifact:
                 subdirectory="../../etc",
             )
 
+    def test_rejects_path_traversal_in_filename(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="escapes"):
+            _save_review_artifact(
+                tmp_path, "cOS_reviews", "../../etc/passwd", "evil",
+            )
+
 
