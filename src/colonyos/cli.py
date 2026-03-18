@@ -60,7 +60,11 @@ def _print_run_summary(log: RunLog) -> None:
 
 
 def _show_welcome() -> None:
-    """Render the ColonyOS welcome banner (shown when no subcommand is given)."""
+    """Render the ColonyOS welcome banner (shown when no subcommand is given).
+
+    The command list is generated dynamically from the Click ``app.commands``
+    registry so that the banner never drifts from actually registered commands.
+    """
     from rich.console import Console
     from rich.panel import Panel
     from rich.table import Table
@@ -100,21 +104,18 @@ def _show_welcome() -> None:
     left.append(f"  {model} \u00b7 v{__version__}\n", style="dim")
     left.append(f"  {display_path}\n", style="dim")
 
-    # Right column: commands + flags
+    # Right column: commands generated from Click registry + flags
     right = Text()
     right.append("Commands\n", style="bold")
-    right.append("  init", style="green")
-    right.append("      Set up this repo\n")
-    right.append("  doctor", style="green")
-    right.append("    Check prerequisites\n")
-    right.append("  run", style="green")
-    right.append("       Run the agent pipeline\n")
-    right.append("  auto", style="green")
-    right.append("      CEO \u2192 full pipeline\n")
-    right.append("  review", style="green")
-    right.append("    Standalone code review\n")
-    right.append("  status", style="green")
-    right.append("    Show recent runs\n")
+
+    # Dynamically iterate over registered commands
+    max_name_len = max((len(name) for name in app.commands), default=0)
+    for name in sorted(app.commands):
+        cmd = app.commands[name]
+        summary = (cmd.get_short_help_str(limit=60) or "").strip()
+        padding = " " * (max_name_len - len(name) + 2)
+        right.append(f"  {name}", style="green")
+        right.append(f"{padding}{summary}\n")
     right.append("\u2500" * 34 + "\n", style="bright_black")
     right.append("Flags\n", style="bold")
     right.append("  -v, --verbose", style="green")
@@ -149,6 +150,10 @@ def _show_welcome() -> None:
     console.print()
 
 
+REPL_HISTORY_PATH = Path.home() / ".colonyos_history"
+REPL_HISTORY_LENGTH = 1000
+
+
 @click.group(invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="colonyos")
 @click.pass_context
@@ -156,6 +161,109 @@ def app(ctx: click.Context) -> None:
     """ColonyOS — autonomous agent loop that turns prompts into shipped PRs."""
     if ctx.invoked_subcommand is None:
         _show_welcome()
+        if sys.stdin.isatty():
+            _run_repl()
+
+
+def _run_repl() -> None:
+    """Interactive REPL loop for running feature prompts.
+
+    When a user types bare ``colonyos`` with no subcommand in an interactive
+    terminal, this loop shows a prompt and routes input to the orchestrator.
+    """
+    try:
+        import readline as _readline
+    except ImportError:
+        _readline = None  # type: ignore[assignment]
+
+    repo_root = _find_repo_root()
+    config_path = repo_root / ".colonyos" / "config.yaml"
+    if not config_path.exists():
+        click.echo('Run `colonyos init` first.')
+        return
+
+    config = load_config(repo_root)
+    if not config.project:
+        click.echo('Run `colonyos init` first.')
+        return
+
+    # Set up readline history
+    if _readline is not None:
+        _readline.set_history_length(REPL_HISTORY_LENGTH)
+        history_path = REPL_HISTORY_PATH
+        try:
+            _readline.read_history_file(str(history_path))
+        except (FileNotFoundError, OSError):
+            pass
+
+    session_cost = 0.0
+    last_interrupt_time = 0.0
+
+    click.echo(click.style(
+        'Type a feature to build, or "exit" to quit. Enter to send.',
+        dim=True,
+    ))
+
+    try:
+        while True:
+            try:
+                prompt_str = click.style(f"[${session_cost:.2f}] > ", fg="green")
+                user_input = input(prompt_str)
+            except EOFError:
+                click.echo()
+                break
+            except KeyboardInterrupt:
+                now = time.time()
+                if now - last_interrupt_time < 2.0:
+                    click.echo()
+                    break
+                last_interrupt_time = now
+                click.echo(click.style(
+                    "\nPress Ctrl+C again to exit",
+                    dim=True,
+                ))
+                continue
+
+            stripped = user_input.strip()
+            if not stripped:
+                continue
+            if stripped.lower() in ("quit", "exit"):
+                break
+
+            # Budget confirmation
+            per_run_cap = config.budget.per_run
+            if not config.auto_approve:
+                try:
+                    confirm = input(
+                        f"Max cost: ${per_run_cap:.2f} (per_run cap). Proceed? [Y/n] "
+                    )
+                except (EOFError, KeyboardInterrupt):
+                    click.echo()
+                    break
+                if confirm.strip().lower() in ("n", "no"):
+                    continue
+
+            try:
+                log = run_orchestrator(
+                    stripped,
+                    repo_root=repo_root,
+                    config=config,
+                    verbose=True,
+                )
+                session_cost += log.total_cost_usd
+                _print_run_summary(log)
+            except KeyboardInterrupt:
+                click.echo(click.style(
+                    "\nRun interrupted. Returning to prompt.",
+                    dim=True,
+                ))
+                continue
+    finally:
+        if _readline is not None:
+            try:
+                _readline.write_history_file(str(REPL_HISTORY_PATH))
+            except OSError:
+                pass
 
 
 @app.command()

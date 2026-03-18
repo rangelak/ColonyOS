@@ -1,20 +1,20 @@
 # Review by Linus Torvalds (Round 1)
 
-Here's my review:
+I have everything I need. Here's my review:
 
 ---
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/config.py]: Clean implementation. `get_model()` is a one-liner that does the obvious thing — dict lookup with fallback. The `VALID_MODELS` frozenset and fail-fast validation in `load_config()` are correct. No over-engineering, no unnecessary abstraction layers.
-- [src/colonyos/config.py]: Validation covers both invalid model names and invalid phase keys, with clear error messages that tell the user what they did wrong and what the valid options are. This is how validation should work.
-- [src/colonyos/models.py]: `model: str | None = None` on `PhaseResult` is the right call — optional field with None default preserves backward compatibility with old serialized logs. Simple.
-- [src/colonyos/agent.py]: All three return paths in `run_phase()` now set `model=model`. No path left uncovered.
-- [src/colonyos/orchestrator.py]: Zero remaining `config.model` references — every call site converted to `config.get_model(Phase.XXX)`. The `phase_header()` calls and `run_phase` calls are consistent. Run log serialization includes the model field, deserialization uses `.get("model")` for backward compat.
-- [src/colonyos/init.py]: `MODEL_PRESETS` dict is straightforward data — no clever abstractions, just the two presets with their phase_models dicts. Quick mode defaults to cost-optimized as specified. Interactive mode presents a simple numeric menu.
-- [src/colonyos/stats.py]: `compute_model_usage()` handles missing model field by falling back to "unknown" — exactly right for old logs. `ModelUsageRow` is a plain dataclass with the four fields specified in the PRD.
-- [src/colonyos/save_config]: `phase_models` only serialized when non-empty — avoids cluttering existing configs with an empty dict. Good.
+- [src/colonyos/cli.py]: Dynamic banner generation (lines 111-118) is clean — iterates `app.commands`, computes padding, pulls help text from Click. This is the right structural fix: you can't forget to update the banner because it generates itself. No complaint.
+- [src/colonyos/cli.py]: `_run_repl()` (lines 168-268) is a straightforward `while True` + `input()` loop. No framework, no dependencies, just stdlib readline and input(). This is exactly what I'd want — the simple, obvious implementation. The signal handling with timestamp-based double Ctrl+C is correct.
+- [src/colonyos/cli.py]: The `_run_repl()` function is ~100 lines. It's on the edge but each section (readline setup, config check, main loop, exit handling) is distinct and the control flow is linear. Acceptable.
+- [src/colonyos/cli.py]: The config double-check (file exists + project not None) at lines 180-188 is a belt-and-suspenders approach. Slightly redundant but defensively correct.
+- [tests/test_registry_sync.py]: Clean, well-documented test. The docstring tells contributors exactly what to do when it fails. The regex-based README extraction is simple enough to not be brittle. The `_HIDDEN_COMMANDS` frozenset is a good escape hatch for future internal commands.
+- [tests/test_cli.py]: REPL tests are thorough — covers quit, exit, EOF, empty input, Ctrl+C, double Ctrl+C, budget confirmation, auto_approve, cost accumulation, uninitialized project, non-TTY. The `test_quit_exits_cleanly` test (line 1069) has a pass statement and doesn't actually assert anything — it's dead code, but it's harmless given the other tests cover the same behavior.
+- [README.md]: All commands documented — `stats`, `review` with options, `--issue` flag. The CLI Reference table is now complete.
+- [src/colonyos/cli.py]: No new runtime dependencies added. `readline` is stdlib. Good.
 
 SYNTHESIS:
-This is a clean, well-executed feature. The data structures are obvious and correct: a dict mapping phase names to model names, a one-line lookup method with fallback, and fail-fast validation at config load time. There's no premature abstraction — no ModelResolver class, no strategy pattern, no factory. Just a dict and a `.get()` call, which is exactly what this problem needs. Every call site in the orchestrator was mechanically converted. The test coverage is thorough (514 tests pass). The init presets are simple data, not code. The stats integration handles backward compat gracefully. The only thing I'd nitpick is that the branch name is absurdly long, but that's not a code issue. Ship it.
+This is a well-executed implementation. The core architectural decision — generate the banner dynamically from Click's command registry rather than maintaining a parallel static list — is correct and eliminates an entire class of drift bugs. The sync enforcement test in `test_registry_sync.py` catches the README side. The REPL is the simplest possible thing that works: a `while True` loop with `input()`, stdlib readline for history, and straightforward signal handling. No frameworks, no abstractions, no cleverness. The test coverage is comprehensive with 82 tests passing. The one dead test (`test_quit_exits_cleanly`) should be cleaned up eventually, but it's not blocking. Ship it.

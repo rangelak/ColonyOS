@@ -1,5 +1,26 @@
 # Changelog
 
+## 20260318_080000 — Interactive REPL Mode & Command Registry Sync Enforcement
+
+Added an interactive REPL mode so that bare `colonyos` invocations drop users into a
+prompt where they can type feature descriptions directly, and refactored the welcome
+banner to dynamically generate its command list from the Click registry. Includes a
+pytest-based sync enforcement test that fails if any registered command is missing from
+the banner or README.
+
+**Created:**
+- `cOS_prds/20260318_075437_prd_the_latest_runs_added_some_new_commands_however_they_did_not_update_the_readme_n.md` — PRD
+- `cOS_tasks/20260318_075437_tasks_the_latest_runs_added_some_new_commands_however_they_did_not_update_the_readme_n.md` — Tasks
+- `tests/test_registry_sync.py` — Registry sync enforcement test
+
+**Modified:**
+- `src/colonyos/cli.py` — Dynamic banner generation, interactive REPL loop, session cost tracking
+- `src/colonyos/ui.py` — REPL prompt styling
+- `README.md` — Updated CLI Reference table with `stats` and all current commands
+
+**PRD:** `cOS_prds/20260318_075437_prd_the_latest_runs_added_some_new_commands_however_they_did_not_update_the_readme_n.md`
+**Tasks:** `cOS_tasks/20260318_075437_tasks_the_latest_runs_added_some_new_commands_however_they_did_not_update_the_readme_n.md`
+
 ## 20260318_004500 — Per-Phase Model Override Configuration
 
 Added `phase_models` configuration to `.colonyos/config.yaml` allowing users to assign

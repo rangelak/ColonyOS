@@ -165,6 +165,14 @@ Each reviewer persona runs concurrently with its own expertise and perspective. 
 | `colonyos run "..." --plan-only` | Stop after PRD + tasks |
 | `colonyos run --from-prd cOS_prds/xxx.md` | Skip planning, implement an existing PRD |
 | `colonyos run --resume <run-id>` | Resume a failed run from its last successful phase |
+| `colonyos run --issue <number>` | Use a GitHub issue as the prompt source |
+| `colonyos review <branch>` | Run standalone multi-persona code review on a branch |
+| `colonyos review --base <branch>` | Base branch to compare against (default: main) |
+| `colonyos review --no-fix` | Skip fix loop, review only |
+| `colonyos review --decide` | Run decision gate after reviews |
+| `colonyos stats` | Show aggregate analytics dashboard across all runs |
+| `colonyos stats -n/--last N` | Limit analytics to the N most recent runs |
+| `colonyos stats --phase <name>` | Drill into a specific phase |
 | `colonyos status` | Show recent runs, loop summaries, and cost breakdown |
 
 ## Configuration
