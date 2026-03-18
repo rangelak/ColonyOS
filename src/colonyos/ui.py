@@ -148,7 +148,10 @@ class PhaseUI:
         if not raw:
             return
         if _looks_like_markdown(raw):
-            console.print()
+            if self._prefix:
+                console.print(f"\n  {self._prefix}─────", highlight=False)
+            else:
+                console.print()
             console.print(Padding(Markdown(raw), (0, 4)))
         else:
             for line in raw.splitlines():
