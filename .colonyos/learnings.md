@@ -45,3 +45,11 @@ _Date: 2026-03-18 | Feature: add_a_colonyos_queue_command_that_accepts_multiple_
 - **[code-quality]** Use enums instead of plain strings for fields with a fixed set of valid values to enable type-checking.
 - **[architecture]** Extract feature logic from CLI entry-point files into dedicated modules; god files (>500 LOC) hinder review and testing.
 - **[testing]** Test cross-command integration points; a subcommand passing its own tests doesn't guarantee correct parent output.
+
+## Run: run-20260318_173116-0d7234c9e5
+_Date: 2026-03-18 | Feature: i_think_we_should_add_some_sort_of_ui_for_managing_all_this__
+
+- **[security]** Resolve user-supplied file paths and verify they stay within the allowed base directory to prevent path traversal.
+- **[architecture]** Hand-maintained type mirrors across languages (e.g., TS types for Python models) drift silently; generate or validate via shared schema.
+- **[code-quality]** Manual serialization helpers that enumerate fields silently drop new fields; co-locate serialization with the data model.
+- **[security]** HTTP error handlers forwarding raw exception messages to clients can leak internal filesystem paths and stack details.

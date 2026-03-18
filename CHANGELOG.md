@@ -1,5 +1,27 @@
 # Changelog
 
+## 20260318_181500 — ColonyOS Web Dashboard (`colonyos ui`)
+
+Added a read-only web dashboard launched via `colonyos ui` that surfaces run history,
+phase timelines, cost trends, and configuration in a local browser. Built as a Vite +
+React SPA served by a thin FastAPI API layer wrapping existing data-layer functions.
+Ships as an optional dependency (`pip install colonyos[ui]`), localhost-only.
+
+**Created:**
+- `src/colonyos/server.py` — FastAPI server with `/api/runs`, `/api/stats`, `/api/config` endpoints
+- `src/colonyos/web_dist/` — Pre-built Vite SPA static assets (HTML, JS, CSS)
+- `web/` — React + TypeScript + Tailwind source: Dashboard, RunDetail, Config pages, components
+- `tests/test_server.py` — Comprehensive API tests (478 lines)
+- `tests/test_cli.py` — CLI integration tests for `colonyos ui` command
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `ui` subcommand to launch the web server
+- `pyproject.toml` — Added optional `[ui]` dependency group (fastapi, uvicorn)
+- `.gitignore` — Added web build artifacts
+
+**PRD:** `cOS_prds/20260318_173116_prd_i_think_we_should_add_some_sort_of_ui_for_managing_all_this_seeing_runs_defining.md`
+**Tasks:** `cOS_tasks/20260318_173116_tasks_i_think_we_should_add_some_sort_of_ui_for_managing_all_this_seeing_runs_defining.md`
+
 ## 20260318_173000 — `colonyos queue` Durable Multi-Item Execution Queue
 
 Added a `colonyos queue` command that lets users enqueue multiple feature prompts
