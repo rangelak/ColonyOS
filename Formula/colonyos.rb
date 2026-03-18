@@ -12,8 +12,8 @@ class Colonyos < Formula
 
   desc "Autonomous agent loop that turns prompts into shipped PRs"
   homepage "https://github.com/rangelak/ColonyOS"
-  url "https://files.pythonhosted.org/packages/source/c/colonyos/colonyos-0.0.2.tar.gz"
-  sha256 "f6b681586b967b44a68e97b30d1e8c151e02137df0110c61557c41a32442916e"
+  url "https://files.pythonhosted.org/packages/source/c/colonyos/colonyos-0.0.3.tar.gz"
+  sha256 "5fb79f63618de2a525a6545e87eefb594dd31e790ec77ee282da1d66878c8bdd"
   license "MIT"
 
   depends_on "python@3.11"
