@@ -1,5 +1,30 @@
 # Changelog
 
+## 20260318_110000 — Package Publishing & Multi-Channel Installation
+
+Added CI/CD pipeline, automated release workflow, curl installer, and Homebrew tap so
+ColonyOS can be installed via `pip`, `curl | sh`, or `brew install`. Adopted `setuptools-scm`
+for single-source versioning from git tags, eliminating hardcoded version duplication.
+
+**Created:**
+- `.github/workflows/ci.yml` — CI pipeline running pytest on Python 3.11/3.12 for every push/PR
+- `.github/workflows/release.yml` — Automated release on `v*` tags: test → build → publish to PyPI → GitHub Release
+- `install.sh` — Curl one-liner installer (detects OS, installs via pipx/pip, runs `colonyos doctor`)
+- `Formula/colonyos.rb` — Homebrew tap formula
+- `tests/test_ci_workflows.py` — CI/release workflow validation tests
+- `tests/test_install_script.sh` — Shell-based installer tests
+- `tests/test_install_script_integration.py` — Python integration tests for install.sh
+- `tests/test_version.py` — Version consistency tests
+
+**Modified:**
+- `pyproject.toml` — Dynamic versioning via `setuptools-scm`, added `build` dependency
+- `src/colonyos/__init__.py` — Version from `importlib.metadata` instead of hardcoded string
+- `src/colonyos/doctor.py` — Added pipx availability check
+- `README.md` — Added installation channels section (pip, curl, brew)
+
+**PRD:** `cOS_prds/20260318_105239_prd_there_should_be_an_easy_way_to_install_this_on_a_repository_with_curl_npm_pip_br.md`
+**Tasks:** `cOS_tasks/20260318_105239_tasks_there_should_be_an_easy_way_to_install_this_on_a_repository_with_curl_npm_pip_br.md`
+
 ## 20260318_091500 — Slack Integration (`colonyos watch`)
 
 Added Slack as a fourth input source for the ColonyOS pipeline. Team members can trigger
