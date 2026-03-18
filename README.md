@@ -190,6 +190,12 @@ Each reviewer persona runs concurrently with its own expertise and perspective. 
 | `colonyos watch --max-hours N` | Maximum wall-clock hours for the watcher |
 | `colonyos watch --max-budget N` | Maximum aggregate USD spend |
 | `colonyos watch --dry-run` | Log triggers without executing pipeline |
+| `colonyos queue add "p1" "p2" --issue 42` | Add prompts and/or issue refs to the execution queue |
+| `colonyos queue start` | Process pending queue items sequentially through the pipeline |
+| `colonyos queue start --max-cost N` | Maximum aggregate USD spend for the queue |
+| `colonyos queue start --max-hours N` | Maximum wall-clock hours for the queue |
+| `colonyos queue status` | Show the current state of the execution queue |
+| `colonyos queue clear` | Remove all pending items from the queue |
 
 ## Configuration
 
