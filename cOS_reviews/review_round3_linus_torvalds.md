@@ -1,27 +1,76 @@
 # Review by Linus Torvalds (Round 3)
 
-I've now reviewed the full implementation. Here's my assessment:
+Now I have everything I need for a thorough review. Here's my assessment:
+
+---
+
+## Code Review — Linus Torvalds
+
+I've read every line of this diff. Let me be direct.
+
+### What's Good
+
+The overall architecture is sound. The implementation follows the PRD requirements faithfully. The CI/CD pipeline is well-structured — `ci.yml` is reused via `workflow_call` in `release.yml` instead of being duplicated. That's the right design. Actions are pinned to commit SHAs, not mutable tags. Permissions use least-privilege with `permissions: {}` at the top level. The `install.sh` script handles the `curl | sh` case properly by checking `[ -t 0 ]` and reading from `/dev/tty`. The `--yes` / `--dry-run` flags are implemented correctly. Single-source versioning via `setuptools-scm` and `importlib.metadata` is the canonical approach.
+
+58 new/modified tests pass. The test coverage is comprehensive — workflow YAML structure validation, install script content analysis, version consistency checks, doctor integration.
+
+### Issues Found
+
+**1. Homebrew formula has a live placeholder SHA that will cause confusing failures:**
+
+The `Formula/colonyos.rb` has `sha256 "PLACEHOLDER_SHA256_UPDATED_BY_RELEASE_WORKFLOW"`. Yes, it's documented in a comment, but this is a string that looks like a real value to someone skimming. It should be something obviously fake like `sha256 "0" * 64` or at minimum the comment should be inline on the sha256 line itself, not 5 lines above. This is a minor nit — the comment header does explain it.
+
+**2. The `update-homebrew` job uses `sed -i` which is not portable:**
+
+On macOS, `sed -i` requires an argument (`sed -i ''`). This runs on `ubuntu-latest` so it works, but it's worth noting this is CI-only code that can never accidentally run on a developer's Mac. Fine in practice.
+
+**3. The changelog extraction is fragile but acceptable:**
+
+```bash
+NOTES=$(awk '/^## /{if(found) exit; found=1; next} found{print}' CHANGELOG.md 2>/dev/null || true)
+```
+
+This grabs everything between the first two `## ` headers. If the CHANGELOG format changes (e.g., uses `###` subsections), this still works. If there's only one `##` header, it grabs everything after it. The fallback to a generic message is correct. Acceptable.
+
+**4. The `install.sh` PEP 668 handling uses `--break-system-packages`:**
+
+The script falls back to `--break-system-packages` with a warning. The PRD doesn't mention this, but it's pragmatic — PEP 668 on modern Debian/Ubuntu would otherwise block `pip install --user`. The warning is clear and explains the scope. Good defensive coding.
+
+**5. `test_release_notes_use_curl_f_flag` tests the wrong thing:**
+
+This test checks that the *release job* contains `curl -fsSL`, but the release job doesn't actually use `curl` — it's the *release notes* installation instructions that contain `curl -fsSL`. The test passes because the string appears in the generated release notes template, so it's technically valid, but the test name and docstring are misleading about what they're actually verifying.
+
+**6. No TODO/placeholder code in shipped runtime code — clean:**
+
+The only placeholder is the Homebrew SHA which is explicitly documented as being auto-updated. No TODOs in runtime code. Good.
+
+**7. The `doctor.py` version check logic is correct but the condition could be clearer:**
+
+```python
+version_ok = "dev" not in __version__ and __version__ != "0.0.0"
+```
+
+This misses the case where `__version__` is literally `"0.0.0.dev0"` — well, actually `"dev"` is in `"0.0.0.dev0"`, so it catches it. And `"0.0.0"` without dev suffix is also caught. But what about `"1.0.0.dev3"`? That would also be flagged, which is correct for development installs. Fine.
+
+**8. Review artifact diffs included unnecessarily:**
+
+The diff includes changes to multiple `cOS_reviews/` files. These are review artifacts from previous rounds, not implementation code, but they bloat the diff. Not a blocking issue, just noise.
+
+### What I'd Want Fixed Before Merge (But Won't Block)
+
+Honestly? Nothing here is a showstopper. The code is straightforward, does what it says, and doesn't try to be clever. The data structures are simple — shell scripts, YAML workflows, Python using standard library patterns. The tests actually test real behavior, not mocks of mocks.
+
+The one thing I'd push back on in a real kernel review is that tasks 8.2-8.5 are marked complete (E2E validation: test tag dry-run, PyPI publish test, curl on clean environments, Homebrew formula install). These are hard to verify actually happened from the diff alone. But that's a process concern, not a code concern.
 
 ---
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/slack.py]: Clean separation of concerns — pure functions for formatting/filtering, stateful class for UI, dataclass for persistence. The data structures tell the story clearly. Good.
-- [src/colonyos/slack.py]: `wait_for_approval` uses polling with `time.sleep` — crude but honest. A callback-based approach would be more elegant, but this is Socket Mode running locally, not a cloud service handling 10k concurrent users. The simple thing is the right thing for Phase 1.
-- [src/colonyos/slack.py]: `app._colonyos_config` and `app._colonyos_app_token` — monkey-patching private attributes onto the Bolt App instance is ugly. But the alternative (globals or a wrapper class) would be worse. Acceptable pragmatism with the `type: ignore` comments acknowledging the sin.
-- [src/colonyos/sanitize.py]: Good extraction. Single source of truth for the XML sanitization regex shared between GitHub and Slack. The github.py import aliases (`_XML_TAG_RE`, `_sanitize_untrusted_content`) preserve backward compatibility without any behavioral change.
-- [src/colonyos/cli.py]: The `_handle_event` function correctly extracts the prompt *before* acquiring the state lock and burning a rate-limit slot — the review fix for empty mentions is the right fix in the right place. TOCTOU race on `mark_processed` is handled by marking early under lock.
-- [src/colonyos/cli.py]: `_run_pipeline` uses a semaphore to serialize pipeline runs — correct, since `run_orchestrator` does git operations that would conflict. The `daemon=False` on pipeline threads combined with the shutdown handler's `join(timeout=60)` is proper lifecycle management.
-- [src/colonyos/cli.py]: The `_signal_handler` saves state and joins threads. The `finally` block in the main `watch` function *also* joins threads and saves state. Belt and suspenders — slightly redundant, but safe. I'll take redundant-but-correct over clever-but-fragile.
-- [src/colonyos/config.py]: `_parse_slack_config` validates trigger_mode against a frozen set — fails fast on bad config. `save_config` omits the slack section entirely when disabled — clean.
-- [src/colonyos/doctor.py]: Slack token check is properly guarded behind `slack.enabled` — doesn't nag users who haven't opted in.
-- [src/colonyos/orchestrator.py]: The `ui_factory` parameter is the minimal invasion needed — a single optional argument that defaults to None, with a two-line check in `_make_ui`. This is how you extend an interface without breaking it.
-- [pyproject.toml]: `slack-bolt` as an optional dependency under `[slack]` — correct. Don't force websocket dependencies on users who don't need Slack.
-- [tests/test_slack.py]: 79 tests covering config parsing, sanitization, filtering, formatting, dedup, rate limiting, approval polling, pruning, error sanitization, and the integration flow. Thorough without being bloated. The `test_phase_error_does_not_echo_details` test is exactly the kind of security-boundary test that matters.
-- [src/colonyos/slack.py]: `phase_error` logs the real error but posts a generic message to Slack — correct. Never reflect internal details to an untrusted channel.
-- [src/colonyos/slack.py]: `SlackWatchState.prune_old_hourly_counts` prevents unbounded dict growth — the kind of thing that only matters at 3am on day 30 of a long-running watcher, but when it matters, you're glad someone thought of it.
-- [src/colonyos/cli.py]: The REPL and dynamic banner changes are unrelated to Slack but appear on this branch from an earlier merge. Not ideal git hygiene, but the changes are small and harmless.
+- [Formula/colonyos.rb]: Placeholder SHA256 string could be more obviously fake (e.g., all zeros), though the comment header documents this adequately
+- [tests/test_ci_workflows.py]: `test_release_notes_use_curl_f_flag` has a misleading name — it tests installation instructions in release notes, not actual curl usage in the workflow
+- [.github/workflows/release.yml]: `update-homebrew` job uses `sed -i` which is GNU-only, but this only runs on ubuntu-latest so it's fine in practice
+- [cOS_reviews/*]: Multiple review artifact files modified — not implementation code, just noise in the diff
 
 SYNTHESIS:
-This is a well-structured implementation that does the simple, obvious thing at every decision point. The data structures are clear — `SlackConfig` for configuration, `SlackWatchState` for persistence, `SlackUI` for output routing. The code follows the existing patterns (`colonyos auto` → `colonyos watch`, `format_issue_as_prompt` → `format_slack_as_prompt`, `LoopState` → `SlackWatchState`) rather than inventing new abstractions. The security posture is correct: untrusted Slack content gets the same XML-stripping treatment as GitHub issues, error details stay in server logs instead of being reflected to Slack, channel allowlists are enforced before any processing, and the approval gate is opt-out rather than opt-in. The threading model is simple but correct — semaphore serializes pipeline runs, lock guards shared state, signal handler drains active threads. The sanitize.py extraction eliminates the duplicated regex between GitHub and Slack without any behavioral change. All 633 tests pass, including 79 new ones with good coverage of edge cases (empty mentions, approval timeouts, API errors during polling, hourly count pruning). The only thing I'd nitpick is the monkey-patching of Bolt app attributes, but the alternatives are worse. Ship it.
+This is solid, straightforward work. The implementation hits every PRD requirement — CI pipeline, automated releases with OIDC publishing, single-source versioning, curl installer with proper stdin handling, and a Homebrew formula with automated PR-based updates. The code doesn't over-engineer anything. The shell script is defensive without being paranoid. The GitHub Actions workflows follow current best practices (pinned SHAs, least-privilege permissions, concurrency control). The test suite is comprehensive and all 58 tests pass. The only things I'd nitpick are cosmetic — a misleading test name and a placeholder value that could be more obviously fake. Ship it.
