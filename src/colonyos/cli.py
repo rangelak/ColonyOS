@@ -1979,6 +1979,9 @@ def watch(
             except Exception:
                 logger.debug("Failed to post triage acknowledgment", exc_info=True)
 
+        # NOTE: Daemon thread — if the process shuts down while triage is
+        # in flight, the message may be mark_processed but never queued.
+        # This is an acceptable trade-off for v1; the window is very small.
         threading.Thread(
             target=_triage_and_enqueue, daemon=True, name=f"triage-{ts}",
         ).start()
@@ -2002,6 +2005,7 @@ def watch(
             slack_client_ready: threading.Event,
             verbose: bool,
             quiet: bool,
+            circuit_breaker_cooldown_minutes: int,
         ) -> None:
             self._repo_root = repo_root
             self._watch_state = watch_state
@@ -2012,6 +2016,7 @@ def watch(
             self._slack_client_ready = slack_client_ready
             self._verbose = verbose
             self._quiet = quiet
+            self._circuit_breaker_cooldown_minutes = circuit_breaker_cooldown_minutes
             # Compute recovery deadline once when pause is first detected
             self._recovery_monotonic: float | None = None
 
@@ -2065,8 +2070,7 @@ def watch(
                 if self._recovery_monotonic is None and self._watch_state.queue_paused_at:
                     try:
                         paused_at = datetime.fromisoformat(self._watch_state.queue_paused_at)
-                        cooldown_sec = self._watch_state.consecutive_failures  # placeholder
-                        cooldown_sec = config.slack.circuit_breaker_cooldown_minutes * 60
+                        cooldown_sec = self._circuit_breaker_cooldown_minutes * 60
                         elapsed_since_pause = (datetime.now(timezone.utc) - paused_at).total_seconds()
                         self._recovery_monotonic = time.monotonic() + max(0, cooldown_sec - elapsed_since_pause)
                     except (ValueError, TypeError):
@@ -2090,7 +2094,19 @@ def watch(
             return None
 
         def _execute_item(self, item_to_run: QueueItem) -> None:
-            current_config = load_config(self._repo_root)
+            try:
+                current_config = load_config(self._repo_root)
+            except Exception:
+                logger.exception(
+                    "Failed to load config.yaml — check for syntax errors"
+                )
+                with self._state_lock:
+                    item_to_run.status = QueueItemStatus.FAILED
+                    item_to_run.error = "Config load failed — check config.yaml for syntax errors"
+                    self._watch_state.consecutive_failures += 1
+                    _save_queue_state(self._repo_root, self._queue_state)
+                    save_watch_state(self._repo_root, self._watch_state)
+                return
 
             with self._state_lock:
                 item_to_run.status = QueueItemStatus.RUNNING
@@ -2253,6 +2269,7 @@ def watch(
         slack_client_ready=_slack_client_ready,
         verbose=verbose,
         quiet=quiet,
+        circuit_breaker_cooldown_minutes=config.slack.circuit_breaker_cooldown_minutes,
     )
 
     # Register event handlers
@@ -2292,6 +2309,14 @@ def watch(
     # Graceful shutdown
     def _signal_handler(signum: int, frame: object) -> None:
         click.echo("\nShutting down Slack watcher...")
+        # Persist state eagerly in case the process is killed before the
+        # finally block runs (e.g. a subsequent SIGKILL).
+        try:
+            with state_lock:
+                _save_queue_state(repo_root, queue_state)
+                save_watch_state(repo_root, watch_state)
+        except Exception:
+            logger.debug("Failed to save state in signal handler", exc_info=True)
         shutdown_event.set()
 
     signal.signal(signal.SIGINT, _signal_handler)

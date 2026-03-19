@@ -1169,3 +1169,28 @@ class TestSlackWatchStateCircuitBreaker:
         state = SlackWatchState.from_dict(d)
         assert state.queue_paused is True
         assert state.queue_paused_at is None
+
+
+class TestCircuitBreakerCodeQuality:
+    """Verify dead code was removed and _is_paused uses explicit parameter."""
+
+    def test_no_placeholder_comment_in_is_paused(self) -> None:
+        """The dead placeholder line must not exist in _is_paused."""
+        import inspect
+        from colonyos import cli as cli_module
+
+        source = inspect.getsource(cli_module)
+        # The old dead code line: cooldown_sec = self._watch_state.consecutive_failures  # placeholder
+        assert "# placeholder" not in source, (
+            "Dead placeholder comment still present in cli.py"
+        )
+
+    def test_is_paused_uses_instance_attribute(self) -> None:
+        """_is_paused should reference self._circuit_breaker_cooldown_minutes, not outer config."""
+        import inspect
+        from colonyos import cli as cli_module
+
+        source = inspect.getsource(cli_module)
+        assert "self._circuit_breaker_cooldown_minutes * 60" in source
+        # The old closure reference should be gone
+        assert "config.slack.circuit_breaker_cooldown_minutes * 60" not in source

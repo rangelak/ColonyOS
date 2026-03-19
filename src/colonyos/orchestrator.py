@@ -1782,12 +1782,14 @@ def run(
                     capture_output=True, text=True, cwd=repo_root, timeout=30,
                 )
                 if status_result.stdout.strip():
+                    stash_msg = f"colonyos-{branch_name}"
                     _log(
                         f"WARNING: Working tree is dirty, stashing changes "
-                        f"before restoring branch '{original_branch}'"
+                        f"before restoring branch '{original_branch}' "
+                        f"(stash message: '{stash_msg}')"
                     )
                     subprocess.run(
-                        ["git", "stash", "--include-untracked"],
+                        ["git", "stash", "push", "--include-untracked", "-m", stash_msg],
                         capture_output=True, text=True, cwd=repo_root, timeout=30,
                     )
                 checkout_result = subprocess.run(

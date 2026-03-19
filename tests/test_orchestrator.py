@@ -2256,3 +2256,15 @@ class TestBaseBranchValidation:
             )
 
 
+class TestNamedStashOnBranchRollback:
+    """The finally block in run() should use a named stash with 'colonyos-{branch}' message."""
+
+    def test_stash_command_includes_branch_name(self) -> None:
+        """Verify the stash push command uses -m with branch-identifying message."""
+        import ast
+        import inspect
+        from colonyos.orchestrator import run as run_fn
+
+        source = inspect.getsource(run_fn)
+        assert "git\", \"stash\", \"push\", \"--include-untracked\", \"-m\"" in source
+        assert "colonyos-{branch_name}" in source
