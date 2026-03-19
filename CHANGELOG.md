@@ -1,5 +1,28 @@
 # Changelog
 
+## 20260319_080000 — Dockerize ColonyOS for Cloud-Managed Deployment
+
+Added Docker containerization to ColonyOS, enabling deployment as a self-hosted
+managed service in the cloud. The Docker image bundles the full pipeline — CLI,
+FastAPI web dashboard, and Claude Agent SDK — into a single deployable unit.
+
+**Created:**
+- `Dockerfile` — Multi-stage build (Node.js for Claude CLI + SPA build, Python runtime)
+- `docker-compose.yml` — Single-command deployment with volume mounts and health checks
+- `docker-entrypoint.sh` — Startup validation, git cleanup, optional repo cloning
+- `.env.example` — Documented environment variable reference
+- `.dockerignore` — Exclude build artifacts, secrets, and run history from image
+- `tests/test_docker.py` — Entrypoint script and Dockerfile build tests
+
+**Modified:**
+- `.github/workflows/release.yml` — Added Docker build & push job to ghcr.io
+- `.github/workflows/ci.yml` — Added Docker build smoke test
+- `src/colonyos/doctor.py` — Container-aware prerequisite checks
+- `README.md` — Docker deployment quick-start section
+
+**PRD:** `cOS_prds/20260319_010245_prd_dockerize_everything_so_it_can_become_a_managed_service_in_the_cloud.md`
+**Tasks:** `cOS_tasks/20260319_010245_tasks_dockerize_everything_so_it_can_become_a_managed_service_in_the_cloud.md`
+
 ## 20260319_010500 — Opt-in PostHog Telemetry Integration
 
 Added opt-in PostHog telemetry that emits anonymized pipeline lifecycle events
