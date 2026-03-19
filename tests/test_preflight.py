@@ -92,13 +92,35 @@ class TestPreflightResult:
         assert restored.action_taken == original.action_taken
         assert restored.warnings == original.warnings
 
-    def test_from_dict_with_defaults(self) -> None:
-        result = PreflightResult.from_dict({})
-        assert result.current_branch == ""
-        assert result.is_clean is True
-        assert result.branch_exists is False
-        assert result.action_taken == "proceed"
-        assert result.warnings == []
+    def test_from_dict_missing_required_keys_raises(self) -> None:
+        with pytest.raises(ValueError, match="missing required key"):
+            PreflightResult.from_dict({})
+        with pytest.raises(ValueError, match="'current_branch'"):
+            PreflightResult.from_dict({"is_clean": True, "branch_exists": False})
+        with pytest.raises(ValueError, match="'is_clean'"):
+            PreflightResult.from_dict({"current_branch": "main", "branch_exists": False})
+        with pytest.raises(ValueError, match="'branch_exists'"):
+            PreflightResult.from_dict({"current_branch": "main", "is_clean": True})
+
+    def test_from_dict_with_head_sha(self) -> None:
+        data = {
+            "current_branch": "main",
+            "is_clean": True,
+            "branch_exists": False,
+            "head_sha": "abc123",
+        }
+        result = PreflightResult.from_dict(data)
+        assert result.head_sha == "abc123"
+
+    def test_to_dict_includes_head_sha(self) -> None:
+        result = PreflightResult(
+            current_branch="main",
+            is_clean=True,
+            branch_exists=False,
+            head_sha="def456",
+        )
+        d = result.to_dict()
+        assert d["head_sha"] == "def456"
 
     def test_warnings_list_is_independent_copy(self) -> None:
         original = PreflightResult(
@@ -160,20 +182,21 @@ class TestPreflightCheck:
         with pytest.raises(click.ClickException, match="Uncommitted changes"):
             _preflight_check(tmp_path, "colonyos/test-feature", config)
 
-    @patch("subprocess.run")
-    def test_existing_branch_no_pr_refuses(self, mock_run, tmp_path: Path) -> None:
+    @patch("colonyos.orchestrator.check_open_pr", return_value=(None, None))
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_existing_branch_no_pr_refuses(self, mock_run, mock_check_pr, tmp_path: Path) -> None:
         from colonyos.orchestrator import _preflight_check
         from colonyos.config import ColonyConfig
 
         def side_effect(cmd, **kwargs):
-            if cmd[0] == "git" and cmd[1] == "rev-parse":
+            if cmd[1] == "rev-parse" and "--abbrev-ref" in cmd:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="main\n", stderr="")
-            if cmd[0] == "git" and cmd[1] == "status":
+            if cmd[1] == "rev-parse" and "HEAD" in cmd and "--abbrev-ref" not in cmd:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="abc123\n", stderr="")
+            if cmd[1] == "status":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-            if cmd[0] == "git" and cmd[1] == "branch":
+            if cmd[1] == "branch":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="  colonyos/test-feature\n", stderr="")
-            if cmd[0] == "gh":
-                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="[]", stderr="")
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         mock_run.side_effect = side_effect
@@ -181,24 +204,21 @@ class TestPreflightCheck:
         with pytest.raises(click.ClickException, match="already exists locally"):
             _preflight_check(tmp_path, "colonyos/test-feature", config)
 
-    @patch("subprocess.run")
-    def test_existing_branch_with_open_pr_refuses_with_url(self, mock_run, tmp_path: Path) -> None:
+    @patch("colonyos.orchestrator.check_open_pr", return_value=(42, "https://github.com/org/repo/pull/42"))
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_existing_branch_with_open_pr_refuses_with_url(self, mock_run, mock_check_pr, tmp_path: Path) -> None:
         from colonyos.orchestrator import _preflight_check
         from colonyos.config import ColonyConfig
 
         def side_effect(cmd, **kwargs):
-            if cmd[0] == "git" and cmd[1] == "rev-parse":
+            if cmd[1] == "rev-parse" and "--abbrev-ref" in cmd:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="main\n", stderr="")
-            if cmd[0] == "git" and cmd[1] == "status":
+            if cmd[1] == "rev-parse" and "HEAD" in cmd and "--abbrev-ref" not in cmd:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="abc123\n", stderr="")
+            if cmd[1] == "status":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-            if cmd[0] == "git" and cmd[1] == "branch":
+            if cmd[1] == "branch":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="  colonyos/test-feature\n", stderr="")
-            if cmd[0] == "gh":
-                return subprocess.CompletedProcess(
-                    args=cmd, returncode=0,
-                    stdout=json.dumps([{"number": 42, "url": "https://github.com/org/repo/pull/42"}]),
-                    stderr="",
-                )
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         mock_run.side_effect = side_effect
@@ -252,28 +272,25 @@ class TestPreflightCheck:
         result = _preflight_check(tmp_path, "colonyos/test-feature", config, offline=True)
         assert result.main_behind_count is None
 
-    @patch("subprocess.run")
-    def test_force_bypasses_all_checks(self, mock_run, tmp_path: Path) -> None:
+    @patch("colonyos.orchestrator.check_open_pr", return_value=(99, "https://github.com/org/repo/pull/99"))
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_force_bypasses_all_checks(self, mock_run, mock_check_pr, tmp_path: Path) -> None:
         from colonyos.orchestrator import _preflight_check
         from colonyos.config import ColonyConfig
 
         def side_effect(cmd, **kwargs):
-            if cmd[0] == "git" and cmd[1] == "rev-parse":
+            if cmd[1] == "rev-parse" and "--abbrev-ref" in cmd:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="main\n", stderr="")
-            if cmd[0] == "git" and cmd[1] == "status":
+            if cmd[1] == "rev-parse" and "HEAD" in cmd and "--abbrev-ref" not in cmd:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="abc123\n", stderr="")
+            if cmd[1] == "status":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=" M dirty.py\n", stderr="")
-            if cmd[0] == "git" and cmd[1] == "branch":
+            if cmd[1] == "branch":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="  colonyos/test-feature\n", stderr="")
-            if cmd[0] == "git" and cmd[1] == "fetch":
+            if cmd[1] == "fetch":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-            if cmd[0] == "git" and cmd[1] == "rev-list":
+            if cmd[1] == "rev-list":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
-            if cmd[0] == "gh":
-                return subprocess.CompletedProcess(
-                    args=cmd, returncode=0,
-                    stdout=json.dumps([{"number": 99, "url": "https://github.com/org/repo/pull/99"}]),
-                    stderr="",
-                )
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         mock_run.side_effect = side_effect
@@ -288,10 +305,7 @@ class TestPreflightCheck:
         from colonyos.orchestrator import _preflight_check
         from colonyos.config import ColonyConfig
 
-        call_count = 0
-
         def side_effect(cmd, **kwargs):
-            nonlocal call_count
             if cmd[1] == "rev-parse":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="main\n", stderr="")
             if cmd[1] == "status":
@@ -322,8 +336,10 @@ class TestResumePreflight:
         from colonyos.orchestrator import _resume_preflight
 
         def side_effect(cmd, **kwargs):
-            if cmd[1] == "rev-parse":
+            if cmd[1] == "rev-parse" and "--abbrev-ref" in cmd:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="feature\n", stderr="")
+            if cmd[1] == "rev-parse":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="abc123\n", stderr="")
             if cmd[1] == "status":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
@@ -332,14 +348,17 @@ class TestResumePreflight:
         result = _resume_preflight(tmp_path, "colonyos/feature")
         assert result.is_clean is True
         assert result.action_taken == "proceed"
+        assert result.head_sha == "abc123"
 
     @patch("colonyos.orchestrator.subprocess.run")
     def test_dirty_tree_raises(self, mock_run, tmp_path: Path) -> None:
         from colonyos.orchestrator import _resume_preflight
 
         def side_effect(cmd, **kwargs):
-            if cmd[1] == "rev-parse":
+            if cmd[1] == "rev-parse" and "--abbrev-ref" in cmd:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="feature\n", stderr="")
+            if cmd[1] == "rev-parse":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="abc123\n", stderr="")
             if cmd[1] == "status":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=" M file.py\n", stderr="")
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
@@ -347,3 +366,163 @@ class TestResumePreflight:
         mock_run.side_effect = side_effect
         with pytest.raises(click.ClickException, match="Uncommitted changes"):
             _resume_preflight(tmp_path, "colonyos/feature")
+
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_head_sha_divergence_raises(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.orchestrator import _resume_preflight
+
+        def side_effect(cmd, **kwargs):
+            if cmd[1] == "rev-parse" and "--abbrev-ref" in cmd:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="feature\n", stderr="")
+            if cmd[1] == "rev-parse":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="new_sha\n", stderr="")
+            if cmd[1] == "status":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+        with pytest.raises(click.ClickException, match="HEAD SHA has diverged"):
+            _resume_preflight(tmp_path, "colonyos/feature", expected_head_sha="old_sha")
+
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_head_sha_matches_proceeds(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.orchestrator import _resume_preflight
+
+        def side_effect(cmd, **kwargs):
+            if cmd[1] == "rev-parse" and "--abbrev-ref" in cmd:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="feature\n", stderr="")
+            if cmd[1] == "rev-parse":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="same_sha\n", stderr="")
+            if cmd[1] == "status":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+        result = _resume_preflight(tmp_path, "colonyos/feature", expected_head_sha="same_sha")
+        assert result.action_taken == "proceed"
+        assert result.head_sha == "same_sha"
+
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+
+class TestGetCurrentBranch:
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_returns_branch_name(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.orchestrator import _get_current_branch
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="feature-branch\n", stderr=""
+        )
+        assert _get_current_branch(tmp_path) == "feature-branch"
+
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_empty_output_raises(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.orchestrator import _get_current_branch
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with pytest.raises(click.ClickException, match="Could not determine current branch"):
+            _get_current_branch(tmp_path)
+
+    @patch("colonyos.orchestrator.subprocess.run", side_effect=OSError("no git"))
+    def test_oserror_raises(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.orchestrator import _get_current_branch
+
+        with pytest.raises(click.ClickException, match="Failed to run git"):
+            _get_current_branch(tmp_path)
+
+
+class TestCheckWorkingTreeClean:
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_clean_tree(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.orchestrator import _check_working_tree_clean
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        is_clean, dirty = _check_working_tree_clean(tmp_path)
+        assert is_clean is True
+        assert dirty == ""
+
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_dirty_tree(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.orchestrator import _check_working_tree_clean
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=" M file.py\n", stderr=""
+        )
+        is_clean, dirty = _check_working_tree_clean(tmp_path)
+        assert is_clean is False
+        assert "file.py" in dirty
+
+    @patch("colonyos.orchestrator.subprocess.run", side_effect=OSError("no git"))
+    def test_oserror_raises(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.orchestrator import _check_working_tree_clean
+
+        with pytest.raises(click.ClickException, match="Failed to run git status"):
+            _check_working_tree_clean(tmp_path)
+
+
+class TestGetHeadSha:
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_returns_sha(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.orchestrator import _get_head_sha
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="abc123def456\n", stderr=""
+        )
+        assert _get_head_sha(tmp_path) == "abc123def456"
+
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_failure_returns_empty(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.orchestrator import _get_head_sha
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="error"
+        )
+        assert _get_head_sha(tmp_path) == ""
+
+    @patch("colonyos.orchestrator.subprocess.run", side_effect=OSError("no git"))
+    def test_oserror_returns_empty(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.orchestrator import _get_head_sha
+
+        assert _get_head_sha(tmp_path) == ""
+
+
+class TestEnsureOnMain:
+    @patch("colonyos.cli.subprocess.run")
+    def test_checkout_and_pull_success(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.cli import _ensure_on_main
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        _ensure_on_main(tmp_path)  # should not raise
+        assert mock_run.call_count == 2
+
+    @patch("colonyos.cli.subprocess.run", side_effect=OSError("no git"))
+    def test_checkout_oserror_raises(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.cli import _ensure_on_main
+
+        with pytest.raises(click.ClickException, match="Failed to checkout main"):
+            _ensure_on_main(tmp_path)
+
+    @patch("colonyos.cli.subprocess.run")
+    def test_pull_failure_warns_but_proceeds(self, mock_run, tmp_path: Path, capsys) -> None:
+        from colonyos.cli import _ensure_on_main
+
+        def side_effect(cmd, **kwargs):
+            if "checkout" in cmd:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+            if "pull" in cmd:
+                return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="conflict")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+        _ensure_on_main(tmp_path)  # should not raise
+        captured = capsys.readouterr()
+        assert "git pull --ff-only failed" in captured.err

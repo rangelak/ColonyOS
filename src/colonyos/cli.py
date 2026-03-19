@@ -861,6 +861,36 @@ def _compute_elapsed_hours(
     return (now - original_start).total_seconds() / 3600.0
 
 
+def _ensure_on_main(repo_root: Path) -> None:
+    """Ensure the working tree is on main with latest changes (for auto mode)."""
+    try:
+        subprocess.run(
+            ["git", "checkout", "main"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise click.ClickException(f"Failed to checkout main: {exc}")
+
+    try:
+        result = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            click.echo(
+                f"Warning: git pull --ff-only failed: {result.stderr.strip()}",
+                err=True,
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        click.echo(f"Warning: Failed to pull latest main: {exc}", err=True)
+
+
 def _run_single_iteration(
     *,
     iteration: int,
@@ -884,6 +914,7 @@ def _run_single_iteration(
     from colonyos.ui import NullUI, PhaseUI
 
     _touch_heartbeat(repo_root)
+    _ensure_on_main(repo_root)
 
     ceo_ui: PhaseUI | NullUI | None = None
     if not quiet:

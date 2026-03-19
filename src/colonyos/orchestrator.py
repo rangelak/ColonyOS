@@ -30,6 +30,7 @@ from colonyos.naming import (
     standalone_decision_artifact_path,
     summary_artifact_path,
 )
+from colonyos.github import check_open_pr
 from colonyos.ui import NullUI, PhaseUI, make_reviewer_prefix, print_reviewer_legend
 
 
@@ -42,6 +43,61 @@ def _touch_heartbeat(repo_root: Path) -> None:
 
 def _log(msg: str) -> None:
     print(f"[colonyos] {msg}", file=sys.stderr, flush=True)
+
+
+def _get_current_branch(repo_root: Path) -> str:
+    """Get the current git branch name. Raises click.ClickException on failure."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+        )
+        branch = result.stdout.strip()
+        if not branch:
+            raise click.ClickException(
+                "Could not determine current branch. Are you in a git repository?"
+            )
+        return branch
+    except OSError as exc:
+        raise click.ClickException(
+            f"Failed to run git: {exc}. Is git installed and is this a git repository?"
+        )
+
+
+def _check_working_tree_clean(repo_root: Path) -> tuple[bool, str]:
+    """Check if the working tree is clean. Returns (is_clean, dirty_output).
+
+    Raises click.ClickException if git status cannot be determined (fail-closed).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+        )
+        dirty_output = result.stdout.strip()
+        return (not dirty_output, dirty_output)
+    except OSError as exc:
+        raise click.ClickException(
+            f"Failed to run git status: {exc}. Cannot determine working tree state."
+        )
+
+
+def _get_head_sha(repo_root: Path) -> str:
+    """Get the current HEAD SHA. Returns empty string on failure."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except OSError:
+        return ""
 
 
 def _preflight_check(
@@ -60,31 +116,11 @@ def _preflight_check(
     """
     warnings: list[str] = []
 
-    # Determine current branch
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=repo_root,
-        )
-        current_branch = result.stdout.strip() or "unknown"
-    except OSError:
-        current_branch = "unknown"
+    # Determine current branch (fail-closed)
+    current_branch = _get_current_branch(repo_root)
 
-    # Check for uncommitted changes
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            cwd=repo_root,
-        )
-        dirty_output = result.stdout.strip()
-        is_clean = not dirty_output
-    except OSError:
-        is_clean = True
-        dirty_output = ""
+    # Check for uncommitted changes (fail-closed)
+    is_clean, dirty_output = _check_working_tree_clean(repo_root)
 
     if not is_clean and not force:
         dirty_files = dirty_output.splitlines()[:10]
@@ -104,7 +140,6 @@ def _preflight_check(
     open_pr_number: int | None = None
     open_pr_url: str | None = None
     if branch_exists and not offline:
-        from colonyos.github import check_open_pr
         open_pr_number, open_pr_url = check_open_pr(branch_name, repo_root)
 
     if branch_exists and not force:
@@ -154,6 +189,8 @@ def _preflight_check(
     if force and (not is_clean or branch_exists):
         action = "forced"
 
+    head_sha = _get_head_sha(repo_root)
+
     return PreflightResult(
         current_branch=current_branch,
         is_clean=is_clean,
@@ -163,38 +200,24 @@ def _preflight_check(
         main_behind_count=main_behind_count,
         action_taken=action,
         warnings=warnings,
+        head_sha=head_sha,
     )
 
 
-def _resume_preflight(repo_root: Path, branch_name: str) -> PreflightResult:
+def _resume_preflight(
+    repo_root: Path,
+    branch_name: str,
+    *,
+    expected_head_sha: str | None = None,
+) -> PreflightResult:
     """Lightweight pre-flight check for resume mode.
 
     Only validates that the working tree is clean.
-    Raises :class:`click.ClickException` if uncommitted changes are found.
+    Raises :class:`click.ClickException` if uncommitted changes are found
+    or if the HEAD SHA has diverged from the expected value.
     """
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=repo_root,
-        )
-        current_branch = result.stdout.strip() or "unknown"
-    except OSError:
-        current_branch = "unknown"
-
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            cwd=repo_root,
-        )
-        dirty_output = result.stdout.strip()
-        is_clean = not dirty_output
-    except OSError:
-        is_clean = True
-        dirty_output = ""
+    current_branch = _get_current_branch(repo_root)
+    is_clean, dirty_output = _check_working_tree_clean(repo_root)
 
     if not is_clean:
         dirty_files = dirty_output.splitlines()[:10]
@@ -204,11 +227,22 @@ def _resume_preflight(repo_root: Path, branch_name: str) -> PreflightResult:
             "Please commit or stash your changes before resuming."
         )
 
+    head_sha = _get_head_sha(repo_root)
+
+    if expected_head_sha and head_sha and head_sha != expected_head_sha:
+        raise click.ClickException(
+            f"HEAD SHA has diverged since last run.\n"
+            f"  Expected: {expected_head_sha}\n"
+            f"  Current:  {head_sha}\n\n"
+            "The branch has changed since the last run. Use --force to bypass."
+        )
+
     return PreflightResult(
         current_branch=current_branch,
         is_clean=True,
         branch_exists=True,
         action_taken="proceed",
+        head_sha=head_sha,
     )
 
 
@@ -1575,7 +1609,10 @@ def run(
         _log(f"Resuming from phase: {next_phase}")
 
         # Lightweight pre-flight for resume: only check clean working tree
-        preflight = _resume_preflight(repo_root, branch_name)
+        expected_sha = None
+        if log.preflight and log.preflight.head_sha:
+            expected_sha = log.preflight.head_sha
+        preflight = _resume_preflight(repo_root, branch_name, expected_head_sha=expected_sha)
         log.preflight = preflight
 
         # Record resume event for audit trail

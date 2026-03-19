@@ -82,6 +82,7 @@ class PreflightResult:
     main_behind_count: int | None = None
     action_taken: str = "proceed"
     warnings: list[str] = field(default_factory=list)
+    head_sha: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,19 +94,24 @@ class PreflightResult:
             "main_behind_count": self.main_behind_count,
             "action_taken": self.action_taken,
             "warnings": list(self.warnings),
+            "head_sha": self.head_sha,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PreflightResult:
+        for key in ("current_branch", "is_clean", "branch_exists"):
+            if key not in data:
+                raise ValueError(f"PreflightResult missing required key: {key!r}")
         return cls(
-            current_branch=data.get("current_branch", ""),
-            is_clean=data.get("is_clean", True),
-            branch_exists=data.get("branch_exists", False),
+            current_branch=data["current_branch"],
+            is_clean=data["is_clean"],
+            branch_exists=data["branch_exists"],
             open_pr_number=data.get("open_pr_number"),
             open_pr_url=data.get("open_pr_url"),
             main_behind_count=data.get("main_behind_count"),
             action_taken=data.get("action_taken", "proceed"),
             warnings=list(data.get("warnings", [])),
+            head_sha=data.get("head_sha"),
         )
 
 
