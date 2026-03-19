@@ -1,5 +1,24 @@
 # Changelog
 
+## 20260319_230625 — AI-Assisted Setup for ColonyOS Init
+
+Adds a new default init mode where Claude Haiku reads the repository, auto-detects project
+info (name, description, tech stack), selects the best persona pack and model preset, and
+proposes a complete config for the user to confirm with a single "y". The manual wizard
+remains available via `--manual`. Falls back gracefully on any LLM failure.
+
+**Created / Modified:**
+- `src/colonyos/models.py` — Added `RepoContext` dataclass for deterministic repo signals
+- `src/colonyos/persona_packs.py` — Added `packs_summary()` helper for prompt serialization
+- `src/colonyos/init.py` — Added `scan_repo_context()`, `_build_init_system_prompt()`, `_parse_ai_config_response()`, `render_config_preview()`, `run_ai_init()`, `_finalize_init()`; updated `collect_project_info()` and `run_init()` to accept pre-fill defaults
+- `src/colonyos/cli.py` — Added `--manual` flag, updated routing: default → AI-assisted, `--manual` → classic wizard
+- `tests/test_init.py` — Added 39 new tests for repo scanning, prompt building, response parsing, AI init flow, config preview, fallback pre-fill, and error handling
+- `tests/test_cli.py` — Added 6 CLI routing tests for `--manual` flag and mutual exclusivity
+- `README.md` — Updated Quickstart section to reflect AI-assisted default
+
+**PRD:** `cOS_prds/20260319_230625_prd_can_we_make_colonyos_setup_choice_one_where_an_assistant_sets_you_up_dynamically.md`
+**Tasks:** `cOS_tasks/20260319_230625_tasks_can_we_make_colonyos_setup_choice_one_where_an_assistant_sets_you_up_dynamically.md`
+
 ## 20260319_152207 — Slack Thread Fix Requests — Conversational PR Iteration
 
 Enables conversational iteration on PRs via Slack threads. When ColonyOS completes a pipeline

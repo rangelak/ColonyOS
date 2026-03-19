@@ -82,6 +82,22 @@ class ProjectInfo:
     stack: str
 
 
+@dataclass(frozen=True)
+class RepoContext:
+    """Deterministically gathered signals from the repository.
+
+    Used by AI-assisted init to provide context to the LLM without
+    spending tokens on file exploration.
+    """
+
+    name: str
+    description: str
+    stack: str
+    readme_excerpt: str = ""
+    manifest_type: str = ""
+    raw_signals: dict[str, str] = field(default_factory=dict)
+
+
 @dataclass
 class PhaseResult:
     phase: Phase

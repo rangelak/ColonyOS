@@ -18,7 +18,7 @@ import click
 from colonyos import __version__
 from colonyos.config import ColonyConfig, load_config, runs_dir_path
 from colonyos.doctor import run_doctor_checks
-from colonyos.init import run_init
+from colonyos.init import run_ai_init, run_init
 from colonyos.models import (
     BranchRestoreError,
     LoopState,
@@ -474,29 +474,43 @@ def doctor() -> None:
 
 
 @app.command()
+@click.option("--manual", is_flag=True, help="Use the classic interactive wizard instead of AI-assisted setup.")
 @click.option("--personas", is_flag=True, help="Re-run only the persona setup.")
 @click.option("--quick", is_flag=True, help="Skip interactive prompts, use defaults.")
 @click.option("--name", "project_name", default=None, help="Project name (for --quick).")
 @click.option("--description", "project_description", default=None, help="Project description (for --quick).")
 @click.option("--stack", "project_stack", default=None, help="Tech stack (for --quick).")
 def init(
+    manual: bool,
     personas: bool,
     quick: bool,
     project_name: str | None,
     project_description: str | None,
     project_stack: str | None,
 ) -> None:
-    """Initialize ColonyOS in the current repository."""
+    """Initialize ColonyOS in the current repository.
+
+    By default, uses AI-assisted setup: Claude reads your repo and proposes
+    a configuration for you to confirm.  Use --manual for the classic
+    interactive wizard.
+    """
+    if manual and (quick or personas):
+        raise click.UsageError("--manual cannot be combined with --quick or --personas.")
+
     repo_root = _find_repo_root()
-    run_init(
-        repo_root,
-        personas_only=personas,
-        quick=quick,
-        project_name=project_name,
-        project_description=project_description,
-        project_stack=project_stack,
-        doctor_check=True,
-    )
+
+    if quick or personas or manual:
+        run_init(
+            repo_root,
+            personas_only=personas,
+            quick=quick,
+            project_name=project_name,
+            project_description=project_description,
+            project_stack=project_stack,
+            doctor_check=True,
+        )
+    else:
+        run_ai_init(repo_root, doctor_check=True)
 
 
 @app.command()

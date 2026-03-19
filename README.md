@@ -87,7 +87,11 @@ cd your-project/
 colonyos init
 ```
 
-The interactive wizard asks for your project name, description, tech stack, and lets you pick a **persona pack** (e.g. "Startup Team", "Enterprise Backend", "Frontend/Design") or define custom expert personas.
+By default, an AI assistant reads your repo, detects your tech stack, and proposes a complete configuration for you to confirm with a single "y". For the classic interactive wizard:
+
+```bash
+colonyos init --manual
+```
 
 For zero-prompt setup:
 
@@ -173,7 +177,8 @@ flowchart TD
 | Command | Description |
 |---|---|
 | `colonyos doctor` | Check all prerequisites and environment health |
-| `colonyos init` | Interactive project setup + persona workshop |
+| `colonyos init` | AI-assisted setup (default) — reads repo, proposes config |
+| `colonyos init --manual` | Classic interactive wizard |
 | `colonyos init --quick` | Zero-prompt setup with defaults |
 | `colonyos init --personas` | Re-run just the persona workshop |
 | `colonyos status` | Show recent runs, loop summaries, and cost breakdown |

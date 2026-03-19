@@ -147,3 +147,16 @@ def get_pack(key: str) -> PersonaPack | None:
 def pack_keys() -> list[str]:
     """Return the keys of all available packs."""
     return [pack.key for pack in PACKS]
+
+
+def packs_summary() -> list[dict]:
+    """Return a serializable summary of all packs for prompt injection."""
+    return [
+        {
+            "key": pack.key,
+            "name": pack.name,
+            "description": pack.description,
+            "persona_roles": [p.role for p in pack.personas],
+        }
+        for pack in PACKS
+    ]

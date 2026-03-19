@@ -240,8 +240,8 @@ class TestAuto:
 
 
 class TestInitWithPacks:
-    def test_init_with_prebuilt_pack(self, runner: CliRunner, tmp_path: Path):
-        """E2E: colonyos init selecting a prebuilt pack produces correct config."""
+    def test_init_manual_with_prebuilt_pack(self, runner: CliRunner, tmp_path: Path):
+        """E2E: colonyos init --manual selecting a prebuilt pack produces correct config."""
         # Simulate: project info, then pack selection (1=startup), confirm pack,
         # no custom additions, then preset/budget defaults
         user_input = "\n".join([
@@ -261,7 +261,7 @@ class TestInitWithPacks:
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
              patch("colonyos.doctor.subprocess.run", return_value=MagicMock(returncode=0)), \
              patch("colonyos.doctor.sys.version_info", type("V", (), {"major": 3, "minor": 12})()):
-            result = runner.invoke(app, ["init"], input=user_input)
+            result = runner.invoke(app, ["init", "--manual"], input=user_input)
 
         assert result.exit_code == 0, result.output
         assert "Config saved" in result.output
@@ -275,6 +275,58 @@ class TestInitWithPacks:
 
         assert len(saved_personas) == len(startup_pack.personas)
         assert saved_personas[0]["role"] == startup_pack.personas[0].role
+
+
+class TestInitCliRouting:
+    """Test that CLI flags route to the correct init function."""
+
+    def test_default_calls_ai_init(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.run_ai_init") as mock_ai:
+            mock_ai.return_value = ColonyConfig()
+            result = runner.invoke(app, ["init"])
+
+        mock_ai.assert_called_once()
+
+    def test_manual_calls_run_init(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.run_init") as mock_manual:
+            mock_manual.return_value = ColonyConfig()
+            result = runner.invoke(app, ["init", "--manual"], input="n\n")
+
+        mock_manual.assert_called_once()
+
+    def test_quick_calls_run_init(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.run_init") as mock_manual:
+            mock_manual.return_value = ColonyConfig()
+            result = runner.invoke(app, ["init", "--quick", "--name", "Test"])
+
+        mock_manual.assert_called_once()
+        call_kwargs = mock_manual.call_args
+        assert call_kwargs.kwargs.get("quick") is True
+
+    def test_personas_calls_run_init(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.run_init") as mock_manual:
+            mock_manual.return_value = ColonyConfig()
+            result = runner.invoke(app, ["init", "--personas"], input="1\ny\nn\n")
+
+        mock_manual.assert_called_once()
+        call_kwargs = mock_manual.call_args
+        assert call_kwargs.kwargs.get("personas_only") is True
+
+    def test_manual_with_quick_errors(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["init", "--manual", "--quick"])
+
+        assert result.exit_code != 0
+
+    def test_manual_with_personas_errors(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["init", "--manual", "--personas"])
+
+        assert result.exit_code != 0
 
 
 class TestResumeFlag:
