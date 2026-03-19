@@ -1873,6 +1873,74 @@ class TestCleanup:
         assert result.exit_code == 0
         assert "1 file(s) flagged" in result.output
 
+    def test_scan_with_very_large_category(self, runner: CliRunner, tmp_path: Path):
+        """Ensure very-large and massive categories render valid Rich markup."""
+        from colonyos.cleanup import FileComplexity, ComplexityCategory
+
+        results = [
+            FileComplexity(
+                path="src/big.py", line_count=1200,
+                function_count=25, category=ComplexityCategory.VERY_LARGE,
+            ),
+            FileComplexity(
+                path="src/huge.py", line_count=2000,
+                function_count=50, category=ComplexityCategory.MASSIVE,
+            ),
+        ]
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cleanup.scan_directory", return_value=results):
+            result = runner.invoke(app, ["cleanup", "scan"])
+        assert result.exit_code == 0
+        assert "2 file(s) flagged" in result.output
+        # Should not have malformed Rich markup (double brackets)
+        assert "[[" not in result.output
+
+    def test_scan_ai_flag(self, runner: CliRunner, tmp_path: Path):
+        """The --ai flag should invoke run_phase_sync with composed system prompt."""
+        from colonyos.cleanup import FileComplexity, ComplexityCategory
+
+        results = [
+            FileComplexity(
+                path="src/big.py", line_count=800,
+                function_count=25, category=ComplexityCategory.MASSIVE,
+            ),
+        ]
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        mock_phase_result = MagicMock()
+        mock_phase_result.success = True
+        mock_phase_result.artifacts = {"result": "# AI Report\n\nAll good."}
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cleanup.scan_directory", return_value=results), \
+             patch("colonyos.agent.run_phase_sync", return_value=mock_phase_result) as mock_rps:
+            result = runner.invoke(app, ["cleanup", "scan", "--ai"])
+        assert result.exit_code == 0
+        assert "AI analysis report saved" in result.output
+        # Verify base.md was composed into the system prompt
+        call_kwargs = mock_rps.call_args
+        system_prompt = call_kwargs.kwargs.get("system_prompt") or call_kwargs[1].get("system_prompt", "")
+        assert "Core Principles" in system_prompt  # from base.md
+        assert "Dead Code Detection" in system_prompt  # from cleanup_scan.md
+
+    def test_scan_refactor_flag(self, runner: CliRunner, tmp_path: Path):
+        """The --refactor flag should delegate to run_orchestrator."""
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        mock_log = MagicMock()
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cleanup.scan_directory", return_value=[]), \
+             patch("colonyos.cli.run_orchestrator", return_value=mock_log), \
+             patch("colonyos.cli._print_run_summary"):
+            result = runner.invoke(app, ["cleanup", "scan", "--refactor", "src/big.py"])
+        assert result.exit_code == 0
+        assert "Delegating refactoring" in result.output
+
     def test_scan_retention_days_override(self, runner: CliRunner, tmp_path: Path):
         runs_dir = tmp_path / ".colonyos" / "runs"
         runs_dir.mkdir(parents=True)

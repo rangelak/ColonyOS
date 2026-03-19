@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -42,9 +41,12 @@ class BranchInfo:
     skip_reason: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass
 class BranchCleanupResult:
-    """Summary of a branch cleanup operation."""
+    """Summary of a branch cleanup operation.
+
+    Not frozen: contains mutable list fields used as result accumulators.
+    """
     deleted_local: list[str] = field(default_factory=list)
     deleted_remote: list[str] = field(default_factory=list)
     skipped: list[BranchInfo] = field(default_factory=list)
@@ -61,9 +63,12 @@ class ArtifactInfo:
     path: Path
 
 
-@dataclass(frozen=True)
+@dataclass
 class ArtifactCleanupResult:
-    """Summary of an artifact cleanup operation."""
+    """Summary of an artifact cleanup operation.
+
+    Not frozen: contains mutable list fields used as result accumulators.
+    """
     removed: list[ArtifactInfo] = field(default_factory=list)
     skipped: list[ArtifactInfo] = field(default_factory=list)
     bytes_reclaimed: int = 0
@@ -167,7 +172,7 @@ def list_merged_branches(
 
     branches: list[BranchInfo] = []
     for line in result.stdout.splitlines():
-        name = line.strip().lstrip("* ").strip()
+        name = line.strip().removeprefix("* ").strip()
         if not name:
             continue
         # Never include the default branch or current branch
@@ -190,21 +195,29 @@ def list_merged_branches(
 def check_branch_safety(
     branch: str,
     repo_root: Path,
+    *,
+    default_branch: str | None = None,
+    current_branch: str | None = None,
 ) -> str | None:
     """Check whether *branch* is safe to delete.
 
     Returns a skip reason string if the branch should be skipped, or
     ``None`` if it is safe to delete.
+
+    Parameters *default_branch* and *current_branch* can be provided to
+    avoid redundant subprocess calls when checking many branches.
     """
-    default_branch = _get_default_branch(repo_root)
-    current_branch = _get_current_branch(repo_root)
+    if default_branch is None:
+        default_branch = _get_default_branch(repo_root)
+    if current_branch is None:
+        current_branch = _get_current_branch(repo_root)
 
     if branch == default_branch:
         return "default branch"
     if branch == current_branch:
         return "current branch"
 
-    # Check for open PRs (non-blocking)
+    # Check for open PRs — fail-closed: if the check errors, skip the branch
     try:
         from colonyos.github import check_open_pr
         pr_number, _pr_url = check_open_pr(branch, repo_root, timeout=5)
@@ -212,6 +225,7 @@ def check_branch_safety(
             return f"has open PR #{pr_number}"
     except Exception as exc:
         logger.warning("Failed to check open PR for %s: %s", branch, exc)
+        return "unable to verify PR status"
 
     return None
 
@@ -231,8 +245,16 @@ def delete_branches(
     skipped: list[BranchInfo] = []
     errors: list[str] = []
 
+    # Hoist branch lookups out of the loop to avoid redundant subprocess calls
+    default_branch = _get_default_branch(repo_root)
+    current_branch = _get_current_branch(repo_root)
+
     for branch_info in branches:
-        skip_reason = check_branch_safety(branch_info.name, repo_root)
+        skip_reason = check_branch_safety(
+            branch_info.name, repo_root,
+            default_branch=default_branch,
+            current_branch=current_branch,
+        )
         if skip_reason:
             skipped.append(BranchInfo(
                 name=branch_info.name,
@@ -289,21 +311,6 @@ def delete_branches(
 # ---------------------------------------------------------------------------
 # Artifact cleanup
 # ---------------------------------------------------------------------------
-
-def _dir_size(path: Path) -> int:
-    """Calculate total size of a directory in bytes."""
-    total = 0
-    try:
-        for entry in path.rglob("*"):
-            if entry.is_file():
-                try:
-                    total += entry.stat().st_size
-                except OSError:
-                    pass
-    except OSError:
-        pass
-    return total
-
 
 def list_stale_artifacts(
     runs_dir: Path,
@@ -404,7 +411,9 @@ def delete_artifacts(
 # Structural scan
 # ---------------------------------------------------------------------------
 
-# Regex patterns for function/class definitions by language family
+# Regex patterns for function/class definitions by language family.
+# These are approximate, best-effort heuristics — they may over- or under-count
+# in some languages (especially Java) but are sufficient for complexity triage.
 _FUNCTION_PATTERNS: dict[str, re.Pattern[str]] = {
     ".py": re.compile(r"^\s*(?:def|class|async\s+def)\s+\w+", re.MULTILINE),
     ".js": re.compile(r"(?:^\s*(?:function|class)\s+\w+|^\s*(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?(?:\(|function))", re.MULTILINE),
@@ -581,12 +590,13 @@ def write_cleanup_log(
     Returns the path to the log file.
     """
     runs_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    now = datetime.now(timezone.utc)
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
     log_path = runs_dir / f"cleanup_{timestamp}.json"
 
     log_data = {
         "operation": operation,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now.isoformat(),
         "result": result,
     }
 

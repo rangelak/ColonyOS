@@ -198,6 +198,23 @@ class TestListMergedBranches:
         assert "main" not in names
         assert "colonyos/feature" in names
 
+    def test_handles_star_marker_branch(self, tmp_path: Path):
+        """Branch names with `*` marker from `git branch` are parsed correctly."""
+        git_output = "* main\n  colonyos/feature\n"
+        with patch("colonyos.cleanup.subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="refs/remotes/origin/main\n"),
+                MagicMock(returncode=0, stdout="main\n"),
+                MagicMock(returncode=0, stdout=git_output),
+                MagicMock(returncode=0, stdout="2026-01-01T00:00:00+00:00\n"),
+            ]
+            result = list_merged_branches(tmp_path, prefix="colonyos/")
+        # main should be excluded (it's the default branch), not mangled by lstrip
+        names = [b.name for b in result]
+        assert "main" not in names
+        assert "ain" not in names  # would appear if lstrip("* ") mangled "main"
+        assert "colonyos/feature" in names
+
     def test_handles_git_failure(self, tmp_path: Path):
         with patch("colonyos.cleanup.subprocess.run") as mock_run:
             mock_run.side_effect = [
@@ -249,6 +266,27 @@ class TestCheckBranchSafety:
                 reason = check_branch_safety("colonyos/old-feature", tmp_path)
         assert reason is None
 
+    def test_github_api_failure_is_fail_closed(self, tmp_path: Path):
+        """When the GitHub PR check fails, the branch should be skipped (fail-closed)."""
+        with patch("colonyos.cleanup.subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="refs/remotes/origin/main\n"),
+                MagicMock(returncode=0, stdout="main\n"),
+            ]
+            with patch("colonyos.github.check_open_pr", side_effect=RuntimeError("network error")):
+                reason = check_branch_safety("colonyos/some-branch", tmp_path)
+        assert reason is not None
+        assert "unable to verify" in reason
+
+    def test_accepts_precomputed_branches(self, tmp_path: Path):
+        """check_branch_safety should accept pre-computed default/current branch."""
+        with patch("colonyos.github.check_open_pr", return_value=(None, None)):
+            reason = check_branch_safety(
+                "colonyos/feature", tmp_path,
+                default_branch="main", current_branch="develop",
+            )
+        assert reason is None
+
 
 class TestDeleteBranches:
     def test_dry_run_returns_candidates(self, tmp_path: Path):
@@ -285,10 +323,11 @@ class TestDeleteBranches:
         ]
         with patch("colonyos.cleanup.check_branch_safety", return_value=None):
             with patch("colonyos.cleanup.subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(returncode=0)
+                mock_run.return_value = MagicMock(returncode=0, stdout="refs/remotes/origin/main\n")
                 result = delete_branches(branches, tmp_path, execute=True)
         assert "colonyos/done" in result.deleted_local
-        mock_run.assert_called_once()
+        # 3 calls: _get_default_branch, _get_current_branch, git branch -d
+        assert mock_run.call_count == 3
 
     def test_execute_handles_delete_failure(self, tmp_path: Path):
         branches = [

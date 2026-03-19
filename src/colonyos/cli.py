@@ -2400,13 +2400,13 @@ def cleanup_scan(
 
     category_styles = {
         "large": "yellow",
-        "very-large": "[bold yellow]",
-        "massive": "[bold red]",
+        "very-large": "bold yellow",
+        "massive": "bold red",
     }
 
     for fc in results:
         cat_style = category_styles.get(fc.category.value, "")
-        cat_display = f"[{cat_style}]{fc.category.value}[/{cat_style}]" if cat_style.startswith("[") else f"[{cat_style}]{fc.category.value}[/{cat_style}]"
+        cat_display = f"[{cat_style}]{fc.category.value}[/{cat_style}]"
         table.add_row(
             fc.path,
             str(fc.line_count),
@@ -2435,8 +2435,10 @@ def cleanup_scan(
             from colonyos.agent import run_phase_sync
             from colonyos.models import Phase
 
-            instruction_path = Path(__file__).parent / "instructions" / "cleanup_scan.md"
-            system_prompt = instruction_path.read_text(encoding="utf-8")
+            instructions_dir = Path(__file__).parent / "instructions"
+            base_prompt = (instructions_dir / "base.md").read_text(encoding="utf-8")
+            scan_prompt = (instructions_dir / "cleanup_scan.md").read_text(encoding="utf-8")
+            system_prompt = base_prompt + "\n\n" + scan_prompt
 
             scan_summary = "\n".join(
                 f"- `{r.path}`: {r.line_count} lines, {r.function_count} functions ({r.category.value})"
