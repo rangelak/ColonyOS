@@ -207,16 +207,26 @@ REPL_HISTORY_PATH = Path.home() / ".colonyos_history"
 REPL_HISTORY_LENGTH = 1000
 
 
+_DOTENV_ALLOWLIST_PREFIX = "COLONYOS_"
+
+
 def _load_dotenv() -> None:
-    """Load .env from the repo root if python-dotenv is available."""
+    """Load COLONYOS_* vars from .env; ignore everything else.
+
+    Other keys (e.g. ANTHROPIC_API_KEY) are left alone so they don't
+    override the Claude CLI's own auth.
+    """
     try:
-        from dotenv import load_dotenv
+        from dotenv import dotenv_values
     except ImportError:
         return
     repo_root = _find_repo_root()
     env_path = repo_root / ".env"
-    if env_path.is_file():
-        load_dotenv(env_path, override=False)
+    if not env_path.is_file():
+        return
+    for key, value in dotenv_values(env_path).items():
+        if key.startswith(_DOTENV_ALLOWLIST_PREFIX) and value is not None:
+            os.environ.setdefault(key, value)
 
 
 @click.group(invoke_without_command=True)

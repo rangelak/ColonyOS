@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -12,16 +14,54 @@ from claude_agent_sdk import (
     ResultMessage,
     query,
 )
-from claude_agent_sdk.types import StreamEvent
+from claude_agent_sdk.types import StreamEvent, SystemMessage
 
 from colonyos.models import Phase, PhaseResult
 
 if TYPE_CHECKING:
     from colonyos.ui import NullUI, PhaseUI
 
+logger = logging.getLogger(__name__)
+
+_API_KEY_SOURCE_LABELS = {
+    "none": "Claude subscription (no API key)",
+    "environment": "ANTHROPIC_API_KEY env var",
+    "config": "Claude config file",
+}
+
 
 def _log(msg: str) -> None:
     print(f"[colonyos] {msg}", file=sys.stderr, flush=True)
+
+
+def _friendly_error(exc: Exception) -> str:
+    """Extract a human-readable message from SDK exceptions."""
+    raw = str(exc)
+    stderr = getattr(exc, "stderr", None) or ""
+    result = getattr(exc, "result", None) or ""
+
+    for text in (result, stderr, raw):
+        lower = text.lower()
+        if "credit balance" in lower:
+            api_key_hint = ""
+            if os.environ.get("ANTHROPIC_API_KEY"):
+                api_key_hint = (
+                    " (ANTHROPIC_API_KEY is set in your environment — "
+                    "this may be overriding your Claude subscription. "
+                    "Unset it or remove it from .env to use your subscription.)"
+                )
+            return f"Credit balance is too low.{api_key_hint}"
+        if "authentication" in lower or "unauthorized" in lower:
+            return f"Authentication failed — check your API key or Claude login. {text.strip()}"
+        if "rate limit" in lower:
+            return f"Rate limited by the API. {text.strip()}"
+
+    if "exit code 1" in raw and not stderr:
+        return (
+            f"{raw} — the Claude CLI exited without details. "
+            "Try running `claude -p 'hello'` to check if it works."
+        )
+    return f"{raw}\n{stderr}".strip()
 
 
 async def run_phase(
@@ -60,17 +100,28 @@ async def run_phase(
 
     result_msg: ResultMessage | None = None
     current_tool: str | None = None
+    api_key_source: str | None = None
 
     try:
         async for message in query(prompt=prompt, options=options):
-            if isinstance(message, StreamEvent) and ui is not None:
+            if isinstance(message, SystemMessage):
+                api_key_source = message.data.get("apiKeySource")
+                label = _API_KEY_SOURCE_LABELS.get(
+                    api_key_source or "", api_key_source or "unknown"
+                )
+                if ui is not None:
+                    ui.on_text_delta(f"  Auth: {label}\n")
+                else:
+                    _log(f"Auth: {label}")
+
+            elif isinstance(message, StreamEvent) and ui is not None:
                 event = message.event
                 etype = event.get("type")
 
                 if etype == "content_block_start":
                     cb = event.get("content_block", {})
                     if cb.get("type") == "tool_use":
-                        current_tool = cb.get("name")
+                        current_tool = cb.get("name", "unknown")
                         ui.on_tool_start(current_tool)
 
                 elif etype == "content_block_delta":
@@ -93,19 +144,18 @@ async def run_phase(
                 result_msg = message
 
     except Exception as exc:
-        error_msg = f"Phase {phase.value} failed: {type(exc).__name__}: {exc}"
-        stderr = getattr(exc, "stderr", None) or ""
+        friendly = _friendly_error(exc)
+        error_msg = f"Phase {phase.value} failed: {friendly}"
         if ui is not None:
             ui.phase_error(error_msg)
         else:
             _log(error_msg)
-            if stderr:
-                _log(f"stderr: {stderr}")
+        logger.debug("Phase %s raw exception: %r", phase.value, exc)
         return PhaseResult(
             phase=phase,
             success=False,
             model=model,
-            error=f"{exc}\n{stderr}".strip(),
+            error=friendly,
         )
 
     if result_msg is None:
