@@ -922,9 +922,9 @@ class TestSlackMaxRunsPerHourValidation:
 
 
 class TestSlackAutoApproveWarning:
-    """Tests for the warning logged when slack.auto_approve is enabled."""
+    """Slack warnings moved to watch command; config parsing should not warn."""
 
-    def test_auto_approve_true_logs_warning(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
+    def test_auto_approve_true_no_config_warning(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text(
@@ -933,21 +933,9 @@ class TestSlackAutoApproveWarning:
         )
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
             load_config(tmp_repo)
-        assert any("slack.auto_approve is enabled" in msg for msg in caplog.messages)
+        assert not any("auto_approve" in msg for msg in caplog.messages)
 
-    def test_auto_approve_false_no_warning(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
-        config_dir = tmp_repo / ".colonyos"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
-            yaml.dump({"slack": {"auto_approve": False}}),
-            encoding="utf-8",
-        )
-        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
-            load_config(tmp_repo)
-        assert not any("slack.auto_approve is enabled" in msg for msg in caplog.messages)
-
-    def test_auto_approve_empty_allowlist_warns(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
-        """auto_approve + empty allowed_user_ids emits an extra warning."""
+    def test_auto_approve_empty_allowlist_no_config_warning(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text(
@@ -956,18 +944,4 @@ class TestSlackAutoApproveWarning:
         )
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
             load_config(tmp_repo)
-        assert any("EMPTY allowed_user_ids" in msg for msg in caplog.messages)
-
-    def test_auto_approve_with_allowlist_no_extra_warning(
-        self, tmp_repo: Path, caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """auto_approve + populated allowed_user_ids does NOT emit the extra warning."""
-        config_dir = tmp_repo / ".colonyos"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
-            yaml.dump({"slack": {"auto_approve": True, "allowed_user_ids": ["U123"]}}),
-            encoding="utf-8",
-        )
-        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
-            load_config(tmp_repo)
-        assert not any("EMPTY allowed_user_ids" in msg for msg in caplog.messages)
+        assert not any("allowed_user_ids" in msg for msg in caplog.messages)

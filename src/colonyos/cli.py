@@ -1862,6 +1862,18 @@ def watch(
         )
         sys.exit(1)
 
+    if config.slack.enabled and not config.slack.allowed_user_ids:
+        logger.warning(
+            "slack.allowed_user_ids is empty — any user in the configured "
+            "channels can trigger triage and approve pipelines."
+        )
+    if config.slack.auto_approve:
+        if not config.slack.allowed_user_ids:
+            logger.warning(
+                "slack.auto_approve is on with no allowed_user_ids — "
+                "any channel member can trigger autonomous code execution."
+            )
+
     from colonyos.slack import (
         SlackUI,
         SlackWatchState,

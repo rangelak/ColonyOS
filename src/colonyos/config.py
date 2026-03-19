@@ -218,27 +218,6 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
     enabled = bool(raw.get("enabled", False))
     auto_approve = bool(raw.get("auto_approve", False))
 
-    # Warn when Slack is enabled without an explicit user allowlist — channel
-    # membership alone is not a strong access control boundary.
-    if enabled and not allowed_user_ids_raw:
-        logger.warning(
-            "slack.enabled is true but allowed_user_ids is empty. "
-            "Any user in the configured channels can trigger triage and "
-            "approve pipelines. Set allowed_user_ids to restrict access."
-        )
-
-    if auto_approve:
-        logger.warning(
-            "slack.auto_approve is enabled — Slack messages that pass triage "
-            "will trigger autonomous code execution with no human approval gate. "
-            "Ensure this is intentional for your environment."
-        )
-        if not allowed_user_ids_raw:
-            logger.warning(
-                "slack.auto_approve is enabled with an EMPTY allowed_user_ids list. "
-                "ANY user in the configured channels can trigger autonomous code "
-                "execution. Set allowed_user_ids to restrict access."
-            )
     return SlackConfig(
         enabled=enabled,
         channels=list(raw.get("channels", [])),
