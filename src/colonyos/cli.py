@@ -2615,11 +2615,15 @@ def watch(
 
             # Extract the raw prompt text from the parent's formatted
             # source_value to avoid double-wrapping in <slack_message> tags.
-            original_prompt = (
+            # Defense-in-depth: re-sanitize extracted text in case the parent's
+            # source_value was populated from a non-Slack path in the future.
+            from colonyos.sanitize import sanitize_untrusted_content
+            raw_prompt = (
                 extract_raw_from_formatted_prompt(parent_item.source_value)
                 if parent_item
                 else ""
             )
+            original_prompt = sanitize_untrusted_content(raw_prompt) if raw_prompt else ""
             prd_rel = ""
             task_rel = ""
             # Try to get PRD/task from parent run log

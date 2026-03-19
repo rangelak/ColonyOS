@@ -59,12 +59,12 @@ def strip_slack_links(text: str) -> str:
     - ``<https://example.com>`` → ``https://example.com``
     - Malformed markup (missing pipe, nested brackets) is left as-is
 
-    Stripped URLs are logged at DEBUG level for forensic audit trails.
+    Stripped URLs are logged at INFO level for forensic audit trails.
     """
     # First pass: <URL|display_text> → display_text
     # Log stripped URLs for audit before removing them.
     for m in _SLACK_LINK_RE.finditer(text):
-        logger.debug("Stripping Slack link URL: %s (display: %s)", m.group(1), m.group(2))
+        logger.info("Stripping Slack link URL: %s (display: %s)", m.group(1), m.group(2))
     text = _SLACK_LINK_RE.sub(r"\2", text)
     # Second pass: bare <URL> → URL (angle brackets removed, URL kept)
     text = _SLACK_BARE_LINK_RE.sub(r"\1", text)
