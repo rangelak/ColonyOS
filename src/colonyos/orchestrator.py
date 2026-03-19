@@ -1699,12 +1699,29 @@ def run(
                             capture_output=True, text=True, cwd=repo_root, timeout=30,
                         )
                         branch_ok, branch_err = validate_branch_exists(base_branch, repo_root)
-                    except Exception:
-                        pass
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        _log(f"Failed to fetch base branch '{base_branch}': {exc}")
                 if not branch_ok:
                     raise PreflightError(
                         f"Base branch '{base_branch}' does not exist: {branch_err}"
                     )
+
+            # Check out the base branch so the feature branch is created
+            # from the correct starting point (FR-13).
+            try:
+                checkout_result = subprocess.run(
+                    ["git", "checkout", base_branch],
+                    capture_output=True, text=True, cwd=repo_root, timeout=30,
+                )
+                if checkout_result.returncode != 0:
+                    raise PreflightError(
+                        f"Failed to checkout base branch '{base_branch}': "
+                        f"{checkout_result.stderr.strip()}"
+                    )
+            except subprocess.TimeoutExpired:
+                raise PreflightError(
+                    f"Timeout checking out base branch '{base_branch}'"
+                )
 
         # --- Pre-flight git state check ---
         preflight = _preflight_check(

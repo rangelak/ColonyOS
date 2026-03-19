@@ -23,6 +23,7 @@ class PreflightError(click.ClickException):
 class Phase(str, Enum):
     CEO = "ceo"
     PLAN = "plan"
+    TRIAGE = "triage"
     IMPLEMENT = "implement"
     REVIEW = "review"
     DECISION = "decision"

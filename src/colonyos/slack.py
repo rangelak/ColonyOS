@@ -27,6 +27,9 @@ from typing import Any
 from colonyos.config import SlackConfig, runs_dir_path
 from colonyos.sanitize import sanitize_untrusted_content
 
+# Strict allowlist for git branch ref characters (matches git-check-ref-format rules).
+_VALID_GIT_REF_RE = re.compile(r"^[a-zA-Z0-9._/\-]+$")
+
 logger = logging.getLogger(__name__)
 
 
@@ -349,6 +352,8 @@ class SlackWatchState:
     daily_cost_reset_date: str = field(
         default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d")
     )
+    consecutive_failures: int = 0
+    queue_paused: bool = False
 
     def reset_daily_cost_if_needed(self) -> None:
         """Reset daily cost counter if the UTC date has changed."""
@@ -388,6 +393,8 @@ class SlackWatchState:
             "hourly_trigger_counts": dict(self.hourly_trigger_counts),
             "daily_cost_usd": self.daily_cost_usd,
             "daily_cost_reset_date": self.daily_cost_reset_date,
+            "consecutive_failures": self.consecutive_failures,
+            "queue_paused": self.queue_paused,
         }
 
     @classmethod
@@ -404,6 +411,8 @@ class SlackWatchState:
                 "daily_cost_reset_date",
                 datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             ),
+            consecutive_failures=data.get("consecutive_failures", 0),
+            queue_paused=bool(data.get("queue_paused", False)),
         )
 
 
@@ -562,11 +571,19 @@ def _parse_triage_response(raw_text: str) -> TriageResult:
             reasoning=f"Failed to parse triage response: {text[:200]}",
         )
 
+    raw_branch = data.get("base_branch") or None
+    if raw_branch and not is_valid_git_ref(raw_branch):
+        logger.warning(
+            "Triage returned invalid base_branch '%s', ignoring",
+            str(raw_branch)[:100],
+        )
+        raw_branch = None
+
     return TriageResult(
         actionable=bool(data.get("actionable", False)),
         confidence=float(data.get("confidence", 0.0)),
         summary=str(data.get("summary", "")),
-        base_branch=data.get("base_branch") or None,
+        base_branch=raw_branch,
         reasoning=str(data.get("reasoning", "")),
     )
 
@@ -598,7 +615,7 @@ def triage_message(
     )
 
     result = run_phase_sync(
-        Phase.PLAN,  # reuse plan phase enum; triage is a lightweight call
+        Phase.TRIAGE,
         user,
         cwd=Path("."),
         system_prompt=system,
@@ -623,15 +640,38 @@ def triage_message(
     return _parse_triage_response(raw_text)
 
 
+def is_valid_git_ref(ref: str) -> bool:
+    """Return True if *ref* contains only characters valid in a git branch name.
+
+    Uses a strict allowlist: ``[a-zA-Z0-9._/-]``.  This rejects special
+    characters, whitespace, shell meta-characters, backticks, and newlines
+    that could be used for prompt injection or command injection.
+    """
+    if not ref or len(ref) > 255:
+        return False
+    if ref.startswith("/") or ref.endswith("/") or ref.endswith("."):
+        return False
+    if ".." in ref:
+        return False
+    return bool(_VALID_GIT_REF_RE.match(ref))
+
+
 def extract_base_branch(text: str) -> str | None:
     """Extract an explicit base branch from message text using known patterns.
 
-    Returns the branch name if found, otherwise None.
+    Returns the branch name if found and valid, otherwise None.
     """
     for pattern in _BASE_BRANCH_PATTERNS:
         match = pattern.search(text)
         if match:
-            return match.group(1)
+            candidate = match.group(1)
+            if is_valid_git_ref(candidate):
+                return candidate
+            logger.warning(
+                "Extracted base branch '%s' contains invalid characters, ignoring",
+                candidate[:100],
+            )
+            return None
     return None
 
 

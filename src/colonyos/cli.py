@@ -1738,9 +1738,9 @@ def watch(
     state_lock = threading.Lock()
     # Semaphore limits concurrent pipeline runs to 1 to prevent git conflicts.
     pipeline_semaphore = threading.Semaphore(1)
-    # Track consecutive failures for circuit breaker.
-    consecutive_failures = 0
-    queue_paused = False
+    # Restore circuit breaker state from persisted watch state.
+    consecutive_failures = watch_state.consecutive_failures
+    queue_paused = watch_state.queue_paused
 
     # Retrieve the bot user ID for mention detection
     try:
@@ -1917,13 +1917,13 @@ def watch(
             _save_queue_state(repo_root, queue_state)
             save_watch_state(repo_root, watch_state)
 
-            # Calculate queue position for acknowledgment
+            # Calculate queue position for acknowledgment (pending items only)
             pending_items = [
                 i for i in queue_state.items
                 if i.status == QueueItemStatus.PENDING
             ]
             position = len(pending_items)
-            total = len(queue_state.items)
+            total = len(pending_items)
 
         # Post triage acknowledgment
         needs_approval = not config.slack.auto_approve
@@ -1979,7 +1979,14 @@ def watch(
 
                 slack_ts = item_to_run.slack_ts
                 slack_channel = item_to_run.slack_channel
-                client = slack_client_ref[0] if slack_client_ref else None
+                if not slack_client_ref:
+                    logger.warning("Slack client not yet available, deferring item %s", item_to_run.id)
+                    with state_lock:
+                        item_to_run.status = QueueItemStatus.PENDING
+                        _save_queue_state(repo_root, queue_state)
+                    shutdown_event.wait(timeout=2.0)
+                    continue
+                client = slack_client_ref[0]
 
                 # Approval gate for Slack-sourced items
                 if not current_config.slack.auto_approve and client and slack_ts and slack_channel:
@@ -2058,6 +2065,8 @@ def watch(
                     watch_state.aggregate_cost_usd += log.total_cost_usd
                     watch_state.reset_daily_cost_if_needed()
                     watch_state.daily_cost_usd += log.total_cost_usd
+                    watch_state.consecutive_failures = consecutive_failures
+                    watch_state.queue_paused = queue_paused
                     queue_state.aggregate_cost_usd += log.total_cost_usd
                     _save_queue_state(repo_root, queue_state)
                     save_watch_state(repo_root, watch_state)
@@ -2083,6 +2092,10 @@ def watch(
                 # Check consecutive failure circuit breaker
                 if consecutive_failures >= current_config.slack.max_consecutive_failures:
                     queue_paused = True
+                    with state_lock:
+                        watch_state.consecutive_failures = consecutive_failures
+                        watch_state.queue_paused = queue_paused
+                        save_watch_state(repo_root, watch_state)
                     logger.warning(
                         "Queue paused: %d consecutive failures", consecutive_failures,
                     )
@@ -2106,6 +2119,8 @@ def watch(
                         item_to_run.status = QueueItemStatus.FAILED
                         item_to_run.error = "Executor error"
                         consecutive_failures += 1
+                        watch_state.consecutive_failures = consecutive_failures
+                        watch_state.queue_paused = queue_paused
                         _save_queue_state(repo_root, queue_state)
                         save_watch_state(repo_root, watch_state)
             finally:
