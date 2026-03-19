@@ -1,0 +1,270 @@
+"""Tests for the agent module, focusing on parallel execution callbacks."""
+from __future__ import annotations
+
+import asyncio
+from typing import Callable
+from unittest.mock import patch, MagicMock
+
+import pytest
+
+from colonyos.models import Phase, PhaseResult
+
+
+def _fake_phase_result(idx: int, phase: Phase = Phase.REVIEW) -> PhaseResult:
+    """Create a fake PhaseResult for testing."""
+    return PhaseResult(
+        phase=phase,
+        success=True,
+        cost_usd=0.1 * (idx + 1),
+        duration_ms=100 * (idx + 1),
+        session_id=f"session-{idx}",
+        artifacts={"result": f"Result {idx}"},
+    )
+
+
+class TestRunPhasesParallel:
+    """Tests for run_phases_parallel and run_phases_parallel_sync."""
+
+    def test_callback_is_invoked_for_each_completed_task(self) -> None:
+        """Test that on_complete callback is invoked for each completed task."""
+        from colonyos.agent import run_phases_parallel
+
+        completed_indices: list[int] = []
+        completed_results: list[PhaseResult] = []
+
+        def on_complete(idx: int, result: PhaseResult) -> None:
+            completed_indices.append(idx)
+            completed_results.append(result)
+
+        # Track which prompt corresponds to which index via closure
+        prompt_to_idx = {"prompt 0": 0, "prompt 1": 1, "prompt 2": 2}
+
+        async def mock_run_phase(
+            phase: Phase,
+            prompt: str,
+            *,
+            cwd: object,
+            system_prompt: str,
+            **kwargs: object,
+        ) -> PhaseResult:
+            idx = prompt_to_idx[prompt]
+            # Simulate different completion times based on index
+            await asyncio.sleep(0.01 * (3 - idx))  # Earlier indices complete later
+            return _fake_phase_result(idx)
+
+        calls = [
+            {"phase": Phase.REVIEW, "prompt": f"prompt {i}", "cwd": "/tmp", "system_prompt": "sys"}
+            for i in range(3)
+        ]
+
+        async def run_test() -> list[PhaseResult]:
+            with patch("colonyos.agent.run_phase", side_effect=mock_run_phase):
+                return await run_phases_parallel(calls, on_complete=on_complete)
+
+        final_results = asyncio.run(run_test())
+
+        # Callback should have been invoked 3 times
+        assert len(completed_indices) == 3
+        assert len(completed_results) == 3
+
+        # Results should be in original call order
+        assert len(final_results) == 3
+        for i, r in enumerate(final_results):
+            assert r.session_id == f"session-{i}"
+
+    def test_callback_receives_correct_index_and_result(self) -> None:
+        """Test that callback receives the correct index (original call order) and result."""
+        from colonyos.agent import run_phases_parallel
+
+        callback_data: list[tuple[int, PhaseResult]] = []
+
+        def on_complete(idx: int, result: PhaseResult) -> None:
+            callback_data.append((idx, result))
+
+        prompt_to_idx = {"prompt 0": 0, "prompt 1": 1}
+
+        async def mock_run_phase(
+            phase: Phase,
+            prompt: str,
+            *,
+            cwd: object,
+            system_prompt: str,
+            **kwargs: object,
+        ) -> PhaseResult:
+            idx = prompt_to_idx[prompt]
+            # Second task completes first
+            await asyncio.sleep(0.01 if idx == 0 else 0.001)
+            return _fake_phase_result(idx)
+
+        calls = [
+            {"phase": Phase.REVIEW, "prompt": f"prompt {i}", "cwd": "/tmp", "system_prompt": "sys"}
+            for i in range(2)
+        ]
+
+        async def run_test() -> None:
+            with patch("colonyos.agent.run_phase", side_effect=mock_run_phase):
+                await run_phases_parallel(calls, on_complete=on_complete)
+
+        asyncio.run(run_test())
+
+        # Both should be called
+        assert len(callback_data) == 2
+
+        # Verify indices match the original call order, not completion order
+        indices = [idx for idx, _ in callback_data]
+        assert sorted(indices) == [0, 1]
+
+        # Verify results match indices
+        for idx, result in callback_data:
+            assert result.session_id == f"session-{idx}"
+
+    def test_backward_compatibility_callback_none(self) -> None:
+        """Test that callback=None works as before (no callback invoked)."""
+        from colonyos.agent import run_phases_parallel
+
+        prompt_to_idx = {"prompt 0": 0, "prompt 1": 1}
+
+        async def mock_run_phase(
+            phase: Phase,
+            prompt: str,
+            *,
+            cwd: object,
+            system_prompt: str,
+            **kwargs: object,
+        ) -> PhaseResult:
+            idx = prompt_to_idx[prompt]
+            return _fake_phase_result(idx)
+
+        calls = [
+            {"phase": Phase.REVIEW, "prompt": f"prompt {i}", "cwd": "/tmp", "system_prompt": "sys"}
+            for i in range(2)
+        ]
+
+        async def run_test() -> list[PhaseResult]:
+            with patch("colonyos.agent.run_phase", side_effect=mock_run_phase):
+                # Should work without callback (default None)
+                return await run_phases_parallel(calls)
+
+        final_results = asyncio.run(run_test())
+
+        assert len(final_results) == 2
+        assert final_results[0].session_id == "session-0"
+        assert final_results[1].session_id == "session-1"
+
+    def test_callback_invocation_order_matches_completion_order(self) -> None:
+        """Test that callbacks are invoked in task completion order, not call order."""
+        from colonyos.agent import run_phases_parallel
+
+        completion_order: list[int] = []
+
+        def on_complete(idx: int, result: PhaseResult) -> None:
+            completion_order.append(idx)
+
+        prompt_to_idx = {"prompt 0": 0, "prompt 1": 1, "prompt 2": 2}
+
+        async def mock_run_phase(
+            phase: Phase,
+            prompt: str,
+            *,
+            cwd: object,
+            system_prompt: str,
+            **kwargs: object,
+        ) -> PhaseResult:
+            idx = prompt_to_idx[prompt]
+            # Create explicit completion order: 2, 0, 1
+            delays = {0: 0.02, 1: 0.03, 2: 0.01}
+            await asyncio.sleep(delays[idx])
+            return _fake_phase_result(idx)
+
+        calls = [
+            {"phase": Phase.REVIEW, "prompt": f"prompt {i}", "cwd": "/tmp", "system_prompt": "sys"}
+            for i in range(3)
+        ]
+
+        async def run_test() -> None:
+            with patch("colonyos.agent.run_phase", side_effect=mock_run_phase):
+                await run_phases_parallel(calls, on_complete=on_complete)
+
+        asyncio.run(run_test())
+
+        # Completion order should be 2, 0, 1 based on delays
+        assert completion_order == [2, 0, 1]
+
+    def test_sync_wrapper_passes_callback(self) -> None:
+        """Test that run_phases_parallel_sync passes through the callback parameter."""
+        from colonyos.agent import run_phases_parallel_sync
+
+        results = [_fake_phase_result(i) for i in range(2)]
+        callback_called: list[int] = []
+
+        def on_complete(idx: int, result: PhaseResult) -> None:
+            callback_called.append(idx)
+
+        async def mock_run_phases_parallel(
+            calls: list[dict],
+            on_complete: Callable[[int, PhaseResult], None] | None = None,
+        ) -> list[PhaseResult]:
+            # Verify callback was passed through
+            assert on_complete is not None
+            for i, _ in enumerate(calls):
+                on_complete(i, results[i])
+            return results
+
+        with patch("colonyos.agent.run_phases_parallel", side_effect=mock_run_phases_parallel):
+            final_results = run_phases_parallel_sync(
+                [{"phase": Phase.REVIEW, "prompt": "p", "cwd": "/tmp", "system_prompt": "s"}] * 2,
+                on_complete=on_complete,
+            )
+
+        assert len(final_results) == 2
+        assert callback_called == [0, 1]
+
+    def test_empty_calls_list(self) -> None:
+        """Test that empty calls list works correctly."""
+        from colonyos.agent import run_phases_parallel
+
+        callback_called: list[int] = []
+
+        def on_complete(idx: int, result: PhaseResult) -> None:
+            callback_called.append(idx)
+
+        async def run_test() -> list[PhaseResult]:
+            return await run_phases_parallel([], on_complete=on_complete)
+
+        results = asyncio.run(run_test())
+
+        assert results == []
+        assert callback_called == []
+
+    def test_results_preserve_original_order(self) -> None:
+        """Test that final results are in original call order regardless of completion order."""
+        from colonyos.agent import run_phases_parallel
+
+        prompt_to_idx = {"prompt 0": 0, "prompt 1": 1, "prompt 2": 2}
+
+        async def mock_run_phase(
+            phase: Phase,
+            prompt: str,
+            *,
+            cwd: object,
+            system_prompt: str,
+            **kwargs: object,
+        ) -> PhaseResult:
+            idx = prompt_to_idx[prompt]
+            # Reverse completion order
+            await asyncio.sleep(0.01 * (3 - idx))
+            return _fake_phase_result(idx)
+
+        calls = [
+            {"phase": Phase.REVIEW, "prompt": f"prompt {i}", "cwd": "/tmp", "system_prompt": "sys"}
+            for i in range(3)
+        ]
+
+        async def run_test() -> list[PhaseResult]:
+            with patch("colonyos.agent.run_phase", side_effect=mock_run_phase):
+                return await run_phases_parallel(calls)
+
+        results = asyncio.run(run_test())
+
+        # Results should be in original call order
+        assert [r.session_id for r in results] == ["session-0", "session-1", "session-2"]

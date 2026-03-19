@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from claude_agent_sdk import (
     AgentDefinition,
@@ -229,12 +229,60 @@ def run_phase_sync(
     )
 
 
-async def run_phases_parallel(calls: list[dict]) -> list[PhaseResult]:
-    """Run multiple phase calls concurrently via asyncio.gather."""
-    tasks = [run_phase(**c) for c in calls]
-    return list(await asyncio.gather(*tasks))
+async def run_phases_parallel(
+    calls: list[dict],
+    on_complete: Callable[[int, PhaseResult], None] | None = None,
+) -> list[PhaseResult]:
+    """Run multiple phase calls concurrently, invoking callback as each completes.
+
+    Args:
+        calls: List of kwargs dicts to pass to run_phase().
+        on_complete: Optional callback invoked for each completed task.
+            Signature: (index, result) where index is the original call order index.
+
+    Returns:
+        Results in the same order as the input calls list.
+    """
+    if not calls:
+        return []
+
+    # Create tasks with their original indices
+    tasks_with_indices: list[tuple[int, asyncio.Task[PhaseResult]]] = []
+    for i, call_kwargs in enumerate(calls):
+        task = asyncio.create_task(run_phase(**call_kwargs))
+        tasks_with_indices.append((i, task))
+
+    # Map task to index for lookup
+    task_to_index = {task: idx for idx, task in tasks_with_indices}
+
+    # Collect results in completion order, storing by original index
+    results: dict[int, PhaseResult] = {}
+    pending = {task for _, task in tasks_with_indices}
+
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            idx = task_to_index[task]
+            result = task.result()
+            results[idx] = result
+            if on_complete is not None:
+                on_complete(idx, result)
+
+    # Return results in original call order
+    return [results[i] for i in range(len(calls))]
 
 
-def run_phases_parallel_sync(calls: list[dict]) -> list[PhaseResult]:
-    """Synchronous wrapper for run_phases_parallel."""
-    return asyncio.run(run_phases_parallel(calls))
+def run_phases_parallel_sync(
+    calls: list[dict],
+    on_complete: Callable[[int, PhaseResult], None] | None = None,
+) -> list[PhaseResult]:
+    """Synchronous wrapper for run_phases_parallel.
+
+    Args:
+        calls: List of kwargs dicts to pass to run_phase().
+        on_complete: Optional callback invoked for each completed task.
+
+    Returns:
+        Results in the same order as the input calls list.
+    """
+    return asyncio.run(run_phases_parallel(calls, on_complete=on_complete))

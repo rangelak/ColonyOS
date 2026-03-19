@@ -34,7 +34,7 @@ from colonyos.naming import (
 from colonyos.github import check_open_pr
 from colonyos.sanitize import sanitize_untrusted_content
 from colonyos.slack import is_valid_git_ref
-from colonyos.ui import NullUI, PhaseUI, make_reviewer_prefix, print_reviewer_legend
+from colonyos.ui import NullUI, ParallelProgressLine, PhaseUI, make_reviewer_prefix, print_reviewer_legend
 
 
 def _touch_heartbeat(repo_root: Path) -> None:
@@ -1308,7 +1308,21 @@ def run_standalone_review(
                 ui=persona_ui,
             ))
 
-        results = run_phases_parallel_sync(review_calls)
+        # Create progress tracker for real-time status updates
+        progress_tracker: ParallelProgressLine | None = None
+        if not quiet:
+            is_tty = sys.stderr.isatty()
+            reviewer_list = [(i, p.role) for i, p in enumerate(reviewers)]
+            progress_tracker = ParallelProgressLine(reviewer_list, is_tty=is_tty)
+
+        results = run_phases_parallel_sync(
+            review_calls,
+            on_complete=progress_tracker.on_reviewer_complete if progress_tracker else None,
+        )
+
+        # Print summary after all reviewers complete
+        if progress_tracker is not None:
+            progress_tracker.print_summary(round_num=round_num)
 
         # Save each persona's review artifact
         for persona, result in zip(reviewers, results):
@@ -2297,7 +2311,21 @@ def _run_pipeline(
                         ui=persona_ui,
                     ))
 
-                results = run_phases_parallel_sync(review_calls)
+                # Create progress tracker for real-time status updates
+                progress_tracker: ParallelProgressLine | None = None
+                if not quiet:
+                    is_tty = sys.stderr.isatty()
+                    reviewer_list = [(i, p.role) for i, p in enumerate(reviewers)]
+                    progress_tracker = ParallelProgressLine(reviewer_list, is_tty=is_tty)
+
+                results = run_phases_parallel_sync(
+                    review_calls,
+                    on_complete=progress_tracker.on_reviewer_complete if progress_tracker else None,
+                )
+
+                # Print summary after all reviewers complete
+                if progress_tracker is not None:
+                    progress_tracker.print_summary(round_num=iteration + 1)
 
                 # Save each persona's review artifact
                 for persona, result in zip(reviewers, results):

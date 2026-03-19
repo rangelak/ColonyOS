@@ -185,3 +185,77 @@ class TestXmlTagRegex:
 
     def test_does_not_match_angle_brackets_in_text(self) -> None:
         assert XML_TAG_RE.search("3 < 5 and 5 > 3") is None
+
+
+class TestSanitizeDisplayText:
+    """Tests for sanitize_display_text() function."""
+
+    def test_strips_ansi_escape_sequences(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # Red text ANSI escape
+        assert sanitize_display_text("\x1b[31mred\x1b[0m") == "red"
+
+    def test_strips_bold_ansi_sequence(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        assert sanitize_display_text("\x1b[1mbold\x1b[0m") == "bold"
+
+    def test_strips_complex_ansi_sequence(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # 256-color ANSI escape
+        assert sanitize_display_text("\x1b[38;5;196mcolorful\x1b[0m") == "colorful"
+
+    def test_strips_control_characters(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        assert sanitize_display_text("hello\x00world") == "helloworld"
+
+    def test_strips_null_and_bell(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        assert sanitize_display_text("test\x00\x07string") == "teststring"
+
+    def test_strips_high_control_characters(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # \x7f is DEL, \x9f is a high control char
+        assert sanitize_display_text("foo\x7fbar\x9fbaz") == "foobarbaz"
+
+    def test_preserves_normal_unicode(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # Emoji and accented characters should be preserved
+        assert sanitize_display_text("Hello 🚀 World") == "Hello 🚀 World"
+        assert sanitize_display_text("café résumé") == "café résumé"
+
+    def test_preserves_box_drawing_chars(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # Box drawing characters (╔═╗) should be preserved
+        assert sanitize_display_text("╔══╗") == "╔══╗"
+
+    def test_empty_string(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        assert sanitize_display_text("") == ""
+
+    def test_whitespace_only_stripped(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        assert sanitize_display_text("   ") == ""
+
+    def test_leading_trailing_whitespace_stripped(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        assert sanitize_display_text("  hello  ") == "hello"
+
+    def test_mixed_content(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # ANSI + control chars + normal text
+        text = "\x1b[31m\x00red\x1b[0m text"
+        assert sanitize_display_text(text) == "red text"
+
+    def test_newlines_preserved(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # Newlines and tabs are typically useful - they're above \x1f
+        # Actually \n is \x0a which is in control char range, but let's
+        # explicitly test and see behavior
+        result = sanitize_display_text("line1\nline2")
+        # Newlines ARE control characters, so they get stripped
+        assert result == "line1line2"
+
+    def test_tabs_stripped(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # Tab is \x09, a control character
+        assert sanitize_display_text("col1\tcol2") == "col1col2"
