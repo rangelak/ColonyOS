@@ -75,6 +75,7 @@ async def run_phase(
     max_turns: int | None = None,
     agents: dict[str, AgentDefinition] | None = None,
     allowed_tools: list[str] | None = None,
+    permission_mode: str = "bypassPermissions",
     ui: PhaseUI | NullUI | None = None,
 ) -> PhaseResult:
     """Run a single phase by invoking Claude Code with the given prompt and instructions."""
@@ -89,7 +90,7 @@ async def run_phase(
         model=model,
         max_turns=max_turns,
         max_budget_usd=budget_usd,
-        permission_mode="bypassPermissions",
+        permission_mode=permission_mode,
         allowed_tools=allowed_tools,
         agents=agents,
         include_partial_messages=ui is not None,
@@ -210,6 +211,7 @@ def run_phase_sync(
     max_turns: int | None = None,
     agents: dict[str, AgentDefinition] | None = None,
     allowed_tools: list[str] | None = None,
+    permission_mode: str = "bypassPermissions",
     ui: PhaseUI | NullUI | None = None,
 ) -> PhaseResult:
     """Synchronous wrapper around run_phase for use in non-async contexts."""
@@ -224,6 +226,7 @@ def run_phase_sync(
             max_turns=max_turns,
             agents=agents,
             allowed_tools=allowed_tools,
+            permission_mode=permission_mode,
             ui=ui,
         )
     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -378,6 +379,38 @@ def render_config_preview(
 # AI-assisted init (FR-1, FR-3, FR-5, FR-6)
 # ---------------------------------------------------------------------------
 
+_AI_INIT_TIMEOUT_SECONDS = 30
+
+
+class _AiInitTimeout(Exception):
+    """Raised when the AI init LLM call exceeds the allowed time."""
+
+
+def _friendly_init_error(exc: Exception) -> str:
+    """Extract a human-readable message from SDK exceptions during init.
+
+    Mirrors the ``_friendly_error`` helper in ``agent.py`` but is tailored
+    to the init context where the user may not yet have a working API key.
+    """
+    raw = str(exc)
+    stderr = getattr(exc, "stderr", None) or ""
+    result = getattr(exc, "result", None) or ""
+
+    for text in (result, stderr, raw):
+        lower = text.lower()
+        if "credit balance" in lower:
+            return "Credit balance is too low to run AI setup."
+        if "authentication" in lower or "unauthorized" in lower:
+            return f"Authentication failed — check your API key or Claude login. {text.strip()}"
+        if "rate limit" in lower:
+            return f"Rate limited by the API. {text.strip()}"
+
+    if isinstance(exc, _AiInitTimeout):
+        return f"AI setup timed out after {_AI_INIT_TIMEOUT_SECONDS}s."
+
+    return raw
+
+
 def run_ai_init(
     repo_root: Path,
     *,
@@ -417,19 +450,37 @@ def run_ai_init(
         "Output only valid JSON matching the schema in your instructions."
     )
 
-    try:
-        result: PhaseResult = run_phase_sync(
-            Phase.PLAN,
-            prompt,
-            cwd=repo_root,
-            system_prompt=system_prompt,
-            model="haiku",
-            budget_usd=0.50,
-            max_turns=3,
-            allowed_tools=["Read", "Glob", "Grep"],
+    def _timeout_handler(signum: int, frame: object) -> None:
+        raise _AiInitTimeout(
+            f"AI init LLM call exceeded {_AI_INIT_TIMEOUT_SECONDS}s deadline"
         )
+
+    try:
+        # Install a SIGALRM-based timeout on platforms that support it
+        _has_alarm = hasattr(signal, "SIGALRM")
+        if _has_alarm:
+            old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+            signal.alarm(_AI_INIT_TIMEOUT_SECONDS)
+
+        try:
+            result: PhaseResult = run_phase_sync(
+                Phase.PLAN,
+                prompt,
+                cwd=repo_root,
+                system_prompt=system_prompt,
+                model="haiku",
+                budget_usd=0.50,
+                max_turns=3,
+                allowed_tools=["Read", "Glob", "Grep"],
+                permission_mode="default",
+            )
+        finally:
+            if _has_alarm:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
     except Exception as exc:
-        click.echo(f"AI setup unavailable ({exc}), falling back to manual wizard.\n")
+        friendly = _friendly_init_error(exc)
+        click.echo(f"AI setup unavailable ({friendly}), falling back to manual wizard.\n")
         return run_init(repo_root, defaults=repo_ctx)
 
     if not result.success:

@@ -10,6 +10,9 @@ from colonyos.config import ColonyConfig, save_config
 from colonyos.models import Persona, PhaseResult, Phase, ProjectInfo, RepoContext
 from colonyos.init import (
     MODEL_PRESETS,
+    _AI_INIT_TIMEOUT_SECONDS,
+    _AiInitTimeout,
+    _friendly_init_error,
     select_persona_pack,
     _collect_personas_with_packs,
     run_init,
@@ -505,6 +508,104 @@ class TestErrorHandling:
                 pass
 
         assert not (tmp_path / ".colonyos" / "config.yaml").exists()
+
+    def test_auth_failure_shows_friendly_message(self, tmp_path: Path, capsys):
+        """Auth failures should produce a human-readable message, not raw exc."""
+        with patch("colonyos.agent.run_phase_sync", side_effect=Exception("authentication failed")), \
+             patch("colonyos.init.run_init") as mock_run_init, \
+             patch("colonyos.init.click") as mock_click:
+            mock_click.echo = click.echo
+            mock_run_init.return_value = ColonyConfig()
+            run_ai_init(tmp_path)
+
+        captured = capsys.readouterr()
+        assert "Authentication failed" in captured.out
+
+    def test_credit_balance_shows_friendly_message(self, tmp_path: Path, capsys):
+        """Credit balance errors should produce a friendly message."""
+        with patch("colonyos.agent.run_phase_sync", side_effect=Exception("credit balance is too low")), \
+             patch("colonyos.init.run_init") as mock_run_init, \
+             patch("colonyos.init.click") as mock_click:
+            mock_click.echo = click.echo
+            mock_run_init.return_value = ColonyConfig()
+            run_ai_init(tmp_path)
+
+        captured = capsys.readouterr()
+        assert "Credit balance" in captured.out
+
+    def test_rate_limit_shows_friendly_message(self, tmp_path: Path, capsys):
+        """Rate-limit errors should produce a friendly message."""
+        with patch("colonyos.agent.run_phase_sync", side_effect=Exception("rate limit exceeded")), \
+             patch("colonyos.init.run_init") as mock_run_init, \
+             patch("colonyos.init.click") as mock_click:
+            mock_click.echo = click.echo
+            mock_run_init.return_value = ColonyConfig()
+            run_ai_init(tmp_path)
+
+        captured = capsys.readouterr()
+        assert "Rate limited" in captured.out
+
+    def test_timeout_shows_friendly_message(self, tmp_path: Path, capsys):
+        """Timeout errors should produce a friendly message."""
+        with patch("colonyos.agent.run_phase_sync", side_effect=_AiInitTimeout("timed out")), \
+             patch("colonyos.init.run_init") as mock_run_init, \
+             patch("colonyos.init.click") as mock_click:
+            mock_click.echo = click.echo
+            mock_run_init.return_value = ColonyConfig()
+            run_ai_init(tmp_path)
+
+        captured = capsys.readouterr()
+        assert "timed out" in captured.out
+
+    def test_run_phase_sync_called_with_default_permission_mode(self, tmp_path: Path):
+        """run_ai_init must pass permission_mode='default' to run_phase_sync."""
+        response = json.dumps({
+            "pack_key": "startup",
+            "preset_name": "Cost-optimized",
+            "project_name": "TestApp",
+            "project_description": "",
+            "project_stack": "Python",
+            "vision": "",
+        })
+        result = PhaseResult(
+            phase=Phase.PLAN,
+            success=True,
+            cost_usd=0.003,
+            artifacts={"result": response},
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=result) as mock_rps, \
+             patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init.render_config_preview"):
+            mock_click.echo = click.echo
+            mock_click.confirm.return_value = True
+            run_ai_init(tmp_path)
+
+        mock_rps.assert_called_once()
+        call_kwargs = mock_rps.call_args
+        assert call_kwargs.kwargs.get("permission_mode") == "default"
+
+
+class TestFriendlyInitError:
+    def test_auth_error(self):
+        msg = _friendly_init_error(Exception("authentication failed"))
+        assert "Authentication failed" in msg
+
+    def test_credit_balance_error(self):
+        msg = _friendly_init_error(Exception("credit balance too low"))
+        assert "Credit balance" in msg
+
+    def test_rate_limit_error(self):
+        msg = _friendly_init_error(Exception("rate limit exceeded"))
+        assert "Rate limited" in msg
+
+    def test_timeout_error(self):
+        msg = _friendly_init_error(_AiInitTimeout("timed out"))
+        assert "timed out" in msg
+        assert str(_AI_INIT_TIMEOUT_SECONDS) in msg
+
+    def test_generic_error(self):
+        msg = _friendly_init_error(Exception("something weird"))
+        assert "something weird" in msg
 
 
 # ---------------------------------------------------------------------------
