@@ -235,6 +235,55 @@ def format_issue_as_prompt(issue: GitHubIssue) -> str:
     return "\n".join(parts)
 
 
+def check_open_pr(
+    branch: str,
+    repo_root: Path,
+    timeout: int = 5,
+) -> tuple[int | None, str | None]:
+    """Check if an open PR exists for the given branch.
+
+    Returns ``(pr_number, pr_url)`` if found, or ``(None, None)`` otherwise.
+    Gracefully returns ``(None, None)`` on any error (network, timeout, gh
+    not installed).
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh", "pr", "list",
+                "--head", branch,
+                "--json", "number,url",
+                "--limit", "1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=repo_root,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Failed to check open PRs for branch %s: %s", branch, exc)
+        return None, None
+
+    if result.returncode != 0:
+        logger.warning(
+            "gh pr list failed for branch %s: %s",
+            branch,
+            result.stderr.strip(),
+        )
+        return None, None
+
+    try:
+        items = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse gh pr list output for branch %s", branch)
+        return None, None
+
+    if items:
+        pr = items[0]
+        return pr.get("number"), pr.get("url")
+
+    return None, None
+
+
 def fetch_open_issues(
     repo_root: Path,
     limit: int = 20,

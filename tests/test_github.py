@@ -14,6 +14,7 @@ from colonyos.github import (
     _COMMENTS_CHAR_CAP,
     _MAX_COMMENTS,
     _sanitize_untrusted_content,
+    check_open_pr,
     fetch_issue,
     fetch_open_issues,
     format_issue_as_prompt,
@@ -389,3 +390,53 @@ class TestFormatIssueAsPromptSanitization:
         result = format_issue_as_prompt(issue)
         assert "<inject>" not in result
         assert "bug" in result
+
+
+# ---------------------------------------------------------------------------
+# check_open_pr
+# ---------------------------------------------------------------------------
+
+
+class TestCheckOpenPr:
+    @patch("colonyos.github.subprocess.run")
+    def test_pr_found(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(  # type: ignore[attr-defined]
+            args=[], returncode=0,
+            stdout=json.dumps([{"number": 42, "url": "https://github.com/org/repo/pull/42"}]),
+            stderr="",
+        )
+        number, url = check_open_pr("colonyos/feature", tmp_path)
+        assert number == 42
+        assert url == "https://github.com/org/repo/pull/42"
+
+    @patch("colonyos.github.subprocess.run")
+    def test_no_pr_found(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(  # type: ignore[attr-defined]
+            args=[], returncode=0, stdout="[]", stderr="",
+        )
+        number, url = check_open_pr("colonyos/feature", tmp_path)
+        assert number is None
+        assert url is None
+
+    @patch("colonyos.github.subprocess.run")
+    def test_timeout_returns_none(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=5)  # type: ignore[attr-defined]
+        number, url = check_open_pr("colonyos/feature", tmp_path)
+        assert number is None
+        assert url is None
+
+    @patch("colonyos.github.subprocess.run")
+    def test_gh_not_installed(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.side_effect = FileNotFoundError()  # type: ignore[attr-defined]
+        number, url = check_open_pr("colonyos/feature", tmp_path)
+        assert number is None
+        assert url is None
+
+    @patch("colonyos.github.subprocess.run")
+    def test_gh_failure(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(  # type: ignore[attr-defined]
+            args=[], returncode=1, stdout="", stderr="auth required",
+        )
+        number, url = check_open_pr("colonyos/feature", tmp_path)
+        assert number is None
+        assert url is None

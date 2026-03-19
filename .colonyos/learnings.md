@@ -62,3 +62,12 @@ _Date: 2026-03-19 | Feature: the_ui_tests_are_failing_on_the_ci_there_is_no_modu
 - **[security]** CORS allowed-origins must be scoped per environment; leaving dev-server origins in production builds weakens isolation.
 - **[architecture]** Mutable state files (queues, logs) lack append-only audit trails; add forensic logging for add/remove operations.
 - **[code-quality]** Reusable format/parse helpers (e.g. duration formatting) get copy-pasted instead of importing the shared utility.
+
+## Run: run-20260319_081958-46cf575c9d
+_Date: 2026-03-19 | Feature: every_time_the_pipeline_starts_we_should_look_at_what_branch_
+
+- **[architecture]** CLI god files (>2000 LOC) must be split proactively; extract each subcommand's helpers into dedicated modules.
+- **[security]** Use allowlist serialization (explicit field inclusion) instead of blocklist (pop sensitive fields) to prevent leaking new fields.
+- **[testing]** CLI entry points (flags, import guards, argument parsing) need dedicated unit tests separate from the underlying logic tests.
+- **[code-quality]** Polling intervals using setInterval with stale closures cause subtle bugs; use refs or re-subscribe on dependency changes.
+- **[architecture]** Prompt templates should use concrete glob patterns instead of natural-language directory descriptions to reduce ambiguity.

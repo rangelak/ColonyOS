@@ -6,7 +6,18 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+import click
+
 logger = logging.getLogger(__name__)
+
+
+class PreflightError(click.ClickException):
+    """Raised when a pre-flight git state check fails.
+
+    Subclass of ClickException so callers can catch it specifically
+    without catching all ClickExceptions from other phases.
+    """
+    pass
 
 
 class Phase(str, Enum):
@@ -71,6 +82,51 @@ class PhaseResult:
 
 
 @dataclass
+class PreflightResult:
+    """Result of the git state pre-flight check run before any agent phases."""
+
+    current_branch: str
+    is_clean: bool
+    branch_exists: bool
+    open_pr_number: int | None = None
+    open_pr_url: str | None = None
+    main_behind_count: int | None = None
+    action_taken: str = "proceed"
+    warnings: list[str] = field(default_factory=list)
+    head_sha: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "current_branch": self.current_branch,
+            "is_clean": self.is_clean,
+            "branch_exists": self.branch_exists,
+            "open_pr_number": self.open_pr_number,
+            "open_pr_url": self.open_pr_url,
+            "main_behind_count": self.main_behind_count,
+            "action_taken": self.action_taken,
+            "warnings": list(self.warnings),
+            "head_sha": self.head_sha,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PreflightResult:
+        for key in ("current_branch", "is_clean", "branch_exists"):
+            if key not in data:
+                raise ValueError(f"PreflightResult missing required key: {key!r}")
+        return cls(
+            current_branch=data["current_branch"],
+            is_clean=data["is_clean"],
+            branch_exists=data["branch_exists"],
+            open_pr_number=data.get("open_pr_number"),
+            open_pr_url=data.get("open_pr_url"),
+            main_behind_count=data.get("main_behind_count"),
+            action_taken=data.get("action_taken", "proceed"),
+            warnings=list(data.get("warnings", [])),
+            head_sha=data.get("head_sha"),
+        )
+
+
+@dataclass
 class ResumeState:
     """Typed container for resume-from parameters passed to the orchestrator."""
 
@@ -97,6 +153,7 @@ class RunLog:
     task_rel: str | None = None
     source_issue: int | None = None
     source_issue_url: str | None = None
+    preflight: PreflightResult | None = None
 
     def mark_finished(self) -> None:
         self.finished_at = datetime.now(timezone.utc).isoformat()

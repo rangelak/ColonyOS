@@ -22,6 +22,7 @@ from colonyos.init import run_init
 from colonyos.models import (
     LoopState,
     LoopStatus,
+    PreflightError,
     QueueItem,
     QueueItemStatus,
     QueueState,
@@ -371,7 +372,9 @@ def init(
 @click.option("--issue", "issue_ref", default=None, help="GitHub issue number or URL to use as the prompt source.")
 @click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
 @click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
-def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool) -> None:
+@click.option("--offline", is_flag=True, help="Skip network calls in pre-flight checks.")
+@click.option("--force", is_flag=True, help="Bypass pre-flight checks (for power users).")
+def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool, offline: bool, force: bool) -> None:
     """Run the autonomous agent loop for a feature prompt."""
     # Mutual exclusivity checks
     if resume_run_id:
@@ -449,6 +452,8 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             quiet=quiet,
             source_issue=source_issue,
             source_issue_url=source_issue_url,
+            offline=offline,
+            force=force,
         )
 
     _print_run_summary(log)
@@ -857,6 +862,41 @@ def _compute_elapsed_hours(
     return (now - original_start).total_seconds() / 3600.0
 
 
+def _ensure_on_main(repo_root: Path) -> None:
+    """Ensure the working tree is on main with latest changes (for auto mode)."""
+    try:
+        result = subprocess.run(
+            ["git", "checkout", "main"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            raise click.ClickException(
+                f"Failed to checkout main (exit code {result.returncode}): "
+                f"{result.stderr.strip() or '(no stderr)'}"
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise click.ClickException(f"Failed to checkout main: {exc}")
+
+    try:
+        result = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            click.echo(
+                f"Warning: git pull --ff-only failed: {result.stderr.strip()}",
+                err=True,
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        click.echo(f"Warning: Failed to pull latest main: {exc}", err=True)
+
+
 def _run_single_iteration(
     *,
     iteration: int,
@@ -868,6 +908,7 @@ def _run_single_iteration(
     propose_only: bool,
     verbose: bool = False,
     quiet: bool = False,
+    offline: bool = False,
 ) -> tuple[float, bool]:
     """Execute one iteration of the auto loop.
 
@@ -879,6 +920,7 @@ def _run_single_iteration(
     from colonyos.ui import NullUI, PhaseUI
 
     _touch_heartbeat(repo_root)
+    _ensure_on_main(repo_root)
 
     ceo_ui: PhaseUI | NullUI | None = None
     if not quiet:
@@ -931,13 +973,24 @@ def _run_single_iteration(
             click.echo("Proposal rejected. Exiting.")
             sys.exit(0)
 
-    log = run_orchestrator(
-        prompt,
-        repo_root=repo_root,
-        config=config,
-        verbose=verbose,
-        quiet=quiet,
-    )
+    try:
+        log = run_orchestrator(
+            prompt,
+            repo_root=repo_root,
+            config=config,
+            verbose=verbose,
+            quiet=quiet,
+            offline=offline,
+        )
+    except PreflightError as exc:
+        # Pre-flight failure in autonomous mode — mark as failed and continue
+        click.echo(f"  Pre-flight failed: {exc.format_message()}", err=True)
+        loop_state.current_iteration = iteration
+        loop_state.aggregate_cost_usd = aggregate_cost
+        loop_state.failed_run_ids.append(f"preflight-fail-iter-{iteration}")
+        _save_loop_state(repo_root, loop_state)
+        return aggregate_cost, False
+
     aggregate_cost += log.total_cost_usd
 
     log.phases.insert(0, ceo_result)
@@ -974,6 +1027,7 @@ def _run_single_iteration(
 @click.option("--resume-loop", is_flag=True, help="Resume the most recent interrupted loop.")
 @click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
 @click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
+@click.option("--offline", is_flag=True, help="Skip network calls in pre-flight checks.")
 def auto(
     no_confirm: bool,
     propose_only: bool,
@@ -983,6 +1037,7 @@ def auto(
     resume_loop: bool,
     verbose: bool,
     quiet: bool,
+    offline: bool,
 ) -> None:
     """Autonomously decide what to build next and run the pipeline."""
     repo_root = _find_repo_root()
@@ -1063,6 +1118,7 @@ def auto(
             propose_only=propose_only,
             verbose=verbose,
             quiet=quiet,
+            offline=offline,
         )
 
         if completed:

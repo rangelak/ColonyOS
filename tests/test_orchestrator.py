@@ -53,6 +53,15 @@ def tmp_repo(tmp_path: Path) -> Path:
     (tmp_path / "cOS_tasks").mkdir()
     (tmp_path / "cOS_reviews").mkdir()
     (tmp_path / ".colonyos").mkdir()
+    # Initialize a git repo so preflight checks can run
+    import subprocess
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
+    # Ignore colonyos working dirs so save_config doesn't dirty the tree
+    (tmp_path / ".gitignore").write_text(".colonyos/\ncOS_prds/\ncOS_tasks/\ncOS_reviews/\ncOS_runs/\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
     return tmp_path
 
 

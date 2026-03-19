@@ -1,5 +1,26 @@
 # Changelog
 
+## 20260319_091500 — Git State Pre-flight Check
+
+Added a pre-flight git state assessment that runs at the very start of the pipeline before
+any agent phases. Detects uncommitted changes, existing branches with open PRs, and stale
+main branches — preventing wasted compute, duplicate PRs, and data loss. Includes `--offline`
+and `--force` CLI flags, a `PreflightResult` dataclass for audit trails, and autonomous-mode
+support that fails gracefully and continues to the next queue item.
+
+**Created:**
+- `tests/test_preflight.py` — Comprehensive tests for all pre-flight scenarios (607 lines)
+
+**Modified:**
+- `src/colonyos/orchestrator.py` — `_preflight_check()`, `_resume_preflight()`, `_gather_git_state()`, `_decide_action()` functions
+- `src/colonyos/models.py` — `PreflightResult` dataclass, `RunLog.preflight` field
+- `src/colonyos/cli.py` — `--offline` and `--force` flags on `run` and `auto` commands
+- `src/colonyos/github.py` — `find_open_pr_for_branch()` helper
+- `tests/test_github.py`, `tests/test_cli.py`, `tests/test_orchestrator.py`, `tests/test_ceo.py` — Extended tests
+
+**PRD:** `cOS_prds/20260319_081958_prd_every_time_the_pipeline_starts_we_should_look_at_what_branch_we_re_on_see_the_di.md`
+**Tasks:** `cOS_tasks/20260319_081958_tasks_every_time_the_pipeline_starts_we_should_look_at_what_branch_we_re_on_see_the_di.md`
+
 ## 20260319_001000 — Fix CI Failures & Interactive Dashboard Control Plane
 
 Fixed CI test failures caused by missing `fastapi`/`uvicorn` in dev dependencies, and
