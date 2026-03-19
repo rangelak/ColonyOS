@@ -158,6 +158,20 @@ def should_process_message(
     return True
 
 
+def _build_slack_ts_index(queue_items: list[Any]) -> dict[str, Any]:
+    """Build a lookup from ``slack_ts`` → completed QueueItem.
+
+    Used by ``should_process_thread_fix`` and ``find_parent_queue_item`` to
+    avoid O(N) linear scans on every incoming Slack event in long-running
+    watch sessions.
+    """
+    index: dict[str, Any] = {}
+    for item in queue_items:
+        if item.slack_ts and item.status.value == "completed":
+            index[item.slack_ts] = item
+    return index
+
+
 def should_process_thread_fix(
     event: dict[str, Any],
     config: SlackConfig,
@@ -207,12 +221,9 @@ def should_process_thread_fix(
     if channel not in config.channels:
         return False
 
-    # Parent thread_ts must map to a completed QueueItem
-    for item in queue_items:
-        if item.slack_ts == thread_ts and item.status.value == "completed":
-            return True
-
-    return False
+    # Parent thread_ts must map to a completed QueueItem (O(1) lookup)
+    ts_index = _build_slack_ts_index(queue_items)
+    return thread_ts in ts_index
 
 
 def find_parent_queue_item(
@@ -220,10 +231,8 @@ def find_parent_queue_item(
     queue_items: list[Any],
 ) -> Any | None:
     """Find the completed parent QueueItem for a given thread_ts."""
-    for item in queue_items:
-        if item.slack_ts == thread_ts and item.status.value == "completed":
-            return item
-    return None
+    ts_index = _build_slack_ts_index(queue_items)
+    return ts_index.get(thread_ts)
 
 
 # ---------------------------------------------------------------------------

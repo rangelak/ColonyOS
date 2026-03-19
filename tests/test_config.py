@@ -945,3 +945,29 @@ class TestSlackAutoApproveWarning:
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
             load_config(tmp_repo)
         assert not any("slack.auto_approve is enabled" in msg for msg in caplog.messages)
+
+    def test_auto_approve_empty_allowlist_warns(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """auto_approve + empty allowed_user_ids emits an extra warning."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"auto_approve": True, "allowed_user_ids": []}}),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            load_config(tmp_repo)
+        assert any("EMPTY allowed_user_ids" in msg for msg in caplog.messages)
+
+    def test_auto_approve_with_allowlist_no_extra_warning(
+        self, tmp_repo: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """auto_approve + populated allowed_user_ids does NOT emit the extra warning."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"auto_approve": True, "allowed_user_ids": ["U123"]}}),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            load_config(tmp_repo)
+        assert not any("EMPTY allowed_user_ids" in msg for msg in caplog.messages)

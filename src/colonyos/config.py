@@ -214,6 +214,7 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
             raise ValueError(
                 f"slack.daily_budget_usd must be positive, got {daily_budget_usd}"
             )
+    allowed_user_ids_raw = list(raw.get("allowed_user_ids", []))
     auto_approve = bool(raw.get("auto_approve", False))
     if auto_approve:
         logger.warning(
@@ -221,13 +222,19 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
             "will trigger autonomous code execution with no human approval gate. "
             "Ensure this is intentional for your environment."
         )
+        if not allowed_user_ids_raw:
+            logger.warning(
+                "slack.auto_approve is enabled with an EMPTY allowed_user_ids list. "
+                "ANY user in the configured channels can trigger autonomous code "
+                "execution. Set allowed_user_ids to restrict access."
+            )
     return SlackConfig(
         enabled=bool(raw.get("enabled", False)),
         channels=list(raw.get("channels", [])),
         trigger_mode=trigger_mode,
         auto_approve=auto_approve,
         max_runs_per_hour=max_runs_per_hour,
-        allowed_user_ids=list(raw.get("allowed_user_ids", [])),
+        allowed_user_ids=allowed_user_ids_raw,
         triage_scope=str(raw.get("triage_scope", "")),
         daily_budget_usd=daily_budget_usd,
         max_queue_depth=max_queue_depth,

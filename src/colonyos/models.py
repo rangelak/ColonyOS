@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
 import click
 
@@ -225,7 +225,15 @@ class QueueItemStatus(str, Enum):
 
 @dataclass
 class QueueItem:
-    """A single item in the execution queue."""
+    """A single item in the execution queue.
+
+    The ``schema_version`` field tracks serialization format evolution.
+    Increment when adding or removing fields so that readers can distinguish
+    "field missing because it didn't exist yet" from "field missing due to
+    corruption".
+    """
+
+    SCHEMA_VERSION: ClassVar[int] = 2  # class-level constant; bump on structural changes
 
     id: str
     source_type: str  # "prompt", "issue", "slack", or "slack_fix"
@@ -250,6 +258,7 @@ class QueueItem:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": self.SCHEMA_VERSION,
             "id": self.id,
             "source_type": self.source_type,
             "source_value": self.source_value,
@@ -272,6 +281,13 @@ class QueueItem:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> QueueItem:
+        stored_version = data.get("schema_version", 1)
+        if stored_version < cls.SCHEMA_VERSION:
+            logger.debug(
+                "QueueItem schema_version %d < current %d; missing fields "
+                "will use defaults",
+                stored_version, cls.SCHEMA_VERSION,
+            )
         raw_status = data.get("status", "pending")
         try:
             status = QueueItemStatus(raw_status)

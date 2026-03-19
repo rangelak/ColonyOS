@@ -440,6 +440,40 @@ class TestQueueItemThreadFixFields:
         assert fix_item.head_sha == new_sha
 
 
+class TestQueueItemSchemaVersion:
+    """Tests for QueueItem schema_version evolution tracking."""
+
+    def test_to_dict_includes_schema_version(self) -> None:
+        item = QueueItem(
+            id="q-sv-1", source_type="slack", source_value="test",
+            status=QueueItemStatus.PENDING,
+        )
+        d = item.to_dict()
+        assert "schema_version" in d
+        assert d["schema_version"] == QueueItem.SCHEMA_VERSION
+
+    def test_from_dict_handles_missing_schema_version(self) -> None:
+        """Old items without schema_version load gracefully."""
+        d = {
+            "id": "q-old",
+            "source_type": "slack",
+            "source_value": "test",
+            "status": "pending",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.id == "q-old"
+
+    def test_roundtrip_preserves_schema_version(self) -> None:
+        item = QueueItem(
+            id="q-sv-rt", source_type="slack", source_value="test",
+            status=QueueItemStatus.COMPLETED,
+        )
+        d = item.to_dict()
+        restored = QueueItem.from_dict(d)
+        assert restored.id == item.id
+        assert d["schema_version"] == QueueItem.SCHEMA_VERSION
+
+
 class TestRunLogPrUrl:
     """Tests for pr_url field on RunLog."""
 

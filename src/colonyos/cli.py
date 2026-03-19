@@ -1907,6 +1907,19 @@ def watch(
     # Queue state for unified watch+queue flow
     queue_state = _load_queue_state(repo_root) or QueueState(queue_id=f"watch-queue-{watch_id}")
 
+    # Detect orphaned processed-but-never-queued messages from prior runs
+    # (can happen if the process died during daemon triage).
+    if queue_state.items:
+        queued_ids = {item.id for item in queue_state.items}
+        for key, rid in list(watch_state.processed_messages.items()):
+            if rid and rid not in queued_ids:
+                logger.warning(
+                    "AUDIT: orphan_detected processed_key=%s run_id=%s — "
+                    "message was marked processed but has no matching queue item "
+                    "(possible daemon triage crash in prior session)",
+                    key, rid,
+                )
+
     # Lock guards all watch_state and queue_state mutations from concurrent event threads.
     state_lock = threading.Lock()
     # Semaphore limits concurrent pipeline runs to 1 to prevent git conflicts.
@@ -2038,6 +2051,14 @@ def watch(
             _save_queue_state(repo_root, queue_state)
             save_watch_state(repo_root, watch_state)
 
+        # Structured audit log for security-relevant Slack-triggered execution
+        logger.info(
+            "AUDIT: thread_fix_enqueued item_id=%s user=%s channel=%s "
+            "parent_id=%s branch=%s fix_round=%d",
+            fix_run_id, user, channel,
+            parent_item.id, parent_item.branch_name, parent_item.fix_rounds,
+        )
+
         # Acknowledge
         try:
             react_to_message(client, channel, ts, "eyes")  # type: ignore[arg-type]
@@ -2070,6 +2091,17 @@ def watch(
             with state_lock:
                 items_snapshot = list(queue_state.items)
             if should_process_thread_fix(event, config.slack, bot_user_id, items_snapshot):
+                # Enforce rate limiting and budget checks for thread-fix requests
+                # to prevent unbounded cost accumulation across many threads.
+                if _check_time_exceeded():
+                    logger.warning("Thread fix: max hours exceeded, ignoring")
+                    return
+                if _check_budget_exceeded():
+                    logger.warning("Thread fix: max budget exceeded, ignoring")
+                    return
+                if _check_daily_budget_exceeded():
+                    logger.warning("Thread fix: daily budget exceeded, ignoring")
+                    return
                 _handle_thread_fix(event, client)
             return
 
@@ -2207,6 +2239,13 @@ def watch(
                 position = len(pending_items)
                 total = len(pending_items)
 
+            # Structured audit log for security-relevant Slack-triggered execution
+            logger.info(
+                "AUDIT: pipeline_enqueued item_id=%s user=%s channel=%s "
+                "base_branch=%s",
+                run_id, user, channel, base_branch or "default",
+            )
+
             needs_approval = not config.slack.auto_approve
             try:
                 post_triage_acknowledgment(
@@ -2224,6 +2263,8 @@ def watch(
         # NOTE: Daemon thread — if the process shuts down while triage is
         # in flight, the message may be mark_processed but never queued.
         # This is an acceptable trade-off for v1; the window is very small.
+        # Recovery: on startup, processed messages with no matching queue item
+        # are logged at WARNING level so operators can detect orphans.
         threading.Thread(
             target=_triage_and_enqueue, daemon=True, name=f"triage-{ts}",
         ).start()
@@ -2309,7 +2350,12 @@ def watch(
             self._recovery_monotonic: float | None = None
 
         def _get_client(self) -> object:
-            """Return the shared Slack client, blocking until available."""
+            """Return the shared Slack client, blocking until available.
+
+            Waits on ``_slack_client_ready`` to ensure the client has been
+            published by the event handler thread before returning.
+            """
+            self._slack_client_ready.wait()
             return _slack_client
 
         def run(self) -> None:

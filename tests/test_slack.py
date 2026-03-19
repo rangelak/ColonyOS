@@ -1485,3 +1485,36 @@ class TestFindParentQueueItem:
             status=QueueItemStatus.RUNNING, slack_ts="100.000",
         )
         assert find_parent_queue_item("100.000", [running]) is None
+
+
+class TestBuildSlackTsIndex:
+    """Tests for _build_slack_ts_index O(1) lookup optimization."""
+
+    def test_builds_index_from_completed_items(self) -> None:
+        from colonyos.models import QueueItem, QueueItemStatus
+        from colonyos.slack import _build_slack_ts_index
+        completed = QueueItem(
+            id="q-1", source_type="slack", source_value="test",
+            status=QueueItemStatus.COMPLETED, slack_ts="100.000",
+        )
+        pending = QueueItem(
+            id="q-2", source_type="slack", source_value="test2",
+            status=QueueItemStatus.PENDING, slack_ts="200.000",
+        )
+        index = _build_slack_ts_index([completed, pending])
+        assert "100.000" in index
+        assert "200.000" not in index
+        assert index["100.000"] is completed
+
+    def test_empty_list_returns_empty_dict(self) -> None:
+        from colonyos.slack import _build_slack_ts_index
+        assert _build_slack_ts_index([]) == {}
+
+    def test_no_slack_ts_items_skipped(self) -> None:
+        from colonyos.models import QueueItem, QueueItemStatus
+        from colonyos.slack import _build_slack_ts_index
+        item = QueueItem(
+            id="q-1", source_type="prompt", source_value="test",
+            status=QueueItemStatus.COMPLETED, slack_ts=None,
+        )
+        assert _build_slack_ts_index([item]) == {}

@@ -32,6 +32,7 @@ from colonyos.naming import (
     summary_artifact_path,
 )
 from colonyos.github import check_open_pr
+from colonyos.sanitize import sanitize_untrusted_content
 from colonyos.slack import is_valid_git_ref
 from colonyos.ui import NullUI, PhaseUI, make_reviewer_prefix, print_reviewer_legend
 
@@ -1635,15 +1636,25 @@ def _build_thread_fix_prompt(
     original_prompt: str,
     repo_root: Path | None = None,
 ) -> tuple[str, str]:
-    """Build the system/user prompts for a thread-fix pipeline run."""
+    """Build the system/user prompts for a thread-fix pipeline run.
+
+    Defense-in-depth: both ``fix_request`` and ``original_prompt`` are
+    sanitized here at point of use, regardless of whether callers have
+    already sanitized them.  This prevents injection if a future caller
+    passes unsanitized content.
+    """
     template = _load_instruction("thread_fix.md")
+
+    # Sanitize untrusted content at point of use (defense-in-depth).
+    safe_fix_request = sanitize_untrusted_content(fix_request)
+    safe_original_prompt = sanitize_untrusted_content(original_prompt)
 
     system = _format_base(config) + "\n\n" + template.format(
         branch_name=branch_name,
         prd_path=prd_rel,
         task_path=task_rel,
-        fix_request=fix_request,
-        original_prompt=original_prompt,
+        fix_request=safe_fix_request,
+        original_prompt=safe_original_prompt,
     )
 
     if repo_root is not None:
@@ -1653,7 +1664,7 @@ def _build_thread_fix_prompt(
 
     user = (
         f"Apply the requested fix on branch `{branch_name}`. "
-        f"The fix request is: {fix_request}"
+        f"The fix request is: {safe_fix_request}"
     )
     return system, user
 
@@ -1677,12 +1688,20 @@ def run_thread_fix(
 
     Skips Plan and triage phases. Runs:
     1. Validate branch name, branch exists, and PR is open
-    2. Checkout existing branch and verify HEAD SHA (force-push defense)
-    3. Implement phase with fix instructions
-    4. Verify phase (test suite)
-    5. Deliver phase (push to existing branch, skip PR creation)
+    2. Clean working tree check (stash if needed)
+    3. Checkout existing branch and verify HEAD SHA (force-push defense)
+    4. Implement phase with fix instructions
+    5. Verify phase (test suite)
+    6. Deliver phase (push to existing branch, skip PR creation)
 
     Returns a RunLog with phase results and cost.
+
+    .. warning:: Concurrency
+
+       This function modifies the git working tree (checkout, commit, push).
+       Callers **must** serialize access — e.g., via the ``pipeline_semaphore``
+       in ``QueueExecutor``. Concurrent invocations will cause working tree
+       corruption.
     """
 
     def _make_ui(prefix: str = "") -> PhaseUI | NullUI | None:
@@ -1721,10 +1740,33 @@ def run_thread_fix(
         return log
 
     # --- Validate PR is still open ---
+    # NOTE: TOCTOU race — the PR could be merged/closed between this check
+    # and the push in the Deliver phase. The window is small and the worst
+    # case is a push to a branch whose PR is already closed, which is benign.
     if pr_url:
         pr_number, _ = check_open_pr(branch_name, repo_root)
         if pr_number is None:
             _log(f"Thread fix: no open PR found for branch {branch_name}")
+            log.status = RunStatus.FAILED
+            log.mark_finished()
+            _save_run_log(repo_root, log)
+            return log
+
+    # --- Ensure working tree is clean before checkout ---
+    tree_clean, dirty_output = _check_working_tree_clean(repo_root)
+    if not tree_clean:
+        _log(
+            f"Thread fix: working tree not clean, stashing changes: "
+            f"{dirty_output[:200]}"
+        )
+        try:
+            subprocess.run(
+                ["git", "stash", "push", "--include-untracked", "-m",
+                 f"colonyos-thread-fix-{branch_name}"],
+                capture_output=True, text=True, cwd=repo_root, timeout=30,
+            )
+        except Exception as exc:
+            _log(f"Thread fix: stash failed: {exc}")
             log.status = RunStatus.FAILED
             log.mark_finished()
             _save_run_log(repo_root, log)
@@ -1808,6 +1850,8 @@ def run_thread_fix(
             _log("=== Thread Fix: Verify ===")
 
         verify_system = _load_instruction("thread_fix_verify.md")
+        # Restrict Verify to read-only tools — it should run tests and
+        # report results, not modify code.  Bash is needed for test runners.
         verify_result = run_phase_sync(
             Phase.VERIFY,
             (
@@ -1820,6 +1864,7 @@ def run_thread_fix(
             model=config.get_model(Phase.VERIFY),
             budget_usd=config.budget.per_phase,
             ui=verify_ui,
+            allowed_tools=["Read", "Bash", "Glob", "Grep"],
         )
         log.phases.append(verify_result)
 
