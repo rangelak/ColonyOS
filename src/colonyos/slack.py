@@ -354,6 +354,7 @@ class SlackWatchState:
     )
     consecutive_failures: int = 0
     queue_paused: bool = False
+    queue_paused_at: str | None = None  # ISO timestamp when queue was paused
 
     def reset_daily_cost_if_needed(self) -> None:
         """Reset daily cost counter if the UTC date has changed."""
@@ -395,6 +396,7 @@ class SlackWatchState:
             "daily_cost_reset_date": self.daily_cost_reset_date,
             "consecutive_failures": self.consecutive_failures,
             "queue_paused": self.queue_paused,
+            "queue_paused_at": self.queue_paused_at,
         }
 
     @classmethod
@@ -413,6 +415,7 @@ class SlackWatchState:
             ),
             consecutive_failures=data.get("consecutive_failures", 0),
             queue_paused=bool(data.get("queue_paused", False)),
+            queue_paused_at=data.get("queue_paused_at"),
         )
 
 

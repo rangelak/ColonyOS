@@ -103,6 +103,7 @@ class SlackConfig:
     max_queue_depth: int = 20
     triage_verbose: bool = False
     max_consecutive_failures: int = 3
+    circuit_breaker_cooldown_minutes: int = 30
 
 
 @dataclass
@@ -189,6 +190,11 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
         raise ValueError(
             f"slack.max_consecutive_failures must be positive, got {max_consecutive_failures}"
         )
+    circuit_breaker_cooldown_minutes = int(raw.get("circuit_breaker_cooldown_minutes", 30))
+    if circuit_breaker_cooldown_minutes < 1:
+        raise ValueError(
+            f"slack.circuit_breaker_cooldown_minutes must be positive, got {circuit_breaker_cooldown_minutes}"
+        )
     daily_budget_raw = raw.get("daily_budget_usd")
     daily_budget_usd: float | None = None
     if daily_budget_raw is not None:
@@ -209,6 +215,7 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
         max_queue_depth=max_queue_depth,
         triage_verbose=bool(raw.get("triage_verbose", False)),
         max_consecutive_failures=max_consecutive_failures,
+        circuit_breaker_cooldown_minutes=circuit_breaker_cooldown_minutes,
     )
 
 
@@ -424,6 +431,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "max_queue_depth": config.slack.max_queue_depth,
             "triage_verbose": config.slack.triage_verbose,
             "max_consecutive_failures": config.slack.max_consecutive_failures,
+            "circuit_breaker_cooldown_minutes": config.slack.circuit_breaker_cooldown_minutes,
         }
         if config.slack.triage_scope:
             slack_data["triage_scope"] = config.slack.triage_scope

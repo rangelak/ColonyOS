@@ -732,6 +732,7 @@ class TestSlackConfigTriageFields:
         assert config.max_queue_depth == 20
         assert config.triage_verbose is False
         assert config.max_consecutive_failures == 3
+        assert config.circuit_breaker_cooldown_minutes == 30
 
     def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
@@ -746,6 +747,7 @@ class TestSlackConfigTriageFields:
                     "max_queue_depth": 10,
                     "triage_verbose": True,
                     "max_consecutive_failures": 5,
+                    "circuit_breaker_cooldown_minutes": 60,
                 },
             }),
             encoding="utf-8",
@@ -756,6 +758,7 @@ class TestSlackConfigTriageFields:
         assert config.slack.max_queue_depth == 10
         assert config.slack.triage_verbose is True
         assert config.slack.max_consecutive_failures == 5
+        assert config.slack.circuit_breaker_cooldown_minutes == 60
 
     def test_missing_new_fields_use_defaults(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
@@ -770,6 +773,7 @@ class TestSlackConfigTriageFields:
         assert config.slack.max_queue_depth == 20
         assert config.slack.triage_verbose is False
         assert config.slack.max_consecutive_failures == 3
+        assert config.slack.circuit_breaker_cooldown_minutes == 30
 
     def test_negative_daily_budget_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
@@ -801,6 +805,7 @@ class TestSlackConfigTriageFields:
                 max_queue_depth=15,
                 triage_verbose=True,
                 max_consecutive_failures=5,
+                circuit_breaker_cooldown_minutes=45,
             ),
         )
         save_config(tmp_repo, original)
@@ -810,5 +815,6 @@ class TestSlackConfigTriageFields:
         assert loaded.slack.max_queue_depth == 15
         assert loaded.slack.triage_verbose is True
         assert loaded.slack.max_consecutive_failures == 5
+        assert loaded.slack.circuit_breaker_cooldown_minutes == 45
 
 

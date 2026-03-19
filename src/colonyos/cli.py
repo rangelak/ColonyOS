@@ -1568,6 +1568,45 @@ def clear() -> None:
     click.echo(f"Cleared {removed} pending item(s). {len(state.items)} item(s) remaining.")
 
 
+@queue.command()
+def unpause() -> None:
+    """Unpause the queue after a circuit breaker trip.
+
+    Resets the circuit breaker state so the queue executor resumes
+    processing items.
+    """
+    from colonyos.config import runs_dir_path
+    from colonyos.slack import load_watch_state, save_watch_state
+
+    repo_root = _find_repo_root()
+    runs_dir = runs_dir_path(repo_root)
+    if not runs_dir.exists():
+        click.echo("No watch state found.")
+        return
+
+    # Find the most recent watch state file
+    watch_files = sorted(runs_dir.glob("watch_state_*.json"), reverse=True)
+    if not watch_files:
+        click.echo("No watch state found.")
+        return
+
+    import json
+
+    for wf in watch_files:
+        data = json.loads(wf.read_text(encoding="utf-8"))
+        watch_id = data.get("watch_id", "")
+        state = load_watch_state(repo_root, watch_id)
+        if state and state.queue_paused:
+            state.queue_paused = False
+            state.queue_paused_at = None
+            state.consecutive_failures = 0
+            save_watch_state(repo_root, state)
+            click.echo(f"Queue unpaused for watch session '{watch_id}'.")
+            return
+
+    click.echo("Queue is not currently paused.")
+
+
 @app.command()
 @click.option("-n", "--last", default=None, type=int, help="Limit to the N most recent runs.")
 @click.option("--phase", default=None, type=str, help="Drill into a specific phase.")
@@ -1738,9 +1777,8 @@ def watch(
     state_lock = threading.Lock()
     # Semaphore limits concurrent pipeline runs to 1 to prevent git conflicts.
     pipeline_semaphore = threading.Semaphore(1)
-    # Restore circuit breaker state from persisted watch state.
-    consecutive_failures = watch_state.consecutive_failures
-    queue_paused = watch_state.queue_paused
+    # Circuit breaker state is stored in watch_state and always accessed under
+    # state_lock for thread safety between the executor and event handler threads.
 
     # Retrieve the bot user ID for mention detection
     try:
@@ -1782,7 +1820,6 @@ def watch(
 
         Triage → queue insertion flow (FR-6, FR-7).
         """
-        nonlocal queue_paused
         # Store client reference for executor thread
         if not slack_client_ref:
             slack_client_ref.append(client)
@@ -1942,7 +1979,6 @@ def watch(
 
     def _queue_executor() -> None:
         """Background thread that drains QueueState items sequentially."""
-        nonlocal consecutive_failures, queue_paused
 
         while not shutdown_event.is_set():
             # Check caps
@@ -1950,7 +1986,26 @@ def watch(
                 shutdown_event.wait(timeout=5.0)
                 continue
 
-            if queue_paused:
+            with state_lock:
+                paused = watch_state.queue_paused
+                if paused and watch_state.queue_paused_at:
+                    # Auto-recover after cooldown period
+                    try:
+                        paused_at = datetime.fromisoformat(watch_state.queue_paused_at)
+                        elapsed_min = (datetime.now(timezone.utc) - paused_at).total_seconds() / 60
+                        cooldown = config.slack.circuit_breaker_cooldown_minutes
+                        if elapsed_min >= cooldown:
+                            watch_state.queue_paused = False
+                            watch_state.queue_paused_at = None
+                            watch_state.consecutive_failures = 0
+                            save_watch_state(repo_root, watch_state)
+                            paused = False
+                            logger.info(
+                                "Circuit breaker auto-recovered after %.0f minutes", elapsed_min,
+                            )
+                    except (ValueError, TypeError):
+                        pass  # Malformed timestamp; remain paused
+            if paused:
                 shutdown_event.wait(timeout=5.0)
                 continue
 
@@ -2056,18 +2111,17 @@ def watch(
 
                     if log.status == RunStatus.COMPLETED:
                         item_to_run.status = QueueItemStatus.COMPLETED
-                        consecutive_failures = 0
+                        watch_state.consecutive_failures = 0
                     else:
                         item_to_run.status = QueueItemStatus.FAILED
                         item_to_run.error = (log.phases[-1].error[:200] if log.phases and log.phases[-1].error else "Pipeline failed")
-                        consecutive_failures += 1
+                        watch_state.consecutive_failures += 1
 
                     watch_state.aggregate_cost_usd += log.total_cost_usd
                     watch_state.reset_daily_cost_if_needed()
                     watch_state.daily_cost_usd += log.total_cost_usd
-                    watch_state.consecutive_failures = consecutive_failures
-                    watch_state.queue_paused = queue_paused
                     queue_state.aggregate_cost_usd += log.total_cost_usd
+                    current_failures = watch_state.consecutive_failures
                     _save_queue_state(repo_root, queue_state)
                     save_watch_state(repo_root, watch_state)
 
@@ -2090,37 +2144,43 @@ def watch(
                     )
 
                 # Check consecutive failure circuit breaker
-                if consecutive_failures >= current_config.slack.max_consecutive_failures:
-                    queue_paused = True
+                if current_failures >= current_config.slack.max_consecutive_failures:
                     with state_lock:
-                        watch_state.consecutive_failures = consecutive_failures
-                        watch_state.queue_paused = queue_paused
+                        watch_state.queue_paused = True
+                        watch_state.queue_paused_at = datetime.now(timezone.utc).isoformat()
                         save_watch_state(repo_root, watch_state)
                     logger.warning(
-                        "Queue paused: %d consecutive failures", consecutive_failures,
+                        "Queue paused: %d consecutive failures (will auto-recover after %d minutes)",
+                        current_failures,
+                        current_config.slack.circuit_breaker_cooldown_minutes,
                     )
                     if client and current_config.slack.channels:
                         notify_channel = current_config.slack.channels[0]
                         try:
+                            cooldown = current_config.slack.circuit_breaker_cooldown_minutes
                             client.chat_postMessage(  # type: ignore[union-attr]
                                 channel=notify_channel,
                                 text=(
-                                    f":rotating_light: Queue paused after {consecutive_failures} "
-                                    f"consecutive failures. Check server logs and re-enable."
+                                    f":rotating_light: Queue paused after {current_failures} "
+                                    f"consecutive failures. Will auto-recover after {cooldown} minutes, "
+                                    f"or use `colonyos watch unpause` to re-enable manually."
                                 ),
                             )
                         except Exception:
                             logger.debug("Failed to post circuit-breaker notification", exc_info=True)
 
             except Exception:
-                logger.exception("Queue executor error for item %s", item_to_run.id if item_to_run else "?")
+                logger.exception(
+                    "Queue executor error for item %s (channel=%s, ts=%s)",
+                    item_to_run.id if item_to_run else "?",
+                    getattr(item_to_run, "slack_channel", "?") if item_to_run else "?",
+                    getattr(item_to_run, "slack_ts", "?") if item_to_run else "?",
+                )
                 if item_to_run:
                     with state_lock:
                         item_to_run.status = QueueItemStatus.FAILED
                         item_to_run.error = "Executor error"
-                        consecutive_failures += 1
-                        watch_state.consecutive_failures = consecutive_failures
-                        watch_state.queue_paused = queue_paused
+                        watch_state.consecutive_failures += 1
                         _save_queue_state(repo_root, queue_state)
                         save_watch_state(repo_root, watch_state)
             finally:
@@ -2199,7 +2259,7 @@ def watch(
                 click.echo("Max budget reached. Shutting down watcher.")
                 break
             if _check_daily_budget_exceeded():
-                click.echo("Daily budget reached. Pausing until next UTC day.")
+                click.echo("Daily budget reached. Queue executor will skip items until next UTC day.")
                 # Don't break — just wait for daily reset
             shutdown_event.wait(timeout=5.0)
         handler.close()

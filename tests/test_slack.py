@@ -1104,3 +1104,36 @@ class TestSlackWatchStateCircuitBreaker:
         state = SlackWatchState.from_dict(d)
         assert state.consecutive_failures == 0
         assert state.queue_paused is False
+
+    def test_queue_paused_at_field_default(self) -> None:
+        """queue_paused_at defaults to None."""
+        state = SlackWatchState(watch_id="paused-at-test")
+        assert state.queue_paused_at is None
+
+    def test_queue_paused_at_roundtrip(self) -> None:
+        """queue_paused_at persists through serialization."""
+        state = SlackWatchState(
+            watch_id="paused-at-test",
+            queue_paused=True,
+            queue_paused_at="2026-03-19T10:00:00+00:00",
+        )
+        d = state.to_dict()
+        assert d["queue_paused_at"] == "2026-03-19T10:00:00+00:00"
+        restored = SlackWatchState.from_dict(d)
+        assert restored.queue_paused_at == "2026-03-19T10:00:00+00:00"
+
+    def test_backward_compat_without_queue_paused_at(self) -> None:
+        """Old state files without queue_paused_at should load with None."""
+        d = {
+            "watch_id": "old-paused-at",
+            "processed_messages": {},
+            "aggregate_cost_usd": 0.0,
+            "runs_triggered": 0,
+            "start_time_iso": "2026-01-01T00:00:00",
+            "hourly_trigger_counts": {},
+            "consecutive_failures": 2,
+            "queue_paused": True,
+        }
+        state = SlackWatchState.from_dict(d)
+        assert state.queue_paused is True
+        assert state.queue_paused_at is None

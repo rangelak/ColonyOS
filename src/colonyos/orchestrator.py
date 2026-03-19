@@ -31,6 +31,7 @@ from colonyos.naming import (
     summary_artifact_path,
 )
 from colonyos.github import check_open_pr
+from colonyos.slack import is_valid_git_ref
 from colonyos.ui import NullUI, PhaseUI, make_reviewer_prefix, print_reviewer_legend
 
 
@@ -1645,6 +1646,8 @@ def run(
         return PhaseUI(verbose=verbose, prefix=prefix)
 
     is_resume = resume_from is not None
+    # Track original branch for rollback if we checkout a base branch.
+    original_branch: str | None = None
 
     # --- Resume mode ---
     if resume_from:
@@ -1683,7 +1686,21 @@ def run(
         branch_name = f"{config.branch_prefix}{slug}"
 
         # --- Base branch validation ---
+        # Save original branch so we can restore on failure (critical for
+        # long-running watch processes where the next queue item must start
+        # from a known state).
+        original_branch: str | None = None
         if base_branch:
+            # Defense-in-depth: validate at the point of use, not just at entry.
+            # This protects against callers that bypass triage (e.g. future CLI
+            # commands or hand-edited queue JSON files).
+            if not is_valid_git_ref(base_branch):
+                raise PreflightError(
+                    f"Base branch '{base_branch[:100]}' contains invalid characters"
+                )
+
+            original_branch = _get_current_branch(repo_root)
+
             branch_ok, branch_err = validate_branch_exists(base_branch, repo_root)
             if not branch_ok:
                 # Try fetching from remote
@@ -1738,6 +1755,55 @@ def run(
     log.prd_rel = prd_rel
     log.task_rel = task_rel
 
+    try:
+        return _run_pipeline(
+            log=log,
+            repo_root=repo_root,
+            config=config,
+            branch_name=branch_name,
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            skip_phases=skip_phases,
+            plan_only=plan_only,
+            from_prd=from_prd,
+            is_resume=is_resume,
+            prompt=prompt,
+            offline=offline,
+            quiet=quiet,
+            base_branch=base_branch,
+            _make_ui=_make_ui,
+        )
+    finally:
+        if original_branch:
+            try:
+                subprocess.run(
+                    ["git", "checkout", original_branch],
+                    capture_output=True, text=True, cwd=repo_root, timeout=30,
+                )
+            except Exception:
+                _log(f"WARNING: Failed to restore original branch '{original_branch}'")
+
+
+def _run_pipeline(
+    *,
+    log: RunLog,
+    repo_root: Path,
+    config: ColonyConfig,
+    branch_name: str,
+    prd_rel: str,
+    task_rel: str,
+    skip_phases: set[str],
+    plan_only: bool,
+    from_prd: str | None,
+    is_resume: bool,
+    prompt: str,
+    offline: bool,
+    quiet: bool,
+    base_branch: str | None,
+    _make_ui: object,
+) -> RunLog:
+    """Execute the pipeline phases. Extracted from run() for try/finally branch rollback."""
+
     # --- Phase 1: Plan ---
     _touch_heartbeat(repo_root)
     if "plan" in skip_phases:
@@ -1761,8 +1827,10 @@ def run(
             if persona_agents:
                 _log(f"  {len(persona_agents)} persona subagents configured for parallel Q&A")
 
+        prd_filename = Path(prd_rel).name
+        task_filename = Path(task_rel).name
         system, user = _build_plan_prompt(
-            prompt, config, names.prd_filename, names.task_filename,
+            prompt, config, prd_filename, task_filename,
             source_issue=log.source_issue,
             source_issue_url=log.source_issue_url,
         )

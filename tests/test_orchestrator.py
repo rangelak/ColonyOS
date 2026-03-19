@@ -2211,4 +2211,48 @@ class TestBaseBranchValidation:
                 offline=True,
             )
 
+    def test_base_branch_with_invalid_chars_rejected(self, tmp_path: Path) -> None:
+        """Defense-in-depth: base_branch with shell metacharacters is rejected at orchestrator level."""
+        from colonyos.orchestrator import run as run_orchestrator
+        from colonyos.models import PreflightError
+
+        config = ColonyConfig(
+            project=ProjectInfo(name="test", description="test", stack="python"),
+        )
+
+        import subprocess
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True)
+
+        with pytest.raises(PreflightError, match="invalid characters"):
+            run_orchestrator(
+                "test prompt",
+                repo_root=tmp_path,
+                config=config,
+                base_branch="main; rm -rf /",
+                offline=True,
+            )
+
+    def test_base_branch_with_dotdot_rejected(self, tmp_path: Path) -> None:
+        """Paths with .. traversal are rejected."""
+        from colonyos.orchestrator import run as run_orchestrator
+        from colonyos.models import PreflightError
+
+        config = ColonyConfig(
+            project=ProjectInfo(name="test", description="test", stack="python"),
+        )
+
+        import subprocess
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True)
+
+        with pytest.raises(PreflightError, match="invalid characters"):
+            run_orchestrator(
+                "test prompt",
+                repo_root=tmp_path,
+                config=config,
+                base_branch="../etc/passwd",
+                offline=True,
+            )
+
 

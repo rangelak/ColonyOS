@@ -1052,3 +1052,57 @@ class TestQueueE2E:
         assert loaded is not None
         assert loaded.items[0].status == QueueItemStatus.REJECTED
         assert loaded.items[1].status == QueueItemStatus.COMPLETED
+
+
+# ===========================================================================
+# Queue unpause command tests
+# ===========================================================================
+
+
+class TestQueueUnpause:
+    def test_unpause_resets_circuit_breaker(self, runner: CliRunner, configured_repo: Path):
+        """unpause command resets queue_paused and consecutive_failures."""
+        from colonyos.slack import SlackWatchState, save_watch_state
+
+        state = SlackWatchState(
+            watch_id="test-watch",
+            queue_paused=True,
+            queue_paused_at="2026-03-19T10:00:00+00:00",
+            consecutive_failures=5,
+        )
+        save_watch_state(configured_repo, state)
+
+        with patch("colonyos.cli._find_repo_root", return_value=configured_repo):
+            result = runner.invoke(app, ["queue", "unpause"])
+        assert result.exit_code == 0
+        assert "unpaused" in result.output.lower()
+
+        from colonyos.slack import load_watch_state
+        loaded = load_watch_state(configured_repo, "test-watch")
+        assert loaded is not None
+        assert loaded.queue_paused is False
+        assert loaded.queue_paused_at is None
+        assert loaded.consecutive_failures == 0
+
+    def test_unpause_when_not_paused(self, runner: CliRunner, configured_repo: Path):
+        """unpause with no paused queue shows appropriate message."""
+        from colonyos.slack import SlackWatchState, save_watch_state
+
+        state = SlackWatchState(
+            watch_id="test-watch",
+            queue_paused=False,
+            consecutive_failures=0,
+        )
+        save_watch_state(configured_repo, state)
+
+        with patch("colonyos.cli._find_repo_root", return_value=configured_repo):
+            result = runner.invoke(app, ["queue", "unpause"])
+        assert result.exit_code == 0
+        assert "not currently paused" in result.output.lower()
+
+    def test_unpause_no_watch_state(self, runner: CliRunner, configured_repo: Path):
+        """unpause with no watch state shows appropriate message."""
+        with patch("colonyos.cli._find_repo_root", return_value=configured_repo):
+            result = runner.invoke(app, ["queue", "unpause"])
+        assert result.exit_code == 0
+        assert "no watch state" in result.output.lower()

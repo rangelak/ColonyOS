@@ -51,21 +51,24 @@ class TestReadmeSync:
     def test_all_commands_in_readme(self) -> None:
         readme_text = README_PATH.read_text(encoding="utf-8")
 
-        # Extract the CLI Reference section
-        match = re.search(
-            r"## CLI Reference\s*\n\s*\n?\|.*?\n\|[-| ]+\n((?:\|.*\n)+)",
+        # Extract the CLI Reference section (everything between ## CLI Reference
+        # and the next ## heading or end of file).  The section may contain
+        # sub-headings (###) and multiple tables.
+        section_match = re.search(
+            r"## CLI Reference\n(.*?)(?=\n## |\Z)",
             readme_text,
+            re.DOTALL,
         )
-        assert match, "Could not find CLI Reference table in README.md"
-        table_body = match.group(1)
+        assert section_match, "Could not find ## CLI Reference section in README.md"
+        cli_section = section_match.group(1)
 
         for name in app.commands:
             if name in _HIDDEN_COMMANDS:
                 continue
-            # Look for `colonyos <name>` in the table
+            # Look for `colonyos <name>` anywhere in the CLI Reference section
             pattern = rf"`colonyos {re.escape(name)}"
-            assert re.search(pattern, table_body), (
+            assert re.search(pattern, cli_section), (
                 f"Command '{name}' is registered in the CLI but missing from "
-                f"the README CLI Reference table. Add a row for "
-                f"`colonyos {name}` to the table in README.md."
+                f"the README CLI Reference section. Add a row for "
+                f"`colonyos {name}` to a table in README.md."
             )
