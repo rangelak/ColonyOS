@@ -2229,23 +2229,35 @@ def watch(
         ).start()
 
     class _DualUI:
-        """Forwards UI calls to both terminal and Slack UIs."""
+        """Forwards UI calls to both terminal and Slack UIs.
+
+        Error isolation: if the Slack API call fails, the terminal UI
+        still receives the call.  Slack errors are logged at DEBUG level
+        to avoid masking the actual pipeline output.
+        """
 
         def __init__(self, terminal: object, slack: object) -> None:
             self._terminal = terminal
             self._slack = slack
 
+        def _safe_slack_call(self, method: str, *a: object, **kw: object) -> None:
+            """Invoke a method on the Slack UI, swallowing exceptions."""
+            try:
+                getattr(self._slack, method)(*a, **kw)
+            except Exception:
+                logger.debug("Slack UI call %s failed", method, exc_info=True)
+
         def phase_header(self, *a: object, **kw: object) -> None:
             self._terminal.phase_header(*a, **kw)  # type: ignore[union-attr]
-            self._slack.phase_header(*a, **kw)  # type: ignore[union-attr]
+            self._safe_slack_call("phase_header", *a, **kw)
 
         def phase_complete(self, *a: object, **kw: object) -> None:
             self._terminal.phase_complete(*a, **kw)  # type: ignore[union-attr]
-            self._slack.phase_complete(*a, **kw)  # type: ignore[union-attr]
+            self._safe_slack_call("phase_complete", *a, **kw)
 
         def phase_error(self, *a: object, **kw: object) -> None:
             self._terminal.phase_error(*a, **kw)  # type: ignore[union-attr]
-            self._slack.phase_error(*a, **kw)  # type: ignore[union-attr]
+            self._safe_slack_call("phase_error", *a, **kw)
 
         def on_tool_start(self, *a: object) -> None:
             self._terminal.on_tool_start(*a)  # type: ignore[union-attr]

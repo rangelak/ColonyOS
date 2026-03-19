@@ -201,6 +201,11 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
         raise ValueError(
             f"slack.max_fix_rounds_per_thread must be positive, got {max_fix_rounds_per_thread}"
         )
+    max_runs_per_hour = int(raw.get("max_runs_per_hour", 3))
+    if max_runs_per_hour < 1:
+        raise ValueError(
+            f"slack.max_runs_per_hour must be positive, got {max_runs_per_hour}"
+        )
     daily_budget_raw = raw.get("daily_budget_usd")
     daily_budget_usd: float | None = None
     if daily_budget_raw is not None:
@@ -209,12 +214,19 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
             raise ValueError(
                 f"slack.daily_budget_usd must be positive, got {daily_budget_usd}"
             )
+    auto_approve = bool(raw.get("auto_approve", False))
+    if auto_approve:
+        logger.warning(
+            "slack.auto_approve is enabled — Slack messages that pass triage "
+            "will trigger autonomous code execution with no human approval gate. "
+            "Ensure this is intentional for your environment."
+        )
     return SlackConfig(
         enabled=bool(raw.get("enabled", False)),
         channels=list(raw.get("channels", [])),
         trigger_mode=trigger_mode,
-        auto_approve=bool(raw.get("auto_approve", False)),
-        max_runs_per_hour=int(raw.get("max_runs_per_hour", 3)),
+        auto_approve=auto_approve,
+        max_runs_per_hour=max_runs_per_hour,
         allowed_user_ids=list(raw.get("allowed_user_ids", [])),
         triage_scope=str(raw.get("triage_scope", "")),
         daily_budget_usd=daily_budget_usd,

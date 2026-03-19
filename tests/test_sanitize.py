@@ -164,14 +164,14 @@ class TestStripSlackLinks:
         assert "<b>" not in result
         assert "https://evil.com" not in result
 
-    def test_logs_stripped_urls_at_info(self) -> None:
-        """Stripped URLs should be logged at INFO level for forensic audit."""
+    def test_logs_stripped_urls_at_debug(self) -> None:
+        """Stripped URLs should be logged at DEBUG level to avoid excessive log volume."""
         import logging
         logger = logging.getLogger("colonyos.sanitize")
-        with unittest.mock.patch.object(logger, "info") as mock_info:
+        with unittest.mock.patch.object(logger, "debug") as mock_debug:
             strip_slack_links("<https://evil.com|click here>")
-            mock_info.assert_called_once()
-            call_args = mock_info.call_args
+            mock_debug.assert_called_once()
+            call_args = mock_debug.call_args
             assert "evil.com" in str(call_args)
             assert "click here" in str(call_args)
 

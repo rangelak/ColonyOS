@@ -881,3 +881,67 @@ class TestSlackMaxFixRoundsPerThread:
         save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.slack.max_fix_rounds_per_thread == 7
+
+
+class TestSlackMaxRunsPerHourValidation:
+    """Tests for SlackConfig.max_runs_per_hour validation."""
+
+    def test_default_value(self) -> None:
+        config = SlackConfig()
+        assert config.max_runs_per_hour == 3
+
+    def test_zero_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"max_runs_per_hour": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="max_runs_per_hour must be positive"):
+            load_config(tmp_repo)
+
+    def test_negative_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"max_runs_per_hour": -1}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="max_runs_per_hour must be positive"):
+            load_config(tmp_repo)
+
+    def test_valid_value_accepted(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"max_runs_per_hour": 10}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.max_runs_per_hour == 10
+
+
+class TestSlackAutoApproveWarning:
+    """Tests for the warning logged when slack.auto_approve is enabled."""
+
+    def test_auto_approve_true_logs_warning(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"auto_approve": True}}),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            load_config(tmp_repo)
+        assert any("slack.auto_approve is enabled" in msg for msg in caplog.messages)
+
+    def test_auto_approve_false_no_warning(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"auto_approve": False}}),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            load_config(tmp_repo)
+        assert not any("slack.auto_approve is enabled" in msg for msg in caplog.messages)
