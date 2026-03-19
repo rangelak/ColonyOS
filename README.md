@@ -44,18 +44,15 @@ Under the hood it orchestrates [Claude](https://www.anthropic.com/claude) agent 
 
 ### Install ColonyOS
 
-Pick **one**:
+```bash
+# Recommended — handles everything (installs pipx if needed, then colonyos)
+curl -sSL https://raw.githubusercontent.com/rangelak/ColonyOS/main/install.sh | sh
+```
+
+Or install directly if you already have pip:
 
 ```bash
-# Recommended — isolated install via pipx
-pipx install colonyos
-
-# Alternative — standard pip
 pip install colonyos
-
-# One-liner for CI or fresh machines
-curl -sSL https://raw.githubusercontent.com/rangelak/ColonyOS/main/install.sh | sh
-
 ```
 
 ### Optional extras
