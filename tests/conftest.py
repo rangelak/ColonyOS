@@ -2,10 +2,21 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 import yaml
+
+
+@pytest.fixture(autouse=True)
+def _strip_git_env_vars(monkeypatch):
+    """Prevent pre-commit's GIT_INDEX_FILE (and friends) from leaking into
+    test subprocesses.  When pytest runs as a pre-commit hook, git sets
+    GIT_INDEX_FILE to a temp index — any subprocess.run(["git", ...]) in
+    tests or source code inherits it and corrupts the parent repo's index."""
+    for key in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture
