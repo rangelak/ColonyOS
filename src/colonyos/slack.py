@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from colonyos.config import SlackConfig, runs_dir_path
-from colonyos.sanitize import sanitize_untrusted_content
+from colonyos.sanitize import sanitize_untrusted_content, strip_slack_links
 
 # Strict allowlist for git branch ref characters (matches git-check-ref-format rules).
 _VALID_GIT_REF_RE = re.compile(r"^[a-zA-Z0-9._/\-]+$")
@@ -39,7 +39,13 @@ logger = logging.getLogger(__name__)
 
 
 def sanitize_slack_content(text: str) -> str:
-    """Strip XML-like tags from untrusted Slack content to reduce prompt injection risk."""
+    """Strip XML-like tags and Slack link markup from untrusted Slack content.
+
+    Applies two sanitization passes:
+    1. Slack link stripping (``<URL|text>`` → ``text``)
+    2. XML tag stripping (to reduce prompt injection risk)
+    """
+    text = strip_slack_links(text)
     return sanitize_untrusted_content(text)
 
 
@@ -126,6 +132,74 @@ def should_process_message(
     return True
 
 
+def should_process_thread_fix(
+    event: dict[str, Any],
+    config: SlackConfig,
+    bot_user_id: str,
+    queue_items: list[Any],
+) -> bool:
+    """Determine whether a Slack threaded reply is a thread-fix request.
+
+    A thread-fix is a reply in a thread where:
+    - The message is a threaded reply (``thread_ts != ts``)
+    - The bot is ``@mentioned``
+    - The parent ``thread_ts`` maps to a completed ``QueueItem``'s ``slack_ts``
+    - The sender is not the bot itself
+    - The sender passes the allowlist (if configured)
+    - Not a bot message or edit
+    """
+    # Must be a threaded reply
+    ts = event.get("ts", "")
+    thread_ts = event.get("thread_ts", "")
+    if not thread_ts or thread_ts == ts:
+        return False
+
+    # Ignore bots
+    if event.get("bot_id") or event.get("subtype") == "bot_message":
+        return False
+
+    # Ignore edits
+    if event.get("subtype") == "message_changed":
+        return False
+
+    # Self-message guard
+    user = event.get("user", "")
+    if user == bot_user_id:
+        return False
+
+    # Sender allowlist (optional)
+    if config.allowed_user_ids and user not in config.allowed_user_ids:
+        return False
+
+    # Bot must be @mentioned
+    text = event.get("text", "")
+    if f"<@{bot_user_id}>" not in text:
+        return False
+
+    # Channel must be in the configured allowlist
+    channel = event.get("channel", "")
+    if channel not in config.channels:
+        return False
+
+    # Parent thread_ts must map to a completed QueueItem
+    for item in queue_items:
+        if item.slack_ts == thread_ts and item.status.value == "completed":
+            return True
+
+    return False
+
+
+def find_parent_queue_item(
+    thread_ts: str,
+    queue_items: list[Any],
+) -> Any | None:
+    """Find the completed parent QueueItem for a given thread_ts."""
+    for item in queue_items:
+        if item.slack_ts == thread_ts and item.status.value == "completed":
+            return item
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Slack feedback (threaded reply helpers)
 # ---------------------------------------------------------------------------
@@ -159,6 +233,24 @@ def format_run_summary(
     if pr_url:
         parts.append(f"PR: {pr_url}")
     return "\n".join(parts)
+
+
+def format_fix_acknowledgment(branch_name: str) -> str:
+    """Format the acknowledgment message posted when a thread-fix starts."""
+    return f":wrench: Working on fix for `{branch_name}` — implementing your changes."
+
+
+def format_fix_round_limit(total_cost: float) -> str:
+    """Format the message posted when the max fix rounds per thread is reached."""
+    return (
+        f":warning: Max fix rounds reached (${total_cost:.2f} total). "
+        f"Please open a new request or iterate manually."
+    )
+
+
+def format_fix_error(error_type: str, detail: str) -> str:
+    """Format an error message for a thread-fix failure."""
+    return f":x: *{error_type}*: {detail}"
 
 
 def post_acknowledgment(

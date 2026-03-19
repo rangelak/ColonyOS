@@ -304,6 +304,115 @@ class TestQueueItemSlackFields:
         assert restored.pr_url == item.pr_url
 
 
+class TestQueueItemThreadFixFields:
+    """Tests for thread-fix fields: branch_name, fix_rounds, parent_item_id."""
+
+    def test_new_fields_default_values(self) -> None:
+        item = QueueItem(
+            id="q-tf-1",
+            source_type="prompt",
+            source_value="fix the bug",
+            status=QueueItemStatus.PENDING,
+        )
+        assert item.branch_name is None
+        assert item.fix_rounds == 0
+        assert item.parent_item_id is None
+
+    def test_slack_fix_source_type(self) -> None:
+        item = QueueItem(
+            id="q-tf-2",
+            source_type="slack_fix",
+            source_value="fix the test",
+            status=QueueItemStatus.PENDING,
+            branch_name="colonyos/feature-x",
+            fix_rounds=1,
+            parent_item_id="q-parent-1",
+        )
+        assert item.source_type == "slack_fix"
+        assert item.branch_name == "colonyos/feature-x"
+        assert item.fix_rounds == 1
+        assert item.parent_item_id == "q-parent-1"
+
+    def test_to_dict_includes_thread_fix_fields(self) -> None:
+        item = QueueItem(
+            id="q-tf-3",
+            source_type="slack_fix",
+            source_value="fix it",
+            status=QueueItemStatus.PENDING,
+            branch_name="colonyos/auth",
+            fix_rounds=2,
+            parent_item_id="q-orig",
+        )
+        d = item.to_dict()
+        assert d["branch_name"] == "colonyos/auth"
+        assert d["fix_rounds"] == 2
+        assert d["parent_item_id"] == "q-orig"
+        assert d["source_type"] == "slack_fix"
+
+    def test_from_dict_with_thread_fix_fields(self) -> None:
+        d = {
+            "id": "q-tf-4",
+            "source_type": "slack_fix",
+            "source_value": "fix it",
+            "status": "pending",
+            "branch_name": "colonyos/feat",
+            "fix_rounds": 3,
+            "parent_item_id": "q-parent-2",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.branch_name == "colonyos/feat"
+        assert item.fix_rounds == 3
+        assert item.parent_item_id == "q-parent-2"
+
+    def test_from_dict_backward_compat_missing_thread_fix_fields(self) -> None:
+        """Old QueueItem dicts without thread-fix fields load with defaults."""
+        d = {
+            "id": "q-old-tf",
+            "source_type": "slack",
+            "source_value": "old item",
+            "status": "completed",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.branch_name is None
+        assert item.fix_rounds == 0
+        assert item.parent_item_id is None
+
+    def test_roundtrip_thread_fix(self) -> None:
+        item = QueueItem(
+            id="q-tf-rt",
+            source_type="slack_fix",
+            source_value="fix roundtrip",
+            status=QueueItemStatus.COMPLETED,
+            slack_ts="999.888",
+            slack_channel="C123",
+            branch_name="colonyos/test-fix",
+            fix_rounds=2,
+            parent_item_id="q-parent-rt",
+            cost_usd=1.50,
+            pr_url="https://github.com/org/repo/pull/42",
+        )
+        d = item.to_dict()
+        restored = QueueItem.from_dict(d)
+        assert restored.source_type == item.source_type
+        assert restored.branch_name == item.branch_name
+        assert restored.fix_rounds == item.fix_rounds
+        assert restored.parent_item_id == item.parent_item_id
+        assert restored.slack_ts == item.slack_ts
+        assert restored.pr_url == item.pr_url
+
+    def test_fix_rounds_increment(self) -> None:
+        """fix_rounds is mutable and can be incremented."""
+        item = QueueItem(
+            id="q-tf-inc",
+            source_type="slack",
+            source_value="some run",
+            status=QueueItemStatus.COMPLETED,
+        )
+        assert item.fix_rounds == 0
+        item.fix_rounds += 1
+        assert item.fix_rounds == 1
+
+
 class TestRunLogPrUrl:
     """Tests for pr_url field on RunLog."""
 

@@ -1194,3 +1194,230 @@ class TestCircuitBreakerCodeQuality:
         assert "self._circuit_breaker_cooldown_minutes * 60" in source
         # The old closure reference should be gone
         assert "config.slack.circuit_breaker_cooldown_minutes * 60" not in source
+
+
+# ---------------------------------------------------------------------------
+# Thread-fix detection tests
+# ---------------------------------------------------------------------------
+
+
+class TestShouldProcessThreadFix:
+    """Tests for should_process_thread_fix()."""
+
+    def _make_config(self, **kwargs: object) -> SlackConfig:
+        defaults = {"enabled": True, "channels": ["C123"]}
+        defaults.update(kwargs)
+        return SlackConfig(**defaults)  # type: ignore[arg-type]
+
+    def _make_completed_item(self, slack_ts: str = "100.000") -> object:
+        from colonyos.models import QueueItem, QueueItemStatus
+        return QueueItem(
+            id="q-parent",
+            source_type="slack",
+            source_value="original prompt",
+            status=QueueItemStatus.COMPLETED,
+            slack_ts=slack_ts,
+            slack_channel="C123",
+            branch_name="colonyos/feature",
+            pr_url="https://github.com/org/repo/pull/1",
+        )
+
+    def test_valid_thread_fix(self) -> None:
+        from colonyos.slack import should_process_thread_fix
+        config = self._make_config()
+        parent = self._make_completed_item()
+        event = {
+            "channel": "C123",
+            "ts": "200.000",
+            "thread_ts": "100.000",
+            "user": "U999",
+            "text": "<@UBOT123> fix the failing test",
+        }
+        assert should_process_thread_fix(event, config, "UBOT123", [parent]) is True
+
+    def test_rejects_non_threaded(self) -> None:
+        from colonyos.slack import should_process_thread_fix
+        config = self._make_config()
+        parent = self._make_completed_item()
+        event = {
+            "channel": "C123",
+            "ts": "100.000",
+            "user": "U999",
+            "text": "<@UBOT123> fix it",
+        }
+        assert should_process_thread_fix(event, config, "UBOT123", [parent]) is False
+
+    def test_rejects_same_ts_thread_ts(self) -> None:
+        from colonyos.slack import should_process_thread_fix
+        config = self._make_config()
+        parent = self._make_completed_item()
+        event = {
+            "channel": "C123",
+            "ts": "100.000",
+            "thread_ts": "100.000",
+            "user": "U999",
+            "text": "<@UBOT123> fix it",
+        }
+        assert should_process_thread_fix(event, config, "UBOT123", [parent]) is False
+
+    def test_rejects_no_bot_mention(self) -> None:
+        from colonyos.slack import should_process_thread_fix
+        config = self._make_config()
+        parent = self._make_completed_item()
+        event = {
+            "channel": "C123",
+            "ts": "200.000",
+            "thread_ts": "100.000",
+            "user": "U999",
+            "text": "fix the test please",
+        }
+        assert should_process_thread_fix(event, config, "UBOT123", [parent]) is False
+
+    def test_rejects_unknown_thread(self) -> None:
+        from colonyos.slack import should_process_thread_fix
+        config = self._make_config()
+        parent = self._make_completed_item(slack_ts="999.000")
+        event = {
+            "channel": "C123",
+            "ts": "200.000",
+            "thread_ts": "100.000",
+            "user": "U999",
+            "text": "<@UBOT123> fix it",
+        }
+        assert should_process_thread_fix(event, config, "UBOT123", [parent]) is False
+
+    def test_rejects_bot_own_message(self) -> None:
+        from colonyos.slack import should_process_thread_fix
+        config = self._make_config()
+        parent = self._make_completed_item()
+        event = {
+            "channel": "C123",
+            "ts": "200.000",
+            "thread_ts": "100.000",
+            "user": "UBOT123",
+            "text": "<@UBOT123> fix it",
+        }
+        assert should_process_thread_fix(event, config, "UBOT123", [parent]) is False
+
+    def test_rejects_non_completed_parent(self) -> None:
+        from colonyos.slack import should_process_thread_fix
+        from colonyos.models import QueueItem, QueueItemStatus
+        config = self._make_config()
+        running_parent = QueueItem(
+            id="q-parent",
+            source_type="slack",
+            source_value="orig",
+            status=QueueItemStatus.RUNNING,
+            slack_ts="100.000",
+        )
+        event = {
+            "channel": "C123",
+            "ts": "200.000",
+            "thread_ts": "100.000",
+            "user": "U999",
+            "text": "<@UBOT123> fix it",
+        }
+        assert should_process_thread_fix(event, config, "UBOT123", [running_parent]) is False
+
+    def test_rejects_user_not_in_allowlist(self) -> None:
+        from colonyos.slack import should_process_thread_fix
+        config = self._make_config(allowed_user_ids=["U111", "U222"])
+        parent = self._make_completed_item()
+        event = {
+            "channel": "C123",
+            "ts": "200.000",
+            "thread_ts": "100.000",
+            "user": "U999",
+            "text": "<@UBOT123> fix it",
+        }
+        assert should_process_thread_fix(event, config, "UBOT123", [parent]) is False
+
+    def test_allows_user_in_allowlist(self) -> None:
+        from colonyos.slack import should_process_thread_fix
+        config = self._make_config(allowed_user_ids=["U999"])
+        parent = self._make_completed_item()
+        event = {
+            "channel": "C123",
+            "ts": "200.000",
+            "thread_ts": "100.000",
+            "user": "U999",
+            "text": "<@UBOT123> fix it",
+        }
+        assert should_process_thread_fix(event, config, "UBOT123", [parent]) is True
+
+    def test_rejects_bot_message_subtype(self) -> None:
+        from colonyos.slack import should_process_thread_fix
+        config = self._make_config()
+        parent = self._make_completed_item()
+        event = {
+            "channel": "C123",
+            "ts": "200.000",
+            "thread_ts": "100.000",
+            "user": "U999",
+            "text": "<@UBOT123> fix it",
+            "bot_id": "B123",
+        }
+        assert should_process_thread_fix(event, config, "UBOT123", [parent]) is False
+
+    def test_rejects_wrong_channel(self) -> None:
+        from colonyos.slack import should_process_thread_fix
+        config = self._make_config(channels=["C123"])
+        parent = self._make_completed_item()
+        event = {
+            "channel": "CWRONG",
+            "ts": "200.000",
+            "thread_ts": "100.000",
+            "user": "U999",
+            "text": "<@UBOT123> fix it",
+        }
+        assert should_process_thread_fix(event, config, "UBOT123", [parent]) is False
+
+
+class TestFormatFixAcknowledgment:
+    def test_basic(self) -> None:
+        from colonyos.slack import format_fix_acknowledgment
+        result = format_fix_acknowledgment("colonyos/feature-x")
+        assert ":wrench:" in result
+        assert "colonyos/feature-x" in result
+
+    def test_contains_branch_name(self) -> None:
+        from colonyos.slack import format_fix_acknowledgment
+        result = format_fix_acknowledgment("colonyos/auth-fix")
+        assert "`colonyos/auth-fix`" in result
+
+
+class TestFormatFixRoundLimit:
+    def test_basic(self) -> None:
+        from colonyos.slack import format_fix_round_limit
+        result = format_fix_round_limit(12.50)
+        assert ":warning:" in result
+        assert "$12.50" in result
+        assert "Max fix rounds reached" in result
+
+
+class TestFindParentQueueItem:
+    def test_finds_completed_parent(self) -> None:
+        from colonyos.models import QueueItem, QueueItemStatus
+        from colonyos.slack import find_parent_queue_item
+        parent = QueueItem(
+            id="q-1", source_type="slack", source_value="orig",
+            status=QueueItemStatus.COMPLETED, slack_ts="100.000",
+        )
+        other = QueueItem(
+            id="q-2", source_type="slack", source_value="other",
+            status=QueueItemStatus.FAILED, slack_ts="200.000",
+        )
+        assert find_parent_queue_item("100.000", [parent, other]) is parent
+
+    def test_returns_none_for_no_match(self) -> None:
+        from colonyos.slack import find_parent_queue_item
+        assert find_parent_queue_item("999.000", []) is None
+
+    def test_ignores_non_completed(self) -> None:
+        from colonyos.models import QueueItem, QueueItemStatus
+        from colonyos.slack import find_parent_queue_item
+        running = QueueItem(
+            id="q-1", source_type="slack", source_value="orig",
+            status=QueueItemStatus.RUNNING, slack_ts="100.000",
+        )
+        assert find_parent_queue_item("100.000", [running]) is None

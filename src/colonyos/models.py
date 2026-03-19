@@ -227,7 +227,7 @@ class QueueItem:
     """A single item in the execution queue."""
 
     id: str
-    source_type: str  # "prompt", "issue", or "slack"
+    source_type: str  # "prompt", "issue", "slack", or "slack_fix"
     source_value: str  # prompt text or issue number
     status: QueueItemStatus
     added_at: str = field(
@@ -242,6 +242,9 @@ class QueueItem:
     base_branch: str | None = None
     slack_ts: str | None = None
     slack_channel: str | None = None
+    branch_name: str | None = None
+    fix_rounds: int = 0
+    parent_item_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -259,6 +262,9 @@ class QueueItem:
             "base_branch": self.base_branch,
             "slack_ts": self.slack_ts,
             "slack_channel": self.slack_channel,
+            "branch_name": self.branch_name,
+            "fix_rounds": self.fix_rounds,
+            "parent_item_id": self.parent_item_id,
         }
 
     @classmethod
@@ -287,6 +293,9 @@ class QueueItem:
             base_branch=data.get("base_branch"),
             slack_ts=data.get("slack_ts"),
             slack_channel=data.get("slack_channel"),
+            branch_name=data.get("branch_name"),
+            fix_rounds=data.get("fix_rounds", 0),
+            parent_item_id=data.get("parent_item_id"),
         )
 
 

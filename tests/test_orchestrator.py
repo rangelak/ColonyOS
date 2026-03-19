@@ -10,6 +10,7 @@ from colonyos.learnings import learnings_path, LearningEntry, append_learnings
 from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, ResumeState, RunLog, RunStatus
 from colonyos.orchestrator import (
     run,
+    run_thread_fix,
     prepare_resume,
     _extract_pr_number_from_log,
     _format_personas_block,
@@ -20,6 +21,7 @@ from colonyos.orchestrator import (
     _build_learn_prompt,
     _build_plan_prompt,
     _build_deliver_prompt,
+    _build_thread_fix_prompt,
     _build_ceo_prompt,
     _build_run_id,
     _load_run_log,
@@ -2268,3 +2270,141 @@ class TestNamedStashOnBranchRollback:
         source = inspect.getsource(run_fn)
         assert "git\", \"stash\", \"push\", \"--include-untracked\", \"-m\"" in source
         assert "colonyos-{branch_name}" in source
+
+
+class TestBuildThreadFixPrompt:
+    """Tests for _build_thread_fix_prompt."""
+
+    def test_includes_fix_request(self, tmp_path: Path) -> None:
+        config = ColonyConfig()
+        system, user = _build_thread_fix_prompt(
+            config,
+            branch_name="colonyos/fix-auth",
+            prd_rel="cOS_prds/test_prd.md",
+            task_rel="cOS_tasks/test_tasks.md",
+            fix_request="Fix the failing test in test_auth.py",
+            original_prompt="Add auth feature",
+        )
+        assert "Fix the failing test in test_auth.py" in system
+        assert "colonyos/fix-auth" in system
+        assert "cOS_prds/test_prd.md" in system
+        assert "Add auth feature" in system
+
+    def test_user_prompt_contains_fix(self) -> None:
+        config = ColonyConfig()
+        system, user = _build_thread_fix_prompt(
+            config,
+            branch_name="colonyos/fix",
+            prd_rel="prd.md",
+            task_rel="tasks.md",
+            fix_request="Fix the bug",
+            original_prompt="original",
+        )
+        assert "Fix the bug" in user
+        assert "colonyos/fix" in user
+
+
+class TestRunThreadFix:
+    """Tests for run_thread_fix orchestrator function."""
+
+    @patch("colonyos.orchestrator.validate_branch_exists")
+    def test_branch_not_found(self, mock_validate: MagicMock, tmp_path: Path) -> None:
+        mock_validate.return_value = (False, "Branch 'colonyos/gone' not found")
+        config = ColonyConfig()
+        save_config(tmp_path, config)
+
+        log = run_thread_fix(
+            "fix the test",
+            branch_name="colonyos/gone",
+            pr_url="https://github.com/org/repo/pull/1",
+            original_prompt="original",
+            prd_rel="prd.md",
+            task_rel="tasks.md",
+            repo_root=tmp_path,
+            config=config,
+            quiet=True,
+        )
+        assert log.status == RunStatus.FAILED
+
+    @patch("colonyos.orchestrator.check_open_pr")
+    @patch("colonyos.orchestrator.validate_branch_exists")
+    def test_pr_merged_or_closed(
+        self, mock_validate: MagicMock, mock_check_pr: MagicMock, tmp_path: Path,
+    ) -> None:
+        mock_validate.return_value = (True, "")
+        mock_check_pr.return_value = (None, None)  # No open PR
+        config = ColonyConfig()
+        save_config(tmp_path, config)
+
+        log = run_thread_fix(
+            "fix the test",
+            branch_name="colonyos/merged",
+            pr_url="https://github.com/org/repo/pull/1",
+            original_prompt="original",
+            prd_rel="prd.md",
+            task_rel="tasks.md",
+            repo_root=tmp_path,
+            config=config,
+            quiet=True,
+        )
+        assert log.status == RunStatus.FAILED
+
+    @patch("colonyos.orchestrator.subprocess")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.check_open_pr")
+    @patch("colonyos.orchestrator.validate_branch_exists")
+    def test_success_path(
+        self,
+        mock_validate: MagicMock,
+        mock_check_pr: MagicMock,
+        mock_run_phase: MagicMock,
+        mock_subprocess: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        mock_validate.return_value = (True, "")
+        mock_check_pr.return_value = (42, "https://github.com/org/repo/pull/42")
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="main", stderr="")
+        mock_run_phase.return_value = PhaseResult(
+            phase=Phase.IMPLEMENT, success=True, cost_usd=1.0,
+        )
+
+        config = ColonyConfig()
+        save_config(tmp_path, config)
+
+        log = run_thread_fix(
+            "fix the test",
+            branch_name="colonyos/feature",
+            pr_url="https://github.com/org/repo/pull/42",
+            original_prompt="original",
+            prd_rel="prd.md",
+            task_rel="tasks.md",
+            repo_root=tmp_path,
+            config=config,
+            quiet=True,
+        )
+        assert log.status == RunStatus.COMPLETED
+        assert len(log.phases) >= 1  # At least implement phase
+
+    @patch("colonyos.orchestrator.subprocess")
+    @patch("colonyos.orchestrator.validate_branch_exists")
+    def test_checkout_failure(
+        self, mock_validate: MagicMock, mock_subprocess: MagicMock, tmp_path: Path,
+    ) -> None:
+        mock_validate.return_value = (True, "")
+        mock_subprocess.run.return_value = MagicMock(returncode=1, stderr="error: checkout failed")
+
+        config = ColonyConfig()
+        save_config(tmp_path, config)
+
+        log = run_thread_fix(
+            "fix the test",
+            branch_name="colonyos/feature",
+            pr_url=None,  # No PR URL, skip PR check
+            original_prompt="original",
+            prd_rel="prd.md",
+            task_rel="tasks.md",
+            repo_root=tmp_path,
+            config=config,
+            quiet=True,
+        )
+        assert log.status == RunStatus.FAILED

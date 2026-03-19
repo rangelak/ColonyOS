@@ -1613,6 +1613,210 @@ def _run_ci_fix_loop(
     _log("CI fix: retries exhausted, CI still failing.")
 
 
+def _build_thread_fix_prompt(
+    config: ColonyConfig,
+    branch_name: str,
+    prd_rel: str,
+    task_rel: str,
+    fix_request: str,
+    original_prompt: str,
+    repo_root: Path | None = None,
+) -> tuple[str, str]:
+    """Build the system/user prompts for a thread-fix pipeline run."""
+    template = _load_instruction("thread_fix.md")
+
+    system = _format_base(config) + "\n\n" + template.format(
+        branch_name=branch_name,
+        prd_path=prd_rel,
+        task_path=task_rel,
+        fix_request=fix_request,
+        original_prompt=original_prompt,
+    )
+
+    if repo_root is not None:
+        learnings = load_learnings_for_injection(repo_root)
+        if learnings:
+            system += f"\n\n## Learnings from Past Runs\n\n{learnings}"
+
+    user = (
+        f"Apply the requested fix on branch `{branch_name}`. "
+        f"The fix request is: {fix_request[:500]}"
+    )
+    return system, user
+
+
+def run_thread_fix(
+    fix_prompt: str,
+    *,
+    branch_name: str,
+    pr_url: str | None,
+    original_prompt: str,
+    prd_rel: str,
+    task_rel: str,
+    repo_root: Path,
+    config: ColonyConfig,
+    verbose: bool = False,
+    quiet: bool = False,
+    ui_factory: object | None = None,
+) -> RunLog:
+    """Execute a lightweight fix pipeline for a Slack thread-fix request.
+
+    Skips Plan and triage phases. Runs:
+    1. Validate branch exists and PR is open
+    2. Checkout existing branch
+    3. Implement phase with fix instructions
+    4. Deliver phase (push to existing branch, skip PR creation)
+
+    Returns a RunLog with phase results and cost.
+    """
+
+    def _make_ui(prefix: str = "") -> PhaseUI | NullUI | None:
+        if ui_factory is not None:
+            return ui_factory(prefix)  # type: ignore[operator]
+        if quiet:
+            return None
+        return PhaseUI(verbose=verbose, prefix=prefix)
+
+    run_id = _build_run_id(f"fix-{fix_prompt}")
+    log = RunLog(
+        run_id=run_id,
+        prompt=fix_prompt,
+        status=RunStatus.RUNNING,
+        branch_name=branch_name,
+        prd_rel=prd_rel,
+        task_rel=task_rel,
+        pr_url=pr_url,
+    )
+
+    # --- Validate branch exists ---
+    branch_ok, branch_err = validate_branch_exists(branch_name, repo_root)
+    if not branch_ok:
+        _log(f"Thread fix: branch validation failed: {branch_err}")
+        log.status = RunStatus.FAILED
+        log.mark_finished()
+        _save_run_log(repo_root, log)
+        return log
+
+    # --- Validate PR is still open ---
+    if pr_url:
+        pr_number, _ = check_open_pr(branch_name, repo_root)
+        if pr_number is None:
+            _log(f"Thread fix: no open PR found for branch {branch_name}")
+            log.status = RunStatus.FAILED
+            log.mark_finished()
+            _save_run_log(repo_root, log)
+            return log
+
+    # --- Checkout branch ---
+    original_branch = _get_current_branch(repo_root)
+    try:
+        checkout_result = subprocess.run(
+            ["git", "checkout", branch_name],
+            capture_output=True, text=True, cwd=repo_root, timeout=30,
+        )
+        if checkout_result.returncode != 0:
+            _log(f"Thread fix: checkout failed: {checkout_result.stderr.strip()}")
+            log.status = RunStatus.FAILED
+            log.mark_finished()
+            _save_run_log(repo_root, log)
+            return log
+    except Exception as exc:
+        _log(f"Thread fix: checkout error: {exc}")
+        log.status = RunStatus.FAILED
+        log.mark_finished()
+        _save_run_log(repo_root, log)
+        return log
+
+    try:
+        # --- Phase: Implement (with thread-fix instructions) ---
+        _touch_heartbeat(repo_root)
+        impl_ui = _make_ui()
+        if impl_ui is not None:
+            impl_ui.phase_header(
+                "Implement (fix)", config.budget.per_phase,
+                config.get_model(Phase.IMPLEMENT), branch_name,
+            )
+        else:
+            _log("=== Thread Fix: Implement ===")
+
+        system, user = _build_thread_fix_prompt(
+            config, branch_name, prd_rel, task_rel,
+            fix_prompt, original_prompt, repo_root=repo_root,
+        )
+        impl_result = run_phase_sync(
+            Phase.IMPLEMENT,
+            user,
+            cwd=repo_root,
+            system_prompt=system,
+            model=config.get_model(Phase.IMPLEMENT),
+            budget_usd=config.budget.per_phase,
+            ui=impl_ui,
+        )
+        log.phases.append(impl_result)
+
+        if not impl_result.success:
+            log.status = RunStatus.FAILED
+            log.mark_finished()
+            _save_run_log(repo_root, log)
+            return log
+
+        # --- Phase: Deliver (push to existing branch, no new PR) ---
+        if config.phases.deliver:
+            _touch_heartbeat(repo_root)
+            deliver_ui = _make_ui()
+            if deliver_ui is not None:
+                deliver_ui.phase_header(
+                    "Deliver (push)", config.budget.per_phase,
+                    config.get_model(Phase.DELIVER),
+                )
+            else:
+                _log("=== Thread Fix: Deliver ===")
+
+            system, user = _build_deliver_prompt(
+                config, prd_rel, branch_name,
+            )
+            # Add instruction to push only, not create a new PR
+            system += (
+                "\n\nIMPORTANT: A PR already exists for this branch. "
+                "Do NOT create a new PR. Only push the new commits to the "
+                "existing branch. The existing PR will be automatically updated."
+            )
+            deliver_result = run_phase_sync(
+                Phase.DELIVER,
+                f"Push the latest commits on branch `{branch_name}` to the remote. "
+                f"Do NOT create a new PR — one already exists.",
+                cwd=repo_root,
+                system_prompt=system,
+                model=config.get_model(Phase.DELIVER),
+                budget_usd=config.budget.per_phase,
+                ui=deliver_ui,
+            )
+            log.phases.append(deliver_result)
+
+            if not deliver_result.success:
+                log.status = RunStatus.FAILED
+                log.mark_finished()
+                _save_run_log(repo_root, log)
+                return log
+
+        log.status = RunStatus.COMPLETED
+        log.mark_finished()
+        _save_run_log(repo_root, log)
+        _log(f"Thread fix complete. Total cost: ${log.total_cost_usd:.4f}")
+        return log
+
+    finally:
+        # Restore original branch
+        if original_branch:
+            try:
+                subprocess.run(
+                    ["git", "checkout", original_branch],
+                    capture_output=True, text=True, cwd=repo_root, timeout=30,
+                )
+            except Exception:
+                _log(f"WARNING: Failed to restore original branch '{original_branch}'")
+
+
 def run(
     prompt: str,
     *,

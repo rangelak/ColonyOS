@@ -1,5 +1,30 @@
 # Changelog
 
+## 20260319_152207 — Slack Thread Fix Requests — Conversational PR Iteration
+
+Enables conversational iteration on PRs via Slack threads. When ColonyOS completes a pipeline
+run triggered from Slack, users can `@mention` the bot in the same thread to request fixes on
+the existing PR. The bot runs a lightweight fix pipeline (Implement → Deliver) on the same
+branch, pushes new commits, and reports results back to the thread. Includes fix round limits,
+Slack link sanitization, and full backwards compatibility.
+
+**Created / Modified:**
+- `src/colonyos/models.py` — Added `branch_name`, `fix_rounds`, `parent_item_id` fields to `QueueItem`
+- `src/colonyos/config.py` — Added `max_fix_rounds_per_thread` to `SlackConfig`
+- `src/colonyos/slack.py` — Added `should_process_thread_fix()`, `find_parent_queue_item()`, fix formatting helpers
+- `src/colonyos/sanitize.py` — Added `strip_slack_links()` for Slack `<URL|text>` markup stripping
+- `src/colonyos/orchestrator.py` — Added `run_thread_fix()` lightweight fix pipeline, `_build_thread_fix_prompt()`
+- `src/colonyos/cli.py` — Thread-fix event handling, `_execute_fix_item()`, `slack_fix` routing in QueueExecutor
+- `src/colonyos/instructions/thread_fix.md` — New instruction template for thread-initiated fixes
+- `tests/test_models.py` — Tests for QueueItem thread-fix fields and backwards compatibility
+- `tests/test_config.py` — Tests for `max_fix_rounds_per_thread` parsing and validation
+- `tests/test_slack.py` — Tests for thread-fix detection, formatting, parent lookup
+- `tests/test_sanitize.py` — Tests for Slack link sanitization
+- `tests/test_orchestrator.py` — Tests for `run_thread_fix()` success, failure, and edge cases
+
+**PRD:** `cOS_prds/20260319_152207_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260319_152207_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260319_130000 — Unified Slack-to-Queue Autonomous Pipeline with LLM Triage
 
 Unified the Slack watcher (`colonyos watch`) and queue system (`colonyos queue`) into a single

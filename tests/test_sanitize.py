@@ -1,7 +1,7 @@
 """Tests for the shared sanitize module."""
 from __future__ import annotations
 
-from colonyos.sanitize import XML_TAG_RE, sanitize_ci_logs, sanitize_untrusted_content
+from colonyos.sanitize import XML_TAG_RE, sanitize_ci_logs, sanitize_untrusted_content, strip_slack_links
 
 
 class TestSanitizeUntrustedContent:
@@ -104,6 +104,47 @@ class TestSanitizeCiLogs:
         text = "APIKEY=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx"
         result = sanitize_ci_logs(text)
         assert "[REDACTED]" in result
+
+
+class TestStripSlackLinks:
+    def test_strips_url_with_display_text(self) -> None:
+        assert strip_slack_links("<https://evil.com|click here>") == "click here"
+
+    def test_strips_bare_url(self) -> None:
+        assert strip_slack_links("<https://example.com>") == "https://example.com"
+
+    def test_multiple_links(self) -> None:
+        text = "Visit <https://a.com|Site A> and <https://b.com|Site B>"
+        assert strip_slack_links(text) == "Visit Site A and Site B"
+
+    def test_preserves_plain_text(self) -> None:
+        assert strip_slack_links("no links here") == "no links here"
+
+    def test_preserves_non_url_angle_brackets(self) -> None:
+        assert strip_slack_links("3 < 5 and 5 > 3") == "3 < 5 and 5 > 3"
+
+    def test_empty_string(self) -> None:
+        assert strip_slack_links("") == ""
+
+    def test_mixed_content(self) -> None:
+        text = "Please fix <https://github.com/org/repo/pull/42|PR #42> it has a bug"
+        assert strip_slack_links(text) == "Please fix PR #42 it has a bug"
+
+    def test_user_mention_preserved(self) -> None:
+        """User mentions like <@U123> should NOT be stripped by link stripping."""
+        text = "<@U123> check <https://example.com|this link>"
+        result = strip_slack_links(text)
+        assert "<@U123>" in result
+        assert "this link" in result
+
+    def test_sanitize_slack_content_integrates_link_stripping(self) -> None:
+        """sanitize_slack_content should strip Slack links before XML tags."""
+        from colonyos.slack import sanitize_slack_content
+        text = "<https://evil.com|click here> and <b>bold</b>"
+        result = sanitize_slack_content(text)
+        assert "click here" in result
+        assert "<b>" not in result
+        assert "https://evil.com" not in result
 
 
 class TestXmlTagRegex:

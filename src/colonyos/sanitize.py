@@ -42,6 +42,27 @@ SECRET_PATTERNS: list[re.Pattern[str]] = [
 _REDACTED = "[REDACTED]"
 
 
+# Regex to strip Slack link markup: ``<URL|display_text>`` → ``display_text``
+# and bare ``<URL>`` → ``URL`` (without angle brackets).
+_SLACK_LINK_RE = re.compile(r"<([^|>]+)\|([^>]+)>")
+_SLACK_BARE_LINK_RE = re.compile(r"<(https?://[^>]+)>")
+
+
+def strip_slack_links(text: str) -> str:
+    """Strip Slack link markup, keeping only the display text.
+
+    Handles:
+    - ``<https://evil.com|click here>`` → ``click here``
+    - ``<https://example.com>`` → ``https://example.com``
+    - Malformed markup (missing pipe, nested brackets) is left as-is
+    """
+    # First pass: <URL|display_text> → display_text
+    text = _SLACK_LINK_RE.sub(r"\2", text)
+    # Second pass: bare <URL> → URL
+    text = _SLACK_BARE_LINK_RE.sub(r"\1", text)
+    return text
+
+
 def sanitize_ci_logs(text: str) -> str:
     """Sanitize CI log content for safe inclusion in agent prompts.
 

@@ -230,12 +230,80 @@ def app(ctx: click.Context) -> None:
             _run_repl()
 
 
+def _repl_command_names() -> set[str]:
+    """Return the set of registered Click command names (including groups)."""
+    names: set[str] = set()
+    for name, cmd in app.commands.items():
+        names.add(name)
+        if isinstance(cmd, click.Group):
+            for sub in cmd.commands:
+                names.add(f"{name} {sub}")
+    return names
+
+
+def _repl_top_level_names() -> set[str]:
+    """Return just the top-level command names for first-token matching."""
+    return set(app.commands.keys())
+
+
+def _invoke_cli_command(tokens: list[str]) -> None:
+    """Invoke a Click command from REPL tokens, catching exits and errors."""
+    try:
+        app.main(args=tokens, standalone_mode=False)
+    except SystemExit:
+        pass
+    except click.exceptions.UsageError as exc:
+        click.echo(f"Usage error: {exc}", err=True)
+    except click.exceptions.Abort:
+        click.echo()
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+
+
+def _print_repl_help(command_name: str | None = None) -> None:
+    """Print help for a specific command, or list all commands."""
+    from rich.console import Console
+    from rich.table import Table
+
+    con = Console()
+
+    if command_name:
+        cmd = app.commands.get(command_name)
+        if cmd is None:
+            click.echo(f"Unknown command: {command_name}")
+            return
+        try:
+            app.main(args=[command_name, "--help"], standalone_mode=False)
+        except SystemExit:
+            pass
+        return
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="bold green", min_width=16)
+    table.add_column(style="dim")
+
+    for name in sorted(app.commands):
+        cmd = app.commands[name]
+        summary = (cmd.get_short_help_str(limit=60) or "").strip()
+        table.add_row(name, summary)
+
+    con.print()
+    con.print(table)
+    con.print()
+    con.print("[dim]Type a command with args, or type a feature description to build it.[/dim]")
+    con.print()
+
+
 def _run_repl() -> None:
-    """Interactive REPL loop for running feature prompts.
+    """Interactive REPL that routes both commands and feature prompts.
 
     When a user types bare ``colonyos`` with no subcommand in an interactive
-    terminal, this loop shows a prompt and routes input to the orchestrator.
+    terminal, this loop shows a prompt. If the first token matches a
+    registered CLI command, it invokes that command. Otherwise the entire
+    line is treated as a feature prompt and sent to the orchestrator.
     """
+    import shlex
+
     try:
         import readline as _readline
     except ImportError:
@@ -252,20 +320,39 @@ def _run_repl() -> None:
         click.echo('Run `colonyos init` first.')
         return
 
-    # Set up readline history
+    command_names = _repl_top_level_names()
+
+    # --- Readline: history + tab completion ---
     if _readline is not None:
         _readline.set_history_length(REPL_HISTORY_LENGTH)
-        history_path = REPL_HISTORY_PATH
         try:
-            _readline.read_history_file(str(history_path))
+            _readline.read_history_file(str(REPL_HISTORY_PATH))
         except (FileNotFoundError, OSError):
             pass
 
+        all_completions = sorted(command_names | {"help", "exit", "quit"})
+
+        def _completer(text: str, state: int) -> str | None:
+            buf = _readline.get_line_buffer().lstrip()
+            # Only complete the first token
+            if " " not in buf:
+                matches = [c + " " for c in all_completions if c.startswith(text)]
+            else:
+                matches = []
+            return matches[state] if state < len(matches) else None
+
+        _readline.set_completer(_completer)
+        _readline.set_completer_delims(" \t")
+        # macOS uses libedit which needs a different parse command
+        if "libedit" in (_readline.__doc__ or ""):
+            _readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            _readline.parse_and_bind("tab: complete")
+
     session_cost = 0.0
-    last_interrupt_time = 0.0
 
     click.echo(click.style(
-        'Type a feature to build, or "exit" to quit. Enter to send.',
+        'Type a command, a feature to build, or "help" for available commands.',
         dim=True,
     ))
 
@@ -287,7 +374,31 @@ def _run_repl() -> None:
             if stripped.lower() in ("quit", "exit"):
                 break
 
-            # Budget confirmation
+            # --- help ---
+            if stripped.lower() == "help":
+                _print_repl_help()
+                continue
+            if stripped.lower().startswith("help "):
+                _print_repl_help(stripped.split(None, 1)[1].strip())
+                continue
+
+            # --- command routing ---
+            try:
+                tokens = shlex.split(stripped)
+            except ValueError:
+                tokens = stripped.split()
+
+            if tokens and tokens[0] in command_names:
+                try:
+                    _invoke_cli_command(tokens)
+                except KeyboardInterrupt:
+                    click.echo(click.style(
+                        "\nCommand interrupted. Returning to prompt.",
+                        dim=True,
+                    ))
+                continue
+
+            # --- feature prompt (default) ---
             per_run_cap = config.budget.per_run
             if not config.auto_approve:
                 try:
@@ -817,10 +928,11 @@ def _format_queue_item_source(item: QueueItem, max_len: int = 60) -> str:
     if item.source_type == "issue":
         title = item.issue_title or ""
         return f"#{item.source_value} {title}"[:max_len]
-    if item.source_type == "slack":
+    if item.source_type in ("slack", "slack_fix"):
         channel = item.slack_channel or "?"
+        label = "fix" if item.source_type == "slack_fix" else "slack"
         text = item.source_value
-        prefix = f"[slack:{channel}] "
+        prefix = f"[{label}:{channel}] "
         remaining = max_len - len(prefix)
         if remaining > 0 and len(text) > remaining:
             text = text[: remaining - 3] + "..."
@@ -1756,6 +1868,10 @@ def watch(
         create_slack_app,
         extract_base_branch,
         extract_prompt_from_mention,
+        find_parent_queue_item,
+        format_fix_acknowledgment,
+        format_fix_error,
+        format_fix_round_limit,
         format_slack_as_prompt,
         format_triage_skip,
         increment_hourly_count,
@@ -1765,8 +1881,10 @@ def watch(
         post_triage_skip,
         react_to_message,
         resolve_channel_names,
+        sanitize_slack_content,
         save_watch_state,
         should_process_message,
+        should_process_thread_fix,
         start_socket_mode,
         triage_message,
         wait_for_approval,
@@ -1841,6 +1959,92 @@ def watch(
         elapsed_hours = (time.monotonic() - start_time) / 3600
         return elapsed_hours >= effective_max_hours
 
+    def _handle_thread_fix(event: dict, client: object) -> None:
+        """Handle a thread-fix request from Slack.
+
+        Looks up the parent QueueItem, validates fix round limits, enqueues
+        a ``slack_fix`` item, and acknowledges in the thread.
+        """
+        channel = event.get("channel", "")
+        ts = event.get("ts", "")
+        thread_ts = event.get("thread_ts", "")
+        user = event.get("user", "unknown")
+        raw_text = event.get("text", "")
+
+        fix_prompt_text = extract_prompt_from_mention(raw_text, bot_user_id)
+        if not fix_prompt_text.strip():
+            return
+
+        # Sanitize fix request text
+        fix_prompt_text = sanitize_slack_content(fix_prompt_text)
+
+        with state_lock:
+            parent_item = find_parent_queue_item(thread_ts, queue_state.items)
+            if parent_item is None:
+                logger.warning("Thread fix: no completed parent for thread_ts=%s", thread_ts)
+                return
+
+            # Check fix round limit
+            if parent_item.fix_rounds >= config.slack.max_fix_rounds_per_thread:
+                try:
+                    client.chat_postMessage(  # type: ignore[union-attr]
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=format_fix_round_limit(parent_item.cost_usd),
+                    )
+                except Exception:
+                    logger.debug("Failed to post fix round limit message", exc_info=True)
+                return
+
+            # Check branch_name and pr_url exist on parent
+            if not parent_item.branch_name:
+                try:
+                    client.chat_postMessage(  # type: ignore[union-attr]
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=format_fix_error("No branch", "No branch name recorded for the original run."),
+                    )
+                except Exception:
+                    logger.debug("Failed to post no-branch message", exc_info=True)
+                return
+
+            # Increment fix rounds on parent
+            parent_item.fix_rounds += 1
+
+            # Create fix queue item
+            fix_run_id = f"slack-fix-{generate_timestamp()}"
+            formatted_prompt = format_slack_as_prompt(fix_prompt_text, channel, user)
+            fix_item = QueueItem(
+                id=fix_run_id,
+                source_type="slack_fix",
+                source_value=formatted_prompt,
+                status=QueueItemStatus.PENDING,
+                slack_ts=thread_ts,
+                slack_channel=channel,
+                branch_name=parent_item.branch_name,
+                parent_item_id=parent_item.id,
+                pr_url=parent_item.pr_url,
+                base_branch=parent_item.base_branch,
+            )
+            queue_state.items.append(fix_item)
+            _save_queue_state(repo_root, queue_state)
+            save_watch_state(repo_root, watch_state)
+
+        # Acknowledge
+        try:
+            react_to_message(client, channel, ts, "eyes")  # type: ignore[arg-type]
+        except Exception:
+            logger.debug("Failed to add :eyes: reaction to fix request", exc_info=True)
+
+        try:
+            client.chat_postMessage(  # type: ignore[union-attr]
+                channel=channel,
+                thread_ts=thread_ts,
+                text=format_fix_acknowledgment(parent_item.branch_name),
+            )
+        except Exception:
+            logger.debug("Failed to post fix acknowledgment", exc_info=True)
+
     def _handle_event(event: dict, client: object) -> None:
         """Handle app_mention and reaction_added events from Slack.
 
@@ -1853,6 +2057,9 @@ def watch(
             _slack_client_ready.set()
 
         if not should_process_message(event, config.slack, bot_user_id):
+            # Check if this is a thread-fix request
+            if should_process_thread_fix(event, config.slack, bot_user_id, queue_state.items):
+                _handle_thread_fix(event, client)
             return
 
         # Enforce time and budget caps
@@ -2010,6 +2217,40 @@ def watch(
             target=_triage_and_enqueue, daemon=True, name=f"triage-{ts}",
         ).start()
 
+    class _DualUI:
+        """Forwards UI calls to both terminal and Slack UIs."""
+
+        def __init__(self, terminal: object, slack: object) -> None:
+            self._terminal = terminal
+            self._slack = slack
+
+        def phase_header(self, *a: object, **kw: object) -> None:
+            self._terminal.phase_header(*a, **kw)  # type: ignore[union-attr]
+            self._slack.phase_header(*a, **kw)  # type: ignore[union-attr]
+
+        def phase_complete(self, *a: object, **kw: object) -> None:
+            self._terminal.phase_complete(*a, **kw)  # type: ignore[union-attr]
+            self._slack.phase_complete(*a, **kw)  # type: ignore[union-attr]
+
+        def phase_error(self, *a: object, **kw: object) -> None:
+            self._terminal.phase_error(*a, **kw)  # type: ignore[union-attr]
+            self._slack.phase_error(*a, **kw)  # type: ignore[union-attr]
+
+        def on_tool_start(self, *a: object) -> None:
+            self._terminal.on_tool_start(*a)  # type: ignore[union-attr]
+
+        def on_tool_input_delta(self, *a: object) -> None:
+            self._terminal.on_tool_input_delta(*a)  # type: ignore[union-attr]
+
+        def on_tool_done(self) -> None:
+            self._terminal.on_tool_done()  # type: ignore[union-attr]
+
+        def on_text_delta(self, *a: object) -> None:
+            self._terminal.on_text_delta(*a)  # type: ignore[union-attr]
+
+        def on_turn_complete(self) -> None:
+            self._terminal.on_turn_complete()  # type: ignore[union-attr]
+
     class QueueExecutor:
         """Drains QueueState items sequentially in a background thread.
 
@@ -2066,7 +2307,10 @@ def watch(
 
                 self._semaphore.acquire()
                 try:
-                    self._execute_item(item_to_run)
+                    if item_to_run.source_type == "slack_fix":
+                        self._execute_fix_item(item_to_run)
+                    else:
+                        self._execute_item(item_to_run)
                 except Exception:
                     logger.exception(
                         "Queue executor error for item %s (channel=%s, ts=%s)",
@@ -2154,12 +2398,23 @@ def watch(
                 if not self._run_approval_gate(client, slack_channel, slack_ts, item_to_run):
                     return
 
-            # Build UI factory for Slack feedback
+            # Build UI factory — streams to both terminal and Slack thread
             ui_factory = None
             if client and slack_ts and slack_channel:
-                def _slack_ui_factory(prefix: str = "", _ch: str = slack_channel, _ts: str = slack_ts) -> SlackUI:
-                    return SlackUI(client, _ch, _ts)
-                ui_factory = _slack_ui_factory
+                from colonyos.ui import PhaseUI, NullUI
+
+                def _dual_ui_factory(
+                    prefix: str = "",
+                    _ch: str = slack_channel,
+                    _ts: str = slack_ts,
+                ) -> object:
+                    slack_ui = SlackUI(client, _ch, _ts)
+                    if self._quiet:
+                        return slack_ui
+                    terminal_ui = PhaseUI(verbose=self._verbose, prefix=prefix)
+                    return _DualUI(terminal_ui, slack_ui)
+
+                ui_factory = _dual_ui_factory
 
                 try:
                     post_acknowledgment(client, slack_channel, slack_ts, item_to_run.source_value[:200])  # type: ignore[arg-type]
@@ -2186,6 +2441,9 @@ def watch(
                 item_to_run.duration_ms = elapsed_ms
                 item_to_run.run_id = log.run_id
                 item_to_run.pr_url = log.pr_url
+                # Persist branch_name for thread-fix lookups (Task 1.3)
+                if log.branch_name:
+                    item_to_run.branch_name = log.branch_name
 
                 if log.status == RunStatus.COMPLETED:
                     item_to_run.status = QueueItemStatus.COMPLETED
@@ -2283,6 +2541,141 @@ def watch(
                 return False
             return True
 
+        def _execute_fix_item(self, item_to_run: QueueItem) -> None:
+            """Execute a thread-fix pipeline item (source_type='slack_fix')."""
+            from colonyos.orchestrator import run_thread_fix as _run_thread_fix
+
+            try:
+                current_config = load_config(self._repo_root)
+            except Exception:
+                logger.exception("Failed to load config for fix item")
+                with self._state_lock:
+                    item_to_run.status = QueueItemStatus.FAILED
+                    item_to_run.error = "Config load failed"
+                    _save_queue_state(self._repo_root, self._queue_state)
+                return
+
+            with self._state_lock:
+                item_to_run.status = QueueItemStatus.RUNNING
+                item_to_run.run_id = item_to_run.id
+                _save_queue_state(self._repo_root, self._queue_state)
+
+            slack_ts = item_to_run.slack_ts
+            slack_channel = item_to_run.slack_channel
+
+            # Wait for Slack client
+            if not self._slack_client_ready.wait(timeout=10.0):
+                logger.warning("Slack client not available for fix item %s", item_to_run.id)
+                with self._state_lock:
+                    item_to_run.status = QueueItemStatus.PENDING
+                    _save_queue_state(self._repo_root, self._queue_state)
+                return
+            client = self._get_client()
+
+            # Build UI factory for the fix
+            ui_factory = None
+            if client and slack_ts and slack_channel:
+                from colonyos.ui import PhaseUI, NullUI
+
+                def _fix_ui_factory(
+                    prefix: str = "",
+                    _ch: str = slack_channel,
+                    _ts: str = slack_ts,
+                ) -> object:
+                    slack_ui = SlackUI(client, _ch, _ts)
+                    if self._quiet:
+                        return slack_ui
+                    terminal_ui = PhaseUI(verbose=self._verbose, prefix=prefix)
+                    return _DualUI(terminal_ui, slack_ui)
+
+                ui_factory = _fix_ui_factory
+
+            # Find parent item for context
+            parent_item = None
+            with self._state_lock:
+                if item_to_run.parent_item_id:
+                    for qi in self._queue_state.items:
+                        if qi.id == item_to_run.parent_item_id:
+                            parent_item = qi
+                            break
+
+            original_prompt = parent_item.source_value if parent_item else ""
+            prd_rel = ""
+            task_rel = ""
+            # Try to get PRD/task from parent run log
+            if parent_item and parent_item.run_id:
+                try:
+                    from colonyos.orchestrator import _load_run_log
+                    parent_log = _load_run_log(self._repo_root, parent_item.run_id)
+                    if parent_log:
+                        prd_rel = parent_log.prd_rel or ""
+                        task_rel = parent_log.task_rel or ""
+                except Exception:
+                    logger.debug("Failed to load parent run log for fix item", exc_info=True)
+
+            start_ms = int(time.time() * 1000)
+            _touch_heartbeat(self._repo_root)
+
+            log = _run_thread_fix(
+                item_to_run.source_value,
+                branch_name=item_to_run.branch_name or "",
+                pr_url=item_to_run.pr_url,
+                original_prompt=original_prompt,
+                prd_rel=prd_rel,
+                task_rel=task_rel,
+                repo_root=self._repo_root,
+                config=current_config,
+                verbose=self._verbose,
+                quiet=self._quiet,
+                ui_factory=ui_factory,
+            )
+
+            elapsed_ms = int(time.time() * 1000) - start_ms
+
+            with self._state_lock:
+                item_to_run.cost_usd = log.total_cost_usd
+                item_to_run.duration_ms = elapsed_ms
+                item_to_run.run_id = log.run_id
+                item_to_run.pr_url = log.pr_url
+
+                if log.status == RunStatus.COMPLETED:
+                    item_to_run.status = QueueItemStatus.COMPLETED
+                    self._watch_state.consecutive_failures = 0
+                else:
+                    item_to_run.status = QueueItemStatus.FAILED
+                    item_to_run.error = (
+                        log.phases[-1].error[:200]
+                        if log.phases and log.phases[-1].error
+                        else "Fix pipeline failed"
+                    )
+                    self._watch_state.consecutive_failures += 1
+
+                self._watch_state.aggregate_cost_usd += log.total_cost_usd
+                self._watch_state.reset_daily_cost_if_needed()
+                self._watch_state.daily_cost_usd += log.total_cost_usd
+                self._queue_state.aggregate_cost_usd += log.total_cost_usd
+                current_failures = self._watch_state.consecutive_failures
+                _save_queue_state(self._repo_root, self._queue_state)
+                save_watch_state(self._repo_root, self._watch_state)
+
+            # Post fix result to Slack thread
+            if client and slack_ts and slack_channel:
+                emoji = "white_check_mark" if log.status == RunStatus.COMPLETED else "x"
+                try:
+                    react_to_message(client, slack_channel, slack_ts, emoji)  # type: ignore[arg-type]
+                except Exception:
+                    logger.debug("Failed to add fix result reaction", exc_info=True)
+
+                post_run_summary(
+                    client,  # type: ignore[arg-type]
+                    slack_channel,
+                    slack_ts,
+                    status=log.status.value,
+                    total_cost=log.total_cost_usd,
+                    branch_name=log.branch_name,
+                    pr_url=log.pr_url,
+                )
+
     queue_executor = QueueExecutor(
         repo_root=repo_root,
         watch_state=watch_state,
@@ -2299,8 +2692,11 @@ def watch(
     # Register event handlers
     bolt_app.event("app_mention")(_handle_event)
 
-    # Register reaction_added handler (FR-3.2) when trigger_mode includes reactions
-    if config.slack.trigger_mode in ("reaction", "all"):
+    # Always register reaction_added to suppress Bolt's "Unhandled request" warnings.
+    # Only actually process reactions when trigger_mode includes them.
+    if config.slack.trigger_mode not in ("reaction", "all"):
+        bolt_app.event("reaction_added")(lambda event, client: None)
+    else:
         def _handle_reaction(event: dict, client: object) -> None:
             """Handle reaction_added events — re-fetch the original message and process."""
             item = event.get("item", {})
