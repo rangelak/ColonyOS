@@ -6,7 +6,10 @@ prompts executed with ``permission_mode="bypassPermissions"``.
 """
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # Regex to strip XML-like tags from untrusted content.  Removes anything that
 # looks like <tag>, </tag>, or <tag attr="…"> — prevents an attacker from
@@ -55,10 +58,15 @@ def strip_slack_links(text: str) -> str:
     - ``<https://evil.com|click here>`` → ``click here``
     - ``<https://example.com>`` → ``https://example.com``
     - Malformed markup (missing pipe, nested brackets) is left as-is
+
+    Stripped URLs are logged at DEBUG level for forensic audit trails.
     """
     # First pass: <URL|display_text> → display_text
+    # Log stripped URLs for audit before removing them.
+    for m in _SLACK_LINK_RE.finditer(text):
+        logger.debug("Stripping Slack link URL: %s (display: %s)", m.group(1), m.group(2))
     text = _SLACK_LINK_RE.sub(r"\2", text)
-    # Second pass: bare <URL> → URL
+    # Second pass: bare <URL> → URL (angle brackets removed, URL kept)
     text = _SLACK_BARE_LINK_RE.sub(r"\1", text)
     return text
 

@@ -87,6 +87,32 @@ def format_slack_as_prompt(message_text: str, channel: str, user: str) -> str:
     return "\n".join(parts)
 
 
+def extract_raw_from_formatted_prompt(formatted: str) -> str:
+    """Extract raw message text from a ``format_slack_as_prompt()`` result.
+
+    Returns the text between ``<slack_message>`` delimiters (after the
+    ``Channel:`` / ``From:`` header lines).  Falls back to returning the
+    full string unchanged if the expected delimiters are not present.
+    """
+    start_tag = "<slack_message>"
+    end_tag = "</slack_message>"
+    start = formatted.find(start_tag)
+    end = formatted.find(end_tag)
+    if start == -1 or end == -1:
+        return formatted
+    inner = formatted[start + len(start_tag) : end].strip()
+    # Skip Channel: and From: header lines
+    lines = inner.splitlines()
+    content_lines: list[str] = []
+    skipped_headers = False
+    for line in lines:
+        if not skipped_headers and (line.startswith("Channel:") or line.startswith("From:")):
+            continue
+        skipped_headers = True
+        content_lines.append(line)
+    return "\n".join(content_lines).strip()
+
+
 def should_process_message(
     event: dict[str, Any],
     config: SlackConfig,

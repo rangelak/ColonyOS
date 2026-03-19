@@ -1,6 +1,8 @@
 """Tests for the shared sanitize module."""
 from __future__ import annotations
 
+import unittest.mock
+
 from colonyos.sanitize import XML_TAG_RE, sanitize_ci_logs, sanitize_untrusted_content, strip_slack_links
 
 
@@ -145,6 +147,17 @@ class TestStripSlackLinks:
         assert "click here" in result
         assert "<b>" not in result
         assert "https://evil.com" not in result
+
+    def test_logs_stripped_urls_at_debug(self) -> None:
+        """Stripped URLs should be logged at DEBUG level for forensic audit."""
+        import logging
+        logger = logging.getLogger("colonyos.sanitize")
+        with unittest.mock.patch.object(logger, "debug") as mock_debug:
+            strip_slack_links("<https://evil.com|click here>")
+            mock_debug.assert_called_once()
+            call_args = mock_debug.call_args
+            assert "evil.com" in str(call_args)
+            assert "click here" in str(call_args)
 
 
 class TestXmlTagRegex:

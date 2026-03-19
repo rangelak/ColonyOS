@@ -19,6 +19,7 @@ from colonyos.slack import (
     check_rate_limit,
     extract_base_branch,
     extract_prompt_from_mention,
+    extract_raw_from_formatted_prompt,
     format_acknowledgment,
     format_phase_update,
     format_run_summary,
@@ -196,6 +197,27 @@ class TestFormatSlackAsPrompt:
     def test_preamble_present(self) -> None:
         result = format_slack_as_prompt("fix", "ch", "u")
         assert "source feature description" in result
+
+
+class TestExtractRawFromFormattedPrompt:
+    def test_roundtrip(self) -> None:
+        """Raw text survives format → extract roundtrip."""
+        raw = "fix the bug in auth.py"
+        formatted = format_slack_as_prompt(raw, "general", "alice")
+        extracted = extract_raw_from_formatted_prompt(formatted)
+        assert extracted == raw
+
+    def test_fallback_on_plain_text(self) -> None:
+        """Non-formatted text is returned unchanged."""
+        plain = "just a plain string"
+        assert extract_raw_from_formatted_prompt(plain) == plain
+
+    def test_preserves_multiline_content(self) -> None:
+        raw = "line one\nline two\nline three"
+        formatted = format_slack_as_prompt(raw, "ch", "u")
+        extracted = extract_raw_from_formatted_prompt(formatted)
+        assert "line one" in extracted
+        assert "line three" in extracted
 
 
 class TestShouldProcessMessage:

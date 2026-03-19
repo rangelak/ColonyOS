@@ -577,6 +577,7 @@ def _build_deliver_prompt(
     *,
     source_issue: int | None = None,
     base_branch: str | None = None,
+    skip_pr_creation: bool = False,
 ) -> tuple[str, str]:
     deliver_template = _load_instruction("deliver.md")
 
@@ -598,11 +599,23 @@ def _build_deliver_prompt(
             f"instead of `main`. Use `--base {base_branch}` when creating the PR."
         )
 
+    if skip_pr_creation:
+        system += (
+            "\n\nIMPORTANT: A PR already exists for this branch. "
+            "Do NOT create a new PR. Only push the new commits to the "
+            "existing branch. The existing PR will be automatically updated."
+        )
+
     user = (
         f"Push branch `{branch_name}` and open a pull request for the "
         f"feature described in `{prd_path}`."
     )
-    if base_branch:
+    if skip_pr_creation:
+        user = (
+            f"Push the latest commits on branch `{branch_name}` to the remote. "
+            f"Do NOT create a new PR — one already exists."
+        )
+    elif base_branch:
         user += f" Target branch: `{base_branch}` (not main)."
     return system, user
 
@@ -1794,6 +1807,7 @@ def run_thread_fix(
         else:
             _log("=== Thread Fix: Verify ===")
 
+        verify_system = _load_instruction("thread_fix_verify.md")
         verify_result = run_phase_sync(
             Phase.VERIFY,
             (
@@ -1802,13 +1816,7 @@ def run_thread_fix(
                 f"If any tests fail, report the failures but do NOT attempt fixes."
             ),
             cwd=repo_root,
-            system_prompt=(
-                "You are a verification agent. Your ONLY job is to run the "
-                "project's test suite and report the results. Do NOT modify "
-                "any code. Run the test command appropriate for this project "
-                "(e.g., pytest, npm test, cargo test, make test) and report "
-                "whether all tests pass. If tests fail, list the failing tests."
-            ),
+            system_prompt=verify_system,
             model=config.get_model(Phase.VERIFY),
             budget_usd=config.budget.per_phase,
             ui=verify_ui,
@@ -1835,17 +1843,11 @@ def run_thread_fix(
 
             system, user = _build_deliver_prompt(
                 config, prd_rel, branch_name,
-            )
-            # Add instruction to push only, not create a new PR
-            system += (
-                "\n\nIMPORTANT: A PR already exists for this branch. "
-                "Do NOT create a new PR. Only push the new commits to the "
-                "existing branch. The existing PR will be automatically updated."
+                skip_pr_creation=True,
             )
             deliver_result = run_phase_sync(
                 Phase.DELIVER,
-                f"Push the latest commits on branch `{branch_name}` to the remote. "
-                f"Do NOT create a new PR — one already exists.",
+                user,
                 cwd=repo_root,
                 system_prompt=system,
                 model=config.get_model(Phase.DELIVER),
@@ -1867,15 +1869,21 @@ def run_thread_fix(
         return log
 
     finally:
-        # Restore original branch
+        # Restore original branch — verify checkout succeeded to prevent
+        # subsequent queue items from running on the wrong branch.
         if original_branch:
             try:
-                subprocess.run(
+                restore = subprocess.run(
                     ["git", "checkout", original_branch],
                     capture_output=True, text=True, cwd=repo_root, timeout=30,
                 )
-            except Exception:
-                _log(f"WARNING: Failed to restore original branch '{original_branch}'")
+                if restore.returncode != 0:
+                    _log(
+                        f"WARNING: git checkout '{original_branch}' exited "
+                        f"{restore.returncode}: {restore.stderr.strip()}"
+                    )
+            except Exception as exc:
+                _log(f"WARNING: Failed to restore original branch '{original_branch}': {exc}")
 
 
 def run(

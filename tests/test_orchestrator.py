@@ -2188,6 +2188,38 @@ class TestBaseBranchDeliverPrompt:
         assert "colonyos/feat" in system
 
 
+class TestSkipPrCreationDeliverPrompt:
+    """Tests for skip_pr_creation parameter in _build_deliver_prompt."""
+
+    def test_skip_pr_creation_system_prompt(self) -> None:
+        from colonyos.orchestrator import _build_deliver_prompt
+        config = ColonyConfig()
+        system, user = _build_deliver_prompt(
+            config, "cOS_prds/test.md", "colonyos/test",
+            skip_pr_creation=True,
+        )
+        assert "Do NOT create a new PR" in system
+        assert "already exists" in system
+
+    def test_skip_pr_creation_user_prompt(self) -> None:
+        from colonyos.orchestrator import _build_deliver_prompt
+        config = ColonyConfig()
+        _, user = _build_deliver_prompt(
+            config, "cOS_prds/test.md", "colonyos/test",
+            skip_pr_creation=True,
+        )
+        assert "Do NOT create a new PR" in user
+
+    def test_no_skip_pr_creation_default(self) -> None:
+        from colonyos.orchestrator import _build_deliver_prompt
+        config = ColonyConfig()
+        system, user = _build_deliver_prompt(
+            config, "cOS_prds/test.md", "colonyos/test",
+        )
+        assert "Do NOT create a new PR" not in system
+        assert "open a pull request" in user
+
+
 class TestBaseBranchValidation:
     """Tests for base_branch validation in orchestrator.run()."""
 

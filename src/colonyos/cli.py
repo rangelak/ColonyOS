@@ -1868,6 +1868,7 @@ def watch(
         create_slack_app,
         extract_base_branch,
         extract_prompt_from_mention,
+        extract_raw_from_formatted_prompt,
         find_parent_queue_item,
         is_valid_git_ref,
         format_fix_acknowledgment,
@@ -2612,7 +2613,13 @@ def watch(
                             parent_item = qi
                             break
 
-            original_prompt = parent_item.source_value if parent_item else ""
+            # Extract the raw prompt text from the parent's formatted
+            # source_value to avoid double-wrapping in <slack_message> tags.
+            original_prompt = (
+                extract_raw_from_formatted_prompt(parent_item.source_value)
+                if parent_item
+                else ""
+            )
             prd_rel = ""
             task_rel = ""
             # Try to get PRD/task from parent run log
