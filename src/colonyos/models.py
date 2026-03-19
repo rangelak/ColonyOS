@@ -154,6 +154,7 @@ class RunLog:
     source_issue: int | None = None
     source_issue_url: str | None = None
     preflight: PreflightResult | None = None
+    pr_url: str | None = None
 
     def mark_finished(self) -> None:
         self.finished_at = datetime.now(timezone.utc).isoformat()
@@ -225,7 +226,7 @@ class QueueItem:
     """A single item in the execution queue."""
 
     id: str
-    source_type: str  # "prompt" or "issue"
+    source_type: str  # "prompt", "issue", or "slack"
     source_value: str  # prompt text or issue number
     status: QueueItemStatus
     added_at: str = field(
@@ -237,6 +238,9 @@ class QueueItem:
     pr_url: str | None = None
     error: str | None = None
     issue_title: str | None = None
+    base_branch: str | None = None
+    slack_ts: str | None = None
+    slack_channel: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -251,6 +255,9 @@ class QueueItem:
             "pr_url": self.pr_url,
             "error": self.error,
             "issue_title": self.issue_title,
+            "base_branch": self.base_branch,
+            "slack_ts": self.slack_ts,
+            "slack_channel": self.slack_channel,
         }
 
     @classmethod
@@ -276,6 +283,9 @@ class QueueItem:
             pr_url=data.get("pr_url"),
             error=data.get("error"),
             issue_title=data.get("issue_title"),
+            base_branch=data.get("base_branch"),
+            slack_ts=data.get("slack_ts"),
+            slack_channel=data.get("slack_channel"),
         )
 
 

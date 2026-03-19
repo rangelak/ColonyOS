@@ -2146,3 +2146,69 @@ class TestRunCiFixLoop:
         assert call_kwargs["budget_usd"] == pytest.approx(0.50, abs=0.01)
 
 
+# ---------------------------------------------------------------------------
+# Base branch targeting tests
+# ---------------------------------------------------------------------------
+
+
+class TestBaseBranchDeliverPrompt:
+    """Tests for base_branch parameter in _build_deliver_prompt."""
+
+    def test_no_base_branch(self) -> None:
+        from colonyos.orchestrator import _build_deliver_prompt
+        config = ColonyConfig()
+        system, user = _build_deliver_prompt(
+            config, "cOS_prds/test.md", "colonyos/test",
+        )
+        assert "--base" not in system
+        assert "Target branch" not in user
+
+    def test_with_base_branch(self) -> None:
+        from colonyos.orchestrator import _build_deliver_prompt
+        config = ColonyConfig()
+        system, user = _build_deliver_prompt(
+            config, "cOS_prds/test.md", "colonyos/test",
+            base_branch="colonyos/auth-middleware",
+        )
+        assert "colonyos/auth-middleware" in system
+        assert "--base" in system
+        assert "colonyos/auth-middleware" in user
+
+    def test_base_branch_with_source_issue(self) -> None:
+        from colonyos.orchestrator import _build_deliver_prompt
+        config = ColonyConfig()
+        system, user = _build_deliver_prompt(
+            config, "cOS_prds/test.md", "colonyos/test",
+            source_issue=42,
+            base_branch="colonyos/feat",
+        )
+        assert "Closes #42" in system
+        assert "colonyos/feat" in system
+
+
+class TestBaseBranchValidation:
+    """Tests for base_branch validation in orchestrator.run()."""
+
+    def test_invalid_base_branch_raises(self, tmp_path: Path) -> None:
+        from colonyos.orchestrator import run as run_orchestrator
+        from colonyos.models import PreflightError
+
+        config = ColonyConfig(
+            project=ProjectInfo(name="test", description="test", stack="python"),
+        )
+
+        # Initialize a git repo for pre-flight to work
+        import subprocess
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True)
+
+        with pytest.raises(PreflightError, match="does not exist"):
+            run_orchestrator(
+                "test prompt",
+                repo_root=tmp_path,
+                config=config,
+                base_branch="nonexistent/branch",
+                offline=True,
+            )
+
+

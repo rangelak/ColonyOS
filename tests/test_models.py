@@ -7,7 +7,16 @@ from pathlib import Path
 
 import pytest
 
-from colonyos.models import LoopState, LoopStatus, Phase, PhaseResult, RunLog, RunStatus
+from colonyos.models import (
+    LoopState,
+    LoopStatus,
+    Phase,
+    PhaseResult,
+    QueueItem,
+    QueueItemStatus,
+    RunLog,
+    RunStatus,
+)
 
 
 class TestPhaseResultModel:
@@ -198,3 +207,125 @@ class TestPhaseCIFix:
             ],
         )
         assert all(p.phase != Phase.CI_FIX for p in log.phases)
+
+
+class TestQueueItemSlackFields:
+    """Tests for new QueueItem fields: base_branch, slack_ts, slack_channel, source_type='slack'."""
+
+    def test_new_fields_default_none(self) -> None:
+        item = QueueItem(
+            id="q-1",
+            source_type="prompt",
+            source_value="fix the bug",
+            status=QueueItemStatus.PENDING,
+        )
+        assert item.base_branch is None
+        assert item.slack_ts is None
+        assert item.slack_channel is None
+
+    def test_slack_source_type(self) -> None:
+        item = QueueItem(
+            id="q-2",
+            source_type="slack",
+            source_value="fix CSV export",
+            status=QueueItemStatus.PENDING,
+            slack_ts="1234567890.123456",
+            slack_channel="C12345",
+            base_branch="colonyos/feature-x",
+        )
+        assert item.source_type == "slack"
+        assert item.slack_ts == "1234567890.123456"
+        assert item.slack_channel == "C12345"
+        assert item.base_branch == "colonyos/feature-x"
+
+    def test_to_dict_includes_new_fields(self) -> None:
+        item = QueueItem(
+            id="q-3",
+            source_type="slack",
+            source_value="fix bug",
+            status=QueueItemStatus.PENDING,
+            slack_ts="123.456",
+            slack_channel="C999",
+            base_branch="colonyos/auth",
+        )
+        d = item.to_dict()
+        assert d["source_type"] == "slack"
+        assert d["slack_ts"] == "123.456"
+        assert d["slack_channel"] == "C999"
+        assert d["base_branch"] == "colonyos/auth"
+
+    def test_from_dict_with_new_fields(self) -> None:
+        d = {
+            "id": "q-4",
+            "source_type": "slack",
+            "source_value": "fix it",
+            "status": "pending",
+            "slack_ts": "111.222",
+            "slack_channel": "C555",
+            "base_branch": "colonyos/feat",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.source_type == "slack"
+        assert item.slack_ts == "111.222"
+        assert item.slack_channel == "C555"
+        assert item.base_branch == "colonyos/feat"
+
+    def test_from_dict_backward_compat(self) -> None:
+        """Old QueueItem dicts without new fields should load with None defaults."""
+        d = {
+            "id": "q-old",
+            "source_type": "prompt",
+            "source_value": "old item",
+            "status": "pending",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.base_branch is None
+        assert item.slack_ts is None
+        assert item.slack_channel is None
+
+    def test_roundtrip(self) -> None:
+        item = QueueItem(
+            id="q-rt",
+            source_type="slack",
+            source_value="roundtrip test",
+            status=QueueItemStatus.COMPLETED,
+            slack_ts="999.888",
+            slack_channel="C123",
+            base_branch="colonyos/test",
+            cost_usd=2.50,
+            pr_url="https://github.com/org/repo/pull/42",
+        )
+        d = item.to_dict()
+        restored = QueueItem.from_dict(d)
+        assert restored.source_type == item.source_type
+        assert restored.slack_ts == item.slack_ts
+        assert restored.slack_channel == item.slack_channel
+        assert restored.base_branch == item.base_branch
+        assert restored.pr_url == item.pr_url
+
+
+class TestRunLogPrUrl:
+    """Tests for pr_url field on RunLog."""
+
+    def test_default_none(self) -> None:
+        log = RunLog(run_id="r-1", prompt="test", status=RunStatus.RUNNING)
+        assert log.pr_url is None
+
+    def test_set_pr_url(self) -> None:
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.COMPLETED,
+            pr_url="https://github.com/org/repo/pull/42",
+        )
+        assert log.pr_url == "https://github.com/org/repo/pull/42"
+
+    def test_mark_finished_preserves_pr_url(self) -> None:
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.RUNNING,
+            pr_url="https://github.com/org/repo/pull/99",
+        )
+        log.mark_finished()
+        assert log.pr_url == "https://github.com/org/repo/pull/99"

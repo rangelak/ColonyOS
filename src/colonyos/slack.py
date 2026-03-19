@@ -345,6 +345,17 @@ class SlackWatchState:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     hourly_trigger_counts: dict[str, int] = field(default_factory=dict)
+    daily_cost_usd: float = 0.0
+    daily_cost_reset_date: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    )
+
+    def reset_daily_cost_if_needed(self) -> None:
+        """Reset daily cost counter if the UTC date has changed."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self.daily_cost_reset_date != today:
+            self.daily_cost_usd = 0.0
+            self.daily_cost_reset_date = today
 
     def message_key(self, channel_id: str, message_ts: str) -> str:
         """Build the dedup key for a message."""
@@ -375,6 +386,8 @@ class SlackWatchState:
             "runs_triggered": self.runs_triggered,
             "start_time_iso": self.start_time_iso,
             "hourly_trigger_counts": dict(self.hourly_trigger_counts),
+            "daily_cost_usd": self.daily_cost_usd,
+            "daily_cost_reset_date": self.daily_cost_reset_date,
         }
 
     @classmethod
@@ -386,6 +399,11 @@ class SlackWatchState:
             runs_triggered=data.get("runs_triggered", 0),
             start_time_iso=data.get("start_time_iso", ""),
             hourly_trigger_counts=dict(data.get("hourly_trigger_counts", {})),
+            daily_cost_usd=data.get("daily_cost_usd", 0.0),
+            daily_cost_reset_date=data.get(
+                "daily_cost_reset_date",
+                datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            ),
         )
 
 
@@ -438,6 +456,242 @@ def increment_hourly_count(state: SlackWatchState) -> None:
     )
     # Prune stale hourly keys to prevent unbounded dict growth
     state.prune_old_hourly_counts()
+
+
+# ---------------------------------------------------------------------------
+# Triage agent
+# ---------------------------------------------------------------------------
+
+# Regex patterns for explicit base branch targeting in Slack messages.
+_BASE_BRANCH_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"base:(\S+)"),
+    re.compile(r"build on top of\s+(\S+)", re.IGNORECASE),
+    re.compile(r"target branch\s+(\S+)", re.IGNORECASE),
+]
+
+
+@dataclass(frozen=True)
+class TriageResult:
+    """Structured output of the LLM triage agent."""
+
+    actionable: bool
+    confidence: float
+    summary: str
+    base_branch: str | None
+    reasoning: str
+
+
+def _build_triage_prompt(
+    message_text: str,
+    *,
+    project_name: str = "",
+    project_description: str = "",
+    project_stack: str = "",
+    vision: str = "",
+    triage_scope: str = "",
+) -> tuple[str, str]:
+    """Build system and user prompts for the triage LLM call.
+
+    Returns (system_prompt, user_prompt).
+    """
+    system_parts: list[str] = [
+        "You are a triage agent for an autonomous coding system. "
+        "Your job is to evaluate incoming Slack messages and decide whether "
+        "they describe an actionable code change that the system should work on.",
+        "",
+        "You must respond with ONLY a JSON object (no markdown fencing, no extra text) "
+        "with these exact fields:",
+        '  {"actionable": bool, "confidence": float (0.0-1.0), '
+        '"summary": str, "base_branch": str|null, "reasoning": str}',
+        "",
+        "Rules:",
+        "- actionable=true means the message describes a bug fix, feature request, "
+        "or code change that can be implemented.",
+        "- actionable=false means the message is a question, discussion, unrelated "
+        "topic, or cannot be acted on as a code change.",
+        "- summary should be a concise (1-2 sentence) description of the work if actionable.",
+        "- base_branch should be extracted if the user explicitly specifies a target branch "
+        "(e.g., 'base:colonyos/feature-x' or 'build on top of colonyos/feature-x'). "
+        "Otherwise null.",
+        "- confidence is your confidence that the classification is correct.",
+    ]
+
+    if project_name:
+        system_parts.append(f"\nProject: {project_name}")
+    if project_description:
+        system_parts.append(f"Description: {project_description}")
+    if project_stack:
+        system_parts.append(f"Stack: {project_stack}")
+    if vision:
+        system_parts.append(f"Vision: {vision}")
+    if triage_scope:
+        system_parts.append(f"\nScope: {triage_scope}")
+
+    safe_text = sanitize_slack_content(message_text)
+    user_prompt = f"Evaluate this Slack message:\n\n{safe_text}"
+
+    return "\n".join(system_parts), user_prompt
+
+
+def _parse_triage_response(raw_text: str) -> TriageResult:
+    """Parse the LLM response into a TriageResult.
+
+    Handles both clean JSON and JSON wrapped in markdown fences.
+    Falls back to a non-actionable result on parse failure.
+    """
+    text = raw_text.strip()
+    # Strip markdown code fences if present
+    if text.startswith("```"):
+        lines = text.splitlines()
+        # Remove first and last fence lines
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("Failed to parse triage response as JSON: %s", text[:200])
+        return TriageResult(
+            actionable=False,
+            confidence=0.0,
+            summary="",
+            base_branch=None,
+            reasoning=f"Failed to parse triage response: {text[:200]}",
+        )
+
+    return TriageResult(
+        actionable=bool(data.get("actionable", False)),
+        confidence=float(data.get("confidence", 0.0)),
+        summary=str(data.get("summary", "")),
+        base_branch=data.get("base_branch") or None,
+        reasoning=str(data.get("reasoning", "")),
+    )
+
+
+def triage_message(
+    message_text: str,
+    *,
+    project_name: str = "",
+    project_description: str = "",
+    project_stack: str = "",
+    vision: str = "",
+    triage_scope: str = "",
+) -> TriageResult:
+    """Run the LLM-based triage agent on a Slack message.
+
+    Uses a single-turn haiku call with no tool access to minimize cost
+    and prompt injection blast radius.
+    """
+    from colonyos.agent import run_phase_sync
+    from colonyos.models import Phase
+
+    system, user = _build_triage_prompt(
+        message_text,
+        project_name=project_name,
+        project_description=project_description,
+        project_stack=project_stack,
+        vision=vision,
+        triage_scope=triage_scope,
+    )
+
+    result = run_phase_sync(
+        Phase.PLAN,  # reuse plan phase enum; triage is a lightweight call
+        user,
+        cwd=Path("."),
+        system_prompt=system,
+        model="haiku",
+        budget_usd=0.05,  # tiny budget for triage
+        allowed_tools=[],  # no tool access
+    )
+
+    raw_text = ""
+    if result.artifacts:
+        raw_text = next(iter(result.artifacts.values()), "")
+    if not raw_text and result.error:
+        logger.warning("Triage LLM call failed: %s", result.error[:200])
+        return TriageResult(
+            actionable=False,
+            confidence=0.0,
+            summary="",
+            base_branch=None,
+            reasoning=f"Triage call failed: {result.error[:200]}",
+        )
+
+    return _parse_triage_response(raw_text)
+
+
+def extract_base_branch(text: str) -> str | None:
+    """Extract an explicit base branch from message text using known patterns.
+
+    Returns the branch name if found, otherwise None.
+    """
+    for pattern in _BASE_BRANCH_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return None
+
+
+def format_triage_acknowledgment(
+    summary: str,
+    *,
+    needs_approval: bool = True,
+    queue_position: int | None = None,
+    queue_total: int | None = None,
+) -> str:
+    """Format a triage acknowledgment message for a Slack thread."""
+    if needs_approval:
+        return f":mag: I can fix this — {summary}. React :thumbsup: to approve."
+    if queue_position is not None and queue_total is not None:
+        return f":mag: {summary}\n:inbox_tray: Added to queue, position {queue_position} of {queue_total}."
+    return f":mag: {summary}\n:inbox_tray: Added to queue."
+
+
+def format_triage_skip(reasoning: str) -> str:
+    """Format a triage skip message for a Slack thread."""
+    truncated = reasoning[:200] + "..." if len(reasoning) > 200 else reasoning
+    return f":fast_forward: Skipping — {truncated}"
+
+
+def post_triage_acknowledgment(
+    client: Any,
+    channel: str,
+    thread_ts: str,
+    summary: str,
+    *,
+    needs_approval: bool = True,
+    queue_position: int | None = None,
+    queue_total: int | None = None,
+) -> None:
+    """Post a triage acknowledgment to a Slack thread."""
+    text = format_triage_acknowledgment(
+        summary,
+        needs_approval=needs_approval,
+        queue_position=queue_position,
+        queue_total=queue_total,
+    )
+    client.chat_postMessage(
+        channel=channel,
+        thread_ts=thread_ts,
+        text=text,
+    )
+
+
+def post_triage_skip(
+    client: Any,
+    channel: str,
+    thread_ts: str,
+    reasoning: str,
+) -> None:
+    """Post a triage skip reason to a Slack thread."""
+    client.chat_postMessage(
+        channel=channel,
+        thread_ts=thread_ts,
+        text=format_triage_skip(reasoning),
+    )
 
 
 # ---------------------------------------------------------------------------

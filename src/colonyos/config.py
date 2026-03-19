@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -97,6 +98,11 @@ class SlackConfig:
     auto_approve: bool = False
     max_runs_per_hour: int = 3
     allowed_user_ids: list[str] = field(default_factory=list)
+    triage_scope: str = ""
+    daily_budget_usd: float | None = None
+    max_queue_depth: int = 20
+    triage_verbose: bool = False
+    max_consecutive_failures: int = 3
 
 
 @dataclass
@@ -173,6 +179,24 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
             f"Invalid slack trigger_mode '{trigger_mode}'. "
             f"Valid options: {sorted(_VALID_TRIGGER_MODES)}"
         )
+    max_queue_depth = int(raw.get("max_queue_depth", 20))
+    if max_queue_depth < 1:
+        raise ValueError(
+            f"slack.max_queue_depth must be positive, got {max_queue_depth}"
+        )
+    max_consecutive_failures = int(raw.get("max_consecutive_failures", 3))
+    if max_consecutive_failures < 1:
+        raise ValueError(
+            f"slack.max_consecutive_failures must be positive, got {max_consecutive_failures}"
+        )
+    daily_budget_raw = raw.get("daily_budget_usd")
+    daily_budget_usd: float | None = None
+    if daily_budget_raw is not None:
+        daily_budget_usd = float(daily_budget_raw)
+        if daily_budget_usd <= 0:
+            raise ValueError(
+                f"slack.daily_budget_usd must be positive, got {daily_budget_usd}"
+            )
     return SlackConfig(
         enabled=bool(raw.get("enabled", False)),
         channels=list(raw.get("channels", [])),
@@ -180,6 +204,11 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
         auto_approve=bool(raw.get("auto_approve", False)),
         max_runs_per_hour=int(raw.get("max_runs_per_hour", 3)),
         allowed_user_ids=list(raw.get("allowed_user_ids", [])),
+        triage_scope=str(raw.get("triage_scope", "")),
+        daily_budget_usd=daily_budget_usd,
+        max_queue_depth=max_queue_depth,
+        triage_verbose=bool(raw.get("triage_verbose", False)),
+        max_consecutive_failures=max_consecutive_failures,
     )
 
 
@@ -385,14 +414,22 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         }
 
     if config.slack.enabled or config.slack.channels:
-        data["slack"] = {
+        slack_data: dict[str, Any] = {
             "enabled": config.slack.enabled,
             "channels": list(config.slack.channels),
             "trigger_mode": config.slack.trigger_mode,
             "auto_approve": config.slack.auto_approve,
             "max_runs_per_hour": config.slack.max_runs_per_hour,
             "allowed_user_ids": list(config.slack.allowed_user_ids),
+            "max_queue_depth": config.slack.max_queue_depth,
+            "triage_verbose": config.slack.triage_verbose,
+            "max_consecutive_failures": config.slack.max_consecutive_failures,
         }
+        if config.slack.triage_scope:
+            slack_data["triage_scope"] = config.slack.triage_scope
+        if config.slack.daily_budget_usd is not None:
+            slack_data["daily_budget_usd"] = config.slack.daily_budget_usd
+        data["slack"] = slack_data
 
     cleanup_defaults = DEFAULTS["cleanup"]
     if (

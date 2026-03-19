@@ -12,13 +12,19 @@ from colonyos.sanitize import XML_TAG_RE, sanitize_untrusted_content
 from colonyos.slack import (
     SlackUI,
     SlackWatchState,
+    TriageResult,
     _MAX_HOURLY_KEYS,
+    _build_triage_prompt,
+    _parse_triage_response,
     check_rate_limit,
+    extract_base_branch,
     extract_prompt_from_mention,
     format_acknowledgment,
     format_phase_update,
     format_run_summary,
     format_slack_as_prompt,
+    format_triage_acknowledgment,
+    format_triage_skip,
     increment_hourly_count,
     load_watch_state,
     sanitize_slack_content,
@@ -780,3 +786,183 @@ class TestSlackUIFactory:
         ui2 = factory("[Review] ")
         assert isinstance(ui1, SlackUI)
         assert isinstance(ui2, SlackUI)
+
+
+# ---------------------------------------------------------------------------
+# Triage agent tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildTriagePrompt:
+    """Tests for triage prompt construction."""
+
+    def test_includes_project_info(self) -> None:
+        system, user = _build_triage_prompt(
+            "fix the bug",
+            project_name="MyApp",
+            project_description="A web app",
+            project_stack="Python/FastAPI",
+            vision="Be the best app",
+            triage_scope="Bug reports for Python backend",
+        )
+        assert "MyApp" in system
+        assert "A web app" in system
+        assert "Python/FastAPI" in system
+        assert "Be the best app" in system
+        assert "Bug reports for Python backend" in system
+        assert "fix the bug" in user
+
+    def test_minimal_prompt(self) -> None:
+        system, user = _build_triage_prompt("hello world")
+        assert "triage agent" in system.lower()
+        assert "hello world" in user
+
+    def test_sanitizes_message(self) -> None:
+        system, user = _build_triage_prompt("<script>alert('xss')</script> fix the bug")
+        assert "<script>" not in user
+        assert "fix the bug" in user
+
+
+class TestParseTriageResponse:
+    """Tests for triage response parsing."""
+
+    def test_valid_json(self) -> None:
+        raw = '{"actionable": true, "confidence": 0.95, "summary": "Fix CSV export", "base_branch": null, "reasoning": "Bug report"}'
+        result = _parse_triage_response(raw)
+        assert result.actionable is True
+        assert result.confidence == 0.95
+        assert result.summary == "Fix CSV export"
+        assert result.base_branch is None
+        assert result.reasoning == "Bug report"
+
+    def test_json_with_markdown_fences(self) -> None:
+        raw = '```json\n{"actionable": true, "confidence": 0.9, "summary": "Fix it", "base_branch": null, "reasoning": "yes"}\n```'
+        result = _parse_triage_response(raw)
+        assert result.actionable is True
+
+    def test_malformed_json_returns_non_actionable(self) -> None:
+        result = _parse_triage_response("this is not json")
+        assert result.actionable is False
+        assert result.confidence == 0.0
+
+    def test_missing_fields_use_defaults(self) -> None:
+        result = _parse_triage_response('{"actionable": true}')
+        assert result.actionable is True
+        assert result.confidence == 0.0
+        assert result.summary == ""
+        assert result.base_branch is None
+
+    def test_base_branch_empty_string_becomes_none(self) -> None:
+        raw = '{"actionable": true, "confidence": 0.8, "summary": "x", "base_branch": "", "reasoning": "y"}'
+        result = _parse_triage_response(raw)
+        assert result.base_branch is None
+
+    def test_base_branch_extracted(self) -> None:
+        raw = '{"actionable": true, "confidence": 0.8, "summary": "x", "base_branch": "colonyos/feat", "reasoning": "y"}'
+        result = _parse_triage_response(raw)
+        assert result.base_branch == "colonyos/feat"
+
+
+class TestExtractBaseBranch:
+    """Tests for explicit base branch extraction from message text."""
+
+    def test_base_colon_syntax(self) -> None:
+        assert extract_base_branch("fix the bug base:colonyos/feature-x") == "colonyos/feature-x"
+
+    def test_build_on_top_of_syntax(self) -> None:
+        assert extract_base_branch("fix it, build on top of colonyos/auth-middleware") == "colonyos/auth-middleware"
+
+    def test_target_branch_syntax(self) -> None:
+        assert extract_base_branch("fix it target branch colonyos/new-feature") == "colonyos/new-feature"
+
+    def test_no_base_branch(self) -> None:
+        assert extract_base_branch("just fix the CSV export bug") is None
+
+    def test_case_insensitive(self) -> None:
+        assert extract_base_branch("Build On Top Of colonyos/test") == "colonyos/test"
+
+
+class TestTriageAcknowledgments:
+    """Tests for triage acknowledgment formatting."""
+
+    def test_needs_approval(self) -> None:
+        msg = format_triage_acknowledgment("Fix CSV truncation", needs_approval=True)
+        assert "Fix CSV truncation" in msg
+        assert "thumbsup" in msg
+
+    def test_auto_approved_with_position(self) -> None:
+        msg = format_triage_acknowledgment(
+            "Fix bug", needs_approval=False, queue_position=3, queue_total=5,
+        )
+        assert "position 3 of 5" in msg
+
+    def test_auto_approved_no_position(self) -> None:
+        msg = format_triage_acknowledgment("Fix bug", needs_approval=False)
+        assert "Added to queue" in msg
+
+    def test_skip_message(self) -> None:
+        msg = format_triage_skip("Not actionable — this is a discussion")
+        assert "Skipping" in msg
+        assert "Not actionable" in msg
+
+    def test_skip_message_truncation(self) -> None:
+        long_reason = "x" * 300
+        msg = format_triage_skip(long_reason)
+        assert len(msg) < 350  # truncated + prefix
+
+
+class TestSlackWatchStateDailyCost:
+    """Tests for daily cost tracking on SlackWatchState."""
+
+    def test_default_daily_cost(self) -> None:
+        state = SlackWatchState(watch_id="daily-test")
+        assert state.daily_cost_usd == 0.0
+        assert state.daily_cost_reset_date != ""
+
+    def test_reset_daily_cost_same_day(self) -> None:
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        state = SlackWatchState(
+            watch_id="daily-test",
+            daily_cost_usd=10.0,
+            daily_cost_reset_date=today,
+        )
+        state.reset_daily_cost_if_needed()
+        assert state.daily_cost_usd == 10.0  # should not reset
+
+    def test_reset_daily_cost_new_day(self) -> None:
+        state = SlackWatchState(
+            watch_id="daily-test",
+            daily_cost_usd=50.0,
+            daily_cost_reset_date="2020-01-01",  # old date
+        )
+        state.reset_daily_cost_if_needed()
+        assert state.daily_cost_usd == 0.0  # should reset
+
+    def test_roundtrip_with_daily_fields(self) -> None:
+        state = SlackWatchState(
+            watch_id="rt-test",
+            daily_cost_usd=25.0,
+            daily_cost_reset_date="2026-03-19",
+        )
+        d = state.to_dict()
+        assert d["daily_cost_usd"] == 25.0
+        assert d["daily_cost_reset_date"] == "2026-03-19"
+
+        restored = SlackWatchState.from_dict(d)
+        assert restored.daily_cost_usd == 25.0
+        assert restored.daily_cost_reset_date == "2026-03-19"
+
+    def test_from_dict_backward_compat(self) -> None:
+        """Old state files without daily fields should load with defaults."""
+        d = {
+            "watch_id": "old-test",
+            "processed_messages": {},
+            "aggregate_cost_usd": 5.0,
+            "runs_triggered": 2,
+            "start_time_iso": "2026-01-01T00:00:00",
+            "hourly_trigger_counts": {},
+        }
+        state = SlackWatchState.from_dict(d)
+        assert state.daily_cost_usd == 0.0
+        assert state.daily_cost_reset_date != ""  # defaults to today

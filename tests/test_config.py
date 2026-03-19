@@ -12,6 +12,7 @@ from colonyos.config import (
     DEFAULTS,
     LearningsConfig,
     PhasesConfig,
+    SlackConfig,
     VALID_MODELS,
     _SAFETY_CRITICAL_PHASES,
     load_config,
@@ -718,5 +719,96 @@ class TestCIFixConfig:
         assert DEFAULTS["ci_fix"]["max_retries"] == 2
         assert DEFAULTS["ci_fix"]["wait_timeout"] == 600
         assert DEFAULTS["ci_fix"]["log_char_cap"] == 12_000
+
+
+class TestSlackConfigTriageFields:
+    """Tests for new SlackConfig fields: triage_scope, daily_budget_usd,
+    max_queue_depth, triage_verbose, max_consecutive_failures."""
+
+    def test_defaults(self) -> None:
+        config = SlackConfig()
+        assert config.triage_scope == ""
+        assert config.daily_budget_usd is None
+        assert config.max_queue_depth == 20
+        assert config.triage_verbose is False
+        assert config.max_consecutive_failures == 3
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "slack": {
+                    "enabled": True,
+                    "channels": ["C12345"],
+                    "triage_scope": "Bug reports for Python backend",
+                    "daily_budget_usd": 50.0,
+                    "max_queue_depth": 10,
+                    "triage_verbose": True,
+                    "max_consecutive_failures": 5,
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.triage_scope == "Bug reports for Python backend"
+        assert config.slack.daily_budget_usd == 50.0
+        assert config.slack.max_queue_depth == 10
+        assert config.slack.triage_verbose is True
+        assert config.slack.max_consecutive_failures == 5
+
+    def test_missing_new_fields_use_defaults(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"enabled": True}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.triage_scope == ""
+        assert config.slack.daily_budget_usd is None
+        assert config.slack.max_queue_depth == 20
+        assert config.slack.triage_verbose is False
+        assert config.slack.max_consecutive_failures == 3
+
+    def test_negative_daily_budget_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"daily_budget_usd": -5.0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="positive"):
+            load_config(tmp_repo)
+
+    def test_zero_max_queue_depth_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"max_queue_depth": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="positive"):
+            load_config(tmp_repo)
+
+    def test_roundtrip(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                channels=["C123"],
+                triage_scope="bugs only",
+                daily_budget_usd=25.0,
+                max_queue_depth=15,
+                triage_verbose=True,
+                max_consecutive_failures=5,
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.slack.triage_scope == "bugs only"
+        assert loaded.slack.daily_budget_usd == 25.0
+        assert loaded.slack.max_queue_depth == 15
+        assert loaded.slack.triage_verbose is True
+        assert loaded.slack.max_consecutive_failures == 5
 
 

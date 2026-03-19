@@ -804,6 +804,14 @@ def _format_queue_item_source(item: QueueItem, max_len: int = 60) -> str:
     if item.source_type == "issue":
         title = item.issue_title or ""
         return f"#{item.source_value} {title}"[:max_len]
+    if item.source_type == "slack":
+        channel = item.slack_channel or "?"
+        text = item.source_value
+        prefix = f"[slack:{channel}] "
+        remaining = max_len - len(prefix)
+        if remaining > 0 and len(text) > remaining:
+            text = text[: remaining - 3] + "..."
+        return f"{prefix}{text}"[:max_len]
     text = item.source_value
     if len(text) > max_len:
         return text[: max_len - 3] + "..."
@@ -1694,15 +1702,20 @@ def watch(
         SlackWatchState,
         check_rate_limit,
         create_slack_app,
+        extract_base_branch,
         extract_prompt_from_mention,
         format_slack_as_prompt,
+        format_triage_skip,
         increment_hourly_count,
         post_acknowledgment,
         post_run_summary,
+        post_triage_acknowledgment,
+        post_triage_skip,
         react_to_message,
         save_watch_state,
         should_process_message,
         start_socket_mode,
+        triage_message,
         wait_for_approval,
     )
 
@@ -1718,12 +1731,16 @@ def watch(
     watch_id = f"watch-{generate_timestamp()}"
     watch_state = SlackWatchState(watch_id=watch_id)
 
-    # Lock guards all watch_state mutations from concurrent event threads.
+    # Queue state for unified watch+queue flow
+    queue_state = _load_queue_state(repo_root) or QueueState(queue_id=f"watch-queue-{watch_id}")
+
+    # Lock guards all watch_state and queue_state mutations from concurrent event threads.
     state_lock = threading.Lock()
     # Semaphore limits concurrent pipeline runs to 1 to prevent git conflicts.
     pipeline_semaphore = threading.Semaphore(1)
-    # Track active pipeline threads for graceful shutdown.
-    active_threads: list[threading.Thread] = []
+    # Track consecutive failures for circuit breaker.
+    consecutive_failures = 0
+    queue_paused = False
 
     # Retrieve the bot user ID for mention detection
     try:
@@ -1735,6 +1752,8 @@ def watch(
 
     shutdown_event = threading.Event()
     start_time = time.monotonic()
+    # Store the Slack client for the executor thread
+    slack_client_ref: list[object] = []
 
     def _check_budget_exceeded() -> bool:
         """Return True if aggregate spend exceeds the configured budget cap."""
@@ -1742,6 +1761,14 @@ def watch(
             return False
         with state_lock:
             return watch_state.aggregate_cost_usd >= effective_max_budget
+
+    def _check_daily_budget_exceeded() -> bool:
+        """Return True if daily spend exceeds the configured daily budget cap."""
+        if config.slack.daily_budget_usd is None:
+            return False
+        with state_lock:
+            watch_state.reset_daily_cost_if_needed()
+            return watch_state.daily_cost_usd >= config.slack.daily_budget_usd
 
     def _check_time_exceeded() -> bool:
         """Return True if wall-clock time exceeds the configured max hours."""
@@ -1751,7 +1778,15 @@ def watch(
         return elapsed_hours >= effective_max_hours
 
     def _handle_event(event: dict, client: object) -> None:
-        """Handle app_mention and reaction_added events from Slack."""
+        """Handle app_mention and reaction_added events from Slack.
+
+        Triage → queue insertion flow (FR-6, FR-7).
+        """
+        nonlocal queue_paused
+        # Store client reference for executor thread
+        if not slack_client_ref:
+            slack_client_ref.append(client)
+
         if not should_process_message(event, config.slack, bot_user_id):
             return
 
@@ -1761,6 +1796,9 @@ def watch(
             return
         if _check_budget_exceeded():
             logger.warning("Max budget exceeded, ignoring event")
+            return
+        if _check_daily_budget_exceeded():
+            logger.warning("Daily budget exceeded, ignoring event")
             return
 
         channel = event.get("channel", "")
@@ -1791,9 +1829,24 @@ def watch(
                     logger.debug("Failed to post rate-limit message", exc_info=True)
                 return
 
+            # Check queue depth limit
+            pending_count = sum(
+                1 for item in queue_state.items
+                if item.status == QueueItemStatus.PENDING
+            )
+            if pending_count >= config.slack.max_queue_depth:
+                logger.warning("Queue depth limit reached (%d), skipping", pending_count)
+                try:
+                    client.chat_postMessage(  # type: ignore[union-attr]
+                        channel=channel,
+                        thread_ts=ts,
+                        text=f":warning: Queue is full ({pending_count} pending items). Try again later.",
+                    )
+                except Exception:
+                    logger.debug("Failed to post queue-full message", exc_info=True)
+                return
+
             # Mark as processed early (under lock) to prevent TOCTOU races.
-            # If the pipeline fails, the message stays marked to prevent
-            # retrigger storms; operators can manually retry.
             run_id = f"slack-{generate_timestamp()}"
             watch_state.mark_processed(channel, ts, run_id)
             increment_hourly_count(watch_state)
@@ -1803,108 +1856,260 @@ def watch(
             click.echo(f"[dry-run] Would trigger pipeline for: {prompt_text[:100]}")
             return
 
-        # Acknowledge
+        # Acknowledge receipt
         try:
             react_to_message(client, channel, ts, "eyes")  # type: ignore[arg-type]
         except Exception:
             logger.debug("Failed to add :eyes: reaction", exc_info=True)
 
+        # --- Triage phase ---
+        triage_kwargs: dict[str, str] = {}
+        if config.project:
+            triage_kwargs["project_name"] = config.project.name
+            triage_kwargs["project_description"] = config.project.description
+            triage_kwargs["project_stack"] = config.project.stack
+        if config.vision:
+            triage_kwargs["vision"] = config.vision
+        if config.slack.triage_scope:
+            triage_kwargs["triage_scope"] = config.slack.triage_scope
+
+        try:
+            triage_result = triage_message(prompt_text, **triage_kwargs)
+        except Exception:
+            logger.exception("Triage failed for message %s:%s", channel, ts)
+            # On triage failure, skip the message
+            try:
+                client.chat_postMessage(  # type: ignore[union-attr]
+                    channel=channel,
+                    thread_ts=ts,
+                    text=":warning: Triage failed. Check server logs for details.",
+                )
+            except Exception:
+                logger.debug("Failed to post triage failure message", exc_info=True)
+            return
+
+        if not triage_result.actionable:
+            logger.info("Triage skipped message %s:%s: %s", channel, ts, triage_result.reasoning[:100])
+            if config.slack.triage_verbose:
+                try:
+                    post_triage_skip(client, channel, ts, triage_result.reasoning)  # type: ignore[arg-type]
+                except Exception:
+                    logger.debug("Failed to post triage skip message", exc_info=True)
+            return
+
+        # Extract base branch (from triage or explicit syntax)
+        base_branch = triage_result.base_branch or extract_base_branch(prompt_text)
+
         formatted_prompt = format_slack_as_prompt(prompt_text, channel, user)
 
-        # Run pipeline in a background thread so the Bolt handler returns quickly
-        def _run_pipeline() -> None:
-            # Acquire semaphore to serialize pipeline runs (prevents git conflicts)
+        # --- Insert into queue ---
+        with state_lock:
+            queue_item = QueueItem(
+                id=run_id,
+                source_type="slack",
+                source_value=formatted_prompt,
+                status=QueueItemStatus.PENDING,
+                slack_ts=ts,
+                slack_channel=channel,
+                base_branch=base_branch,
+            )
+            queue_state.items.append(queue_item)
+            _save_queue_state(repo_root, queue_state)
+            save_watch_state(repo_root, watch_state)
+
+            # Calculate queue position for acknowledgment
+            pending_items = [
+                i for i in queue_state.items
+                if i.status == QueueItemStatus.PENDING
+            ]
+            position = len(pending_items)
+            total = len(queue_state.items)
+
+        # Post triage acknowledgment
+        needs_approval = not config.slack.auto_approve
+        try:
+            post_triage_acknowledgment(
+                client,  # type: ignore[arg-type]
+                channel,
+                ts,
+                triage_result.summary,
+                needs_approval=needs_approval,
+                queue_position=position,
+                queue_total=total,
+            )
+        except Exception:
+            logger.debug("Failed to post triage acknowledgment", exc_info=True)
+
+    def _queue_executor() -> None:
+        """Background thread that drains QueueState items sequentially."""
+        nonlocal consecutive_failures, queue_paused
+
+        while not shutdown_event.is_set():
+            # Check caps
+            if _check_time_exceeded() or _check_budget_exceeded() or _check_daily_budget_exceeded():
+                shutdown_event.wait(timeout=5.0)
+                continue
+
+            if queue_paused:
+                shutdown_event.wait(timeout=5.0)
+                continue
+
+            # Find next pending item
+            item_to_run: QueueItem | None = None
+            with state_lock:
+                for item in queue_state.items:
+                    if item.status == QueueItemStatus.PENDING:
+                        item_to_run = item
+                        break
+
+            if item_to_run is None:
+                shutdown_event.wait(timeout=2.0)
+                continue
+
+            # Acquire semaphore to serialize pipeline runs
             pipeline_semaphore.acquire()
             try:
-                # Approval gate: if auto_approve is false, wait for thumbsup
-                if not config.slack.auto_approve:
+                # Reload config each iteration for freshness
+                current_config = load_config(repo_root)
+
+                with state_lock:
+                    item_to_run.status = QueueItemStatus.RUNNING
+                    item_to_run.run_id = item_to_run.id
+                    _save_queue_state(repo_root, queue_state)
+
+                slack_ts = item_to_run.slack_ts
+                slack_channel = item_to_run.slack_channel
+                client = slack_client_ref[0] if slack_client_ref else None
+
+                # Approval gate for Slack-sourced items
+                if not current_config.slack.auto_approve and client and slack_ts and slack_channel:
                     try:
                         approval_resp = client.chat_postMessage(  # type: ignore[union-attr]
-                            channel=channel,
-                            thread_ts=ts,
+                            channel=slack_channel,
+                            thread_ts=slack_ts,
                             text=":question: Awaiting approval — react with :thumbsup: to proceed.",
                         )
                         approval_ts = approval_resp.get("ts", "")
                         approved = wait_for_approval(
-                            client, channel, ts, approval_ts,  # type: ignore[arg-type]
+                            client, slack_channel, slack_ts, approval_ts,  # type: ignore[arg-type]
                         )
                         if not approved:
                             try:
                                 client.chat_postMessage(  # type: ignore[union-attr]
-                                    channel=channel,
-                                    thread_ts=ts,
+                                    channel=slack_channel,
+                                    thread_ts=slack_ts,
                                     text=":no_entry: Approval timed out. Pipeline not executed.",
                                 )
                             except Exception:
-                                logger.debug("Failed to post approval timeout message", exc_info=True)
-                            return
+                                logger.debug("Failed to post approval timeout", exc_info=True)
+                            with state_lock:
+                                item_to_run.status = QueueItemStatus.REJECTED
+                                _save_queue_state(repo_root, queue_state)
+                            continue
                     except Exception:
-                        logger.debug("Failed to post/poll approval message", exc_info=True)
-                        return
+                        logger.debug("Failed to post/poll approval", exc_info=True)
+                        with state_lock:
+                            item_to_run.status = QueueItemStatus.FAILED
+                            item_to_run.error = "Approval flow failed"
+                            _save_queue_state(repo_root, queue_state)
+                        continue
 
-                # Re-check budget after approval wait
-                if _check_budget_exceeded():
-                    logger.warning("Budget exceeded after approval wait")
-                    return
+                # Build UI factory for Slack feedback
+                ui_factory = None
+                if client and slack_ts and slack_channel:
+                    def _slack_ui_factory(prefix: str = "", _ch: str = slack_channel, _ts: str = slack_ts) -> SlackUI:
+                        return SlackUI(client, _ch, _ts)
+                    ui_factory = _slack_ui_factory
 
-                post_acknowledgment(client, channel, ts, prompt_text)  # type: ignore[arg-type]
+                    try:
+                        post_acknowledgment(client, slack_channel, slack_ts, item_to_run.source_value[:200])  # type: ignore[arg-type]
+                    except Exception:
+                        logger.debug("Failed to post pipeline start", exc_info=True)
 
-                # Build a UI factory that creates SlackUI instances so
-                # phase progress appears as threaded Slack replies (FR-6.3).
-                def _slack_ui_factory(prefix: str = "") -> SlackUI:
-                    return SlackUI(client, channel, ts)
-
+                start_ms = int(time.time() * 1000)
                 _touch_heartbeat(repo_root)
+
                 log = run_orchestrator(
-                    formatted_prompt,
+                    item_to_run.source_value,
                     repo_root=repo_root,
-                    config=config,
+                    config=current_config,
                     verbose=verbose,
                     quiet=quiet,
-                    ui_factory=_slack_ui_factory,
+                    ui_factory=ui_factory,
+                    base_branch=item_to_run.base_branch,
                 )
 
+                elapsed_ms = int(time.time() * 1000) - start_ms
+
                 with state_lock:
+                    item_to_run.cost_usd = log.total_cost_usd
+                    item_to_run.duration_ms = elapsed_ms
+                    item_to_run.run_id = log.run_id
+                    item_to_run.pr_url = log.pr_url
+
+                    if log.status == RunStatus.COMPLETED:
+                        item_to_run.status = QueueItemStatus.COMPLETED
+                        consecutive_failures = 0
+                    else:
+                        item_to_run.status = QueueItemStatus.FAILED
+                        item_to_run.error = (log.phases[-1].error[:200] if log.phases and log.phases[-1].error else "Pipeline failed")
+                        consecutive_failures += 1
+
                     watch_state.aggregate_cost_usd += log.total_cost_usd
+                    watch_state.reset_daily_cost_if_needed()
+                    watch_state.daily_cost_usd += log.total_cost_usd
+                    queue_state.aggregate_cost_usd += log.total_cost_usd
+                    _save_queue_state(repo_root, queue_state)
                     save_watch_state(repo_root, watch_state)
 
-                emoji = "white_check_mark" if log.status.value == "completed" else "x"
-                try:
-                    react_to_message(client, channel, ts, emoji)  # type: ignore[arg-type]
-                except Exception:
-                    logger.debug("Failed to add result reaction", exc_info=True)
+                # Post result to Slack thread
+                if client and slack_ts and slack_channel:
+                    emoji = "white_check_mark" if log.status == RunStatus.COMPLETED else "x"
+                    try:
+                        react_to_message(client, slack_channel, slack_ts, emoji)  # type: ignore[arg-type]
+                    except Exception:
+                        logger.debug("Failed to add result reaction", exc_info=True)
 
-                post_run_summary(
-                    client,  # type: ignore[arg-type]
-                    channel,
-                    ts,
-                    status=log.status.value,
-                    total_cost=log.total_cost_usd,
-                    branch_name=log.branch_name,
-                    pr_url=getattr(log, "pr_url", None),
-                )
-            except Exception:
-                logger.exception("Pipeline run failed for Slack message %s:%s", channel, ts)
-                try:
-                    react_to_message(client, channel, ts, "x")  # type: ignore[arg-type]
-                except Exception:
-                    logger.debug("Failed to add :x: reaction after failure", exc_info=True)
-                try:
-                    client.chat_postMessage(  # type: ignore[union-attr]
-                        channel=channel,
-                        thread_ts=ts,
-                        text=":x: Pipeline failed. Check server logs for details.",
+                    post_run_summary(
+                        client,  # type: ignore[arg-type]
+                        slack_channel,
+                        slack_ts,
+                        status=log.status.value,
+                        total_cost=log.total_cost_usd,
+                        branch_name=log.branch_name,
+                        pr_url=log.pr_url,
                     )
-                except Exception:
-                    logger.debug("Failed to post failure message", exc_info=True)
-                with state_lock:
-                    save_watch_state(repo_root, watch_state)
+
+                # Check consecutive failure circuit breaker
+                if consecutive_failures >= current_config.slack.max_consecutive_failures:
+                    queue_paused = True
+                    logger.warning(
+                        "Queue paused: %d consecutive failures", consecutive_failures,
+                    )
+                    if client and current_config.slack.channels:
+                        notify_channel = current_config.slack.channels[0]
+                        try:
+                            client.chat_postMessage(  # type: ignore[union-attr]
+                                channel=notify_channel,
+                                text=(
+                                    f":rotating_light: Queue paused after {consecutive_failures} "
+                                    f"consecutive failures. Check server logs and re-enable."
+                                ),
+                            )
+                        except Exception:
+                            logger.debug("Failed to post circuit-breaker notification", exc_info=True)
+
+            except Exception:
+                logger.exception("Queue executor error for item %s", item_to_run.id if item_to_run else "?")
+                if item_to_run:
+                    with state_lock:
+                        item_to_run.status = QueueItemStatus.FAILED
+                        item_to_run.error = "Executor error"
+                        consecutive_failures += 1
+                        _save_queue_state(repo_root, queue_state)
+                        save_watch_state(repo_root, watch_state)
             finally:
                 pipeline_semaphore.release()
-
-        thread = threading.Thread(target=_run_pipeline, daemon=False)
-        active_threads.append(thread)
-        thread.start()
 
     # Register event handlers
     bolt_app.event("app_mention")(_handle_event)
@@ -1944,11 +2149,6 @@ def watch(
     def _signal_handler(signum: int, frame: object) -> None:
         click.echo("\nShutting down Slack watcher...")
         shutdown_event.set()
-        # Wait for active pipeline threads to complete (up to 60s)
-        for t in active_threads:
-            t.join(timeout=60)
-        with state_lock:
-            save_watch_state(repo_root, watch_state)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -1960,10 +2160,16 @@ def watch(
         click.echo(f"Max hours: {effective_max_hours}")
     if effective_max_budget is not None:
         click.echo(f"Max budget: ${effective_max_budget:.2f}")
+    if config.slack.daily_budget_usd is not None:
+        click.echo(f"Daily budget: ${config.slack.daily_budget_usd:.2f}")
     if dry_run:
         click.echo("DRY RUN MODE — triggers will be logged but not executed")
 
     save_watch_state(repo_root, watch_state)
+
+    # Start the queue executor thread
+    executor_thread = threading.Thread(target=_queue_executor, daemon=True, name="queue-executor")
+    executor_thread.start()
 
     try:
         handler = start_socket_mode(bolt_app)
@@ -1977,6 +2183,9 @@ def watch(
             if _check_budget_exceeded():
                 click.echo("Max budget reached. Shutting down watcher.")
                 break
+            if _check_daily_budget_exceeded():
+                click.echo("Daily budget reached. Pausing until next UTC day.")
+                # Don't break — just wait for daily reset
             shutdown_event.wait(timeout=5.0)
         handler.close()
     except ImportError as exc:
@@ -1988,10 +2197,10 @@ def watch(
         click.echo(f"Slack watcher error: {exc}", err=True)
         sys.exit(1)
     finally:
-        # Wait for active threads and persist state
-        for t in active_threads:
-            t.join(timeout=30)
+        shutdown_event.set()
+        executor_thread.join(timeout=60)
         with state_lock:
+            _save_queue_state(repo_root, queue_state)
             save_watch_state(repo_root, watch_state)
 
 

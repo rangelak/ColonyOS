@@ -574,6 +574,7 @@ def _build_deliver_prompt(
     branch_name: str,
     *,
     source_issue: int | None = None,
+    base_branch: str | None = None,
 ) -> tuple[str, str]:
     deliver_template = _load_instruction("deliver.md")
 
@@ -589,10 +590,18 @@ def _build_deliver_prompt(
             f"the issue on merge. Reference the issue in the summary section."
         )
 
+    if base_branch:
+        system += (
+            f"\n\nIMPORTANT: This PR must target the branch `{base_branch}` "
+            f"instead of `main`. Use `--base {base_branch}` when creating the PR."
+        )
+
     user = (
         f"Push branch `{branch_name}` and open a pull request for the "
         f"feature described in `{prd_path}`."
     )
+    if base_branch:
+        user += f" Target branch: `{base_branch}` (not main)."
     return system, user
 
 
@@ -1617,6 +1626,7 @@ def run(
     ui_factory: object | None = None,
     offline: bool = False,
     force: bool = False,
+    base_branch: str | None = None,
 ) -> RunLog:
     """Execute the full orchestration loop: plan -> implement -> review -> deliver.
 
@@ -1671,6 +1681,30 @@ def run(
         slug = slugify(prompt)
         names = planning_names(prompt)
         branch_name = f"{config.branch_prefix}{slug}"
+
+        # --- Base branch validation ---
+        if base_branch:
+            branch_ok, branch_err = validate_branch_exists(base_branch, repo_root)
+            if not branch_ok:
+                # Try fetching from remote
+                if not offline:
+                    try:
+                        subprocess.run(
+                            ["git", "fetch", "origin", base_branch],
+                            capture_output=True, text=True, cwd=repo_root, timeout=30,
+                        )
+                        # Try to create local tracking branch
+                        subprocess.run(
+                            ["git", "branch", "--track", base_branch, f"origin/{base_branch}"],
+                            capture_output=True, text=True, cwd=repo_root, timeout=30,
+                        )
+                        branch_ok, branch_err = validate_branch_exists(base_branch, repo_root)
+                    except Exception:
+                        pass
+                if not branch_ok:
+                    raise PreflightError(
+                        f"Base branch '{base_branch}' does not exist: {branch_err}"
+                    )
 
         # --- Pre-flight git state check ---
         preflight = _preflight_check(
@@ -1951,6 +1985,7 @@ def run(
         system, user = _build_deliver_prompt(
             config, prd_rel, branch_name,
             source_issue=log.source_issue,
+            base_branch=base_branch,
         )
         deliver_result = run_phase_sync(
             Phase.DELIVER,
@@ -1962,6 +1997,11 @@ def run(
             ui=deliver_ui,
         )
         log.phases.append(deliver_result)
+
+        # Extract PR URL from deliver artifacts
+        pr_url = deliver_result.artifacts.get("pr_url", "")
+        if pr_url:
+            log.pr_url = pr_url
 
         if not deliver_result.success:
             log.status = RunStatus.FAILED
