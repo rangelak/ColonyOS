@@ -3504,3 +3504,105 @@ def ui(port: int, no_open: bool, write: bool) -> None:
         uvicorn.run(fast_app, host="127.0.0.1", port=port, log_level="warning")
     except KeyboardInterrupt:
         click.echo("\n[colonyos] Dashboard stopped.")
+
+
+# ---------------------------------------------------------------------------
+# Watch GitHub command (PR review comment watcher)
+# ---------------------------------------------------------------------------
+
+
+@app.command("watch-github")
+@click.option("--max-hours", type=float, default=None, help="Maximum wall-clock hours for the watcher.")
+@click.option("--max-budget", type=float, default=None, help="Maximum aggregate USD spend.")
+@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
+@click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
+@click.option("--dry-run", is_flag=True, help="Log triggers without executing pipeline.")
+def watch_github(
+    max_hours: float | None,
+    max_budget: float | None,
+    verbose: bool,
+    quiet: bool,
+    dry_run: bool,
+) -> None:
+    """Watch GitHub PRs for review comments mentioning @colonyos."""
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+
+    if not config.project:
+        click.echo("No ColonyOS config found. Run `colonyos init` first.", err=True)
+        sys.exit(1)
+
+    if not config.github.enabled:
+        click.echo(
+            "GitHub integration is not enabled. "
+            "Set `github.enabled: true` in .colonyos/config.yaml.",
+            err=True,
+        )
+        sys.exit(1)
+
+    from colonyos.github_watcher import (
+        GithubFixContext,
+        RunResult,
+        run_github_watcher,
+    )
+    from colonyos.orchestrator import run_thread_fix
+
+    effective_max_hours = max_hours if max_hours is not None else config.budget.max_duration_hours
+    effective_max_budget = max_budget if max_budget is not None else config.budget.max_total_usd
+
+    click.echo(f"[colonyos] Starting GitHub watcher for {repo_root}")
+    click.echo(f"[colonyos] Bot username: @{config.github.bot_username}")
+    click.echo(f"[colonyos] Branch prefix: {config.branch_prefix}")
+    click.echo(f"[colonyos] Polling interval: {config.github.polling_interval_seconds}s")
+
+    if dry_run:
+        click.echo("[colonyos] DRY RUN MODE — no pipelines will execute")
+
+    def _on_trigger(ctx: GithubFixContext, run_id: str) -> RunResult | None:
+        """Execute the fix pipeline when triggered."""
+        try:
+            from colonyos.github_watcher import format_github_comment_as_prompt
+            from colonyos.ui import PhaseUI, NullUI
+
+            prompt = format_github_comment_as_prompt(ctx)
+
+            ui_cls = NullUI if quiet else PhaseUI
+            ui = ui_cls(verbose=verbose, prefix=f"[PR #{ctx.pr_number}] ")
+
+            log = run_thread_fix(
+                prompt=prompt,
+                branch=ctx.branch_name,
+                repo_root=repo_root,
+                config=config,
+                ui=ui,
+            )
+
+            return RunResult(
+                success=log.status.value == "completed",
+                cost_usd=log.total_cost_usd,
+                run_id=log.run_id,
+                error=log.phases[-1].error if log.phases and log.phases[-1].error else None,
+            )
+        except Exception as exc:
+            logger.exception("Fix run failed for PR #%d", ctx.pr_number)
+            return RunResult(
+                success=False,
+                cost_usd=0.0,
+                run_id=run_id,
+                error=str(exc),
+            )
+
+    try:
+        run_github_watcher(
+            repo_root=repo_root,
+            config=config.github,
+            branch_prefix=config.branch_prefix,
+            max_hours=effective_max_hours,
+            max_budget=effective_max_budget,
+            dry_run=dry_run,
+            verbose=verbose,
+            quiet=quiet,
+            on_trigger=_on_trigger,
+        )
+    except KeyboardInterrupt:
+        click.echo("\n[colonyos] GitHub watcher stopped.")

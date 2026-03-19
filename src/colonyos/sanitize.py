@@ -82,3 +82,24 @@ def sanitize_ci_logs(text: str) -> str:
     for pattern in SECRET_PATTERNS:
         text = pattern.sub(_REDACTED, text)
     return text
+
+
+# Maximum characters for GitHub review comment content.
+# Matches the 2000 char cap used in github.py for consistency.
+_GITHUB_COMMENT_CHAR_CAP = 2000
+
+
+def sanitize_github_comment(text: str) -> str:
+    """Sanitize GitHub review comment content for safe inclusion in prompts.
+
+    Applies two passes:
+    1. XML tag stripping via ``sanitize_untrusted_content()``
+    2. Character cap to prevent overly long comments
+
+    This mirrors the sanitization applied to Slack messages and GitHub issues,
+    ensuring consistent prompt injection defenses across all integrations.
+    """
+    text = sanitize_untrusted_content(text)
+    if len(text) > _GITHUB_COMMENT_CHAR_CAP:
+        text = text[:_GITHUB_COMMENT_CHAR_CAP]
+    return text

@@ -945,3 +945,170 @@ class TestSlackAutoApproveWarning:
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
             load_config(tmp_repo)
         assert not any("allowed_user_ids" in msg for msg in caplog.messages)
+
+
+class TestGithubWatcherConfig:
+    """Tests for GithubWatcherConfig parsing and validation."""
+
+    def test_default_values(self, tmp_repo: Path) -> None:
+        """GithubWatcherConfig should have sensible defaults."""
+        from colonyos.config import GithubWatcherConfig
+        config = GithubWatcherConfig()
+        assert config.enabled is False
+        assert config.bot_username == "colonyos"
+        assert config.max_runs_per_hour == 5
+        assert config.daily_budget_usd is None
+        assert config.polling_interval_seconds == 60
+        assert config.max_consecutive_failures == 3
+        assert config.circuit_breaker_cooldown_minutes == 30
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        """GithubWatcherConfig should be parsed from YAML."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "github": {
+                    "enabled": True,
+                    "bot_username": "my-bot",
+                    "max_runs_per_hour": 10,
+                    "daily_budget_usd": 25.0,
+                    "polling_interval_seconds": 30,
+                    "max_consecutive_failures": 5,
+                    "circuit_breaker_cooldown_minutes": 60,
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.github.enabled is True
+        assert config.github.bot_username == "my-bot"
+        assert config.github.max_runs_per_hour == 10
+        assert config.github.daily_budget_usd == 25.0
+        assert config.github.polling_interval_seconds == 30
+        assert config.github.max_consecutive_failures == 5
+        assert config.github.circuit_breaker_cooldown_minutes == 60
+
+    def test_missing_section_uses_defaults(self, tmp_repo: Path) -> None:
+        """Missing github section should use defaults."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "sonnet"}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.github.enabled is False
+        assert config.github.bot_username == "colonyos"
+        assert config.github.max_runs_per_hour == 5
+
+    def test_invalid_max_runs_per_hour_zero_raises(self, tmp_repo: Path) -> None:
+        """Zero max_runs_per_hour should raise ValueError."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github": {"max_runs_per_hour": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="github.max_runs_per_hour must be positive"):
+            load_config(tmp_repo)
+
+    def test_invalid_max_runs_per_hour_negative_raises(self, tmp_repo: Path) -> None:
+        """Negative max_runs_per_hour should raise ValueError."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github": {"max_runs_per_hour": -1}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="github.max_runs_per_hour must be positive"):
+            load_config(tmp_repo)
+
+    def test_invalid_daily_budget_negative_raises(self, tmp_repo: Path) -> None:
+        """Negative daily_budget_usd should raise ValueError."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github": {"daily_budget_usd": -5.0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="github.daily_budget_usd must be positive"):
+            load_config(tmp_repo)
+
+    def test_invalid_polling_interval_zero_raises(self, tmp_repo: Path) -> None:
+        """Zero polling_interval_seconds should raise ValueError."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github": {"polling_interval_seconds": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="github.polling_interval_seconds must be positive"):
+            load_config(tmp_repo)
+
+    def test_invalid_max_consecutive_failures_zero_raises(self, tmp_repo: Path) -> None:
+        """Zero max_consecutive_failures should raise ValueError."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github": {"max_consecutive_failures": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="github.max_consecutive_failures must be positive"):
+            load_config(tmp_repo)
+
+    def test_invalid_circuit_breaker_cooldown_zero_raises(self, tmp_repo: Path) -> None:
+        """Zero circuit_breaker_cooldown_minutes should raise ValueError."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github": {"circuit_breaker_cooldown_minutes": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="github.circuit_breaker_cooldown_minutes must be positive"):
+            load_config(tmp_repo)
+
+    def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
+        """GithubWatcherConfig should survive roundtrip save/load."""
+        from colonyos.config import GithubWatcherConfig
+        original = ColonyConfig(
+            github=GithubWatcherConfig(
+                enabled=True,
+                bot_username="test-bot",
+                max_runs_per_hour=8,
+                daily_budget_usd=50.0,
+                polling_interval_seconds=90,
+                max_consecutive_failures=4,
+                circuit_breaker_cooldown_minutes=45,
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.github.enabled is True
+        assert loaded.github.bot_username == "test-bot"
+        assert loaded.github.max_runs_per_hour == 8
+        assert loaded.github.daily_budget_usd == 50.0
+        assert loaded.github.polling_interval_seconds == 90
+        assert loaded.github.max_consecutive_failures == 4
+        assert loaded.github.circuit_breaker_cooldown_minutes == 45
+
+    def test_disabled_config_not_serialized(self, tmp_repo: Path) -> None:
+        """Disabled github config with all defaults should not be serialized."""
+        from colonyos.config import GithubWatcherConfig
+        original = ColonyConfig(github=GithubWatcherConfig())
+        save_config(tmp_repo, original)
+        raw = yaml.safe_load(
+            (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert "github" not in raw
+
+    def test_enabled_config_serialized(self, tmp_repo: Path) -> None:
+        """Enabled github config should be serialized."""
+        from colonyos.config import GithubWatcherConfig
+        original = ColonyConfig(github=GithubWatcherConfig(enabled=True))
+        save_config(tmp_repo, original)
+        raw = yaml.safe_load(
+            (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert "github" in raw
+        assert raw["github"]["enabled"] is True

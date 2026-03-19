@@ -108,6 +108,19 @@ class SlackConfig:
 
 
 @dataclass
+class GithubWatcherConfig:
+    """Configuration for the GitHub PR review comment watcher."""
+
+    enabled: bool = False
+    bot_username: str = "colonyos"
+    max_runs_per_hour: int = 5
+    daily_budget_usd: float | None = None
+    polling_interval_seconds: int = 60
+    max_consecutive_failures: int = 3
+    circuit_breaker_cooldown_minutes: int = 30
+
+
+@dataclass
 class ColonyConfig:
     project: ProjectInfo | None = None
     personas: list[Persona] = field(default_factory=list)
@@ -127,6 +140,7 @@ class ColonyConfig:
     learnings: LearningsConfig = field(default_factory=LearningsConfig)
     ci_fix: CIFixConfig = field(default_factory=CIFixConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
+    github: GithubWatcherConfig = field(default_factory=GithubWatcherConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
 
     def get_model(self, phase: Phase) -> str:
@@ -294,6 +308,55 @@ def _parse_cleanup_config(raw: dict) -> CleanupConfig:
     )
 
 
+def _parse_github_watcher_config(raw: dict) -> GithubWatcherConfig:
+    """Parse the ``github`` section from config.yaml."""
+    if not raw:
+        return GithubWatcherConfig()
+
+    max_runs_per_hour = int(raw.get("max_runs_per_hour", 5))
+    if max_runs_per_hour < 1:
+        raise ValueError(
+            f"github.max_runs_per_hour must be positive, got {max_runs_per_hour}"
+        )
+
+    daily_budget_raw = raw.get("daily_budget_usd")
+    daily_budget_usd: float | None = None
+    if daily_budget_raw is not None:
+        daily_budget_usd = float(daily_budget_raw)
+        if daily_budget_usd <= 0:
+            raise ValueError(
+                f"github.daily_budget_usd must be positive, got {daily_budget_usd}"
+            )
+
+    polling_interval_seconds = int(raw.get("polling_interval_seconds", 60))
+    if polling_interval_seconds < 1:
+        raise ValueError(
+            f"github.polling_interval_seconds must be positive, got {polling_interval_seconds}"
+        )
+
+    max_consecutive_failures = int(raw.get("max_consecutive_failures", 3))
+    if max_consecutive_failures < 1:
+        raise ValueError(
+            f"github.max_consecutive_failures must be positive, got {max_consecutive_failures}"
+        )
+
+    circuit_breaker_cooldown_minutes = int(raw.get("circuit_breaker_cooldown_minutes", 30))
+    if circuit_breaker_cooldown_minutes < 1:
+        raise ValueError(
+            f"github.circuit_breaker_cooldown_minutes must be positive, got {circuit_breaker_cooldown_minutes}"
+        )
+
+    return GithubWatcherConfig(
+        enabled=bool(raw.get("enabled", False)),
+        bot_username=str(raw.get("bot_username", "colonyos")),
+        max_runs_per_hour=max_runs_per_hour,
+        daily_budget_usd=daily_budget_usd,
+        polling_interval_seconds=polling_interval_seconds,
+        max_consecutive_failures=max_consecutive_failures,
+        circuit_breaker_cooldown_minutes=circuit_breaker_cooldown_minutes,
+    )
+
+
 def load_config(repo_root: Path) -> ColonyConfig:
     config_path = repo_root / CONFIG_DIR / CONFIG_FILE
     if not config_path.exists():
@@ -372,6 +435,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         ),
         ci_fix=_parse_ci_fix_config(raw.get("ci_fix", {})),
         slack=_parse_slack_config(raw.get("slack", {})),
+        github=_parse_github_watcher_config(raw.get("github", {})),
         cleanup=_parse_cleanup_config(raw.get("cleanup", {})),
     )
 
@@ -455,6 +519,19 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         if config.slack.daily_budget_usd is not None:
             slack_data["daily_budget_usd"] = config.slack.daily_budget_usd
         data["slack"] = slack_data
+
+    if config.github.enabled:
+        github_data: dict[str, Any] = {
+            "enabled": config.github.enabled,
+            "bot_username": config.github.bot_username,
+            "max_runs_per_hour": config.github.max_runs_per_hour,
+            "polling_interval_seconds": config.github.polling_interval_seconds,
+            "max_consecutive_failures": config.github.max_consecutive_failures,
+            "circuit_breaker_cooldown_minutes": config.github.circuit_breaker_cooldown_minutes,
+        }
+        if config.github.daily_budget_usd is not None:
+            github_data["daily_budget_usd"] = config.github.daily_budget_usd
+        data["github"] = github_data
 
     cleanup_defaults = DEFAULTS["cleanup"]
     if (
