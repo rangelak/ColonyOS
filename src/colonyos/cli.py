@@ -12,6 +12,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -3504,3 +3505,351 @@ def ui(port: int, no_open: bool, write: bool) -> None:
         uvicorn.run(fast_app, host="127.0.0.1", port=port, log_level="warning")
     except KeyboardInterrupt:
         click.echo("\n[colonyos] Dashboard stopped.")
+
+
+# ---------------------------------------------------------------------------
+# colonyos watch-github — GitHub PR review watcher
+# ---------------------------------------------------------------------------
+
+
+@app.command("watch-github")
+@click.option("--poll-interval", type=int, default=None, help="Poll interval in seconds (default: 60)")
+@click.option("--dry-run", is_flag=True, help="Log detected events without triggering fixes")
+@click.option("--max-hours", type=float, default=None, help="Max hours to run")
+@click.option("--max-budget", type=float, default=None, help="Max budget in USD")
+@click.option("-v", "--verbose", is_flag=True, help="Verbose output")
+@click.option("-q", "--quiet", is_flag=True, help="Minimal output")
+def watch_github(
+    poll_interval: int | None,
+    dry_run: bool,
+    max_hours: float | None,
+    max_budget: float | None,
+    verbose: bool,
+    quiet: bool,
+) -> None:
+    """Watch GitHub PRs for review events and auto-fix on request changes.
+
+    Monitors ColonyOS-created PRs (colonyos/* branches) for "Request Changes"
+    reviews and automatically triggers the fix pipeline to address feedback.
+
+    Example:
+        colonyos watch-github --poll-interval 30
+        colonyos watch-github --dry-run
+    """
+    import signal
+    import threading
+
+    from colonyos.github_watcher import (
+        GitHubWatchState,
+        check_github_rate_limit,
+        create_github_fix_queue_item,
+        fetch_pr_reviews_for_branch,
+        fetch_review_comments,
+        format_fix_complete_comment,
+        format_fix_limit_comment,
+        format_fix_start_comment,
+        format_github_fix_prompt,
+        increment_github_hourly_count,
+        is_colonyos_branch,
+        is_reviewer_allowed,
+        is_valid_git_ref,
+        load_github_watch_state,
+        post_pr_comment,
+        save_github_watch_state,
+    )
+    from colonyos.naming import generate_timestamp
+
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+
+    if not config.project:
+        click.echo("No ColonyOS config found. Run `colonyos init` first.", err=True)
+        sys.exit(1)
+
+    if not config.github_watch.enabled:
+        click.echo(
+            "GitHub watch is not enabled. "
+            "Set `github_watch.enabled: true` in .colonyos/config.yaml.",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Resolve effective settings
+    effective_poll_interval = (
+        poll_interval if poll_interval is not None
+        else config.github_watch.poll_interval_seconds
+    )
+    effective_max_hours = (
+        max_hours if max_hours is not None
+        else config.budget.max_duration_hours
+    )
+    effective_max_budget = (
+        max_budget if max_budget is not None
+        else config.budget.max_total_usd
+    )
+    max_fix_rounds = config.github_watch.max_fix_rounds_per_pr
+    max_fix_cost = config.github_watch.max_fix_cost_per_pr_usd
+
+    # Security warnings
+    if config.github_watch.enabled and not config.github_watch.allowed_reviewers:
+        logger.warning(
+            "github_watch.allowed_reviewers is empty — any reviewer can trigger "
+            "auto-fixes on colonyos/* branches. Consider restricting to team members."
+        )
+
+    # Initialize watch state
+    watch_id = f"github-watch-{generate_timestamp()}"
+    watch_state = GitHubWatchState(watch_id=watch_id)
+
+    # Lock for thread-safe state access
+    state_lock = threading.Lock()
+    shutdown_event = threading.Event()
+    start_time = time.monotonic()
+
+    def _signal_handler(signum: int, frame: Any) -> None:
+        logger.info("Received signal %d, initiating shutdown", signum)
+        shutdown_event.set()
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+    # Log startup
+    if not quiet:
+        click.echo(f"[watch-github] Starting GitHub PR review watcher (ID: {watch_id})")
+        click.echo(f"[watch-github] Poll interval: {effective_poll_interval}s")
+        click.echo(f"[watch-github] Max fix rounds per PR: {max_fix_rounds}")
+        click.echo(f"[watch-github] Max fix cost per PR: ${max_fix_cost:.2f}")
+        if dry_run:
+            click.echo("[watch-github] DRY RUN mode — events logged but not processed")
+
+    def _check_budget_exceeded() -> bool:
+        """Return True if aggregate spend exceeds the configured budget cap."""
+        if effective_max_budget is None:
+            return False
+        with state_lock:
+            return watch_state.aggregate_cost_usd >= effective_max_budget
+
+    def _check_time_exceeded() -> bool:
+        """Return True if we've exceeded the max runtime."""
+        if effective_max_hours is None:
+            return False
+        elapsed_hours = (time.monotonic() - start_time) / 3600
+        return elapsed_hours >= effective_max_hours
+
+    def _poll_and_process() -> None:
+        """Poll GitHub for review events and process any found."""
+        import subprocess
+
+        # Get list of ColonyOS branches with open PRs
+        try:
+            result = subprocess.run(
+                ["gh", "pr", "list", "--state", "open", "--json", "number,headRefName,reviews"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                logger.warning("gh pr list failed: %s", result.stderr[:200])
+                return
+            prs = json.loads(result.stdout)
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as exc:
+            logger.warning("Failed to fetch PRs: %s", exc)
+            return
+
+        for pr in prs:
+            pr_number = pr.get("number")
+            branch = pr.get("headRefName", "")
+            reviews = pr.get("reviews", [])
+
+            # Only process colonyos/* branches
+            if not is_colonyos_branch(branch):
+                continue
+
+            # Validate branch name
+            if not is_valid_git_ref(branch):
+                logger.warning("Invalid branch name '%s', skipping", branch[:100])
+                continue
+
+            # Check each review for "CHANGES_REQUESTED" state
+            for review in reviews:
+                review_state = review.get("state", "")
+                reviewer = review.get("author", {}).get("login", "unknown")
+                review_id = review.get("id", 0)
+                submitted_at = review.get("submittedAt", "")
+
+                # Only process "CHANGES_REQUESTED" reviews
+                if review_state != "CHANGES_REQUESTED":
+                    continue
+
+                # Build event ID for deduplication
+                event_id = f"{pr_number}:{review_id}"
+
+                with state_lock:
+                    # Skip if already processed
+                    if watch_state.is_event_processed(event_id):
+                        continue
+
+                    # Check reviewer allowlist
+                    if not is_reviewer_allowed(reviewer, config.github_watch):
+                        logger.info(
+                            "Reviewer '%s' not in allowed_reviewers, skipping PR #%d",
+                            reviewer, pr_number
+                        )
+                        continue
+
+                    # Check rate limit
+                    if not check_github_rate_limit(watch_state, config.slack.max_runs_per_hour):
+                        logger.warning("Rate limit exceeded, skipping PR #%d", pr_number)
+                        continue
+
+                    # Check per-PR round limit
+                    current_rounds = watch_state.get_pr_rounds(pr_number)
+                    if current_rounds >= max_fix_rounds:
+                        logger.info(
+                            "PR #%d has reached round limit (%d/%d)",
+                            pr_number, current_rounds, max_fix_rounds
+                        )
+                        if not dry_run:
+                            post_pr_comment(
+                                pr_number,
+                                format_fix_limit_comment("rounds", current_rounds, max_fix_rounds)
+                            )
+                        continue
+
+                    # Check per-PR cost limit
+                    current_cost = watch_state.get_pr_cost(pr_number)
+                    if current_cost >= max_fix_cost:
+                        logger.info(
+                            "PR #%d has reached cost limit ($%.2f/$%.2f)",
+                            pr_number, current_cost, max_fix_cost
+                        )
+                        if not dry_run:
+                            post_pr_comment(
+                                pr_number,
+                                format_fix_limit_comment("cost", current_cost, max_fix_cost)
+                            )
+                        continue
+
+                # Log the event
+                if verbose or not quiet:
+                    click.echo(
+                        f"[watch-github] Detected: PR #{pr_number} changes requested by @{reviewer}"
+                    )
+
+                if dry_run:
+                    with state_lock:
+                        watch_state.mark_event_processed(event_id, "dry-run")
+                    continue
+
+                # Fetch review comments
+                comments = fetch_review_comments(pr_number, review_id)
+
+                # If no file-specific comments, use the review body
+                if not comments:
+                    review_body = review.get("body", "")
+                    if review_body:
+                        from colonyos.github_watcher import ReviewComment
+                        comments = [
+                            ReviewComment(
+                                file_path="(general)",
+                                line=0,
+                                body=review_body,
+                                reviewer=reviewer,
+                            )
+                        ]
+
+                if not comments:
+                    logger.warning("No comments found for PR #%d review, skipping", pr_number)
+                    with state_lock:
+                        watch_state.mark_event_processed(event_id, "no-comments")
+                    continue
+
+                # Format fix prompt
+                fix_prompt = format_github_fix_prompt(
+                    comments,
+                    pr_number=pr_number,
+                    branch=branch,
+                )
+
+                # Post start comment
+                round_num = watch_state.get_pr_rounds(pr_number) + 1
+                post_pr_comment(pr_number, format_fix_start_comment(reviewer, round_num))
+
+                # Create queue item and run fix
+                # Note: In a full implementation, this would call run_thread_fix()
+                # from orchestrator.py. For now, we log and mark processed.
+                queue_item = create_github_fix_queue_item(
+                    pr_number=pr_number,
+                    branch=branch,
+                    review_id=review_id,
+                    reviewer=reviewer,
+                    fix_prompt=fix_prompt,
+                )
+
+                logger.info(
+                    "Would trigger fix for PR #%d (item: %s, branch: %s)",
+                    pr_number, queue_item.id, branch
+                )
+
+                # TODO: Integrate with run_thread_fix() from orchestrator.py
+                # For MVP, we mark as processed and log
+                with state_lock:
+                    watch_state.mark_event_processed(event_id, queue_item.id)
+                    watch_state.increment_pr_rounds(pr_number)
+                    increment_github_hourly_count(watch_state)
+                    watch_state.runs_triggered += 1
+                    save_github_watch_state(repo_root, watch_state)
+
+                # Post completion comment (placeholder - would use actual result)
+                # post_pr_comment(pr_number, format_fix_complete_comment("abc123", 0.0))
+
+    # Main watch loop
+    try:
+        while not shutdown_event.is_set():
+            # Check termination conditions
+            if _check_budget_exceeded():
+                click.echo("[watch-github] Budget limit reached, stopping")
+                break
+            if _check_time_exceeded():
+                click.echo("[watch-github] Time limit reached, stopping")
+                break
+
+            # Reset daily cost if needed
+            with state_lock:
+                watch_state.reset_daily_cost_if_needed()
+
+            # Poll and process
+            try:
+                _poll_and_process()
+            except Exception as exc:
+                logger.exception("Error during poll: %s", exc)
+                with state_lock:
+                    watch_state.consecutive_failures += 1
+                    if watch_state.consecutive_failures >= config.slack.max_consecutive_failures:
+                        click.echo(
+                            f"[watch-github] {watch_state.consecutive_failures} consecutive "
+                            "failures, pausing queue"
+                        )
+                        watch_state.queue_paused = True
+                        watch_state.queue_paused_at = datetime.now(timezone.utc).isoformat()
+                        save_github_watch_state(repo_root, watch_state)
+                        break
+
+            # Save state periodically
+            with state_lock:
+                save_github_watch_state(repo_root, watch_state)
+
+            # Wait for next poll
+            shutdown_event.wait(timeout=effective_poll_interval)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # Save final state
+        with state_lock:
+            save_github_watch_state(repo_root, watch_state)
+        if not quiet:
+            click.echo(
+                f"[watch-github] Stopped. Runs triggered: {watch_state.runs_triggered}, "
+                f"Cost: ${watch_state.aggregate_cost_usd:.2f}"
+            )

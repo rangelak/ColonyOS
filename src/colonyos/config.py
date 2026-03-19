@@ -108,6 +108,22 @@ class SlackConfig:
 
 
 @dataclass
+class GitHubWatchConfig:
+    """Configuration for the GitHub PR review watcher.
+
+    Monitors GitHub PR review events and automatically triggers the fix pipeline
+    when reviewers request changes on ColonyOS-created PRs.
+    """
+
+    enabled: bool = False
+    trigger_mode: str = "review_request_changes"  # MVP: only this mode
+    max_fix_rounds_per_pr: int = 3
+    max_fix_cost_per_pr_usd: float = 10.0
+    poll_interval_seconds: int = 60
+    allowed_reviewers: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ColonyConfig:
     project: ProjectInfo | None = None
     personas: list[Persona] = field(default_factory=list)
@@ -128,6 +144,7 @@ class ColonyConfig:
     ci_fix: CIFixConfig = field(default_factory=CIFixConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
+    github_watch: GitHubWatchConfig = field(default_factory=GitHubWatchConfig)
 
     def get_model(self, phase: Phase) -> str:
         """Return the model for a phase, falling back to the global default."""
@@ -169,6 +186,7 @@ def _parse_project(raw: dict) -> ProjectInfo | None:
 
 
 _VALID_TRIGGER_MODES: frozenset[str] = frozenset({"mention", "reaction", "slash_command"})
+_VALID_GITHUB_WATCH_TRIGGER_MODES: frozenset[str] = frozenset({"review_request_changes"})
 
 
 def _parse_slack_config(raw: dict) -> SlackConfig:
@@ -294,6 +312,41 @@ def _parse_cleanup_config(raw: dict) -> CleanupConfig:
     )
 
 
+def _parse_github_watch_config(raw: dict) -> GitHubWatchConfig:
+    """Parse the ``github_watch`` section from config.yaml."""
+    if not raw:
+        return GitHubWatchConfig()
+    trigger_mode = raw.get("trigger_mode", "review_request_changes")
+    if trigger_mode not in _VALID_GITHUB_WATCH_TRIGGER_MODES:
+        raise ValueError(
+            f"Invalid github_watch trigger_mode '{trigger_mode}'. "
+            f"Valid options: {sorted(_VALID_GITHUB_WATCH_TRIGGER_MODES)}"
+        )
+    max_fix_rounds_per_pr = int(raw.get("max_fix_rounds_per_pr", 3))
+    if max_fix_rounds_per_pr < 1:
+        raise ValueError(
+            f"github_watch.max_fix_rounds_per_pr must be positive, got {max_fix_rounds_per_pr}"
+        )
+    max_fix_cost_per_pr_usd = float(raw.get("max_fix_cost_per_pr_usd", 10.0))
+    if max_fix_cost_per_pr_usd <= 0:
+        raise ValueError(
+            f"github_watch.max_fix_cost_per_pr_usd must be positive, got {max_fix_cost_per_pr_usd}"
+        )
+    poll_interval_seconds = int(raw.get("poll_interval_seconds", 60))
+    if poll_interval_seconds < 1:
+        raise ValueError(
+            f"github_watch.poll_interval_seconds must be positive, got {poll_interval_seconds}"
+        )
+    return GitHubWatchConfig(
+        enabled=bool(raw.get("enabled", False)),
+        trigger_mode=trigger_mode,
+        max_fix_rounds_per_pr=max_fix_rounds_per_pr,
+        max_fix_cost_per_pr_usd=max_fix_cost_per_pr_usd,
+        poll_interval_seconds=poll_interval_seconds,
+        allowed_reviewers=list(raw.get("allowed_reviewers", [])),
+    )
+
+
 def load_config(repo_root: Path) -> ColonyConfig:
     config_path = repo_root / CONFIG_DIR / CONFIG_FILE
     if not config_path.exists():
@@ -373,6 +426,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         ci_fix=_parse_ci_fix_config(raw.get("ci_fix", {})),
         slack=_parse_slack_config(raw.get("slack", {})),
         cleanup=_parse_cleanup_config(raw.get("cleanup", {})),
+        github_watch=_parse_github_watch_config(raw.get("github_watch", {})),
     )
 
 
@@ -479,6 +533,16 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
 
     if config.vision:
         data["vision"] = config.vision
+
+    if config.github_watch.enabled or config.github_watch.allowed_reviewers:
+        data["github_watch"] = {
+            "enabled": config.github_watch.enabled,
+            "trigger_mode": config.github_watch.trigger_mode,
+            "max_fix_rounds_per_pr": config.github_watch.max_fix_rounds_per_pr,
+            "max_fix_cost_per_pr_usd": config.github_watch.max_fix_cost_per_pr_usd,
+            "poll_interval_seconds": config.github_watch.poll_interval_seconds,
+            "allowed_reviewers": list(config.github_watch.allowed_reviewers),
+        }
 
     config_path = config_dir / CONFIG_FILE
     config_path.write_text(

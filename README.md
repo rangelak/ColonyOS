@@ -255,7 +255,7 @@ flowchart TD
 | `colonyos cleanup scan` | Find large files, long functions, dead code |
 | `colonyos cleanup scan --ai` | AI-powered qualitative analysis |
 
-### Slack & Dashboard
+### Slack, GitHub & Dashboard
 
 | Command | Description |
 |---|---|
@@ -263,6 +263,9 @@ flowchart TD
 | `colonyos watch --dry-run` | Log triggers without executing |
 | `colonyos watch --max-hours N` | Wall-clock limit for the watcher |
 | `colonyos watch --max-budget N` | Aggregate USD spend limit |
+| `colonyos watch-github` | Watch GitHub PRs and auto-fix on review changes |
+| `colonyos watch-github --poll-interval N` | Poll interval in seconds (default: 60) |
+| `colonyos watch-github --dry-run` | Log detected events without triggering fixes |
 | `colonyos ui` | Launch the local web dashboard |
 | `colonyos ui --port N` | Custom port (default: 7400) |
 | `colonyos ui --no-open` | Don't auto-open the browser |

@@ -1947,3 +1947,46 @@ class TestCleanup:
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
             result = runner.invoke(app, ["cleanup", "artifacts", "--retention-days", "7"])
         assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# watch-github CLI tests
+# ---------------------------------------------------------------------------
+
+
+class TestWatchGitHubCommand:
+    """Tests for the watch-github CLI command."""
+
+    def test_requires_config(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Should error if no colonyos config exists."""
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["watch-github"])
+        assert result.exit_code != 0
+        assert "init" in result.output.lower()
+
+    def test_requires_github_watch_enabled(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Should error if github_watch is not enabled."""
+        from colonyos.config import GitHubWatchConfig
+
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="Test", stack="Python"),
+            github_watch=GitHubWatchConfig(enabled=False),
+        )
+        save_config(tmp_path, config)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["watch-github"])
+        assert result.exit_code != 0
+        assert "github_watch.enabled" in result.output.lower()
+
+    def test_poll_interval_flag(self, runner: CliRunner) -> None:
+        """Poll interval flag should be accepted."""
+        result = runner.invoke(app, ["watch-github", "--help"])
+        assert "--poll-interval" in result.output
+
+    def test_help_text(self, runner: CliRunner) -> None:
+        """Help should describe the command."""
+        result = runner.invoke(app, ["watch-github", "--help"])
+        assert result.exit_code == 0
+        assert "poll" in result.output.lower()
+        assert "review" in result.output.lower()

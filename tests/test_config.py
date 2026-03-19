@@ -945,3 +945,123 @@ class TestSlackAutoApproveWarning:
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
             load_config(tmp_repo)
         assert not any("allowed_user_ids" in msg for msg in caplog.messages)
+
+
+class TestGitHubWatchConfig:
+    """Tests for GitHubWatchConfig parsing and validation."""
+
+    def test_defaults_when_no_github_watch_section(self, tmp_repo: Path) -> None:
+        config = load_config(tmp_repo)
+        assert config.github_watch.enabled is False
+        assert config.github_watch.trigger_mode == "review_request_changes"
+        assert config.github_watch.max_fix_rounds_per_pr == 3
+        assert config.github_watch.max_fix_cost_per_pr_usd == 10.0
+        assert config.github_watch.poll_interval_seconds == 60
+        assert config.github_watch.allowed_reviewers == []
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "github_watch": {
+                    "enabled": True,
+                    "trigger_mode": "review_request_changes",
+                    "max_fix_rounds_per_pr": 5,
+                    "max_fix_cost_per_pr_usd": 20.0,
+                    "poll_interval_seconds": 30,
+                    "allowed_reviewers": ["alice", "bob"],
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.github_watch.enabled is True
+        assert config.github_watch.trigger_mode == "review_request_changes"
+        assert config.github_watch.max_fix_rounds_per_pr == 5
+        assert config.github_watch.max_fix_cost_per_pr_usd == 20.0
+        assert config.github_watch.poll_interval_seconds == 30
+        assert config.github_watch.allowed_reviewers == ["alice", "bob"]
+
+    def test_missing_fields_get_defaults(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github_watch": {"enabled": True}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.github_watch.enabled is True
+        assert config.github_watch.trigger_mode == "review_request_changes"
+        assert config.github_watch.max_fix_rounds_per_pr == 3
+        assert config.github_watch.max_fix_cost_per_pr_usd == 10.0
+        assert config.github_watch.poll_interval_seconds == 60
+
+    def test_invalid_trigger_mode_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github_watch": {"trigger_mode": "invalid"}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Invalid github_watch trigger_mode"):
+            load_config(tmp_repo)
+
+    def test_zero_max_fix_rounds_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github_watch": {"max_fix_rounds_per_pr": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="max_fix_rounds_per_pr must be positive"):
+            load_config(tmp_repo)
+
+    def test_negative_poll_interval_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github_watch": {"poll_interval_seconds": -1}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="poll_interval_seconds must be positive"):
+            load_config(tmp_repo)
+
+    def test_zero_max_fix_cost_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github_watch": {"max_fix_cost_per_pr_usd": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="max_fix_cost_per_pr_usd must be positive"):
+            load_config(tmp_repo)
+
+    def test_roundtrip_save_load(self, tmp_repo: Path) -> None:
+        from colonyos.config import GitHubWatchConfig
+        original = ColonyConfig(
+            github_watch=GitHubWatchConfig(
+                enabled=True,
+                trigger_mode="review_request_changes",
+                max_fix_rounds_per_pr=5,
+                max_fix_cost_per_pr_usd=15.0,
+                poll_interval_seconds=45,
+                allowed_reviewers=["alice"],
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.github_watch.enabled is True
+        assert loaded.github_watch.max_fix_rounds_per_pr == 5
+        assert loaded.github_watch.max_fix_cost_per_pr_usd == 15.0
+        assert loaded.github_watch.poll_interval_seconds == 45
+        assert loaded.github_watch.allowed_reviewers == ["alice"]
+
+    def test_disabled_github_watch_not_persisted(self, tmp_repo: Path) -> None:
+        from colonyos.config import GitHubWatchConfig
+        original = ColonyConfig(github_watch=GitHubWatchConfig())
+        save_config(tmp_repo, original)
+        raw = yaml.safe_load(
+            (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert "github_watch" not in raw
