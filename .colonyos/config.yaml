@@ -52,3 +52,11 @@ reviews_dir: cOS_reviews
 proposals_dir: cOS_proposals
 max_fix_iterations: 4
 auto_approve: true
+
+slack:
+  enabled: true
+  channels:
+    - colonyos-test
+  trigger_mode: mention
+  auto_approve: false
+  max_runs_per_hour: 3

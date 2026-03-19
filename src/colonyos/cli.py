@@ -206,11 +206,24 @@ REPL_HISTORY_PATH = Path.home() / ".colonyos_history"
 REPL_HISTORY_LENGTH = 1000
 
 
+def _load_dotenv() -> None:
+    """Load .env from the repo root if python-dotenv is available."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    repo_root = _find_repo_root()
+    env_path = repo_root / ".env"
+    if env_path.is_file():
+        load_dotenv(env_path, override=False)
+
+
 @click.group(invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="colonyos")
 @click.pass_context
 def app(ctx: click.Context) -> None:
     """ColonyOS — autonomous agent loop that turns prompts into shipped PRs."""
+    _load_dotenv()
     if ctx.invoked_subcommand is None:
         _show_welcome()
         if sys.stdin.isatty():
@@ -1751,6 +1764,7 @@ def watch(
         post_triage_acknowledgment,
         post_triage_skip,
         react_to_message,
+        resolve_channel_names,
         save_watch_state,
         should_process_message,
         start_socket_mode,
@@ -1786,6 +1800,16 @@ def watch(
         bot_user_id = auth_response["user_id"]
     except Exception as exc:
         click.echo(f"Failed to authenticate with Slack: {exc}", err=True)
+        sys.exit(1)
+
+    try:
+        resolved_channels = resolve_channel_names(
+            bolt_app.client, config.slack.channels
+        )
+        config.slack.channels = [ch.id for ch in resolved_channels]
+        channel_display = {ch.id: ch.name for ch in resolved_channels}
+    except RuntimeError as exc:
+        click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
 
     shutdown_event = threading.Event()
@@ -2322,17 +2346,48 @@ def watch(
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    click.echo(f"ColonyOS Slack watcher started (ID: {watch_id})")
-    click.echo(f"Monitoring channels: {', '.join(config.slack.channels)}")
-    click.echo(f"Trigger mode: {config.slack.trigger_mode}")
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    con = Console()
+
+    trigger_labels = {"mention": "@mention", "reaction": "emoji reaction", "slash_command": "/colonyos", "all": "all"}
+    trigger_label = trigger_labels.get(config.slack.trigger_mode, config.slack.trigger_mode)
+
+    channels_text = Text()
+    for i, ch in enumerate(resolved_channels):
+        if i > 0:
+            channels_text.append("  ")
+        channels_text.append("#", style="dim")
+        channels_text.append(ch.name, style="bold cyan")
+
+    info = Table.grid(padding=(0, 2))
+    info.add_column(style="dim", justify="right")
+    info.add_column()
+    info.add_row("channels", channels_text)
+    info.add_row("trigger", Text(trigger_label, style="bold"))
     if effective_max_hours is not None:
-        click.echo(f"Max hours: {effective_max_hours}")
+        info.add_row("max hours", Text(str(effective_max_hours), style="yellow"))
     if effective_max_budget is not None:
-        click.echo(f"Max budget: ${effective_max_budget:.2f}")
+        info.add_row("max budget", Text(f"${effective_max_budget:.2f}", style="yellow"))
     if config.slack.daily_budget_usd is not None:
-        click.echo(f"Daily budget: ${config.slack.daily_budget_usd:.2f}")
+        info.add_row("daily budget", Text(f"${config.slack.daily_budget_usd:.2f}", style="yellow"))
+    if config.slack.max_runs_per_hour:
+        info.add_row("rate limit", Text(f"{config.slack.max_runs_per_hour} runs/hour", style="dim"))
     if dry_run:
-        click.echo("DRY RUN MODE — triggers will be logged but not executed")
+        info.add_row("mode", Text("DRY RUN — triggers logged, not executed", style="bold red"))
+
+    con.print()
+    con.print(Panel(
+        info,
+        title="[bold]ColonyOS Slack Watcher[/bold]",
+        subtitle=f"[dim]{watch_id}[/dim]",
+        border_style="cyan",
+        padding=(1, 2),
+    ))
+    con.print()
 
     save_watch_state(repo_root, watch_state)
 
@@ -2342,10 +2397,8 @@ def watch(
 
     try:
         handler = start_socket_mode(bolt_app)
-        # Use start_async so we can check shutdown_event in a loop
-        handler.start_async()
+        handler.connect()
         while not shutdown_event.is_set():
-            # Check time/budget caps periodically
             if _check_time_exceeded():
                 click.echo("Max hours reached. Shutting down watcher.")
                 break
@@ -2354,7 +2407,6 @@ def watch(
                 break
             if _check_daily_budget_exceeded():
                 click.echo("Daily budget reached. Queue executor will skip items until next UTC day.")
-                # Don't break — just wait for daily reset
             shutdown_event.wait(timeout=5.0)
         handler.close()
     except ImportError as exc:

@@ -750,6 +750,76 @@ def post_triage_skip(
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class ResolvedChannel:
+    """A Slack channel with both its ID and display name."""
+    id: str
+    name: str
+
+
+def resolve_channel_names(client: Any, names: list[str]) -> list[ResolvedChannel]:
+    """Resolve a mix of channel names and IDs to ResolvedChannel objects.
+
+    Entries that already look like Slack channel IDs (start with C/G and are
+    alphanumeric) are kept as-is.  Everything else is treated as a channel
+    name (with or without a leading ``#``) and resolved via the Slack API.
+
+    Raises ``RuntimeError`` if any name cannot be resolved.
+    """
+    _ID_PREFIX = frozenset("CG")
+    resolved: list[ResolvedChannel] = []
+    to_resolve_names: list[str] = []
+    to_resolve_ids: list[str] = []
+
+    for entry in names:
+        clean = entry.lstrip("#").strip()
+        if clean and len(clean) >= 9 and clean[0] in _ID_PREFIX and clean.isalnum():
+            to_resolve_ids.append(clean)
+        else:
+            to_resolve_names.append(clean)
+
+    all_channels: dict[str, str] = {}
+    id_to_name: dict[str, str] = {}
+
+    if to_resolve_names or to_resolve_ids:
+        cursor = None
+        while True:
+            kwargs: dict[str, Any] = {
+                "types": "public_channel,private_channel",
+                "limit": 200,
+                "exclude_archived": True,
+            }
+            if cursor:
+                kwargs["cursor"] = cursor
+            resp = client.conversations_list(**kwargs)
+            for ch in resp.get("channels", []):
+                all_channels[ch["name"]] = ch["id"]
+                id_to_name[ch["id"]] = ch["name"]
+            cursor = resp.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+
+    for cid in to_resolve_ids:
+        name = id_to_name.get(cid, cid)
+        resolved.append(ResolvedChannel(id=cid, name=name))
+
+    unresolved: list[str] = []
+    for name in to_resolve_names:
+        cid = all_channels.get(name)
+        if cid:
+            resolved.append(ResolvedChannel(id=cid, name=name))
+        else:
+            unresolved.append(name)
+
+    if unresolved:
+        raise RuntimeError(
+            f"Could not resolve Slack channel(s): {', '.join(unresolved)}. "
+            "Make sure the bot is invited to these channels."
+        )
+
+    return resolved
+
+
 def create_slack_app(config: SlackConfig) -> Any:
     """Create and configure a Slack Bolt app with Socket Mode.
 
