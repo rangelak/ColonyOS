@@ -1,5 +1,29 @@
 # Changelog
 
+## 20260319_130000 — Unified Slack-to-Queue Autonomous Pipeline with LLM Triage
+
+Unified the Slack watcher (`colonyos watch`) and queue system (`colonyos queue`) into a single
+end-to-end flow: listen → triage → queue → execute → report. Added an LLM-based triage agent
+(haiku model) that evaluates incoming Slack messages for actionability before queuing, plus
+explicit branch targeting via `base:branch-name` syntax in messages. Includes daily budget caps,
+rate limiting, circuit breaker patterns, and a `QueueExecutor` class for thread-safe queue processing.
+
+**Created / Modified:**
+- `src/colonyos/slack.py` — Triage agent integration, queue-backed watch loop, circuit breaker, daily budget tracking
+- `src/colonyos/cli.py` — Updated `watch` command with queue integration, triage config, daily budget flags
+- `src/colonyos/config.py` — `triage_scope`, `daily_budget_usd` fields on `SlackConfig`
+- `src/colonyos/models.py` — `Phase.TRIAGE` enum, `QueueItem` triage metadata fields
+- `src/colonyos/orchestrator.py` — `QueueExecutor` class, triage-to-queue pipeline, branch targeting
+- `tests/test_slack.py` — Comprehensive tests for triage, queue integration, circuit breaker, budget enforcement
+- `tests/test_queue.py` — Queue executor and triage metadata tests
+- `tests/test_orchestrator.py` — QueueExecutor and branch targeting tests
+- `tests/test_config.py` — Triage config parsing tests
+- `tests/test_models.py` — Triage metadata model tests
+- `README.md` — Updated with unified watch+queue documentation
+
+**PRD:** `cOS_prds/20260319_104252_prd_i_want_to_have_the_following_flow_1_connect_to_a_slack_channel_i_e_bugs_listen_o.md`
+**Tasks:** `cOS_tasks/20260319_104252_tasks_i_want_to_have_the_following_flow_1_connect_to_a_slack_channel_i_e_bugs_listen_o.md`
+
 ## 20260319_093000 — `colonyos cleanup` Codebase Hygiene & Structural Analysis
 
 Added a `colonyos cleanup` command with three subcommands for maintaining codebase health:
