@@ -7,12 +7,13 @@ import pytest
 
 from colonyos.config import ColonyConfig, BudgetConfig, LearningsConfig, PhasesConfig, save_config
 from colonyos.learnings import learnings_path, LearningEntry, append_learnings
-from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, ResumeState, RunLog, RunStatus
+from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, ProjectInfo, ResumeState, RunLog, RunStatus
 from colonyos.orchestrator import (
     run,
     run_thread_fix,
     prepare_resume,
     _extract_pr_number_from_log,
+    _fail_run_log,
     _format_personas_block,
     _build_persona_agents,
     _build_ci_fix_prompt,
@@ -2294,13 +2295,17 @@ class TestNamedStashOnBranchRollback:
     """The finally block in run() should use a named stash with 'colonyos-{branch}' message."""
 
     def test_stash_command_includes_branch_name(self) -> None:
-        """Verify the stash push command uses -m with branch-identifying message."""
-        import ast
+        """Verify the stash push command uses -m with branch-identifying message.
+
+        The stash intentionally omits --include-untracked to avoid capturing
+        sensitive untracked files (.env.local, credential files).
+        """
         import inspect
         from colonyos.orchestrator import run as run_fn
 
         source = inspect.getsource(run_fn)
-        assert "git\", \"stash\", \"push\", \"--include-untracked\", \"-m\"" in source
+        assert "git\", \"stash\", \"push\", \"-m\"" in source
+        assert "--include-untracked" not in source
         assert "colonyos-{branch_name}" in source
 
 
@@ -2807,3 +2812,97 @@ class TestRunThreadFix:
         # Verify stash was called (second subprocess.run call)
         stash_call = mock_run.call_args_list[1]
         assert "stash" in stash_call[0][0]
+
+
+class TestFailRunLogHelper:
+    """Tests for the _fail_run_log deduplication helper."""
+
+    def test_marks_failed_and_persists(self, tmp_path: Path) -> None:
+        """_fail_run_log should set FAILED status, mark finished, and save."""
+        log = RunLog(
+            run_id="test-fail-helper",
+            prompt="test",
+            status=RunStatus.RUNNING,
+        )
+        result = _fail_run_log(tmp_path, log, "something went wrong")
+        assert result is log
+        assert result.status == RunStatus.FAILED
+        assert result.finished_at is not None
+
+    def test_returns_same_log_object(self, tmp_path: Path) -> None:
+        log = RunLog(
+            run_id="test-identity",
+            prompt="test",
+            status=RunStatus.RUNNING,
+        )
+        result = _fail_run_log(tmp_path, log, "reason")
+        assert result is log
+
+
+class TestBranchRestoreError:
+    """BranchRestoreError should be a RuntimeError subclass."""
+
+    def test_is_runtime_error(self) -> None:
+        err = BranchRestoreError("checkout failed")
+        assert isinstance(err, RuntimeError)
+        assert str(err) == "checkout failed"
+
+    def test_raised_on_checkout_failure_in_run_thread_fix(self, tmp_path: Path) -> None:
+        """run_thread_fix raises BranchRestoreError when branch restore fails."""
+        config = ColonyConfig()
+
+        # Track git checkout calls to make first succeed and restore fail
+        checkout_calls = []
+
+        def _mock_subprocess_run(cmd, *args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            if cmd[0] == "git" and cmd[1] == "checkout":
+                checkout_calls.append(cmd)
+                if len(checkout_calls) >= 2:
+                    # Second checkout = restore → fail
+                    result.returncode = 1
+                    result.stderr = "error: pathspec 'main' did not match"
+            return result
+
+        with (
+            patch("colonyos.orchestrator.subprocess.run", side_effect=_mock_subprocess_run),
+            patch("colonyos.orchestrator._get_current_branch", return_value="main"),
+            patch("colonyos.orchestrator.validate_branch_exists", return_value=(True, "")),
+            patch("colonyos.orchestrator.is_valid_git_ref", return_value=True),
+            patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, "")),
+            patch("colonyos.orchestrator._get_head_sha", return_value="abc123"),
+            patch("colonyos.orchestrator.run_phase_sync", return_value=PhaseResult(
+                phase=Phase.IMPLEMENT, success=False, cost_usd=0.01,
+                duration_ms=100,
+            )),
+            patch("colonyos.orchestrator._touch_heartbeat"),
+        ):
+            with pytest.raises(BranchRestoreError, match="pathspec"):
+                run_thread_fix(
+                    "fix the bug",
+                    branch_name="colonyos/feature",
+                    pr_url=None,
+                    original_prompt="original",
+                    prd_rel="prd.md",
+                    task_rel="tasks.md",
+                    repo_root=tmp_path,
+                    config=config,
+                    quiet=True,
+                )
+
+
+class TestStashOmitsIncludeUntracked:
+    """Stash commands should NOT include --include-untracked to avoid capturing secrets."""
+
+    def test_thread_fix_stash_no_include_untracked(self) -> None:
+        """run_thread_fix stash command should not use --include-untracked."""
+        import inspect
+        from colonyos.orchestrator import run_thread_fix as fn
+
+        source = inspect.getsource(fn)
+        # The stash push command should be present but without --include-untracked
+        assert '"git", "stash", "push", "-m"' in source
+        assert "--include-untracked" not in source

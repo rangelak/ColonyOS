@@ -12,6 +12,10 @@ oauth_config:
   scopes:
     bot:
       - app_mentions:read
+      # channels:history is required by the message.channels event
+      # subscription below for thread-fix detection (reading threaded
+      # replies).  If you only need @mention triggers, you can remove
+      # this scope and the message.channels event subscription.
       - channels:history
       - channels:read
       - chat:write

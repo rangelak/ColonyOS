@@ -1518,3 +1518,120 @@ class TestBuildSlackTsIndex:
             status=QueueItemStatus.COMPLETED, slack_ts=None,
         )
         assert _build_slack_ts_index([item]) == {}
+
+
+class TestWaitForApprovalAllowedApprovers:
+    """Tests for wait_for_approval with allowed_approver_ids."""
+
+    def test_any_user_approved_when_no_allowlist(self) -> None:
+        """When allowed_approver_ids is None, any thumbsup counts."""
+        from colonyos.slack import wait_for_approval
+
+        client = MagicMock()
+        client.reactions_get.return_value = {
+            "message": {
+                "reactions": [
+                    {"name": "+1", "users": ["U_UNKNOWN"]},
+                ],
+            },
+        }
+        result = wait_for_approval(
+            client, "C123", "ts1", "ts2",
+            timeout_seconds=1, poll_interval=0.1,
+            allowed_approver_ids=None,
+        )
+        assert result is True
+
+    def test_unauthorized_user_rejected(self) -> None:
+        """When allowed_approver_ids is set, thumbsup from non-listed user is ignored."""
+        from colonyos.slack import wait_for_approval
+
+        client = MagicMock()
+        client.reactions_get.return_value = {
+            "message": {
+                "reactions": [
+                    {"name": "+1", "users": ["U_ATTACKER"]},
+                ],
+            },
+        }
+        result = wait_for_approval(
+            client, "C123", "ts1", "ts2",
+            timeout_seconds=1, poll_interval=0.1,
+            allowed_approver_ids=["U_ADMIN"],
+        )
+        assert result is False
+
+    def test_authorized_user_approved(self) -> None:
+        """When allowed_approver_ids is set, thumbsup from authorized user succeeds."""
+        from colonyos.slack import wait_for_approval
+
+        client = MagicMock()
+        client.reactions_get.return_value = {
+            "message": {
+                "reactions": [
+                    {"name": "thumbsup", "users": ["U_RANDOM", "U_ADMIN"]},
+                ],
+            },
+        }
+        result = wait_for_approval(
+            client, "C123", "ts1", "ts2",
+            timeout_seconds=1, poll_interval=0.1,
+            allowed_approver_ids=["U_ADMIN"],
+        )
+        assert result is True
+
+    def test_empty_allowlist_treated_as_no_restriction(self) -> None:
+        """Empty list (falsy) should behave like no restriction."""
+        from colonyos.slack import wait_for_approval
+
+        client = MagicMock()
+        client.reactions_get.return_value = {
+            "message": {
+                "reactions": [{"name": "+1", "users": ["U_ANYONE"]}],
+            },
+        }
+        result = wait_for_approval(
+            client, "C123", "ts1", "ts2",
+            timeout_seconds=1, poll_interval=0.1,
+            allowed_approver_ids=[],
+        )
+        assert result is True
+
+
+class TestSlackClientProtocol:
+    """Tests for SlackClient Protocol type."""
+
+    def test_protocol_defines_required_methods(self) -> None:
+        """SlackClient Protocol should define the 4 Slack methods we use."""
+        from colonyos.slack import SlackClient
+        import inspect
+
+        # Verify the Protocol class defines the expected method signatures
+        members = [m for m in dir(SlackClient) if not m.startswith("_")]
+        assert "chat_postMessage" in members
+        assert "reactions_add" in members
+        assert "reactions_get" in members
+        assert "conversations_list" in members
+
+    def test_functions_use_typed_client(self) -> None:
+        """Public functions should accept SlackClient, not Any."""
+        import inspect
+        from colonyos.slack import post_acknowledgment
+
+        sig = inspect.signature(post_acknowledgment)
+        # The annotation should reference SlackClient, not Any
+        client_param = sig.parameters["client"]
+        assert "SlackClient" in str(client_param.annotation)
+
+
+class TestThreadFixTemplateDefensiveInstructions:
+    """The thread_fix.md template should contain defensive instructions for untrusted data."""
+
+    def test_security_notes_present(self) -> None:
+        from pathlib import Path
+        template_path = Path(__file__).parent.parent / "src" / "colonyos" / "instructions" / "thread_fix.md"
+        content = template_path.read_text()
+        assert "Security note" in content
+        assert "user-supplied input" in content
+        # Both sections should have the note
+        assert content.count("Security note") >= 2

@@ -20,7 +20,7 @@ from colonyos.learnings import (
     load_learnings_for_injection,
     parse_learnings,
 )
-from colonyos.models import Persona, Phase, PhaseResult, PreflightError, PreflightResult, ResumeState, RunLog, RunStatus
+from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightError, PreflightResult, ResumeState, RunLog, RunStatus
 from colonyos.naming import (
     decision_artifact_path,
     generate_timestamp,
@@ -907,6 +907,23 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
     return log_path
 
 
+def _fail_run_log(
+    repo_root: Path,
+    log: RunLog,
+    reason: str,
+) -> RunLog:
+    """Mark a RunLog as FAILED, persist it, and return it.
+
+    Extracts the 3-line boilerplate that was previously duplicated ~14 times
+    across ``run_thread_fix()`` and ``run()``.
+    """
+    _log(reason)
+    log.status = RunStatus.FAILED
+    log.mark_finished()
+    _save_run_log(repo_root, log)
+    return log
+
+
 def _validate_run_id(run_id: str) -> None:
     """Validate that run_id contains no path traversal characters."""
     if not run_id:
@@ -1724,20 +1741,18 @@ def run_thread_fix(
 
     # --- Defense-in-depth: validate branch name at point of use ---
     if not is_valid_git_ref(branch_name):
-        _log(f"Thread fix: invalid branch name: {branch_name[:100]}")
-        log.status = RunStatus.FAILED
-        log.mark_finished()
-        _save_run_log(repo_root, log)
-        return log
+        return _fail_run_log(
+            repo_root, log,
+            f"Thread fix: invalid branch name: {branch_name[:100]}",
+        )
 
     # --- Validate branch exists ---
     branch_ok, branch_err = validate_branch_exists(branch_name, repo_root)
     if not branch_ok:
-        _log(f"Thread fix: branch validation failed: {branch_err}")
-        log.status = RunStatus.FAILED
-        log.mark_finished()
-        _save_run_log(repo_root, log)
-        return log
+        return _fail_run_log(
+            repo_root, log,
+            f"Thread fix: branch validation failed: {branch_err}",
+        )
 
     # --- Validate PR is still open ---
     # NOTE: TOCTOU race — the PR could be merged/closed between this check
@@ -1746,11 +1761,10 @@ def run_thread_fix(
     if pr_url:
         pr_number, _ = check_open_pr(branch_name, repo_root)
         if pr_number is None:
-            _log(f"Thread fix: no open PR found for branch {branch_name}")
-            log.status = RunStatus.FAILED
-            log.mark_finished()
-            _save_run_log(repo_root, log)
-            return log
+            return _fail_run_log(
+                repo_root, log,
+                f"Thread fix: no open PR found for branch {branch_name}",
+            )
 
     # --- Ensure working tree is clean before checkout ---
     tree_clean, dirty_output = _check_working_tree_clean(repo_root)
@@ -1760,17 +1774,18 @@ def run_thread_fix(
             f"{dirty_output[:200]}"
         )
         try:
+            # Only stash tracked files to avoid capturing sensitive
+            # untracked files (.env.local, credential files).
             subprocess.run(
-                ["git", "stash", "push", "--include-untracked", "-m",
+                ["git", "stash", "push", "-m",
                  f"colonyos-thread-fix-{branch_name}"],
                 capture_output=True, text=True, cwd=repo_root, timeout=30,
             )
         except Exception as exc:
-            _log(f"Thread fix: stash failed: {exc}")
-            log.status = RunStatus.FAILED
-            log.mark_finished()
-            _save_run_log(repo_root, log)
-            return log
+            return _fail_run_log(
+                repo_root, log,
+                f"Thread fix: stash failed: {exc}",
+            )
 
     # --- Checkout branch ---
     original_branch = _get_current_branch(repo_root)
@@ -1780,31 +1795,27 @@ def run_thread_fix(
             capture_output=True, text=True, cwd=repo_root, timeout=30,
         )
         if checkout_result.returncode != 0:
-            _log(f"Thread fix: checkout failed: {checkout_result.stderr.strip()}")
-            log.status = RunStatus.FAILED
-            log.mark_finished()
-            _save_run_log(repo_root, log)
-            return log
+            return _fail_run_log(
+                repo_root, log,
+                f"Thread fix: checkout failed: {checkout_result.stderr.strip()}",
+            )
     except Exception as exc:
-        _log(f"Thread fix: checkout error: {exc}")
-        log.status = RunStatus.FAILED
-        log.mark_finished()
-        _save_run_log(repo_root, log)
-        return log
+        return _fail_run_log(
+            repo_root, log,
+            f"Thread fix: checkout error: {exc}",
+        )
 
     try:
         # --- Verify HEAD SHA (defense against force-push tampering, FR-7) ---
         if expected_head_sha:
             current_sha = _get_head_sha(repo_root)
             if current_sha and current_sha != expected_head_sha:
-                _log(
-                    f"Thread fix: HEAD SHA mismatch — expected {expected_head_sha[:12]}, "
-                    f"got {current_sha[:12]}. Branch may have been force-pushed."
+                return _fail_run_log(
+                    repo_root, log,
+                    f"Thread fix: HEAD SHA mismatch — expected "
+                    f"{expected_head_sha[:12]}, got {current_sha[:12]}. "
+                    f"Branch may have been force-pushed.",
                 )
-                log.status = RunStatus.FAILED
-                log.mark_finished()
-                _save_run_log(repo_root, log)
-                return log
 
         # --- Phase: Implement (with thread-fix instructions) ---
         _touch_heartbeat(repo_root)
@@ -1833,10 +1844,7 @@ def run_thread_fix(
         log.phases.append(impl_result)
 
         if not impl_result.success:
-            log.status = RunStatus.FAILED
-            log.mark_finished()
-            _save_run_log(repo_root, log)
-            return log
+            return _fail_run_log(repo_root, log, "Thread fix: Implement phase failed")
 
         # --- Phase: Verify (test suite, FR-7) ---
         _touch_heartbeat(repo_root)
@@ -1869,10 +1877,7 @@ def run_thread_fix(
         log.phases.append(verify_result)
 
         if not verify_result.success:
-            log.status = RunStatus.FAILED
-            log.mark_finished()
-            _save_run_log(repo_root, log)
-            return log
+            return _fail_run_log(repo_root, log, "Thread fix: Verify phase failed")
 
         # --- Phase: Deliver (push to existing branch, no new PR) ---
         if config.phases.deliver:
@@ -1902,10 +1907,7 @@ def run_thread_fix(
             log.phases.append(deliver_result)
 
             if not deliver_result.success:
-                log.status = RunStatus.FAILED
-                log.mark_finished()
-                _save_run_log(repo_root, log)
-                return log
+                return _fail_run_log(repo_root, log, "Thread fix: Deliver phase failed")
 
         log.status = RunStatus.COMPLETED
         log.mark_finished()
@@ -1914,8 +1916,9 @@ def run_thread_fix(
         return log
 
     finally:
-        # Restore original branch — verify checkout succeeded to prevent
-        # subsequent queue items from running on the wrong branch.
+        # Restore original branch — raise BranchRestoreError on failure
+        # to halt the queue executor.  Running subsequent items on the
+        # wrong branch is a data-corruption risk.
         if original_branch:
             try:
                 restore = subprocess.run(
@@ -1923,12 +1926,16 @@ def run_thread_fix(
                     capture_output=True, text=True, cwd=repo_root, timeout=30,
                 )
                 if restore.returncode != 0:
-                    _log(
-                        f"WARNING: git checkout '{original_branch}' exited "
+                    raise BranchRestoreError(
+                        f"git checkout '{original_branch}' exited "
                         f"{restore.returncode}: {restore.stderr.strip()}"
                     )
+            except BranchRestoreError:
+                raise
             except Exception as exc:
-                _log(f"WARNING: Failed to restore original branch '{original_branch}': {exc}")
+                raise BranchRestoreError(
+                    f"Failed to restore original branch '{original_branch}': {exc}"
+                ) from exc
 
 
 def run(
@@ -2106,8 +2113,10 @@ def run(
                         f"before restoring branch '{original_branch}' "
                         f"(stash message: '{stash_msg}')"
                     )
+                    # Only stash tracked files to avoid capturing sensitive
+                    # untracked files (.env.local, credential files).
                     subprocess.run(
-                        ["git", "stash", "push", "--include-untracked", "-m", stash_msg],
+                        ["git", "stash", "push", "-m", stash_msg],
                         capture_output=True, text=True, cwd=repo_root, timeout=30,
                     )
                 checkout_result = subprocess.run(
@@ -2115,12 +2124,16 @@ def run(
                     capture_output=True, text=True, cwd=repo_root, timeout=30,
                 )
                 if checkout_result.returncode != 0:
-                    _log(
-                        f"WARNING: Failed to restore original branch '{original_branch}': "
+                    raise BranchRestoreError(
+                        f"Failed to restore original branch '{original_branch}': "
                         f"{checkout_result.stderr.strip()}"
                     )
-            except Exception:
-                _log(f"WARNING: Failed to restore original branch '{original_branch}'")
+            except BranchRestoreError:
+                raise
+            except Exception as exc:
+                raise BranchRestoreError(
+                    f"Failed to restore original branch '{original_branch}': {exc}"
+                ) from exc
 
 
 def _run_pipeline(
@@ -2186,11 +2199,10 @@ def _run_pipeline(
         log.phases.append(plan_result)
 
         if not plan_result.success:
-            log.status = RunStatus.FAILED
-            log.mark_finished()
-            _save_run_log(repo_root, log)
             if plan_ui is None:
-                _log(f"Plan phase failed: {plan_result.error}")
+                _fail_run_log(repo_root, log, f"Plan phase failed: {plan_result.error}")
+            else:
+                _fail_run_log(repo_root, log, "Plan phase failed")
             return log
 
     if plan_only:
@@ -2223,11 +2235,10 @@ def _run_pipeline(
         log.phases.append(impl_result)
 
         if not impl_result.success:
-            log.status = RunStatus.FAILED
-            log.mark_finished()
-            _save_run_log(repo_root, log)
             if impl_ui is None:
-                _log(f"Implement phase failed: {impl_result.error}")
+                _fail_run_log(repo_root, log, f"Implement phase failed: {impl_result.error}")
+            else:
+                _fail_run_log(repo_root, log, "Implement phase failed")
             return log
 
     # --- Phase 3: Review/Fix Loop ---
@@ -2385,10 +2396,7 @@ def _run_pipeline(
 
             if verdict == "NO-GO":
                 _run_learn_phase(config, repo_root, log, prompt, _make_ui)
-                log.status = RunStatus.FAILED
-                log.mark_finished()
-                _save_run_log(repo_root, log)
-                _log("Decision gate: NO-GO. Pipeline stopped before deliver.")
+                _fail_run_log(repo_root, log, "Decision gate: NO-GO. Pipeline stopped before deliver.")
                 return log
 
             if verdict == "UNKNOWN":
@@ -2428,11 +2436,10 @@ def _run_pipeline(
             log.pr_url = pr_url
 
         if not deliver_result.success:
-            log.status = RunStatus.FAILED
-            log.mark_finished()
-            _save_run_log(repo_root, log)
             if deliver_ui is None:
-                _log(f"Deliver phase failed: {deliver_result.error}")
+                _fail_run_log(repo_root, log, f"Deliver phase failed: {deliver_result.error}")
+            else:
+                _fail_run_log(repo_root, log, "Deliver phase failed")
             return log
 
     # --- CI Fix Phase (post-deliver) ---

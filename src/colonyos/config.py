@@ -215,7 +215,18 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
                 f"slack.daily_budget_usd must be positive, got {daily_budget_usd}"
             )
     allowed_user_ids_raw = list(raw.get("allowed_user_ids", []))
+    enabled = bool(raw.get("enabled", False))
     auto_approve = bool(raw.get("auto_approve", False))
+
+    # Warn when Slack is enabled without an explicit user allowlist — channel
+    # membership alone is not a strong access control boundary.
+    if enabled and not allowed_user_ids_raw:
+        logger.warning(
+            "slack.enabled is true but allowed_user_ids is empty. "
+            "Any user in the configured channels can trigger triage and "
+            "approve pipelines. Set allowed_user_ids to restrict access."
+        )
+
     if auto_approve:
         logger.warning(
             "slack.auto_approve is enabled — Slack messages that pass triage "
@@ -229,7 +240,7 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
                 "execution. Set allowed_user_ids to restrict access."
             )
     return SlackConfig(
-        enabled=bool(raw.get("enabled", False)),
+        enabled=enabled,
         channels=list(raw.get("channels", [])),
         trigger_mode=trigger_mode,
         auto_approve=auto_approve,

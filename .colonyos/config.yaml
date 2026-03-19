@@ -54,9 +54,11 @@ max_fix_iterations: 4
 auto_approve: true
 
 slack:
-  enabled: true
+  enabled: false
   channels:
     - colonyos-test
   trigger_mode: mention
   auto_approve: false
   max_runs_per_hour: 3
+  # allowed_user_ids:
+  #   - U12345678  # Restrict who can trigger and approve pipelines

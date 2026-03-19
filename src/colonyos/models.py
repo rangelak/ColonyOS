@@ -20,6 +20,17 @@ class PreflightError(click.ClickException):
     pass
 
 
+class BranchRestoreError(RuntimeError):
+    """Raised when git checkout fails to restore the original branch.
+
+    This is a **fatal** error for queue execution — if the branch cannot be
+    restored, subsequent queue items would silently run on the wrong branch,
+    risking data corruption.  Callers (e.g. ``QueueExecutor``) should catch
+    this and halt the queue rather than proceeding.
+    """
+    pass
+
+
 class Phase(str, Enum):
     CEO = "ceo"
     PLAN = "plan"

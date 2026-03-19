@@ -20,6 +20,7 @@ from colonyos.config import ColonyConfig, load_config, runs_dir_path
 from colonyos.doctor import run_doctor_checks
 from colonyos.init import run_init
 from colonyos.models import (
+    BranchRestoreError,
     LoopState,
     LoopStatus,
     PreflightError,
@@ -2380,6 +2381,25 @@ def watch(
                         self._execute_fix_item(item_to_run)
                     else:
                         self._execute_item(item_to_run)
+                except BranchRestoreError:
+                    # FATAL — running subsequent items on the wrong branch
+                    # risks data corruption.  Halt the queue immediately.
+                    logger.critical(
+                        "Branch restore failed for item %s — halting queue "
+                        "to prevent data corruption. Manual intervention required.",
+                        item_to_run.id,
+                    )
+                    with self._state_lock:
+                        item_to_run.status = QueueItemStatus.FAILED
+                        item_to_run.error = "Branch restore failed — queue halted"
+                        self._watch_state.queue_paused = True
+                        self._watch_state.queue_paused_at = (
+                            datetime.now(timezone.utc).isoformat()
+                        )
+                        _save_queue_state(self._repo_root, self._queue_state)
+                        save_watch_state(self._repo_root, self._watch_state)
+                    self._shutdown.set()
+                    return
                 except Exception:
                     logger.exception(
                         "Queue executor error for item %s (channel=%s, ts=%s)",
@@ -2464,7 +2484,10 @@ def watch(
 
             # Approval gate for Slack-sourced items
             if not current_config.slack.auto_approve and client and slack_ts and slack_channel:
-                if not self._run_approval_gate(client, slack_channel, slack_ts, item_to_run):
+                if not self._run_approval_gate(
+                    client, slack_channel, slack_ts, item_to_run,
+                    allowed_approver_ids=current_config.slack.allowed_user_ids or None,
+                ):
                     return
 
             # Build UI factory — streams to both terminal and Slack thread
@@ -2579,8 +2602,14 @@ def watch(
 
         def _run_approval_gate(
             self, client: object, channel: str, ts: str, item: QueueItem,
+            *, allowed_approver_ids: list[str] | None = None,
         ) -> bool:
-            """Run the approval gate. Returns True if approved, False otherwise."""
+            """Run the approval gate. Returns True if approved, False otherwise.
+
+            When ``allowed_approver_ids`` is set, only thumbsup reactions from
+            those users count as valid approval — prevents unauthorized users
+            from approving their own requests.
+            """
             try:
                 approval_resp = client.chat_postMessage(  # type: ignore[union-attr]
                     channel=channel,
@@ -2590,6 +2619,7 @@ def watch(
                 approval_ts = approval_resp.get("ts", "")
                 approved = wait_for_approval(
                     client, channel, ts, approval_ts,  # type: ignore[arg-type]
+                    allowed_approver_ids=allowed_approver_ids,
                 )
                 if not approved:
                     try:

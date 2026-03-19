@@ -22,10 +22,36 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from colonyos.config import SlackConfig, runs_dir_path
 from colonyos.sanitize import sanitize_untrusted_content, strip_slack_links
+
+if TYPE_CHECKING:
+    from colonyos.models import QueueItem
+
+
+@runtime_checkable
+class SlackClient(Protocol):
+    """Minimal protocol for the Slack Web API client methods we use.
+
+    Avoids ``client: Any`` throughout the module while keeping the
+    slack-sdk an optional dependency.
+    """
+
+    def chat_postMessage(
+        self, *, channel: str, thread_ts: str, text: str, **kwargs: Any
+    ) -> dict[str, Any]: ...
+
+    def reactions_add(
+        self, *, channel: str, timestamp: str, name: str, **kwargs: Any
+    ) -> dict[str, Any]: ...
+
+    def reactions_get(
+        self, *, channel: str, timestamp: str, full: bool, **kwargs: Any
+    ) -> dict[str, Any]: ...
+
+    def conversations_list(self, **kwargs: Any) -> dict[str, Any]: ...
 
 # Strict allowlist for git branch ref characters (matches git-check-ref-format rules).
 _VALID_GIT_REF_RE = re.compile(r"^[a-zA-Z0-9._/\-]+$")
@@ -158,14 +184,14 @@ def should_process_message(
     return True
 
 
-def _build_slack_ts_index(queue_items: list[Any]) -> dict[str, Any]:
+def _build_slack_ts_index(queue_items: list[QueueItem]) -> dict[str, QueueItem]:
     """Build a lookup from ``slack_ts`` → completed QueueItem.
 
     Used by ``should_process_thread_fix`` and ``find_parent_queue_item`` to
     avoid O(N) linear scans on every incoming Slack event in long-running
     watch sessions.
     """
-    index: dict[str, Any] = {}
+    index: dict[str, QueueItem] = {}
     for item in queue_items:
         if item.slack_ts and item.status.value == "completed":
             index[item.slack_ts] = item
@@ -176,7 +202,7 @@ def should_process_thread_fix(
     event: dict[str, Any],
     config: SlackConfig,
     bot_user_id: str,
-    queue_items: list[Any],
+    queue_items: list[QueueItem],
 ) -> bool:
     """Determine whether a Slack threaded reply is a thread-fix request.
 
@@ -228,8 +254,8 @@ def should_process_thread_fix(
 
 def find_parent_queue_item(
     thread_ts: str,
-    queue_items: list[Any],
-) -> Any | None:
+    queue_items: list[QueueItem],
+) -> QueueItem | None:
     """Find the completed parent QueueItem for a given thread_ts."""
     ts_index = _build_slack_ts_index(queue_items)
     return ts_index.get(thread_ts)
@@ -289,7 +315,7 @@ def format_fix_error(error_type: str, detail: str) -> str:
 
 
 def post_acknowledgment(
-    client: Any,
+    client: SlackClient,
     channel: str,
     thread_ts: str,
     prompt: str,
@@ -303,7 +329,7 @@ def post_acknowledgment(
 
 
 def post_phase_update(
-    client: Any,
+    client: SlackClient,
     channel: str,
     thread_ts: str,
     phase: str,
@@ -319,7 +345,7 @@ def post_phase_update(
 
 
 def post_run_summary(
-    client: Any,
+    client: SlackClient,
     channel: str,
     thread_ts: str,
     status: str,
@@ -336,7 +362,7 @@ def post_run_summary(
 
 
 def react_to_message(
-    client: Any,
+    client: SlackClient,
     channel: str,
     timestamp: str,
     emoji: str,
@@ -350,14 +376,19 @@ def react_to_message(
 
 
 def wait_for_approval(
-    client: Any,
+    client: SlackClient,
     channel: str,
     message_ts: str,
     approval_message_ts: str,
     timeout_seconds: int = 300,
     poll_interval: float = 5.0,
+    allowed_approver_ids: list[str] | None = None,
 ) -> bool:
     """Poll for a :thumbsup: reaction on the approval message.
+
+    When ``allowed_approver_ids`` is provided, only reactions from users in
+    that list are accepted.  This prevents unauthorized channel members from
+    approving their own (potentially malicious) requests.
 
     Returns ``True`` if approved within ``timeout_seconds``, ``False`` otherwise.
     """
@@ -372,7 +403,23 @@ def wait_for_approval(
             reactions = resp.get("message", {}).get("reactions", [])
             for reaction in reactions:
                 if reaction.get("name") in ("+1", "thumbsup"):
-                    return True
+                    # If no allowlist is configured, any thumbsup counts
+                    if not allowed_approver_ids:
+                        return True
+                    # Otherwise, verify at least one reactor is authorized
+                    reactors = reaction.get("users", [])
+                    if any(uid in allowed_approver_ids for uid in reactors):
+                        logger.info(
+                            "Approval received from authorized user in %s",
+                            channel,
+                        )
+                        return True
+                    logger.debug(
+                        "Thumbsup reaction found but no authorized approver "
+                        "(reactors=%s, allowed=%s)",
+                        reactors,
+                        allowed_approver_ids,
+                    )
         except Exception:
             logger.debug(
                 "Failed to poll reactions for approval on %s:%s",
@@ -398,7 +445,7 @@ class SlackUI:
 
     def __init__(
         self,
-        client: Any,
+        client: SlackClient,
         channel: str,
         thread_ts: str,
     ) -> None:
@@ -835,7 +882,7 @@ def format_triage_skip(reasoning: str) -> str:
 
 
 def post_triage_acknowledgment(
-    client: Any,
+    client: SlackClient,
     channel: str,
     thread_ts: str,
     summary: str,
@@ -859,7 +906,7 @@ def post_triage_acknowledgment(
 
 
 def post_triage_skip(
-    client: Any,
+    client: SlackClient,
     channel: str,
     thread_ts: str,
     reasoning: str,
@@ -884,7 +931,7 @@ class ResolvedChannel:
     name: str
 
 
-def resolve_channel_names(client: Any, names: list[str]) -> list[ResolvedChannel]:
+def resolve_channel_names(client: SlackClient, names: list[str]) -> list[ResolvedChannel]:
     """Resolve a mix of channel names and IDs to ResolvedChannel objects.
 
     Entries that already look like Slack channel IDs (start with C/G and are
@@ -977,9 +1024,11 @@ def create_slack_app(config: SlackConfig) -> Any:
         )
 
     app = App(token=bot_token)
-    # Stash config and app_token for downstream use (start_socket_mode, handlers)
+    # Stash config for downstream use (handlers).
+    # NOTE: Do NOT stash the app_token on the app instance — the agent
+    # can inspect its own process via Bash, so keeping tokens in Python
+    # attributes increases the blast radius of prompt-injection attacks.
     app._colonyos_config = config  # type: ignore[attr-defined]
-    app._colonyos_app_token = app_token  # type: ignore[attr-defined]
     return app
 
 
@@ -987,13 +1036,12 @@ def start_socket_mode(app: Any) -> Any:
     """Start the Bolt app in Socket Mode.
 
     Returns the SocketModeHandler instance for lifecycle management.
-    Uses the app token captured during ``create_slack_app`` to avoid
-    a redundant env-var read.
+    Reads the app token from the environment at call time rather than
+    caching it on the app instance (to avoid exposing it to agent
+    introspection).
     """
     from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-    app_token = getattr(app, "_colonyos_app_token", None) or os.environ.get(
-        "COLONYOS_SLACK_APP_TOKEN", ""
-    ).strip()
+    app_token = os.environ.get("COLONYOS_SLACK_APP_TOKEN", "").strip()
     handler = SocketModeHandler(app, app_token)
     return handler
