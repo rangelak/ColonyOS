@@ -131,3 +131,12 @@ _Date: 2026-03-19 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[architecture]** Business-logic regexes copied across modules drift silently; extract to one shared constant.
 - **[security]** Prompt templates must prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
 - **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load.
+
+## Run: run-20260320_003605-6692da3ebc
+_Date: 2026-03-20 | Feature: add_colonyos_watch_github_command_that_listens_for_github_pr_
+
+- **[code-quality]** Finally blocks restoring git state must capture SHAs before cleanup; post-restoration calls return stale values.
+- **[testing]** Verify phase must be included in lightweight pipelines; skipping validation before push ships untested LLM outputs.
+- **[architecture]** Fail-closed on external API errors (GitHub, Slack) is the correct safety default when proceeding risks data loss.
+- **[code-quality]** Variables named for past-tense outcomes (e.g., `deleted_local`) should not hold pending candidates in dry-run mode.
+- **[security]** LLM-based triage agents should use no-tools mode to minimize prompt injection blast radius on untrusted input.

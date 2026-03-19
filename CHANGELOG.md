@@ -1,5 +1,29 @@
 # Changelog
 
+## 20260320_010900 — `colonyos watch-github` — GitHub PR Review Comment Watcher
+
+Added a `colonyos watch-github` command that monitors GitHub PR review comments for `@colonyos`
+mentions and automatically triggers fix runs. When a developer comments `@colonyos please fix
+the null check on line 42` on a ColonyOS-generated PR, the bot validates the request, extracts
+line-specific context (file path, line number, diff hunk), queues a fix run, and reports progress
+back via GitHub reactions (👀, ✅, ❌) and optional summary comments.
+
+**Created:**
+- `src/colonyos/github_watcher.py` — Main watcher module: polling, filtering, context extraction, state management, permission caching, circuit breaker
+- `cOS_tasks/20260320_003605_tasks_add_colonyos_watch_github_command_that_listens_for_github_pr_review_comments_men.md` — Implementation tasks
+- `tests/test_github_watcher.py` — Comprehensive unit tests (829 lines)
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `watch-github` command with `--polling-interval`, `--max-hours`, `--max-budget`, `--dry-run`, `-v/-q` flags
+- `src/colonyos/config.py` — Added `GithubWatcherConfig` dataclass with rate limiting, budget caps, circuit breaker settings
+- `src/colonyos/sanitize.py` — Added `sanitize_github_comment()` for XML tag stripping and content sanitization
+- `src/colonyos/models.py` — Added `source_type="github_review"` documentation
+- `tests/test_config.py` — Tests for `GithubWatcherConfig` parsing and validation
+- `tests/test_sanitize.py` — Tests for GitHub comment sanitization
+- `README.md` — Added `watch-github` command to CLI reference
+
+**PRD:** `cOS_prds/20260320_003605_prd_add_colonyos_watch_github_command_that_listens_for_github_pr_review_comments_men.md`
+
 ## 20260319_152207 — Slack Thread Fix Requests — Conversational PR Iteration
 
 Enables conversational iteration on PRs via Slack threads. When ColonyOS completes a pipeline
