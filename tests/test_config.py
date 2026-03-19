@@ -12,6 +12,7 @@ from colonyos.config import (
     DEFAULTS,
     LearningsConfig,
     PhasesConfig,
+    SlackConfig,
     VALID_MODELS,
     _SAFETY_CRITICAL_PHASES,
     load_config,
@@ -720,3 +721,253 @@ class TestCIFixConfig:
         assert DEFAULTS["ci_fix"]["log_char_cap"] == 12_000
 
 
+class TestSlackConfigTriageFields:
+    """Tests for new SlackConfig fields: triage_scope, daily_budget_usd,
+    max_queue_depth, triage_verbose, max_consecutive_failures."""
+
+    def test_defaults(self) -> None:
+        config = SlackConfig()
+        assert config.triage_scope == ""
+        assert config.daily_budget_usd is None
+        assert config.max_queue_depth == 20
+        assert config.triage_verbose is False
+        assert config.max_consecutive_failures == 3
+        assert config.circuit_breaker_cooldown_minutes == 30
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "slack": {
+                    "enabled": True,
+                    "channels": ["C12345"],
+                    "triage_scope": "Bug reports for Python backend",
+                    "daily_budget_usd": 50.0,
+                    "max_queue_depth": 10,
+                    "triage_verbose": True,
+                    "max_consecutive_failures": 5,
+                    "circuit_breaker_cooldown_minutes": 60,
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.triage_scope == "Bug reports for Python backend"
+        assert config.slack.daily_budget_usd == 50.0
+        assert config.slack.max_queue_depth == 10
+        assert config.slack.triage_verbose is True
+        assert config.slack.max_consecutive_failures == 5
+        assert config.slack.circuit_breaker_cooldown_minutes == 60
+
+    def test_missing_new_fields_use_defaults(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"enabled": True}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.triage_scope == ""
+        assert config.slack.daily_budget_usd is None
+        assert config.slack.max_queue_depth == 20
+        assert config.slack.triage_verbose is False
+        assert config.slack.max_consecutive_failures == 3
+        assert config.slack.circuit_breaker_cooldown_minutes == 30
+
+    def test_negative_daily_budget_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"daily_budget_usd": -5.0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="positive"):
+            load_config(tmp_repo)
+
+    def test_zero_max_queue_depth_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"max_queue_depth": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="positive"):
+            load_config(tmp_repo)
+
+    def test_roundtrip(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                channels=["C123"],
+                triage_scope="bugs only",
+                daily_budget_usd=25.0,
+                max_queue_depth=15,
+                triage_verbose=True,
+                max_consecutive_failures=5,
+                circuit_breaker_cooldown_minutes=45,
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.slack.triage_scope == "bugs only"
+        assert loaded.slack.daily_budget_usd == 25.0
+        assert loaded.slack.max_queue_depth == 15
+        assert loaded.slack.triage_verbose is True
+        assert loaded.slack.max_consecutive_failures == 5
+        assert loaded.slack.circuit_breaker_cooldown_minutes == 45
+
+
+class TestSlackMaxFixRoundsPerThread:
+    """Tests for SlackConfig.max_fix_rounds_per_thread."""
+
+    def test_default_value(self) -> None:
+        config = SlackConfig()
+        assert config.max_fix_rounds_per_thread == 3
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "slack": {
+                    "enabled": True,
+                    "max_fix_rounds_per_thread": 5,
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.max_fix_rounds_per_thread == 5
+
+    def test_invalid_zero_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "slack": {
+                    "enabled": True,
+                    "max_fix_rounds_per_thread": 0,
+                },
+            }),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="max_fix_rounds_per_thread must be positive"):
+            load_config(tmp_repo)
+
+    def test_invalid_negative_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "slack": {
+                    "enabled": True,
+                    "max_fix_rounds_per_thread": -1,
+                },
+            }),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="max_fix_rounds_per_thread must be positive"):
+            load_config(tmp_repo)
+
+    def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                channels=["C123"],
+                max_fix_rounds_per_thread=7,
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.slack.max_fix_rounds_per_thread == 7
+
+
+class TestSlackMaxRunsPerHourValidation:
+    """Tests for SlackConfig.max_runs_per_hour validation."""
+
+    def test_default_value(self) -> None:
+        config = SlackConfig()
+        assert config.max_runs_per_hour == 3
+
+    def test_zero_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"max_runs_per_hour": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="max_runs_per_hour must be positive"):
+            load_config(tmp_repo)
+
+    def test_negative_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"max_runs_per_hour": -1}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="max_runs_per_hour must be positive"):
+            load_config(tmp_repo)
+
+    def test_valid_value_accepted(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"max_runs_per_hour": 10}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.max_runs_per_hour == 10
+
+
+class TestSlackAutoApproveWarning:
+    """Tests for the warning logged when slack.auto_approve is enabled."""
+
+    def test_auto_approve_true_logs_warning(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"auto_approve": True}}),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            load_config(tmp_repo)
+        assert any("slack.auto_approve is enabled" in msg for msg in caplog.messages)
+
+    def test_auto_approve_false_no_warning(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"auto_approve": False}}),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            load_config(tmp_repo)
+        assert not any("slack.auto_approve is enabled" in msg for msg in caplog.messages)
+
+    def test_auto_approve_empty_allowlist_warns(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """auto_approve + empty allowed_user_ids emits an extra warning."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"auto_approve": True, "allowed_user_ids": []}}),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            load_config(tmp_repo)
+        assert any("EMPTY allowed_user_ids" in msg for msg in caplog.messages)
+
+    def test_auto_approve_with_allowlist_no_extra_warning(
+        self, tmp_repo: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """auto_approve + populated allowed_user_ids does NOT emit the extra warning."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"auto_approve": True, "allowed_user_ids": ["U123"]}}),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            load_config(tmp_repo)
+        assert not any("EMPTY allowed_user_ids" in msg for msg in caplog.messages)

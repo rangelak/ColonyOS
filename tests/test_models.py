@@ -7,7 +7,16 @@ from pathlib import Path
 
 import pytest
 
-from colonyos.models import LoopState, LoopStatus, Phase, PhaseResult, RunLog, RunStatus
+from colonyos.models import (
+    LoopState,
+    LoopStatus,
+    Phase,
+    PhaseResult,
+    QueueItem,
+    QueueItemStatus,
+    RunLog,
+    RunStatus,
+)
 
 
 class TestPhaseResultModel:
@@ -198,3 +207,295 @@ class TestPhaseCIFix:
             ],
         )
         assert all(p.phase != Phase.CI_FIX for p in log.phases)
+
+
+class TestQueueItemSlackFields:
+    """Tests for new QueueItem fields: base_branch, slack_ts, slack_channel, source_type='slack'."""
+
+    def test_new_fields_default_none(self) -> None:
+        item = QueueItem(
+            id="q-1",
+            source_type="prompt",
+            source_value="fix the bug",
+            status=QueueItemStatus.PENDING,
+        )
+        assert item.base_branch is None
+        assert item.slack_ts is None
+        assert item.slack_channel is None
+
+    def test_slack_source_type(self) -> None:
+        item = QueueItem(
+            id="q-2",
+            source_type="slack",
+            source_value="fix CSV export",
+            status=QueueItemStatus.PENDING,
+            slack_ts="1234567890.123456",
+            slack_channel="C12345",
+            base_branch="colonyos/feature-x",
+        )
+        assert item.source_type == "slack"
+        assert item.slack_ts == "1234567890.123456"
+        assert item.slack_channel == "C12345"
+        assert item.base_branch == "colonyos/feature-x"
+
+    def test_to_dict_includes_new_fields(self) -> None:
+        item = QueueItem(
+            id="q-3",
+            source_type="slack",
+            source_value="fix bug",
+            status=QueueItemStatus.PENDING,
+            slack_ts="123.456",
+            slack_channel="C999",
+            base_branch="colonyos/auth",
+        )
+        d = item.to_dict()
+        assert d["source_type"] == "slack"
+        assert d["slack_ts"] == "123.456"
+        assert d["slack_channel"] == "C999"
+        assert d["base_branch"] == "colonyos/auth"
+
+    def test_from_dict_with_new_fields(self) -> None:
+        d = {
+            "id": "q-4",
+            "source_type": "slack",
+            "source_value": "fix it",
+            "status": "pending",
+            "slack_ts": "111.222",
+            "slack_channel": "C555",
+            "base_branch": "colonyos/feat",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.source_type == "slack"
+        assert item.slack_ts == "111.222"
+        assert item.slack_channel == "C555"
+        assert item.base_branch == "colonyos/feat"
+
+    def test_from_dict_backward_compat(self) -> None:
+        """Old QueueItem dicts without new fields should load with None defaults."""
+        d = {
+            "id": "q-old",
+            "source_type": "prompt",
+            "source_value": "old item",
+            "status": "pending",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.base_branch is None
+        assert item.slack_ts is None
+        assert item.slack_channel is None
+
+    def test_roundtrip(self) -> None:
+        item = QueueItem(
+            id="q-rt",
+            source_type="slack",
+            source_value="roundtrip test",
+            status=QueueItemStatus.COMPLETED,
+            slack_ts="999.888",
+            slack_channel="C123",
+            base_branch="colonyos/test",
+            cost_usd=2.50,
+            pr_url="https://github.com/org/repo/pull/42",
+        )
+        d = item.to_dict()
+        restored = QueueItem.from_dict(d)
+        assert restored.source_type == item.source_type
+        assert restored.slack_ts == item.slack_ts
+        assert restored.slack_channel == item.slack_channel
+        assert restored.base_branch == item.base_branch
+        assert restored.pr_url == item.pr_url
+
+
+class TestQueueItemThreadFixFields:
+    """Tests for thread-fix fields: branch_name, fix_rounds, parent_item_id."""
+
+    def test_new_fields_default_values(self) -> None:
+        item = QueueItem(
+            id="q-tf-1",
+            source_type="prompt",
+            source_value="fix the bug",
+            status=QueueItemStatus.PENDING,
+        )
+        assert item.branch_name is None
+        assert item.fix_rounds == 0
+        assert item.parent_item_id is None
+
+    def test_slack_fix_source_type(self) -> None:
+        item = QueueItem(
+            id="q-tf-2",
+            source_type="slack_fix",
+            source_value="fix the test",
+            status=QueueItemStatus.PENDING,
+            branch_name="colonyos/feature-x",
+            fix_rounds=1,
+            parent_item_id="q-parent-1",
+        )
+        assert item.source_type == "slack_fix"
+        assert item.branch_name == "colonyos/feature-x"
+        assert item.fix_rounds == 1
+        assert item.parent_item_id == "q-parent-1"
+
+    def test_to_dict_includes_thread_fix_fields(self) -> None:
+        item = QueueItem(
+            id="q-tf-3",
+            source_type="slack_fix",
+            source_value="fix it",
+            status=QueueItemStatus.PENDING,
+            branch_name="colonyos/auth",
+            fix_rounds=2,
+            parent_item_id="q-orig",
+        )
+        d = item.to_dict()
+        assert d["branch_name"] == "colonyos/auth"
+        assert d["fix_rounds"] == 2
+        assert d["parent_item_id"] == "q-orig"
+        assert d["source_type"] == "slack_fix"
+
+    def test_from_dict_with_thread_fix_fields(self) -> None:
+        d = {
+            "id": "q-tf-4",
+            "source_type": "slack_fix",
+            "source_value": "fix it",
+            "status": "pending",
+            "branch_name": "colonyos/feat",
+            "fix_rounds": 3,
+            "parent_item_id": "q-parent-2",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.branch_name == "colonyos/feat"
+        assert item.fix_rounds == 3
+        assert item.parent_item_id == "q-parent-2"
+
+    def test_from_dict_backward_compat_missing_thread_fix_fields(self) -> None:
+        """Old QueueItem dicts without thread-fix fields load with defaults."""
+        d = {
+            "id": "q-old-tf",
+            "source_type": "slack",
+            "source_value": "old item",
+            "status": "completed",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.branch_name is None
+        assert item.fix_rounds == 0
+        assert item.parent_item_id is None
+
+    def test_roundtrip_thread_fix(self) -> None:
+        item = QueueItem(
+            id="q-tf-rt",
+            source_type="slack_fix",
+            source_value="fix roundtrip",
+            status=QueueItemStatus.COMPLETED,
+            slack_ts="999.888",
+            slack_channel="C123",
+            branch_name="colonyos/test-fix",
+            fix_rounds=2,
+            parent_item_id="q-parent-rt",
+            cost_usd=1.50,
+            pr_url="https://github.com/org/repo/pull/42",
+        )
+        d = item.to_dict()
+        restored = QueueItem.from_dict(d)
+        assert restored.source_type == item.source_type
+        assert restored.branch_name == item.branch_name
+        assert restored.fix_rounds == item.fix_rounds
+        assert restored.parent_item_id == item.parent_item_id
+        assert restored.slack_ts == item.slack_ts
+        assert restored.pr_url == item.pr_url
+
+    def test_fix_rounds_increment(self) -> None:
+        """fix_rounds is mutable and can be incremented."""
+        item = QueueItem(
+            id="q-tf-inc",
+            source_type="slack",
+            source_value="some run",
+            status=QueueItemStatus.COMPLETED,
+        )
+        assert item.fix_rounds == 0
+        item.fix_rounds += 1
+        assert item.fix_rounds == 1
+
+    def test_head_sha_propagation_to_parent(self) -> None:
+        """After a fix, the parent's head_sha must be updated so the next fix
+        round inherits the correct expected SHA (multi-round fix support)."""
+        parent = QueueItem(
+            id="q-parent",
+            source_type="slack",
+            source_value="build feature X",
+            status=QueueItemStatus.COMPLETED,
+            head_sha="aaa111",
+            branch_name="colonyos/feature-x",
+        )
+        new_sha = "bbb222"
+        # Simulate the fix executor updating parent's head_sha
+        parent.head_sha = new_sha
+        assert parent.head_sha == new_sha
+
+        # A subsequent fix item inheriting from parent gets the updated SHA
+        fix_item = QueueItem(
+            id="q-fix-2",
+            source_type="slack_fix",
+            source_value="fix item 2",
+            status=QueueItemStatus.PENDING,
+            parent_item_id=parent.id,
+            head_sha=parent.head_sha,
+        )
+        assert fix_item.head_sha == new_sha
+
+
+class TestQueueItemSchemaVersion:
+    """Tests for QueueItem schema_version evolution tracking."""
+
+    def test_to_dict_includes_schema_version(self) -> None:
+        item = QueueItem(
+            id="q-sv-1", source_type="slack", source_value="test",
+            status=QueueItemStatus.PENDING,
+        )
+        d = item.to_dict()
+        assert "schema_version" in d
+        assert d["schema_version"] == QueueItem.SCHEMA_VERSION
+
+    def test_from_dict_handles_missing_schema_version(self) -> None:
+        """Old items without schema_version load gracefully."""
+        d = {
+            "id": "q-old",
+            "source_type": "slack",
+            "source_value": "test",
+            "status": "pending",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.id == "q-old"
+
+    def test_roundtrip_preserves_schema_version(self) -> None:
+        item = QueueItem(
+            id="q-sv-rt", source_type="slack", source_value="test",
+            status=QueueItemStatus.COMPLETED,
+        )
+        d = item.to_dict()
+        restored = QueueItem.from_dict(d)
+        assert restored.id == item.id
+        assert d["schema_version"] == QueueItem.SCHEMA_VERSION
+
+
+class TestRunLogPrUrl:
+    """Tests for pr_url field on RunLog."""
+
+    def test_default_none(self) -> None:
+        log = RunLog(run_id="r-1", prompt="test", status=RunStatus.RUNNING)
+        assert log.pr_url is None
+
+    def test_set_pr_url(self) -> None:
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.COMPLETED,
+            pr_url="https://github.com/org/repo/pull/42",
+        )
+        assert log.pr_url == "https://github.com/org/repo/pull/42"
+
+    def test_mark_finished_preserves_pr_url(self) -> None:
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.RUNNING,
+            pr_url="https://github.com/org/repo/pull/99",
+        )
+        log.mark_finished()
+        assert log.pr_url == "https://github.com/org/repo/pull/99"

@@ -22,10 +22,39 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from colonyos.config import SlackConfig, runs_dir_path
-from colonyos.sanitize import sanitize_untrusted_content
+from colonyos.sanitize import sanitize_untrusted_content, strip_slack_links
+
+if TYPE_CHECKING:
+    from colonyos.models import QueueItem
+
+
+@runtime_checkable
+class SlackClient(Protocol):
+    """Minimal protocol for the Slack Web API client methods we use.
+
+    Avoids ``client: Any`` throughout the module while keeping the
+    slack-sdk an optional dependency.
+    """
+
+    def chat_postMessage(
+        self, *, channel: str, thread_ts: str, text: str, **kwargs: Any
+    ) -> dict[str, Any]: ...
+
+    def reactions_add(
+        self, *, channel: str, timestamp: str, name: str, **kwargs: Any
+    ) -> dict[str, Any]: ...
+
+    def reactions_get(
+        self, *, channel: str, timestamp: str, full: bool, **kwargs: Any
+    ) -> dict[str, Any]: ...
+
+    def conversations_list(self, **kwargs: Any) -> dict[str, Any]: ...
+
+# Strict allowlist for git branch ref characters (matches git-check-ref-format rules).
+_VALID_GIT_REF_RE = re.compile(r"^[a-zA-Z0-9._/\-]+$")
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +65,13 @@ logger = logging.getLogger(__name__)
 
 
 def sanitize_slack_content(text: str) -> str:
-    """Strip XML-like tags from untrusted Slack content to reduce prompt injection risk."""
+    """Strip XML-like tags and Slack link markup from untrusted Slack content.
+
+    Applies two sanitization passes:
+    1. Slack link stripping (``<URL|text>`` → ``text``)
+    2. XML tag stripping (to reduce prompt injection risk)
+    """
+    text = strip_slack_links(text)
     return sanitize_untrusted_content(text)
 
 
@@ -76,6 +111,32 @@ def format_slack_as_prompt(message_text: str, channel: str, user: str) -> str:
         "</slack_message>",
     ]
     return "\n".join(parts)
+
+
+def extract_raw_from_formatted_prompt(formatted: str) -> str:
+    """Extract raw message text from a ``format_slack_as_prompt()`` result.
+
+    Returns the text between ``<slack_message>`` delimiters (after the
+    ``Channel:`` / ``From:`` header lines).  Falls back to returning the
+    full string unchanged if the expected delimiters are not present.
+    """
+    start_tag = "<slack_message>"
+    end_tag = "</slack_message>"
+    start = formatted.find(start_tag)
+    end = formatted.find(end_tag)
+    if start == -1 or end == -1:
+        return formatted
+    inner = formatted[start + len(start_tag) : end].strip()
+    # Skip Channel: and From: header lines
+    lines = inner.splitlines()
+    content_lines: list[str] = []
+    skipped_headers = False
+    for line in lines:
+        if not skipped_headers and (line.startswith("Channel:") or line.startswith("From:")):
+            continue
+        skipped_headers = True
+        content_lines.append(line)
+    return "\n".join(content_lines).strip()
 
 
 def should_process_message(
@@ -123,6 +184,83 @@ def should_process_message(
     return True
 
 
+def _build_slack_ts_index(queue_items: list[QueueItem]) -> dict[str, QueueItem]:
+    """Build a lookup from ``slack_ts`` → completed QueueItem.
+
+    Used by ``should_process_thread_fix`` and ``find_parent_queue_item`` to
+    avoid O(N) linear scans on every incoming Slack event in long-running
+    watch sessions.
+    """
+    index: dict[str, QueueItem] = {}
+    for item in queue_items:
+        if item.slack_ts and item.status.value == "completed":
+            index[item.slack_ts] = item
+    return index
+
+
+def should_process_thread_fix(
+    event: dict[str, Any],
+    config: SlackConfig,
+    bot_user_id: str,
+    queue_items: list[QueueItem],
+) -> bool:
+    """Determine whether a Slack threaded reply is a thread-fix request.
+
+    A thread-fix is a reply in a thread where:
+    - The message is a threaded reply (``thread_ts != ts``)
+    - The bot is ``@mentioned``
+    - The parent ``thread_ts`` maps to a completed ``QueueItem``'s ``slack_ts``
+    - The sender is not the bot itself
+    - The sender passes the allowlist (if configured)
+    - Not a bot message or edit
+    """
+    # Must be a threaded reply
+    ts = event.get("ts", "")
+    thread_ts = event.get("thread_ts", "")
+    if not thread_ts or thread_ts == ts:
+        return False
+
+    # Ignore bots
+    if event.get("bot_id") or event.get("subtype") == "bot_message":
+        return False
+
+    # Ignore edits
+    if event.get("subtype") == "message_changed":
+        return False
+
+    # Self-message guard
+    user = event.get("user", "")
+    if user == bot_user_id:
+        return False
+
+    # Sender allowlist (optional)
+    if config.allowed_user_ids and user not in config.allowed_user_ids:
+        return False
+
+    # Bot must be @mentioned
+    text = event.get("text", "")
+    if f"<@{bot_user_id}>" not in text:
+        return False
+
+    # Channel must be in the configured allowlist
+    channel = event.get("channel", "")
+    if channel not in config.channels:
+        return False
+
+    # Parent thread_ts must map to a completed QueueItem (O(1) lookup)
+    ts_index = _build_slack_ts_index(queue_items)
+    return thread_ts in ts_index
+
+
+def find_parent_queue_item(
+    thread_ts: str,
+    queue_items: list[QueueItem],
+) -> QueueItem | None:
+    """Find the completed parent QueueItem for a given thread_ts."""
+    ts_index = _build_slack_ts_index(queue_items)
+    return ts_index.get(thread_ts)
+
+
 # ---------------------------------------------------------------------------
 # Slack feedback (threaded reply helpers)
 # ---------------------------------------------------------------------------
@@ -158,8 +296,26 @@ def format_run_summary(
     return "\n".join(parts)
 
 
+def format_fix_acknowledgment(branch_name: str) -> str:
+    """Format the acknowledgment message posted when a thread-fix starts."""
+    return f":wrench: Working on fix for `{branch_name}` — implementing your changes."
+
+
+def format_fix_round_limit(total_cost: float) -> str:
+    """Format the message posted when the max fix rounds per thread is reached."""
+    return (
+        f":warning: Max fix rounds reached (${total_cost:.2f} total). "
+        f"Please open a new request or iterate manually."
+    )
+
+
+def format_fix_error(error_type: str, detail: str) -> str:
+    """Format an error message for a thread-fix failure."""
+    return f":x: *{error_type}*: {detail}"
+
+
 def post_acknowledgment(
-    client: Any,
+    client: SlackClient,
     channel: str,
     thread_ts: str,
     prompt: str,
@@ -173,7 +329,7 @@ def post_acknowledgment(
 
 
 def post_phase_update(
-    client: Any,
+    client: SlackClient,
     channel: str,
     thread_ts: str,
     phase: str,
@@ -189,7 +345,7 @@ def post_phase_update(
 
 
 def post_run_summary(
-    client: Any,
+    client: SlackClient,
     channel: str,
     thread_ts: str,
     status: str,
@@ -206,7 +362,7 @@ def post_run_summary(
 
 
 def react_to_message(
-    client: Any,
+    client: SlackClient,
     channel: str,
     timestamp: str,
     emoji: str,
@@ -220,14 +376,19 @@ def react_to_message(
 
 
 def wait_for_approval(
-    client: Any,
+    client: SlackClient,
     channel: str,
     message_ts: str,
     approval_message_ts: str,
     timeout_seconds: int = 300,
     poll_interval: float = 5.0,
+    allowed_approver_ids: list[str] | None = None,
 ) -> bool:
     """Poll for a :thumbsup: reaction on the approval message.
+
+    When ``allowed_approver_ids`` is provided, only reactions from users in
+    that list are accepted.  This prevents unauthorized channel members from
+    approving their own (potentially malicious) requests.
 
     Returns ``True`` if approved within ``timeout_seconds``, ``False`` otherwise.
     """
@@ -242,7 +403,23 @@ def wait_for_approval(
             reactions = resp.get("message", {}).get("reactions", [])
             for reaction in reactions:
                 if reaction.get("name") in ("+1", "thumbsup"):
-                    return True
+                    # If no allowlist is configured, any thumbsup counts
+                    if not allowed_approver_ids:
+                        return True
+                    # Otherwise, verify at least one reactor is authorized
+                    reactors = reaction.get("users", [])
+                    if any(uid in allowed_approver_ids for uid in reactors):
+                        logger.info(
+                            "Approval received from authorized user in %s",
+                            channel,
+                        )
+                        return True
+                    logger.debug(
+                        "Thumbsup reaction found but no authorized approver "
+                        "(reactors=%s, allowed=%s)",
+                        reactors,
+                        allowed_approver_ids,
+                    )
         except Exception:
             logger.debug(
                 "Failed to poll reactions for approval on %s:%s",
@@ -268,7 +445,7 @@ class SlackUI:
 
     def __init__(
         self,
-        client: Any,
+        client: SlackClient,
         channel: str,
         thread_ts: str,
     ) -> None:
@@ -345,6 +522,20 @@ class SlackWatchState:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     hourly_trigger_counts: dict[str, int] = field(default_factory=dict)
+    daily_cost_usd: float = 0.0
+    daily_cost_reset_date: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    )
+    consecutive_failures: int = 0
+    queue_paused: bool = False
+    queue_paused_at: str | None = None  # ISO timestamp when queue was paused
+
+    def reset_daily_cost_if_needed(self) -> None:
+        """Reset daily cost counter if the UTC date has changed."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self.daily_cost_reset_date != today:
+            self.daily_cost_usd = 0.0
+            self.daily_cost_reset_date = today
 
     def message_key(self, channel_id: str, message_ts: str) -> str:
         """Build the dedup key for a message."""
@@ -375,6 +566,11 @@ class SlackWatchState:
             "runs_triggered": self.runs_triggered,
             "start_time_iso": self.start_time_iso,
             "hourly_trigger_counts": dict(self.hourly_trigger_counts),
+            "daily_cost_usd": self.daily_cost_usd,
+            "daily_cost_reset_date": self.daily_cost_reset_date,
+            "consecutive_failures": self.consecutive_failures,
+            "queue_paused": self.queue_paused,
+            "queue_paused_at": self.queue_paused_at,
         }
 
     @classmethod
@@ -386,6 +582,14 @@ class SlackWatchState:
             runs_triggered=data.get("runs_triggered", 0),
             start_time_iso=data.get("start_time_iso", ""),
             hourly_trigger_counts=dict(data.get("hourly_trigger_counts", {})),
+            daily_cost_usd=data.get("daily_cost_usd", 0.0),
+            daily_cost_reset_date=data.get(
+                "daily_cost_reset_date",
+                datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            ),
+            consecutive_failures=data.get("consecutive_failures", 0),
+            queue_paused=bool(data.get("queue_paused", False)),
+            queue_paused_at=data.get("queue_paused_at"),
         )
 
 
@@ -441,8 +645,353 @@ def increment_hourly_count(state: SlackWatchState) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Triage agent
+# ---------------------------------------------------------------------------
+
+# Regex patterns for explicit base branch targeting in Slack messages.
+_BASE_BRANCH_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"base:(\S+)"),
+    re.compile(r"build on top of\s+(\S+)", re.IGNORECASE),
+    re.compile(r"target branch\s+(\S+)", re.IGNORECASE),
+]
+
+
+@dataclass(frozen=True)
+class TriageResult:
+    """Structured output of the LLM triage agent."""
+
+    actionable: bool
+    confidence: float
+    summary: str
+    base_branch: str | None
+    reasoning: str
+
+
+def _build_triage_prompt(
+    message_text: str,
+    *,
+    project_name: str = "",
+    project_description: str = "",
+    project_stack: str = "",
+    vision: str = "",
+    triage_scope: str = "",
+) -> tuple[str, str]:
+    """Build system and user prompts for the triage LLM call.
+
+    Returns (system_prompt, user_prompt).
+    """
+    system_parts: list[str] = [
+        "You are a triage agent for an autonomous coding system. "
+        "Your job is to evaluate incoming Slack messages and decide whether "
+        "they describe an actionable code change that the system should work on.",
+        "",
+        "You must respond with ONLY a JSON object (no markdown fencing, no extra text) "
+        "with these exact fields:",
+        '  {"actionable": bool, "confidence": float (0.0-1.0), '
+        '"summary": str, "base_branch": str|null, "reasoning": str}',
+        "",
+        "Rules:",
+        "- actionable=true means the message describes a bug fix, feature request, "
+        "or code change that can be implemented.",
+        "- actionable=false means the message is a question, discussion, unrelated "
+        "topic, or cannot be acted on as a code change.",
+        "- summary should be a concise (1-2 sentence) description of the work if actionable.",
+        "- base_branch should be extracted if the user explicitly specifies a target branch "
+        "(e.g., 'base:colonyos/feature-x' or 'build on top of colonyos/feature-x'). "
+        "Otherwise null.",
+        "- confidence is your confidence that the classification is correct.",
+    ]
+
+    if project_name:
+        system_parts.append(f"\nProject: {project_name}")
+    if project_description:
+        system_parts.append(f"Description: {project_description}")
+    if project_stack:
+        system_parts.append(f"Stack: {project_stack}")
+    if vision:
+        system_parts.append(f"Vision: {vision}")
+    if triage_scope:
+        system_parts.append(f"\nScope: {triage_scope}")
+
+    safe_text = sanitize_slack_content(message_text)
+    user_prompt = f"Evaluate this Slack message:\n\n{safe_text}"
+
+    return "\n".join(system_parts), user_prompt
+
+
+def _parse_triage_response(raw_text: str) -> TriageResult:
+    """Parse the LLM response into a TriageResult.
+
+    Handles both clean JSON and JSON wrapped in markdown fences.
+    Falls back to a non-actionable result on parse failure.
+    """
+    text = raw_text.strip()
+    # Strip markdown code fences if present
+    if text.startswith("```"):
+        lines = text.splitlines()
+        # Remove first and last fence lines
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("Failed to parse triage response as JSON: %s", text[:200])
+        return TriageResult(
+            actionable=False,
+            confidence=0.0,
+            summary="",
+            base_branch=None,
+            reasoning=f"Failed to parse triage response: {text[:200]}",
+        )
+
+    raw_branch = data.get("base_branch") or None
+    if raw_branch and not is_valid_git_ref(raw_branch):
+        logger.warning(
+            "Triage returned invalid base_branch '%s', ignoring",
+            str(raw_branch)[:100],
+        )
+        raw_branch = None
+
+    confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
+
+    return TriageResult(
+        actionable=bool(data.get("actionable", False)),
+        confidence=confidence,
+        summary=str(data.get("summary", "")),
+        base_branch=raw_branch,
+        reasoning=str(data.get("reasoning", "")),
+    )
+
+
+def triage_message(
+    message_text: str,
+    *,
+    repo_root: Path | None = None,
+    project_name: str = "",
+    project_description: str = "",
+    project_stack: str = "",
+    vision: str = "",
+    triage_scope: str = "",
+) -> TriageResult:
+    """Run the LLM-based triage agent on a Slack message.
+
+    Uses a single-turn haiku call with no tool access to minimize cost
+    and prompt injection blast radius.
+
+    Args:
+        repo_root: Repository root directory. Falls back to cwd if not provided.
+    """
+    from colonyos.agent import run_phase_sync
+    from colonyos.models import Phase
+
+    cwd = repo_root if repo_root is not None else Path.cwd()
+
+    system, user = _build_triage_prompt(
+        message_text,
+        project_name=project_name,
+        project_description=project_description,
+        project_stack=project_stack,
+        vision=vision,
+        triage_scope=triage_scope,
+    )
+
+    result = run_phase_sync(
+        Phase.TRIAGE,
+        user,
+        cwd=cwd,
+        system_prompt=system,
+        model="haiku",
+        budget_usd=0.05,  # tiny budget for triage
+        allowed_tools=[],  # no tool access
+    )
+
+    raw_text = ""
+    if result.artifacts:
+        raw_text = next(iter(result.artifacts.values()), "")
+    if not raw_text and result.error:
+        logger.warning("Triage LLM call failed: %s", result.error[:200])
+        return TriageResult(
+            actionable=False,
+            confidence=0.0,
+            summary="",
+            base_branch=None,
+            reasoning=f"Triage call failed: {result.error[:200]}",
+        )
+
+    return _parse_triage_response(raw_text)
+
+
+def is_valid_git_ref(ref: str) -> bool:
+    """Return True if *ref* contains only characters valid in a git branch name.
+
+    Uses a strict allowlist: ``[a-zA-Z0-9._/-]``.  This rejects special
+    characters, whitespace, shell meta-characters, backticks, and newlines
+    that could be used for prompt injection or command injection.
+    """
+    if not ref or len(ref) > 255:
+        return False
+    if ref.startswith("/") or ref.endswith("/") or ref.endswith("."):
+        return False
+    if ".." in ref:
+        return False
+    return bool(_VALID_GIT_REF_RE.match(ref))
+
+
+def extract_base_branch(text: str) -> str | None:
+    """Extract an explicit base branch from message text using known patterns.
+
+    Returns the branch name if found and valid, otherwise None.
+    """
+    for pattern in _BASE_BRANCH_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            candidate = match.group(1)
+            if is_valid_git_ref(candidate):
+                return candidate
+            logger.warning(
+                "Extracted base branch '%s' contains invalid characters, ignoring",
+                candidate[:100],
+            )
+            return None
+    return None
+
+
+def format_triage_acknowledgment(
+    summary: str,
+    *,
+    needs_approval: bool = True,
+    queue_position: int | None = None,
+    queue_total: int | None = None,
+) -> str:
+    """Format a triage acknowledgment message for a Slack thread."""
+    if needs_approval:
+        return f":mag: I can fix this — {summary}. React :thumbsup: to approve."
+    if queue_position is not None and queue_total is not None:
+        return f":mag: {summary}\n:inbox_tray: Added to queue, position {queue_position} of {queue_total}."
+    return f":mag: {summary}\n:inbox_tray: Added to queue."
+
+
+def format_triage_skip(reasoning: str) -> str:
+    """Format a triage skip message for a Slack thread."""
+    truncated = reasoning[:200] + "..." if len(reasoning) > 200 else reasoning
+    return f":fast_forward: Skipping — {truncated}"
+
+
+def post_triage_acknowledgment(
+    client: SlackClient,
+    channel: str,
+    thread_ts: str,
+    summary: str,
+    *,
+    needs_approval: bool = True,
+    queue_position: int | None = None,
+    queue_total: int | None = None,
+) -> None:
+    """Post a triage acknowledgment to a Slack thread."""
+    text = format_triage_acknowledgment(
+        summary,
+        needs_approval=needs_approval,
+        queue_position=queue_position,
+        queue_total=queue_total,
+    )
+    client.chat_postMessage(
+        channel=channel,
+        thread_ts=thread_ts,
+        text=text,
+    )
+
+
+def post_triage_skip(
+    client: SlackClient,
+    channel: str,
+    thread_ts: str,
+    reasoning: str,
+) -> None:
+    """Post a triage skip reason to a Slack thread."""
+    client.chat_postMessage(
+        channel=channel,
+        thread_ts=thread_ts,
+        text=format_triage_skip(reasoning),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Bolt app creation
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class ResolvedChannel:
+    """A Slack channel with both its ID and display name."""
+    id: str
+    name: str
+
+
+def resolve_channel_names(client: SlackClient, names: list[str]) -> list[ResolvedChannel]:
+    """Resolve a mix of channel names and IDs to ResolvedChannel objects.
+
+    Entries that already look like Slack channel IDs (start with C/G and are
+    alphanumeric) are kept as-is.  Everything else is treated as a channel
+    name (with or without a leading ``#``) and resolved via the Slack API.
+
+    Raises ``RuntimeError`` if any name cannot be resolved.
+    """
+    _ID_PREFIX = frozenset("CG")
+    resolved: list[ResolvedChannel] = []
+    to_resolve_names: list[str] = []
+    to_resolve_ids: list[str] = []
+
+    for entry in names:
+        clean = entry.lstrip("#").strip()
+        if clean and len(clean) >= 9 and clean[0] in _ID_PREFIX and clean.isalnum():
+            to_resolve_ids.append(clean)
+        else:
+            to_resolve_names.append(clean)
+
+    all_channels: dict[str, str] = {}
+    id_to_name: dict[str, str] = {}
+
+    if to_resolve_names or to_resolve_ids:
+        cursor = None
+        while True:
+            kwargs: dict[str, Any] = {
+                "types": "public_channel,private_channel",
+                "limit": 200,
+                "exclude_archived": True,
+            }
+            if cursor:
+                kwargs["cursor"] = cursor
+            resp = client.conversations_list(**kwargs)
+            for ch in resp.get("channels", []):
+                all_channels[ch["name"]] = ch["id"]
+                id_to_name[ch["id"]] = ch["name"]
+            cursor = resp.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+
+    for cid in to_resolve_ids:
+        name = id_to_name.get(cid, cid)
+        resolved.append(ResolvedChannel(id=cid, name=name))
+
+    unresolved: list[str] = []
+    for name in to_resolve_names:
+        cid = all_channels.get(name)
+        if cid:
+            resolved.append(ResolvedChannel(id=cid, name=name))
+        else:
+            unresolved.append(name)
+
+    if unresolved:
+        raise RuntimeError(
+            f"Could not resolve Slack channel(s): {', '.join(unresolved)}. "
+            "Make sure the bot is invited to these channels."
+        )
+
+    return resolved
 
 
 def create_slack_app(config: SlackConfig) -> Any:
@@ -475,9 +1024,11 @@ def create_slack_app(config: SlackConfig) -> Any:
         )
 
     app = App(token=bot_token)
-    # Stash config and app_token for downstream use (start_socket_mode, handlers)
+    # Stash config for downstream use (handlers).
+    # NOTE: Do NOT stash the app_token on the app instance — the agent
+    # can inspect its own process via Bash, so keeping tokens in Python
+    # attributes increases the blast radius of prompt-injection attacks.
     app._colonyos_config = config  # type: ignore[attr-defined]
-    app._colonyos_app_token = app_token  # type: ignore[attr-defined]
     return app
 
 
@@ -485,13 +1036,12 @@ def start_socket_mode(app: Any) -> Any:
     """Start the Bolt app in Socket Mode.
 
     Returns the SocketModeHandler instance for lifecycle management.
-    Uses the app token captured during ``create_slack_app`` to avoid
-    a redundant env-var read.
+    Reads the app token from the environment at call time rather than
+    caching it on the app instance (to avoid exposing it to agent
+    introspection).
     """
     from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-    app_token = getattr(app, "_colonyos_app_token", None) or os.environ.get(
-        "COLONYOS_SLACK_APP_TOKEN", ""
-    ).strip()
+    app_token = os.environ.get("COLONYOS_SLACK_APP_TOKEN", "").strip()
     handler = SocketModeHandler(app, app_token)
     return handler

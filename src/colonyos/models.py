@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
 import click
 
@@ -20,14 +20,27 @@ class PreflightError(click.ClickException):
     pass
 
 
+class BranchRestoreError(RuntimeError):
+    """Raised when git checkout fails to restore the original branch.
+
+    This is a **fatal** error for queue execution — if the branch cannot be
+    restored, subsequent queue items would silently run on the wrong branch,
+    risking data corruption.  Callers (e.g. ``QueueExecutor``) should catch
+    this and halt the queue rather than proceeding.
+    """
+    pass
+
+
 class Phase(str, Enum):
     CEO = "ceo"
     PLAN = "plan"
+    TRIAGE = "triage"
     IMPLEMENT = "implement"
     REVIEW = "review"
     DECISION = "decision"
     FIX = "fix"
     LEARN = "learn"
+    VERIFY = "verify"
     DELIVER = "deliver"
     CI_FIX = "ci_fix"
 
@@ -154,6 +167,8 @@ class RunLog:
     source_issue: int | None = None
     source_issue_url: str | None = None
     preflight: PreflightResult | None = None
+    pr_url: str | None = None
+    post_fix_head_sha: str | None = None
 
     def mark_finished(self) -> None:
         self.finished_at = datetime.now(timezone.utc).isoformat()
@@ -222,10 +237,18 @@ class QueueItemStatus(str, Enum):
 
 @dataclass
 class QueueItem:
-    """A single item in the execution queue."""
+    """A single item in the execution queue.
+
+    The ``schema_version`` field tracks serialization format evolution.
+    Increment when adding or removing fields so that readers can distinguish
+    "field missing because it didn't exist yet" from "field missing due to
+    corruption".
+    """
+
+    SCHEMA_VERSION: ClassVar[int] = 2  # class-level constant; bump on structural changes
 
     id: str
-    source_type: str  # "prompt" or "issue"
+    source_type: str  # "prompt", "issue", "slack", or "slack_fix"
     source_value: str  # prompt text or issue number
     status: QueueItemStatus
     added_at: str = field(
@@ -237,9 +260,18 @@ class QueueItem:
     pr_url: str | None = None
     error: str | None = None
     issue_title: str | None = None
+    base_branch: str | None = None
+    slack_ts: str | None = None
+    slack_channel: str | None = None
+    branch_name: str | None = None
+    fix_rounds: int = 0
+    parent_item_id: str | None = None
+    head_sha: str | None = None
+    raw_prompt: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": self.SCHEMA_VERSION,
             "id": self.id,
             "source_type": self.source_type,
             "source_value": self.source_value,
@@ -251,10 +283,25 @@ class QueueItem:
             "pr_url": self.pr_url,
             "error": self.error,
             "issue_title": self.issue_title,
+            "base_branch": self.base_branch,
+            "slack_ts": self.slack_ts,
+            "slack_channel": self.slack_channel,
+            "branch_name": self.branch_name,
+            "fix_rounds": self.fix_rounds,
+            "parent_item_id": self.parent_item_id,
+            "head_sha": self.head_sha,
+            "raw_prompt": self.raw_prompt,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> QueueItem:
+        stored_version = data.get("schema_version", 1)
+        if stored_version < cls.SCHEMA_VERSION:
+            logger.debug(
+                "QueueItem schema_version %d < current %d; missing fields "
+                "will use defaults",
+                stored_version, cls.SCHEMA_VERSION,
+            )
         raw_status = data.get("status", "pending")
         try:
             status = QueueItemStatus(raw_status)
@@ -276,6 +323,14 @@ class QueueItem:
             pr_url=data.get("pr_url"),
             error=data.get("error"),
             issue_title=data.get("issue_title"),
+            base_branch=data.get("base_branch"),
+            slack_ts=data.get("slack_ts"),
+            slack_channel=data.get("slack_channel"),
+            branch_name=data.get("branch_name"),
+            fix_rounds=data.get("fix_rounds", 0),
+            parent_item_id=data.get("parent_item_id"),
+            head_sha=data.get("head_sha"),
+            raw_prompt=data.get("raw_prompt"),
         )
 
 

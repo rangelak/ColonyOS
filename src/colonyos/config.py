@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -97,6 +98,13 @@ class SlackConfig:
     auto_approve: bool = False
     max_runs_per_hour: int = 3
     allowed_user_ids: list[str] = field(default_factory=list)
+    triage_scope: str = ""
+    daily_budget_usd: float | None = None
+    max_queue_depth: int = 20
+    triage_verbose: bool = False
+    max_consecutive_failures: int = 3
+    circuit_breaker_cooldown_minutes: int = 30
+    max_fix_rounds_per_thread: int = 3
 
 
 @dataclass
@@ -173,13 +181,78 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
             f"Invalid slack trigger_mode '{trigger_mode}'. "
             f"Valid options: {sorted(_VALID_TRIGGER_MODES)}"
         )
+    max_queue_depth = int(raw.get("max_queue_depth", 20))
+    if max_queue_depth < 1:
+        raise ValueError(
+            f"slack.max_queue_depth must be positive, got {max_queue_depth}"
+        )
+    max_consecutive_failures = int(raw.get("max_consecutive_failures", 3))
+    if max_consecutive_failures < 1:
+        raise ValueError(
+            f"slack.max_consecutive_failures must be positive, got {max_consecutive_failures}"
+        )
+    circuit_breaker_cooldown_minutes = int(raw.get("circuit_breaker_cooldown_minutes", 30))
+    if circuit_breaker_cooldown_minutes < 1:
+        raise ValueError(
+            f"slack.circuit_breaker_cooldown_minutes must be positive, got {circuit_breaker_cooldown_minutes}"
+        )
+    max_fix_rounds_per_thread = int(raw.get("max_fix_rounds_per_thread", 3))
+    if max_fix_rounds_per_thread < 1:
+        raise ValueError(
+            f"slack.max_fix_rounds_per_thread must be positive, got {max_fix_rounds_per_thread}"
+        )
+    max_runs_per_hour = int(raw.get("max_runs_per_hour", 3))
+    if max_runs_per_hour < 1:
+        raise ValueError(
+            f"slack.max_runs_per_hour must be positive, got {max_runs_per_hour}"
+        )
+    daily_budget_raw = raw.get("daily_budget_usd")
+    daily_budget_usd: float | None = None
+    if daily_budget_raw is not None:
+        daily_budget_usd = float(daily_budget_raw)
+        if daily_budget_usd <= 0:
+            raise ValueError(
+                f"slack.daily_budget_usd must be positive, got {daily_budget_usd}"
+            )
+    allowed_user_ids_raw = list(raw.get("allowed_user_ids", []))
+    enabled = bool(raw.get("enabled", False))
+    auto_approve = bool(raw.get("auto_approve", False))
+
+    # Warn when Slack is enabled without an explicit user allowlist — channel
+    # membership alone is not a strong access control boundary.
+    if enabled and not allowed_user_ids_raw:
+        logger.warning(
+            "slack.enabled is true but allowed_user_ids is empty. "
+            "Any user in the configured channels can trigger triage and "
+            "approve pipelines. Set allowed_user_ids to restrict access."
+        )
+
+    if auto_approve:
+        logger.warning(
+            "slack.auto_approve is enabled — Slack messages that pass triage "
+            "will trigger autonomous code execution with no human approval gate. "
+            "Ensure this is intentional for your environment."
+        )
+        if not allowed_user_ids_raw:
+            logger.warning(
+                "slack.auto_approve is enabled with an EMPTY allowed_user_ids list. "
+                "ANY user in the configured channels can trigger autonomous code "
+                "execution. Set allowed_user_ids to restrict access."
+            )
     return SlackConfig(
-        enabled=bool(raw.get("enabled", False)),
+        enabled=enabled,
         channels=list(raw.get("channels", [])),
         trigger_mode=trigger_mode,
-        auto_approve=bool(raw.get("auto_approve", False)),
-        max_runs_per_hour=int(raw.get("max_runs_per_hour", 3)),
-        allowed_user_ids=list(raw.get("allowed_user_ids", [])),
+        auto_approve=auto_approve,
+        max_runs_per_hour=max_runs_per_hour,
+        allowed_user_ids=allowed_user_ids_raw,
+        triage_scope=str(raw.get("triage_scope", "")),
+        daily_budget_usd=daily_budget_usd,
+        max_queue_depth=max_queue_depth,
+        triage_verbose=bool(raw.get("triage_verbose", False)),
+        max_consecutive_failures=max_consecutive_failures,
+        circuit_breaker_cooldown_minutes=circuit_breaker_cooldown_minutes,
+        max_fix_rounds_per_thread=max_fix_rounds_per_thread,
     )
 
 
@@ -385,14 +458,24 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         }
 
     if config.slack.enabled or config.slack.channels:
-        data["slack"] = {
+        slack_data: dict[str, Any] = {
             "enabled": config.slack.enabled,
             "channels": list(config.slack.channels),
             "trigger_mode": config.slack.trigger_mode,
             "auto_approve": config.slack.auto_approve,
             "max_runs_per_hour": config.slack.max_runs_per_hour,
             "allowed_user_ids": list(config.slack.allowed_user_ids),
+            "max_queue_depth": config.slack.max_queue_depth,
+            "triage_verbose": config.slack.triage_verbose,
+            "max_consecutive_failures": config.slack.max_consecutive_failures,
+            "circuit_breaker_cooldown_minutes": config.slack.circuit_breaker_cooldown_minutes,
+            "max_fix_rounds_per_thread": config.slack.max_fix_rounds_per_thread,
         }
+        if config.slack.triage_scope:
+            slack_data["triage_scope"] = config.slack.triage_scope
+        if config.slack.daily_budget_usd is not None:
+            slack_data["daily_budget_usd"] = config.slack.daily_budget_usd
+        data["slack"] = slack_data
 
     cleanup_defaults = DEFAULTS["cleanup"]
     if (
