@@ -48,12 +48,13 @@ After addressing all items in the fix request:
 
 ### Step 5: Commit Changes
 
-Commit all fixes on branch `{branch_name}` with a clear commit message describing what was fixed and why.
+Commit all fixes on branch `{branch_name}` with a clear commit message describing what was fixed and why. Do **NOT** push to the remote — the Deliver phase handles pushing.
 
 ## Rules
 
 - Only fix issues described in the fix request — do not refactor unrelated code
 - Make incremental commits on the existing branch (do NOT create a new branch)
+- Do NOT push commits — the Deliver phase is responsible for pushing
 - Follow existing code conventions exactly
 - Every fix must have corresponding test coverage
 - Do not introduce new dependencies unless absolutely necessary

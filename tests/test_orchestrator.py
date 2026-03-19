@@ -2607,3 +2607,54 @@ class TestRunThreadFix:
         assert Phase.VERIFY in phase_names
         # Deliver should NOT have run
         assert Phase.DELIVER not in phase_names
+
+    @patch("colonyos.orchestrator.subprocess")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.check_open_pr")
+    @patch("colonyos.orchestrator.validate_branch_exists")
+    def test_verify_phase_uses_verify_model(
+        self,
+        mock_validate: MagicMock,
+        mock_check_pr: MagicMock,
+        mock_run_phase: MagicMock,
+        mock_subprocess: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Verify phase must use Phase.VERIFY model, not Phase.IMPLEMENT."""
+        mock_validate.return_value = (True, "")
+        mock_check_pr.return_value = (42, "https://github.com/org/repo/pull/42")
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="main", stderr="")
+
+        models_used: list[tuple[Phase, str]] = []
+
+        def _phase_result(phase, *args, **kwargs):
+            model = kwargs.get("model", "")
+            models_used.append((phase, model))
+            return PhaseResult(phase=phase, success=True, cost_usd=1.0)
+        mock_run_phase.side_effect = _phase_result
+
+        config = ColonyConfig()
+        # Set distinct models so we can distinguish them
+        config.phase_models = {
+            "implement": "model-implement",
+            "verify": "model-verify",
+            "deliver": "model-deliver",
+        }
+        save_config(tmp_path, config)
+
+        log = run_thread_fix(
+            "fix the test",
+            branch_name="colonyos/feature",
+            pr_url="https://github.com/org/repo/pull/42",
+            original_prompt="original",
+            prd_rel="prd.md",
+            task_rel="tasks.md",
+            repo_root=tmp_path,
+            config=config,
+            quiet=True,
+        )
+        assert log.status == RunStatus.COMPLETED
+        # Find the Verify phase call and confirm it used the VERIFY model
+        verify_calls = [(p, m) for p, m in models_used if p == Phase.VERIFY]
+        assert len(verify_calls) == 1
+        assert verify_calls[0][1] == "model-verify"

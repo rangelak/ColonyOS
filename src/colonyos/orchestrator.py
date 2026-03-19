@@ -1789,7 +1789,7 @@ def run_thread_fix(
         if verify_ui is not None:
             verify_ui.phase_header(
                 "Verify (tests)", config.budget.per_phase,
-                config.get_model(Phase.IMPLEMENT),
+                config.get_model(Phase.VERIFY),
             )
         else:
             _log("=== Thread Fix: Verify ===")
@@ -1809,7 +1809,7 @@ def run_thread_fix(
                 "(e.g., pytest, npm test, cargo test, make test) and report "
                 "whether all tests pass. If tests fail, list the failing tests."
             ),
-            model=config.get_model(Phase.IMPLEMENT),
+            model=config.get_model(Phase.VERIFY),
             budget_usd=config.budget.per_phase,
             ui=verify_ui,
         )

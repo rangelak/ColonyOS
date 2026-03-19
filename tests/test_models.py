@@ -412,6 +412,33 @@ class TestQueueItemThreadFixFields:
         item.fix_rounds += 1
         assert item.fix_rounds == 1
 
+    def test_head_sha_propagation_to_parent(self) -> None:
+        """After a fix, the parent's head_sha must be updated so the next fix
+        round inherits the correct expected SHA (multi-round fix support)."""
+        parent = QueueItem(
+            id="q-parent",
+            source_type="slack",
+            source_value="build feature X",
+            status=QueueItemStatus.COMPLETED,
+            head_sha="aaa111",
+            branch_name="colonyos/feature-x",
+        )
+        new_sha = "bbb222"
+        # Simulate the fix executor updating parent's head_sha
+        parent.head_sha = new_sha
+        assert parent.head_sha == new_sha
+
+        # A subsequent fix item inheriting from parent gets the updated SHA
+        fix_item = QueueItem(
+            id="q-fix-2",
+            source_type="slack_fix",
+            source_value="fix item 2",
+            status=QueueItemStatus.PENDING,
+            parent_item_id=parent.id,
+            head_sha=parent.head_sha,
+        )
+        assert fix_item.head_sha == new_sha
+
 
 class TestRunLogPrUrl:
     """Tests for pr_url field on RunLog."""

@@ -1976,8 +1976,8 @@ def watch(
         if not fix_prompt_text.strip():
             return
 
-        # Sanitize fix request text
-        fix_prompt_text = sanitize_slack_content(fix_prompt_text)
+        # Note: sanitize_slack_content is called inside format_slack_as_prompt
+        # below, so we do not double-sanitize here.
 
         with state_lock:
             parent_item = find_parent_queue_item(thread_ts, queue_state.items)
@@ -1987,11 +1987,16 @@ def watch(
 
             # Check fix round limit
             if parent_item.fix_rounds >= config.slack.max_fix_rounds_per_thread:
+                # Sum cumulative cost across parent + all fix items for this thread (FR-17)
+                cumulative_cost = parent_item.cost_usd + sum(
+                    qi.cost_usd for qi in queue_state.items
+                    if qi.parent_item_id == parent_item.id
+                )
                 try:
                     client.chat_postMessage(  # type: ignore[union-attr]
                         channel=channel,
                         thread_ts=thread_ts,
-                        text=format_fix_round_limit(parent_item.cost_usd),
+                        text=format_fix_round_limit(cumulative_cost),
                     )
                 except Exception:
                     logger.debug("Failed to post fix round limit message", exc_info=True)
@@ -2059,8 +2064,11 @@ def watch(
             _slack_client_ready.set()
 
         if not should_process_message(event, config.slack, bot_user_id):
-            # Check if this is a thread-fix request
-            if should_process_thread_fix(event, config.slack, bot_user_id, queue_state.items):
+            # Check if this is a thread-fix request — snapshot items to avoid
+            # iterating shared mutable state without holding state_lock.
+            with state_lock:
+                items_snapshot = list(queue_state.items)
+            if should_process_thread_fix(event, config.slack, bot_user_id, items_snapshot):
                 _handle_thread_fix(event, client)
             return
 
@@ -2652,6 +2660,13 @@ def watch(
 
             elapsed_ms = int(time.time() * 1000) - start_ms
 
+            # Capture new HEAD SHA after fix so subsequent rounds use the
+            # updated value (fixes head_sha staleness bug).
+            new_head_sha = ""
+            if log.status == RunStatus.COMPLETED:
+                from colonyos.orchestrator import _get_head_sha
+                new_head_sha = _get_head_sha(self._repo_root)
+
             with self._state_lock:
                 item_to_run.cost_usd = log.total_cost_usd
                 item_to_run.duration_ms = elapsed_ms
@@ -2661,6 +2676,10 @@ def watch(
                 if log.status == RunStatus.COMPLETED:
                     item_to_run.status = QueueItemStatus.COMPLETED
                     self._watch_state.consecutive_failures = 0
+                    # Propagate new HEAD SHA to parent so the next fix round
+                    # inherits the correct expected SHA (multi-round fix support).
+                    if parent_item and new_head_sha:
+                        parent_item.head_sha = new_head_sha
                 else:
                     item_to_run.status = QueueItemStatus.FAILED
                     item_to_run.error = (

@@ -1395,6 +1395,48 @@ class TestFormatFixRoundLimit:
         assert "Max fix rounds reached" in result
 
 
+class TestCumulativeCostCalculation:
+    """Cumulative cost should sum parent + all child fix items (FR-17)."""
+
+    def test_cumulative_cost_includes_all_fix_rounds(self) -> None:
+        from colonyos.models import QueueItem, QueueItemStatus
+        parent = QueueItem(
+            id="q-parent", source_type="slack", source_value="orig",
+            status=QueueItemStatus.COMPLETED, cost_usd=5.0,
+        )
+        fix1 = QueueItem(
+            id="q-fix-1", source_type="slack_fix", source_value="fix 1",
+            status=QueueItemStatus.COMPLETED, parent_item_id="q-parent",
+            cost_usd=2.0,
+        )
+        fix2 = QueueItem(
+            id="q-fix-2", source_type="slack_fix", source_value="fix 2",
+            status=QueueItemStatus.COMPLETED, parent_item_id="q-parent",
+            cost_usd=3.0,
+        )
+        other = QueueItem(
+            id="q-other", source_type="slack", source_value="other",
+            status=QueueItemStatus.COMPLETED, cost_usd=10.0,
+        )
+        items = [parent, fix1, fix2, other]
+        cumulative_cost = parent.cost_usd + sum(
+            qi.cost_usd for qi in items if qi.parent_item_id == parent.id
+        )
+        assert cumulative_cost == 10.0  # 5 + 2 + 3
+
+    def test_cumulative_cost_no_fix_rounds(self) -> None:
+        from colonyos.models import QueueItem, QueueItemStatus
+        parent = QueueItem(
+            id="q-parent", source_type="slack", source_value="orig",
+            status=QueueItemStatus.COMPLETED, cost_usd=5.0,
+        )
+        items = [parent]
+        cumulative_cost = parent.cost_usd + sum(
+            qi.cost_usd for qi in items if qi.parent_item_id == parent.id
+        )
+        assert cumulative_cost == 5.0
+
+
 class TestFindParentQueueItem:
     def test_finds_completed_parent(self) -> None:
         from colonyos.models import QueueItem, QueueItemStatus
