@@ -66,10 +66,25 @@ def _get_current_branch(repo_root: Path) -> str:
         )
 
 
-def _check_working_tree_clean(repo_root: Path) -> tuple[bool, str]:
+_COLONYOS_OUTPUT_PREFIXES = (
+    "cOS_prds/",
+    "cOS_tasks/",
+    "cOS_reviews/",
+    "cOS_proposals/",
+    ".colonyos/",
+)
+
+
+def _check_working_tree_clean(
+    repo_root: Path, *, ignore_colonyos_dirs: bool = True,
+) -> tuple[bool, str]:
     """Check if the working tree is clean. Returns (is_clean, dirty_output).
 
-    Raises click.ClickException if git status cannot be determined (fail-closed).
+    When *ignore_colonyos_dirs* is True (the default), files inside known
+    ColonyOS output directories are excluded so the pipeline's own artifacts
+    don't block subsequent phases.
+
+    Raises :class:`PreflightError` if git status cannot be determined (fail-closed).
     """
     try:
         result = subprocess.run(
@@ -85,7 +100,13 @@ def _check_working_tree_clean(repo_root: Path) -> tuple[bool, str]:
                 f"{result.stderr.strip() or '(no stderr)'}. "
                 "Cannot determine working tree state."
             )
-        dirty_output = result.stdout.strip()
+        lines = result.stdout.strip().splitlines()
+        if ignore_colonyos_dirs:
+            lines = [
+                ln for ln in lines
+                if not any(ln[3:].startswith(p) for p in _COLONYOS_OUTPUT_PREFIXES)
+            ]
+        dirty_output = "\n".join(lines)
         return (not dirty_output, dirty_output)
     except subprocess.TimeoutExpired:
         raise PreflightError(
