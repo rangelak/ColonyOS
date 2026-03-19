@@ -1,5 +1,27 @@
 # Changelog
 
+## 20260319_093000 — `colonyos cleanup` Codebase Hygiene & Structural Analysis
+
+Added a `colonyos cleanup` command with three subcommands for maintaining codebase health:
+`cleanup branches` prunes merged `colonyos/` branches (local and remote), `cleanup artifacts`
+removes old `.colonyos/runs/` run logs, and `cleanup scan` runs an AI-powered structural
+analysis that identifies complex files, long functions, and dead code. All destructive
+operations default to dry-run mode, requiring `--execute` to apply changes.
+
+**Created:**
+- `src/colonyos/cleanup.py` — Branch pruning, artifact cleanup, and AI-powered structural scan logic
+- `src/colonyos/instructions/cleanup_scan.md` — Agent instruction template for structural analysis
+- `tests/test_cleanup.py` — Comprehensive tests for all cleanup subcommands (616 lines)
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `cleanup` command group with `branches`, `artifacts`, `scan` subcommands
+- `src/colonyos/config.py` — Added cleanup-related configuration fields
+- `README.md` — Updated CLI reference with cleanup commands
+- `tests/test_cli.py` — Extended CLI tests for cleanup commands
+
+**PRD:** `cOS_prds/20260319_091624_prd_i_want_to_add_a_cleanup_command_that_basically_looks_for_things_to_optimize_and.md`
+**Tasks:** `cOS_tasks/20260319_091624_tasks_i_want_to_add_a_cleanup_command_that_basically_looks_for_things_to_optimize_and.md`
+
 ## 20260319_091500 — Git State Pre-flight Check
 
 Added a pre-flight git state assessment that runs at the very start of the pipeline before
