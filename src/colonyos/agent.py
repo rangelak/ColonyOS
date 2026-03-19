@@ -266,7 +266,10 @@ async def run_phases_parallel(
             result = task.result()
             results[idx] = result
             if on_complete is not None:
-                on_complete(idx, result)
+                try:
+                    on_complete(idx, result)
+                except Exception:
+                    logger.exception("Progress callback failed for index %d", idx)
 
     # Return results in original call order
     return [results[i] for i in range(len(calls))]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -294,6 +294,23 @@ def _extract_review_verdict(result_text: str) -> str:
 # -- Parallel Progress Tracker ------------------------------------------------
 
 
+def _get_default_console() -> Console:
+    """Return the module-level console instance.
+
+    This avoids using globals() for runtime lookup while still allowing
+    the console to be overridden in tests.
+    """
+    return console
+
+
+class _ReviewerState(TypedDict):
+    """Type definition for reviewer state tracking."""
+
+    status: str  # 'pending', 'approved', 'request-changes', 'failed'
+    cost_usd: float
+    duration_ms: int
+
+
 class ParallelProgressLine:
     """Real-time progress indicator for parallel reviewer execution.
 
@@ -324,7 +341,8 @@ class ParallelProgressLine:
 
         self._reviewers = reviewers
         self._is_tty = is_tty
-        self._console = console or globals()["console"]
+        # Use passed console or fall back to module-level console
+        self._console: Console = console if console is not None else _get_default_console()
         self._start_time = time.monotonic()
 
         # Sanitize and store reviewer names
@@ -333,13 +351,16 @@ class ParallelProgressLine:
             self._sanitized_names[idx] = sanitize_display_text(name)
 
         # State tracking: index -> {status, cost_usd, duration_ms}
-        self._states: dict[int, dict[str, object]] = {}
+        self._states: dict[int, _ReviewerState] = {}
         for idx, _ in reviewers:
             self._states[idx] = {
                 "status": "pending",
                 "cost_usd": 0.0,
                 "duration_ms": 0,
             }
+
+        # Track the most recently completed reviewer for non-TTY rendering
+        self._last_completed_index: int | None = None
 
     @property
     def total_cost_usd(self) -> float:
@@ -381,6 +402,9 @@ class ParallelProgressLine:
             "cost_usd": result.cost_usd or 0.0,
             "duration_ms": result.duration_ms,
         }
+
+        # Track which reviewer just completed for non-TTY rendering
+        self._last_completed_index = index
 
         self._render()
 
@@ -432,30 +456,28 @@ class ParallelProgressLine:
 
     def _render_non_tty(self) -> None:
         """Render log-style output for non-TTY environments."""
-        # Find the just-completed reviewer (last one that's not pending)
-        for idx, _ in self._reviewers:
-            state = self._states[idx]
-            if state["status"] != "pending":
-                # Only print if this is the most recently completed
-                # (We print on each completion in non-TTY mode)
-                status = state["status"]
-                cost = float(state["cost_usd"])
-                duration_ms = int(state["duration_ms"])
-                duration_str = _format_duration(duration_ms)
-                name = self._sanitized_names.get(idx, f"R{idx + 1}")
+        # Print only the reviewer that just completed (tracked in on_reviewer_complete)
+        idx = self._last_completed_index
+        if idx is None:
+            return
 
-                icon = {
-                    "approved": self._ICON_APPROVED,
-                    "request-changes": self._ICON_CHANGES,
-                    "failed": self._ICON_FAILED,
-                }.get(status, "?")
+        state = self._states[idx]
+        status = state["status"]
+        cost = state["cost_usd"]
+        duration_ms = state["duration_ms"]
+        duration_str = _format_duration(duration_ms)
+        name = self._sanitized_names.get(idx, f"R{idx + 1}")
 
-                self._console.print(
-                    f"  R{idx + 1} {icon} {name} ({status}) ${cost:.2f} in {duration_str}",
-                    highlight=False,
-                )
-                # Only print the last completed one (avoid reprinting)
-                break
+        icon = {
+            "approved": self._ICON_APPROVED,
+            "request-changes": self._ICON_CHANGES,
+            "failed": self._ICON_FAILED,
+        }.get(status, "?")
+
+        self._console.print(
+            f"  R{idx + 1} {icon} {name} ({status}) ${cost:.2f} in {duration_str}",
+            highlight=False,
+        )
 
     def print_summary(self, round_num: int) -> None:
         """Print a summary line after all reviewers complete.

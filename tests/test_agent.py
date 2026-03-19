@@ -268,3 +268,59 @@ class TestRunPhasesParallel:
 
         # Results should be in original call order
         assert [r.session_id for r in results] == ["session-0", "session-1", "session-2"]
+
+    def test_callback_exception_does_not_fail_execution(self) -> None:
+        """Test that an exception in callback doesn't fail the entire parallel execution.
+
+        This tests the fix for a reliability concern where a callback throwing an exception
+        would bubble up and fail the entire parallel execution. Now exceptions are logged
+        but execution continues.
+        """
+        from colonyos.agent import run_phases_parallel
+        import logging
+
+        callback_indices: list[int] = []
+        exception_raised = False
+
+        def on_complete(idx: int, result: PhaseResult) -> None:
+            callback_indices.append(idx)
+            if idx == 1:
+                # Raise an exception on the second callback
+                raise ValueError("Intentional test exception in callback")
+
+        prompt_to_idx = {"prompt 0": 0, "prompt 1": 1, "prompt 2": 2}
+
+        async def mock_run_phase(
+            phase: Phase,
+            prompt: str,
+            *,
+            cwd: object,
+            system_prompt: str,
+            **kwargs: object,
+        ) -> PhaseResult:
+            idx = prompt_to_idx[prompt]
+            return _fake_phase_result(idx)
+
+        calls = [
+            {"phase": Phase.REVIEW, "prompt": f"prompt {i}", "cwd": "/tmp", "system_prompt": "sys"}
+            for i in range(3)
+        ]
+
+        async def run_test() -> list[PhaseResult]:
+            with patch("colonyos.agent.run_phase", side_effect=mock_run_phase):
+                return await run_phases_parallel(calls, on_complete=on_complete)
+
+        # Should complete without raising, despite callback exception
+        with patch("colonyos.agent.logger") as mock_logger:
+            results = asyncio.run(run_test())
+
+            # Logger.exception should have been called for the failing callback
+            mock_logger.exception.assert_called_once()
+            # The call should include index 1 (either as format string arg or in message)
+            call_args = mock_logger.exception.call_args
+            assert call_args[0][1] == 1, "Expected index 1 in exception log"
+
+        # All 3 results should still be returned
+        assert len(results) == 3
+        # All 3 callbacks should have been attempted (even though one failed)
+        assert sorted(callback_indices) == [0, 1, 2]

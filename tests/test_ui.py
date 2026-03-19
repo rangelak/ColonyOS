@@ -122,6 +122,49 @@ class TestParallelProgressLine:
         # Should contain reviewer info
         assert "R1" in call_args or "Reviewer" in call_args
 
+    def test_render_non_tty_multiple_completions_out_of_order(self) -> None:
+        """Test that non-TTY mode prints each reviewer exactly once, even when out of order.
+
+        This tests the fix for a bug where non-TTY mode would re-print the first
+        completed reviewer on every subsequent completion instead of printing
+        the reviewer that just completed.
+        """
+        from colonyos.ui import ParallelProgressLine
+
+        mock_console = MagicMock()
+        reviewers = [(0, "Alice"), (1, "Bob"), (2, "Charlie"), (3, "Diana")]
+        tracker = ParallelProgressLine(reviewers, is_tty=False, console=mock_console)
+
+        # Complete reviewers out of order: R2, R0, R3, R1
+        tracker.on_reviewer_complete(2, _fake_phase_result(2, cost_usd=0.10))
+        tracker.on_reviewer_complete(0, _fake_phase_result(0, cost_usd=0.12))
+        tracker.on_reviewer_complete(3, _fake_phase_result(3, cost_usd=0.08))
+        tracker.on_reviewer_complete(1, _fake_phase_result(1, cost_usd=0.15))
+
+        # Should have exactly 4 print calls (one per reviewer)
+        assert mock_console.print.call_count == 4
+
+        # Extract all printed lines
+        printed_lines = [str(call) for call in mock_console.print.call_args_list]
+
+        # Each reviewer should appear exactly once in the output
+        r1_calls = [line for line in printed_lines if "R1 " in line]
+        r2_calls = [line for line in printed_lines if "R2 " in line]
+        r3_calls = [line for line in printed_lines if "R3 " in line]
+        r4_calls = [line for line in printed_lines if "R4 " in line]
+
+        assert len(r1_calls) == 1, f"R1 should appear once, got {len(r1_calls)}"
+        assert len(r2_calls) == 1, f"R2 should appear once, got {len(r2_calls)}"
+        assert len(r3_calls) == 1, f"R3 should appear once, got {len(r3_calls)}"
+        assert len(r4_calls) == 1, f"R4 should appear once, got {len(r4_calls)}"
+
+        # Verify order matches completion order (R3, R1, R4, R2 in 1-indexed)
+        # Note: R2 completes first (index 2 -> R3), R0 second (index 0 -> R1), etc.
+        assert "R3" in printed_lines[0], "First print should be R3 (index 2)"
+        assert "R1" in printed_lines[1], "Second print should be R1 (index 0)"
+        assert "R4" in printed_lines[2], "Third print should be R4 (index 3)"
+        assert "R2" in printed_lines[3], "Fourth print should be R2 (index 1)"
+
     def test_cost_accumulation(self) -> None:
         """Test that costs accumulate across reviewers."""
         from colonyos.ui import ParallelProgressLine
