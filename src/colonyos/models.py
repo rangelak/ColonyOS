@@ -71,6 +71,45 @@ class PhaseResult:
 
 
 @dataclass
+class PreflightResult:
+    """Result of the git state pre-flight check run before any agent phases."""
+
+    current_branch: str
+    is_clean: bool
+    branch_exists: bool
+    open_pr_number: int | None = None
+    open_pr_url: str | None = None
+    main_behind_count: int | None = None
+    action_taken: str = "proceed"
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "current_branch": self.current_branch,
+            "is_clean": self.is_clean,
+            "branch_exists": self.branch_exists,
+            "open_pr_number": self.open_pr_number,
+            "open_pr_url": self.open_pr_url,
+            "main_behind_count": self.main_behind_count,
+            "action_taken": self.action_taken,
+            "warnings": list(self.warnings),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PreflightResult:
+        return cls(
+            current_branch=data.get("current_branch", ""),
+            is_clean=data.get("is_clean", True),
+            branch_exists=data.get("branch_exists", False),
+            open_pr_number=data.get("open_pr_number"),
+            open_pr_url=data.get("open_pr_url"),
+            main_behind_count=data.get("main_behind_count"),
+            action_taken=data.get("action_taken", "proceed"),
+            warnings=list(data.get("warnings", [])),
+        )
+
+
+@dataclass
 class ResumeState:
     """Typed container for resume-from parameters passed to the orchestrator."""
 
@@ -97,6 +136,7 @@ class RunLog:
     task_rel: str | None = None
     source_issue: int | None = None
     source_issue_url: str | None = None
+    preflight: PreflightResult | None = None
 
     def mark_finished(self) -> None:
         self.finished_at = datetime.now(timezone.utc).isoformat()

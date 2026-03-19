@@ -19,7 +19,7 @@ from colonyos.learnings import (
     load_learnings_for_injection,
     parse_learnings,
 )
-from colonyos.models import Persona, Phase, PhaseResult, ResumeState, RunLog, RunStatus
+from colonyos.models import Persona, Phase, PhaseResult, PreflightResult, ResumeState, RunLog, RunStatus
 from colonyos.naming import (
     decision_artifact_path,
     generate_timestamp,
@@ -42,6 +42,174 @@ def _touch_heartbeat(repo_root: Path) -> None:
 
 def _log(msg: str) -> None:
     print(f"[colonyos] {msg}", file=sys.stderr, flush=True)
+
+
+def _preflight_check(
+    repo_root: Path,
+    branch_name: str,
+    config: ColonyConfig,
+    *,
+    offline: bool = False,
+    force: bool = False,
+) -> PreflightResult:
+    """Run pre-flight git state assessment before any agent phases.
+
+    Checks for uncommitted changes, existing branches, open PRs, and
+    stale main. Raises :class:`click.ClickException` on fatal issues
+    unless ``force=True``.
+    """
+    warnings: list[str] = []
+
+    # Determine current branch
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+        )
+        current_branch = result.stdout.strip() or "unknown"
+    except OSError:
+        current_branch = "unknown"
+
+    # Check for uncommitted changes
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+        )
+        dirty_output = result.stdout.strip()
+        is_clean = not dirty_output
+    except OSError:
+        is_clean = True
+        dirty_output = ""
+
+    if not is_clean and not force:
+        dirty_files = dirty_output.splitlines()[:10]
+        file_list = "\n  ".join(dirty_files)
+        if len(dirty_output.splitlines()) > 10:
+            file_list += f"\n  ... and {len(dirty_output.splitlines()) - 10} more"
+        raise click.ClickException(
+            f"Uncommitted changes detected:\n  {file_list}\n\n"
+            "Please commit or stash your changes before running colonyos."
+        )
+
+    # Check if branch already exists locally
+    branch_exists_result = validate_branch_exists(branch_name, repo_root)
+    branch_exists = branch_exists_result[0]
+
+    # If branch exists, check for open PRs
+    open_pr_number: int | None = None
+    open_pr_url: str | None = None
+    if branch_exists and not offline:
+        from colonyos.github import check_open_pr
+        open_pr_number, open_pr_url = check_open_pr(branch_name, repo_root)
+
+    if branch_exists and not force:
+        if open_pr_number is not None:
+            raise click.ClickException(
+                f"Branch '{branch_name}' already exists with open PR #{open_pr_number}: "
+                f"{open_pr_url}\n\n"
+                f"Use --resume to continue existing work, or --force to bypass this check."
+            )
+        raise click.ClickException(
+            f"Branch '{branch_name}' already exists locally.\n\n"
+            "Use --resume to continue existing work, or --force to bypass this check."
+        )
+
+    # Check if main is behind origin/main
+    main_behind_count: int | None = None
+    if not offline:
+        try:
+            subprocess.run(
+                ["git", "fetch", "origin", "main"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=repo_root,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            warnings.append(f"Failed to fetch origin/main: {exc}")
+
+        try:
+            result = subprocess.run(
+                ["git", "rev-list", "--count", "main..origin/main"],
+                capture_output=True,
+                text=True,
+                cwd=repo_root,
+            )
+            if result.returncode == 0 and result.stdout.strip().isdigit():
+                main_behind_count = int(result.stdout.strip())
+                if main_behind_count > 0:
+                    warnings.append(
+                        f"Local main is {main_behind_count} commit(s) behind origin/main. "
+                        "Consider running: git pull"
+                    )
+        except OSError:
+            pass
+
+    action = "proceed"
+    if force and (not is_clean or branch_exists):
+        action = "forced"
+
+    return PreflightResult(
+        current_branch=current_branch,
+        is_clean=is_clean,
+        branch_exists=branch_exists,
+        open_pr_number=open_pr_number,
+        open_pr_url=open_pr_url,
+        main_behind_count=main_behind_count,
+        action_taken=action,
+        warnings=warnings,
+    )
+
+
+def _resume_preflight(repo_root: Path, branch_name: str) -> PreflightResult:
+    """Lightweight pre-flight check for resume mode.
+
+    Only validates that the working tree is clean.
+    Raises :class:`click.ClickException` if uncommitted changes are found.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+        )
+        current_branch = result.stdout.strip() or "unknown"
+    except OSError:
+        current_branch = "unknown"
+
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+        )
+        dirty_output = result.stdout.strip()
+        is_clean = not dirty_output
+    except OSError:
+        is_clean = True
+        dirty_output = ""
+
+    if not is_clean:
+        dirty_files = dirty_output.splitlines()[:10]
+        file_list = "\n  ".join(dirty_files)
+        raise click.ClickException(
+            f"Uncommitted changes detected:\n  {file_list}\n\n"
+            "Please commit or stash your changes before resuming."
+        )
+
+    return PreflightResult(
+        current_branch=current_branch,
+        is_clean=True,
+        branch_exists=True,
+        action_taken="proceed",
+    )
 
 
 def _build_run_id(prompt: str) -> str:
@@ -617,6 +785,7 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
                 "task_rel": log.task_rel,
                 "source_issue": log.source_issue,
                 "source_issue_url": log.source_issue_url,
+                "preflight": log.preflight.to_dict() if log.preflight else None,
                 "last_successful_phase": last_successful_phase,
                 "resume_events": resume_events,
                 "phases": [
@@ -701,6 +870,7 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
             task_rel=data.get("task_rel"),
             source_issue=data.get("source_issue"),
             source_issue_url=data.get("source_issue_url"),
+            preflight=PreflightResult.from_dict(data["preflight"]) if data.get("preflight") else None,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise click.ClickException(
@@ -1371,6 +1541,8 @@ def run(
     source_issue: int | None = None,
     source_issue_url: str | None = None,
     ui_factory: object | None = None,
+    offline: bool = False,
+    force: bool = False,
 ) -> RunLog:
     """Execute the full orchestration loop: plan -> implement -> review -> deliver.
 
@@ -1401,6 +1573,11 @@ def run(
         next_phase = _compute_next_phase(last_successful)
         log.status = RunStatus.RUNNING
         _log(f"Resuming from phase: {next_phase}")
+
+        # Lightweight pre-flight for resume: only check clean working tree
+        preflight = _resume_preflight(repo_root, branch_name)
+        log.preflight = preflight
+
         # Record resume event for audit trail
         _save_run_log(repo_root, log, resumed=True)
     else:
@@ -1417,6 +1594,14 @@ def run(
         slug = slugify(prompt)
         names = planning_names(prompt)
         branch_name = f"{config.branch_prefix}{slug}"
+
+        # --- Pre-flight git state check ---
+        preflight = _preflight_check(
+            repo_root, branch_name, config, offline=offline, force=force,
+        )
+        log.preflight = preflight
+        for warning in preflight.warnings:
+            _log(f"Pre-flight warning: {warning}")
 
         prd_rel = f"{config.prds_dir}/{names.prd_filename}"
         task_rel = f"{config.tasks_dir}/{names.task_filename}"
