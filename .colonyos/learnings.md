@@ -131,3 +131,11 @@ _Date: 2026-03-19 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[architecture]** Business-logic regexes copied across modules drift silently; extract to one shared constant.
 - **[security]** Prompt templates must prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
 - **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load.
+
+## Run: run-20260319_230625-dbdcda5b59
+_Date: 2026-03-19 | Feature: can_we_make_colonyos_setup_choice_one_where_an_assistant_set_
+
+- **[code-quality]** Fixed-length error truncation can bisect redacted tokens, creating apparent credential leaks in persisted logs.
+- **[architecture]** Budget/quota enforcement must pre-check remaining capacity before starting work; post-only checks allow one full overshoot.
+- **[style]** Float equality/inequality comparisons for budget thresholds are fragile due to IEEE 754 rounding; use epsilon tolerance.
+- **[code-quality]** Placeholder values (SHA256 hashes, URLs) shipped in release artifacts cause install failures; gate releases on validation.
