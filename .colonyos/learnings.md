@@ -45,3 +45,20 @@ _Date: 2026-03-18 | Feature: add_a_colonyos_queue_command_that_accepts_multiple_
 - **[code-quality]** Use enums instead of plain strings for fields with a fixed set of valid values to enable type-checking.
 - **[architecture]** Extract feature logic from CLI entry-point files into dedicated modules; god files (>500 LOC) hinder review and testing.
 - **[testing]** Test cross-command integration points; a subcommand passing its own tests doesn't guarantee correct parent output.
+
+## Run: run-20260318_173116-0d7234c9e5
+_Date: 2026-03-18 | Feature: i_think_we_should_add_some_sort_of_ui_for_managing_all_this__
+
+- **[security]** Resolve user-supplied file paths and verify they stay within the allowed base directory to prevent path traversal.
+- **[architecture]** Hand-maintained type mirrors across languages (e.g., TS types for Python models) drift silently; generate or validate via shared schema.
+- **[code-quality]** Manual serialization helpers that enumerate fields silently drop new fields; co-locate serialization with the data model.
+- **[security]** HTTP error handlers forwarding raw exception messages to clients can leak internal filesystem paths and stack details.
+
+## Run: run-20260318_233254-2ac1052a17
+_Date: 2026-03-19 | Feature: the_ui_tests_are_failing_on_the_ci_there_is_no_module_found__
+
+- **[code-quality]** Config loaded once before a long-running loop goes stale; reload configuration at the start of each iteration.
+- **[code-quality]** Deserialization via direct key access (`d["key"]`) crashes on corrupted data; use `.get()` with defaults for resilience.
+- **[security]** CORS allowed-origins must be scoped per environment; leaving dev-server origins in production builds weakens isolation.
+- **[architecture]** Mutable state files (queues, logs) lack append-only audit trails; add forensic logging for add/remove operations.
+- **[code-quality]** Reusable format/parse helpers (e.g. duration formatting) get copy-pasted instead of importing the shared utility.

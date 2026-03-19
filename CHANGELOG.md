@@ -1,5 +1,53 @@
 # Changelog
 
+## 20260319_001000 — Fix CI Failures & Interactive Dashboard Control Plane
+
+Fixed CI test failures caused by missing `fastapi`/`uvicorn` in dev dependencies, and
+transformed the read-only web dashboard into a full interactive control plane with write
+API endpoints, inline config/persona editing, run launching, artifact previews, and
+frontend test infrastructure (Vitest + React Testing Library).
+
+**Created:**
+- `web/src/components/ArtifactPreview.tsx`, `AuthTokenPrompt.tsx`, `InlineEdit.tsx`, `RunLauncher.tsx` — Interactive UI components
+- `web/src/pages/Proposals.tsx`, `Reviews.tsx` — New dashboard pages for browsing artifacts
+- `web/src/__tests__/` — Component, page, and API client tests (Vitest + RTL)
+- `web/vitest.config.ts`, `web/src/setupTests.ts` — Frontend test infrastructure
+- `tests/test_server_write.py` — Write API endpoint tests
+- `tests/conftest.py` — Shared test fixtures
+
+**Modified:**
+- `pyproject.toml` — Added UI deps (`fastapi`, `uvicorn`) to dev extras for CI
+- `.github/workflows/ci.yml` — Added `web-build` CI job
+- `src/colonyos/server.py` — Write API endpoints (PUT config, POST runs, GET artifacts) with bearer token auth
+- `web/src/pages/Config.tsx`, `Dashboard.tsx`, `RunDetail.tsx` — Transformed to interactive with inline editing
+- `web/src/api.ts`, `web/src/types.ts` — Extended API client and type definitions
+- `web/package.json` — Added Vitest, RTL, and test script
+
+**PRD:** `cOS_prds/20260318_233254_prd_the_ui_tests_are_failing_on_the_ci_there_is_no_module_found_fastapi_and_there_ar.md`
+**Tasks:** `cOS_tasks/20260318_233254_tasks_the_ui_tests_are_failing_on_the_ci_there_is_no_module_found_fastapi_and_there_ar.md`
+
+## 20260318_181500 — ColonyOS Web Dashboard (`colonyos ui`)
+
+Added a read-only web dashboard launched via `colonyos ui` that surfaces run history,
+phase timelines, cost trends, and configuration in a local browser. Built as a Vite +
+React SPA served by a thin FastAPI API layer wrapping existing data-layer functions.
+Ships as an optional dependency (`pip install colonyos[ui]`), localhost-only.
+
+**Created:**
+- `src/colonyos/server.py` — FastAPI server with `/api/runs`, `/api/stats`, `/api/config` endpoints
+- `src/colonyos/web_dist/` — Pre-built Vite SPA static assets (HTML, JS, CSS)
+- `web/` — React + TypeScript + Tailwind source: Dashboard, RunDetail, Config pages, components
+- `tests/test_server.py` — Comprehensive API tests (478 lines)
+- `tests/test_cli.py` — CLI integration tests for `colonyos ui` command
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `ui` subcommand to launch the web server
+- `pyproject.toml` — Added optional `[ui]` dependency group (fastapi, uvicorn)
+- `.gitignore` — Added web build artifacts
+
+**PRD:** `cOS_prds/20260318_173116_prd_i_think_we_should_add_some_sort_of_ui_for_managing_all_this_seeing_runs_defining.md`
+**Tasks:** `cOS_tasks/20260318_173116_tasks_i_think_we_should_add_some_sort_of_ui_for_managing_all_this_seeing_runs_defining.md`
+
 ## 20260318_173000 — `colonyos queue` Durable Multi-Item Execution Queue
 
 Added a `colonyos queue` command that lets users enqueue multiple feature prompts

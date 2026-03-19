@@ -1,0 +1,45 @@
+# Review by Staff Security Engineer (Round 2)
+
+I now have a thorough picture of the implementation. Here is my review:
+
+---
+
+## Staff Security Engineer Review
+
+### Checklist Assessment
+
+**Completeness:**
+- [x] All functional requirements from the PRD are implemented (FR-1 through FR-22 covered)
+- [x] All tasks in the task file are marked complete (1.0–8.0 all checked)
+- [x] No placeholder or TODO code remains
+
+**Quality:**
+- [x] Tests present for both backend (test_server.py, test_server_write.py) and frontend (vitest suite)
+- [x] Code follows existing project conventions
+- [x] No unnecessary dependencies — UI deps remain optional via `[ui]` extra
+- [x] No unrelated changes beyond documentation/changelog
+
+**Safety:**
+- [x] No secrets or credentials in committed code
+- [x] No destructive database operations
+- [x] Error handling present for all failure cases
+
+### Security-Specific Findings
+
+VERDICT: approve
+
+FINDINGS:
+- [src/colonyos/server.py]: **Good** — Bearer token generated with `secrets.token_urlsafe(32)` and compared with `secrets.compare_digest()`, preventing timing attacks. Write mode gated behind explicit `COLONYOS_WRITE_ENABLED` env var (default: off). This is the correct pattern.
+- [src/colonyos/server.py]: **Good** — `_SENSITIVE_CONFIG_FIELDS` (`slack`, `ceo_persona`) blocked from mutation via API with explicit 400 rejection.
+- [src/colonyos/server.py]: **Good** — Path traversal defense-in-depth on artifacts endpoint: allowlist of top-level directories (`_ALLOWED_ARTIFACT_DIRS`), `resolve()` + `is_relative_to()` check, and file-existence validation. SPA catch-all route has the same pattern.
+- [src/colonyos/server.py]: **Good** — Rate limiting on `POST /api/runs` with `threading.Lock` and max 1 concurrent run. Prevents abuse of the most expensive operation (launching agent runs that burn API budget).
+- [src/colonyos/server.py]: **Minor concern** — `GET /api/artifacts/{path}` serves raw file content without server-side sanitization. Content is only escaped client-side in `renderMarkdown()`. If a malicious instruction template writes an artifact containing crafted markdown, the XSS mitigation depends entirely on the client-side HTML entity escaping being applied before markdown parsing. The escaping order in `renderMarkdown` is correct (`&`, `<`, `>` escaped first), but a defense-in-depth approach would also sanitize server-side.
+- [web/src/components/ArtifactPreview.tsx]: **Acceptable risk** — `dangerouslySetInnerHTML` is used with a custom markdown renderer that properly escapes HTML entities before processing markdown syntax. The escaping order (`&amp;`, `&lt;`, `&gt;` before any markdown→HTML conversion) is correct. For a localhost-only tool this is acceptable, but a production deployment would warrant a battle-tested sanitizer (DOMPurify).
+- [web/src/api.ts]: **Good** — Auth token stored in `localStorage`, which is same-origin only. Acceptable for a localhost tool. Token is sent only on write requests (PUT/POST), not leaked on GET endpoints.
+- [src/colonyos/server.py]: **Good** — CORS only enabled when `COLONYOS_DEV` is set, restricted to `localhost:5173` origin. Production SPA is served from the same origin (no CORS needed).
+- [.github/workflows/ci.yml]: **Good** — `web-build` job uses pinned action SHAs (not floating tags), following supply-chain security best practices consistent with the existing CI jobs. `permissions: contents: read` enforces least privilege.
+- [src/colonyos/cli.py]: **Good** — Token is printed to terminal only when write mode is enabled. Server binds to `127.0.0.1` only (not `0.0.0.0`), preventing network exposure.
+- [tests/test_server_write.py]: **Good** — Comprehensive auth tests: verifies 403 when write disabled, 401 with no/wrong token, 200 with correct token, and GET endpoints remain unauthenticated. Path traversal and sensitive field rejection also tested.
+
+SYNTHESIS:
+From a security posture standpoint, this implementation is well-designed for its threat model (single-user localhost tool). The critical security controls are all in place: write operations are off by default and require an explicit opt-in flag, bearer token auth uses cryptographically secure generation and constant-time comparison, sensitive config fields are blocked from API mutation, path traversal protection uses defense-in-depth with allowlisting plus resolve-based verification, and the server binds only to localhost. The CI changes follow supply chain best practices with pinned action SHAs and minimal permissions. The one area I'd flag for a future hardening pass is the client-side markdown rendering via `dangerouslySetInnerHTML` — while the HTML entity escaping is correctly ordered (escaping before markdown processing), adding DOMPurify or server-side content sanitization on the artifacts endpoint would provide an additional defense layer. However, given the localhost-only deployment model and the fact that artifact content is generated by the system's own agents (not arbitrary external input), this is an acceptable risk for the current scope. **Approve.**
