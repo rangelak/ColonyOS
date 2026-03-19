@@ -1885,6 +1885,7 @@ def watch(
             )
 
     from colonyos.slack import (
+        SlackClient,
         SlackUI,
         SlackWatchState,
         check_rate_limit,
@@ -1972,7 +1973,7 @@ def watch(
     start_time = time.monotonic()
     # Thread-safe Slack client sharing: the client is set by the first event
     # handler invocation and the executor blocks until it becomes available.
-    _slack_client: object = None
+    _slack_client: SlackClient | None = None
     _slack_client_ready = threading.Event()
 
     def _check_budget_exceeded() -> bool:
@@ -2105,8 +2106,10 @@ def watch(
         """
         nonlocal _slack_client
         # Publish the Slack client for the executor thread (idempotent).
+        # Bolt types `client` as object; at runtime it's a WebClient that
+        # satisfies SlackClient.
         if not _slack_client_ready.is_set():
-            _slack_client = client
+            _slack_client = client  # type: ignore[assignment]
             _slack_client_ready.set()
 
         if not should_process_message(event, config.slack, bot_user_id):
@@ -2374,13 +2377,14 @@ def watch(
             # Compute recovery deadline once when pause is first detected
             self._recovery_monotonic: float | None = None
 
-        def _get_client(self) -> object:
+        def _get_client(self) -> SlackClient:
             """Return the shared Slack client, blocking until available.
 
             Waits on ``_slack_client_ready`` to ensure the client has been
             published by the event handler thread before returning.
             """
             self._slack_client_ready.wait()
+            assert _slack_client is not None
             return _slack_client
 
         def run(self) -> None:
@@ -2523,7 +2527,7 @@ def watch(
                     prefix: str = "",
                     _ch: str = slack_channel,
                     _ts: str = slack_ts,
-                ) -> object:
+                ) -> SlackUI | _DualUI:
                     slack_ui = SlackUI(client, _ch, _ts)
                     if self._quiet:
                         return slack_ui
@@ -2707,7 +2711,7 @@ def watch(
                     prefix: str = "",
                     _ch: str = slack_channel,
                     _ts: str = slack_ts,
-                ) -> object:
+                ) -> SlackUI | _DualUI:
                     slack_ui = SlackUI(client, _ch, _ts)
                     if self._quiet:
                         return slack_ui

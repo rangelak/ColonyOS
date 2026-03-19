@@ -100,19 +100,19 @@ async def run_phase(
 
     result_msg: ResultMessage | None = None
     current_tool: str | None = None
-    api_key_source: str | None = None
+    auth_shown = False
 
     try:
         async for message in query(prompt=prompt, options=options):
-            if isinstance(message, SystemMessage):
-                api_key_source = message.data.get("apiKeySource")
-                label = _API_KEY_SOURCE_LABELS.get(
-                    api_key_source or "", api_key_source or "unknown"
-                )
-                if ui is not None:
-                    ui.on_text_delta(f"  Auth: {label}\n")
-                else:
-                    _log(f"Auth: {label}")
+            if isinstance(message, SystemMessage) and not auth_shown:
+                source = message.data.get("apiKeySource")
+                if source:
+                    auth_shown = True
+                    label = _API_KEY_SOURCE_LABELS.get(source, source)
+                    if ui is not None:
+                        ui.on_text_delta(f"  Auth: {label}\n")
+                    else:
+                        _log(f"Auth: {label}")
 
             elif isinstance(message, StreamEvent) and ui is not None:
                 event = message.event
