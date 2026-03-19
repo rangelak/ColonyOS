@@ -22,6 +22,7 @@ from colonyos.init import run_init
 from colonyos.models import (
     LoopState,
     LoopStatus,
+    PreflightError,
     QueueItem,
     QueueItemStatus,
     QueueState,
@@ -864,13 +865,18 @@ def _compute_elapsed_hours(
 def _ensure_on_main(repo_root: Path) -> None:
     """Ensure the working tree is on main with latest changes (for auto mode)."""
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["git", "checkout", "main"],
             capture_output=True,
             text=True,
             cwd=repo_root,
             timeout=10,
         )
+        if result.returncode != 0:
+            raise click.ClickException(
+                f"Failed to checkout main (exit code {result.returncode}): "
+                f"{result.stderr.strip() or '(no stderr)'}"
+            )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise click.ClickException(f"Failed to checkout main: {exc}")
 
@@ -976,7 +982,7 @@ def _run_single_iteration(
             quiet=quiet,
             offline=offline,
         )
-    except click.ClickException as exc:
+    except PreflightError as exc:
         # Pre-flight failure in autonomous mode — mark as failed and continue
         click.echo(f"  Pre-flight failed: {exc.format_message()}", err=True)
         loop_state.current_iteration = iteration

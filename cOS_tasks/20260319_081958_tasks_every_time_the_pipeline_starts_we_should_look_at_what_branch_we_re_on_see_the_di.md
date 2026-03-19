@@ -50,7 +50,7 @@
 - [x] 5.0 Handle autonomous mode pre-flight
   - [x] 5.1 Write tests for autonomous mode git state handling in `tests/test_preflight.py` — verify that bad git state marks iteration as failed and continues
   - [x] 5.2 In `_run_single_iteration()` in `cli.py` (or equivalent autonomous loop), wrap `run()` call to catch pre-flight `click.ClickException`, log the error, mark iteration as failed, and continue to next iteration
-  - [ ] 5.3 In autonomous mode, ensure the pipeline always starts from main by adding a `git checkout main && git pull --ff-only` sequence before calling `run()` (only in auto mode, with error handling)
+  - [x] 5.3 In autonomous mode, ensure the pipeline always starts from main by adding a `git checkout main && git pull --ff-only` sequence before calling `run()` (only in auto mode, with error handling)
 
 - [x] 6.0 Add CLI flags
   - [x] 6.1 Write tests for `--offline` and `--force` flags in `tests/test_cli.py` — verify flags are parsed and passed through to `run_orchestrator()`

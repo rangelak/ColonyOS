@@ -9,12 +9,21 @@ from unittest.mock import patch
 import click
 import pytest
 
-from colonyos.models import PreflightResult
+from colonyos.models import PreflightError, PreflightResult
 
 
 # ---------------------------------------------------------------------------
 # PreflightResult dataclass
 # ---------------------------------------------------------------------------
+
+
+class TestPreflightError:
+    def test_is_click_exception_subclass(self) -> None:
+        assert issubclass(PreflightError, click.ClickException)
+
+    def test_message(self) -> None:
+        err = PreflightError("test error")
+        assert err.format_message() == "test error"
 
 
 class TestPreflightResult:
@@ -305,7 +314,10 @@ class TestPreflightCheck:
         from colonyos.orchestrator import _preflight_check
         from colonyos.config import ColonyConfig
 
+        calls_made = []
+
         def side_effect(cmd, **kwargs):
+            calls_made.append(cmd[1])
             if cmd[1] == "rev-parse":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="main\n", stderr="")
             if cmd[1] == "status":
@@ -315,7 +327,7 @@ class TestPreflightCheck:
             if cmd[1] == "fetch":
                 raise subprocess.TimeoutExpired(cmd="git", timeout=5)
             if cmd[1] == "rev-list":
-                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
+                raise AssertionError("rev-list should not be called when fetch fails")
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         mock_run.side_effect = side_effect
@@ -323,6 +335,43 @@ class TestPreflightCheck:
         result = _preflight_check(tmp_path, "colonyos/test-feature", config)
         assert result.action_taken == "proceed"
         assert any("Failed to fetch" in w for w in result.warnings)
+        assert "rev-list" not in calls_made
+
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_dirty_tree_raises_preflight_error(self, mock_run, tmp_path: Path) -> None:
+        """Dirty tree raises PreflightError (not generic ClickException)."""
+        from colonyos.orchestrator import _preflight_check
+        from colonyos.config import ColonyConfig
+
+        def side_effect(cmd, **kwargs):
+            if cmd[1] == "rev-parse":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="main\n", stderr="")
+            if cmd[1] == "status":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=" M file.py\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+        config = ColonyConfig()
+        with pytest.raises(PreflightError, match="Uncommitted changes"):
+            _preflight_check(tmp_path, "colonyos/test-feature", config)
+
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_git_status_nonzero_is_fail_closed(self, mock_run, tmp_path: Path) -> None:
+        """git status returning non-zero exit code raises PreflightError (fail-closed)."""
+        from colonyos.orchestrator import _preflight_check
+        from colonyos.config import ColonyConfig
+
+        def side_effect(cmd, **kwargs):
+            if cmd[1] == "rev-parse":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="main\n", stderr="")
+            if cmd[1] == "status":
+                return subprocess.CompletedProcess(args=cmd, returncode=128, stdout="", stderr="fatal: bad")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+        config = ColonyConfig()
+        with pytest.raises(PreflightError, match="git status exited with code 128"):
+            _preflight_check(tmp_path, "colonyos/test-feature", config)
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +512,26 @@ class TestCheckWorkingTreeClean:
     def test_oserror_raises(self, mock_run, tmp_path: Path) -> None:
         from colonyos.orchestrator import _check_working_tree_clean
 
-        with pytest.raises(click.ClickException, match="Failed to run git status"):
+        with pytest.raises(PreflightError, match="Failed to run git status"):
+            _check_working_tree_clean(tmp_path)
+
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_nonzero_returncode_raises(self, mock_run, tmp_path: Path) -> None:
+        """Fail-closed: non-zero returncode from git status raises PreflightError."""
+        from colonyos.orchestrator import _check_working_tree_clean
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=128, stdout="", stderr="fatal: not a git repository"
+        )
+        with pytest.raises(PreflightError, match="git status exited with code 128"):
+            _check_working_tree_clean(tmp_path)
+
+    @patch("colonyos.orchestrator.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=30))
+    def test_timeout_raises(self, mock_run, tmp_path: Path) -> None:
+        """git status timeout raises PreflightError."""
+        from colonyos.orchestrator import _check_working_tree_clean
+
+        with pytest.raises(PreflightError, match="timed out"):
             _check_working_tree_clean(tmp_path)
 
 
@@ -508,6 +576,17 @@ class TestEnsureOnMain:
     def test_checkout_oserror_raises(self, mock_run, tmp_path: Path) -> None:
         from colonyos.cli import _ensure_on_main
 
+        with pytest.raises(click.ClickException, match="Failed to checkout main"):
+            _ensure_on_main(tmp_path)
+
+    @patch("colonyos.cli.subprocess.run")
+    def test_checkout_nonzero_returncode_raises(self, mock_run, tmp_path: Path) -> None:
+        """Non-zero returncode from git checkout raises ClickException."""
+        from colonyos.cli import _ensure_on_main
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="error: pathspec 'main' did not match"
+        )
         with pytest.raises(click.ClickException, match="Failed to checkout main"):
             _ensure_on_main(tmp_path)
 

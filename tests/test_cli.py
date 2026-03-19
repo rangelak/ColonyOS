@@ -111,6 +111,7 @@ class TestAuto:
         )
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_result)):
             result = runner.invoke(app, ["auto", "--propose-only"])
 
@@ -134,6 +135,7 @@ class TestAuto:
         )
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log):
             result = runner.invoke(app, ["auto", "--no-confirm"])
@@ -158,6 +160,7 @@ class TestAuto:
         )
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log):
             result = runner.invoke(app, ["auto"])
@@ -179,6 +182,7 @@ class TestAuto:
         )
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_result)):
             result = runner.invoke(app, ["auto"], input="n\n")
 
@@ -195,6 +199,7 @@ class TestAuto:
         )
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_result)):
             result = runner.invoke(app, ["auto"], input="n\n")
 
@@ -224,6 +229,7 @@ class TestAuto:
 
         # Patch _compute_elapsed_hours to return 0 so time cap doesn't fire
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", side_effect=lambda *a, **k: next(calls)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log), \
              patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
@@ -525,6 +531,7 @@ class TestAutoLoopCap:
         )
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log):
             result = runner.invoke(app, ["auto", "--no-confirm", "--loop", "20"])
@@ -546,6 +553,7 @@ class TestAutoLoopCap:
         )
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log):
             result = runner.invoke(app, ["auto", "--no-confirm", "--max-hours", "2.0"])
@@ -567,6 +575,7 @@ class TestAutoLoopCap:
         )
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log):
             result = runner.invoke(app, ["auto", "--no-confirm", "--max-budget", "100.0"])
@@ -625,6 +634,7 @@ class TestAutoLoopCap:
         )
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log), \
              patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
@@ -665,6 +675,7 @@ class TestAutoLoopCap:
             return fake_log_ok
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", side_effect=mock_orchestrator), \
              patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
@@ -692,6 +703,7 @@ class TestAutoLoopCap:
         )
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log), \
              patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
@@ -739,6 +751,7 @@ class TestAutoLoopCap:
         )
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log), \
              patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
@@ -1059,6 +1072,7 @@ class TestHeartbeatInAutoLoop:
         )
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._ensure_on_main"), \
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log), \
              patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):

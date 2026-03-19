@@ -19,7 +19,7 @@ from colonyos.learnings import (
     load_learnings_for_injection,
     parse_learnings,
 )
-from colonyos.models import Persona, Phase, PhaseResult, PreflightResult, ResumeState, RunLog, RunStatus
+from colonyos.models import Persona, Phase, PhaseResult, PreflightError, PreflightResult, ResumeState, RunLog, RunStatus
 from colonyos.naming import (
     decision_artifact_path,
     generate_timestamp,
@@ -46,7 +46,7 @@ def _log(msg: str) -> None:
 
 
 def _get_current_branch(repo_root: Path) -> str:
-    """Get the current git branch name. Raises click.ClickException on failure."""
+    """Get the current git branch name. Raises PreflightError on failure."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -56,12 +56,12 @@ def _get_current_branch(repo_root: Path) -> str:
         )
         branch = result.stdout.strip()
         if not branch:
-            raise click.ClickException(
+            raise PreflightError(
                 "Could not determine current branch. Are you in a git repository?"
             )
         return branch
     except OSError as exc:
-        raise click.ClickException(
+        raise PreflightError(
             f"Failed to run git: {exc}. Is git installed and is this a git repository?"
         )
 
@@ -77,11 +77,22 @@ def _check_working_tree_clean(repo_root: Path) -> tuple[bool, str]:
             capture_output=True,
             text=True,
             cwd=repo_root,
+            timeout=30,
         )
+        if result.returncode != 0:
+            raise PreflightError(
+                f"git status exited with code {result.returncode}: "
+                f"{result.stderr.strip() or '(no stderr)'}. "
+                "Cannot determine working tree state."
+            )
         dirty_output = result.stdout.strip()
         return (not dirty_output, dirty_output)
+    except subprocess.TimeoutExpired:
+        raise PreflightError(
+            "git status timed out after 30s. Cannot determine working tree state."
+        )
     except OSError as exc:
-        raise click.ClickException(
+        raise PreflightError(
             f"Failed to run git status: {exc}. Cannot determine working tree state."
         )
 
@@ -111,7 +122,7 @@ def _preflight_check(
     """Run pre-flight git state assessment before any agent phases.
 
     Checks for uncommitted changes, existing branches, open PRs, and
-    stale main. Raises :class:`click.ClickException` on fatal issues
+    stale main. Raises :class:`PreflightError` on fatal issues
     unless ``force=True``.
     """
     warnings: list[str] = []
@@ -127,14 +138,13 @@ def _preflight_check(
         file_list = "\n  ".join(dirty_files)
         if len(dirty_output.splitlines()) > 10:
             file_list += f"\n  ... and {len(dirty_output.splitlines()) - 10} more"
-        raise click.ClickException(
+        raise PreflightError(
             f"Uncommitted changes detected:\n  {file_list}\n\n"
             "Please commit or stash your changes before running colonyos."
         )
 
     # Check if branch already exists locally
-    branch_exists_result = validate_branch_exists(branch_name, repo_root)
-    branch_exists = branch_exists_result[0]
+    branch_exists, _ = validate_branch_exists(branch_name, repo_root)
 
     # If branch exists, check for open PRs
     open_pr_number: int | None = None
@@ -144,18 +154,19 @@ def _preflight_check(
 
     if branch_exists and not force:
         if open_pr_number is not None:
-            raise click.ClickException(
+            raise PreflightError(
                 f"Branch '{branch_name}' already exists with open PR #{open_pr_number}: "
                 f"{open_pr_url}\n\n"
                 f"Use --resume to continue existing work, or --force to bypass this check."
             )
-        raise click.ClickException(
+        raise PreflightError(
             f"Branch '{branch_name}' already exists locally.\n\n"
             "Use --resume to continue existing work, or --force to bypass this check."
         )
 
     # Check if main is behind origin/main
     main_behind_count: int | None = None
+    fetch_succeeded = False
     if not offline:
         try:
             subprocess.run(
@@ -165,25 +176,27 @@ def _preflight_check(
                 timeout=5,
                 cwd=repo_root,
             )
+            fetch_succeeded = True
         except (OSError, subprocess.TimeoutExpired) as exc:
             warnings.append(f"Failed to fetch origin/main: {exc}")
 
-        try:
-            result = subprocess.run(
-                ["git", "rev-list", "--count", "main..origin/main"],
-                capture_output=True,
-                text=True,
-                cwd=repo_root,
-            )
-            if result.returncode == 0 and result.stdout.strip().isdigit():
-                main_behind_count = int(result.stdout.strip())
-                if main_behind_count > 0:
-                    warnings.append(
-                        f"Local main is {main_behind_count} commit(s) behind origin/main. "
-                        "Consider running: git pull"
-                    )
-        except OSError:
-            pass
+        if fetch_succeeded:
+            try:
+                result = subprocess.run(
+                    ["git", "rev-list", "--count", "main..origin/main"],
+                    capture_output=True,
+                    text=True,
+                    cwd=repo_root,
+                )
+                if result.returncode == 0 and result.stdout.strip().isdigit():
+                    main_behind_count = int(result.stdout.strip())
+                    if main_behind_count > 0:
+                        warnings.append(
+                            f"Local main is {main_behind_count} commit(s) behind origin/main. "
+                            "Consider running: git pull"
+                        )
+            except OSError:
+                pass
 
     action = "proceed"
     if force and (not is_clean or branch_exists):
@@ -213,7 +226,7 @@ def _resume_preflight(
     """Lightweight pre-flight check for resume mode.
 
     Only validates that the working tree is clean.
-    Raises :class:`click.ClickException` if uncommitted changes are found
+    Raises :class:`PreflightError` if uncommitted changes are found
     or if the HEAD SHA has diverged from the expected value.
     """
     current_branch = _get_current_branch(repo_root)
@@ -222,7 +235,7 @@ def _resume_preflight(
     if not is_clean:
         dirty_files = dirty_output.splitlines()[:10]
         file_list = "\n  ".join(dirty_files)
-        raise click.ClickException(
+        raise PreflightError(
             f"Uncommitted changes detected:\n  {file_list}\n\n"
             "Please commit or stash your changes before resuming."
         )
@@ -230,7 +243,7 @@ def _resume_preflight(
     head_sha = _get_head_sha(repo_root)
 
     if expected_head_sha and head_sha and head_sha != expected_head_sha:
-        raise click.ClickException(
+        raise PreflightError(
             f"HEAD SHA has diverged since last run.\n"
             f"  Expected: {expected_head_sha}\n"
             f"  Current:  {head_sha}\n\n"
@@ -783,6 +796,12 @@ def _save_review_artifact(
 
 
 def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Path:
+    # Update head_sha to current HEAD so resume checks against post-phase state
+    if log.preflight is not None:
+        current_sha = _get_head_sha(repo_root)
+        if current_sha:
+            log.preflight.head_sha = current_sha
+
     runs = runs_dir_path(repo_root)
     runs.mkdir(parents=True, exist_ok=True)
     log_path = runs / f"{log.run_id}.json"

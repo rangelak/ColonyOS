@@ -6,7 +6,18 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+import click
+
 logger = logging.getLogger(__name__)
+
+
+class PreflightError(click.ClickException):
+    """Raised when a pre-flight git state check fails.
+
+    Subclass of ClickException so callers can catch it specifically
+    without catching all ClickExceptions from other phases.
+    """
+    pass
 
 
 class Phase(str, Enum):
