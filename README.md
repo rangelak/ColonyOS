@@ -196,6 +196,16 @@ Each reviewer persona runs concurrently with its own expertise and perspective. 
 | `colonyos queue start --max-hours N` | Maximum wall-clock hours for the queue |
 | `colonyos queue status` | Show the current state of the execution queue |
 | `colonyos queue clear` | Remove all pending items from the queue |
+| `colonyos cleanup` | Codebase hygiene: prune branches, clean artifacts, scan for complexity |
+| `colonyos cleanup branches` | List merged `colonyos/` branches (dry-run by default) |
+| `colonyos cleanup branches --execute` | Actually delete merged branches |
+| `colonyos cleanup branches --include-remote` | Also prune merged branches from origin |
+| `colonyos cleanup artifacts` | List stale run artifacts beyond retention period |
+| `colonyos cleanup artifacts --execute` | Actually delete stale artifacts |
+| `colonyos cleanup artifacts --retention-days N` | Override retention period (default: 30) |
+| `colonyos cleanup scan` | Scan codebase for structural complexity (large files, many functions) |
+| `colonyos cleanup scan --ai` | Run AI-powered qualitative analysis |
+| `colonyos cleanup scan --refactor FILE` | Delegate refactoring of FILE to `colonyos run` |
 | `colonyos ui` | Launch the local web dashboard (requires `colonyos[ui]`) |
 | `colonyos ui --port N` | Serve dashboard on custom port (default: 7400) |
 | `colonyos ui --no-open` | Start dashboard without auto-opening browser |

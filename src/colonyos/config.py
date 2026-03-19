@@ -42,6 +42,12 @@ DEFAULTS = {
         "wait_timeout": 600,
         "log_char_cap": 12_000,
     },
+    "cleanup": {
+        "branch_retention_days": 0,
+        "artifact_retention_days": 30,
+        "scan_max_lines": 500,
+        "scan_max_functions": 20,
+    },
 }
 
 
@@ -76,6 +82,14 @@ class CIFixConfig:
 
 
 @dataclass
+class CleanupConfig:
+    branch_retention_days: int = 0
+    artifact_retention_days: int = 30
+    scan_max_lines: int = 500
+    scan_max_functions: int = 20
+
+
+@dataclass
 class SlackConfig:
     enabled: bool = False
     channels: list[str] = field(default_factory=list)
@@ -105,6 +119,7 @@ class ColonyConfig:
     learnings: LearningsConfig = field(default_factory=LearningsConfig)
     ci_fix: CIFixConfig = field(default_factory=CIFixConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
 
     def get_model(self, phase: Phase) -> str:
         """Return the model for a phase, falling back to the global default."""
@@ -195,6 +210,38 @@ def _parse_ci_fix_config(raw: dict) -> CIFixConfig:
     )
 
 
+def _parse_cleanup_config(raw: dict) -> CleanupConfig:
+    """Parse the ``cleanup`` section from config.yaml."""
+    if not raw:
+        return CleanupConfig()
+    branch_retention_days = int(raw.get("branch_retention_days", DEFAULTS["cleanup"]["branch_retention_days"]))
+    if branch_retention_days < 0:
+        raise ValueError(
+            f"cleanup.branch_retention_days must be non-negative, got {branch_retention_days}"
+        )
+    artifact_retention_days = int(raw.get("artifact_retention_days", DEFAULTS["cleanup"]["artifact_retention_days"]))
+    if artifact_retention_days < 0:
+        raise ValueError(
+            f"cleanup.artifact_retention_days must be non-negative, got {artifact_retention_days}"
+        )
+    scan_max_lines = int(raw.get("scan_max_lines", DEFAULTS["cleanup"]["scan_max_lines"]))
+    if scan_max_lines < 1:
+        raise ValueError(
+            f"cleanup.scan_max_lines must be positive, got {scan_max_lines}"
+        )
+    scan_max_functions = int(raw.get("scan_max_functions", DEFAULTS["cleanup"]["scan_max_functions"]))
+    if scan_max_functions < 1:
+        raise ValueError(
+            f"cleanup.scan_max_functions must be positive, got {scan_max_functions}"
+        )
+    return CleanupConfig(
+        branch_retention_days=branch_retention_days,
+        artifact_retention_days=artifact_retention_days,
+        scan_max_lines=scan_max_lines,
+        scan_max_functions=scan_max_functions,
+    )
+
+
 def load_config(repo_root: Path) -> ColonyConfig:
     config_path = repo_root / CONFIG_DIR / CONFIG_FILE
     if not config_path.exists():
@@ -273,6 +320,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         ),
         ci_fix=_parse_ci_fix_config(raw.get("ci_fix", {})),
         slack=_parse_slack_config(raw.get("slack", {})),
+        cleanup=_parse_cleanup_config(raw.get("cleanup", {})),
     )
 
 
@@ -344,6 +392,20 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "auto_approve": config.slack.auto_approve,
             "max_runs_per_hour": config.slack.max_runs_per_hour,
             "allowed_user_ids": list(config.slack.allowed_user_ids),
+        }
+
+    cleanup_defaults = DEFAULTS["cleanup"]
+    if (
+        config.cleanup.branch_retention_days != cleanup_defaults["branch_retention_days"]
+        or config.cleanup.artifact_retention_days != cleanup_defaults["artifact_retention_days"]
+        or config.cleanup.scan_max_lines != cleanup_defaults["scan_max_lines"]
+        or config.cleanup.scan_max_functions != cleanup_defaults["scan_max_functions"]
+    ):
+        data["cleanup"] = {
+            "branch_retention_days": config.cleanup.branch_retention_days,
+            "artifact_retention_days": config.cleanup.artifact_retention_days,
+            "scan_max_lines": config.cleanup.scan_max_lines,
+            "scan_max_functions": config.cleanup.scan_max_functions,
         }
 
     if config.ceo_persona:

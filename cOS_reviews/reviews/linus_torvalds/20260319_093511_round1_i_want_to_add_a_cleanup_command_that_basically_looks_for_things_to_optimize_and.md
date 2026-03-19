@@ -1,0 +1,27 @@
+# Review by Linus Torvalds (Round 1)
+
+Now I have everything I need. Here's my review:
+
+---
+
+## Review as Linus Torvalds
+
+All 62 tests pass (54 in test_cleanup.py, 8 in test_cli.py). The implementation covers all 27 functional requirements from the PRD. The code is structured sensibly — a standalone `cleanup.py` module with pure functions, called from `cli.py` via Click commands, following the established `doctor.py` pattern. No new dependencies. Let me get to the problems.
+
+---
+
+VERDICT: request-changes
+
+FINDINGS:
+- [src/colonyos/cleanup.py:170]: **Bug: `lstrip("* ")` is not `removeprefix("* ")`**. `str.lstrip()` takes a *set of characters* to strip, not a prefix. `"* main".strip().lstrip("* ")` works by accident, but a branch named `*staging` (unlikely but possible) or any edge case with those characters at the start would get mangled silently. Use `removeprefix("* ")` or explicitly check for the `*` marker that `git branch` emits. This is the kind of "works by coincidence" code that eventually bites you.
+- [src/colonyos/cli.py:2401-2409]: **Bug: Broken Rich markup for `very-large` and `massive` categories**. The `category_styles` dict maps `"very-large"` to `"[bold yellow]"` (already bracket-wrapped), but the rendering code does `f"[{cat_style}]{fc.category.value}[/{cat_style}]"`, producing `[[bold yellow]]very-large[/[bold yellow]]` — malformed Rich markup. The `if/else` on line 2409 is a no-op: both branches produce identical output. This is the kind of code where someone clearly got confused, copy-pasted, and didn't test it visually.
+- [src/colonyos/cleanup.py:243-258]: **Dead code: `_dir_size()` is never called**. The artifact cleanup operates on JSON files (`entry.is_file()`), never directories. `_dir_size()` walks directories recursively to compute size. Nobody calls it. Delete it. Dead code is not a "feature for later" — it's noise.
+- [src/colonyos/cleanup.py:45-72]: **Frozen dataclasses with mutable defaults are misleading**. `BranchCleanupResult` and `ArtifactCleanupResult` are `frozen=True` but contain `list` fields. Frozen prevents reassignment of the field reference but the lists themselves are fully mutable. Either drop `frozen=True` (since these are result containers, not value types) or document why this is intentional. As written, it promises immutability it doesn't deliver.
+- [src/colonyos/cleanup.py:185-191]: **`check_branch_safety` called per-branch inside `delete_branches` creates redundant subprocess calls**. Each call to `check_branch_safety` spawns two `git` subprocesses (to get default branch and current branch) — information that is already known and doesn't change between iterations. For a repo with 50 merged branches, that's 100 unnecessary subprocess spawns. Hoist the default/current branch lookups out of the loop.
+- [src/colonyos/cli.py:2431-2465]: **AI scan path lacks test coverage**. The `--ai` flag codepath imports `run_phase_sync`, constructs a prompt, reads an instruction file, and writes results — but there's zero test coverage for any of it. Not even a mock test. The `--refactor` path similarly goes through `run_orchestrator` without a test. "It compiles" is not a test.
+- [src/colonyos/cleanup.py:304-319]: **The `_FUNCTION_PATTERNS` regex for Java is hilariously fragile**. It matches `public static void main` but also matches `String variableName = ...` on any line that starts with the right keywords. This will wildly overcount "functions" in Java files. The regex tries to do too much — either support a language properly or don't pretend to. A comment saying "approximate, best-effort" would at least set expectations.
+- [src/colonyos/cli.py]: **320 new lines added to an already 2153-line file**. The PRD itself identified `cli.py` as already too large at 1,866 lines. Adding 320 more lines of command definitions is the exact opposite of the cleanup ethos this feature is supposed to embody. The `cleanup` Click group should be defined in a separate module (like `cli_cleanup.py`) and registered into the main app, exactly as the PRD's "Architecture" section recommends following the `doctor.py` pattern.
+- [src/colonyos/cleanup_scan.md]: FR-26 requires the AI scan to "inherit the `base.md` instruction constraints." The `cleanup_scan.md` template is standalone — it doesn't reference or include `base.md`. The safety constraints (no main commits, no force-push) are mentioned in the PRD but missing from the actual instruction template.
+
+SYNTHESIS:
+The implementation is structurally sound and covers the PRD requirements with good test coverage for the deterministic paths (54 unit tests, all passing). The data structures are clean, the separation between discovery and deletion is correct, and the dry-run-by-default safety model is properly enforced. However, there are two actual bugs (the `lstrip` misuse and the Rich markup generation), dead code (`_dir_size`), a performance issue (redundant subprocess calls in the delete loop), zero test coverage for the AI codepaths, and the irony of a cleanup feature that makes the already-too-large `cli.py` even larger. Fix the bugs, delete the dead code, add at least mock tests for the AI paths, and consider whether adding 320 lines to `cli.py` is really the right call for a feature about reducing codebase entropy.
