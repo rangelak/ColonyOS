@@ -1773,3 +1773,109 @@ class TestUI:
             result = runner.invoke(app, ["ui", "--no-open"])
         assert result.exit_code == 0
         mock_open.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Cleanup command tests
+# ---------------------------------------------------------------------------
+
+
+class TestCleanup:
+    def test_no_subcommand_shows_help(self, runner: CliRunner):
+        result = runner.invoke(app, ["cleanup"])
+        assert result.exit_code == 0
+        assert "branches" in result.output
+        assert "artifacts" in result.output
+        assert "scan" in result.output
+
+    def test_branches_no_merged(self, runner: CliRunner, tmp_path: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cleanup.list_merged_branches", return_value=[]):
+            result = runner.invoke(app, ["cleanup", "branches"])
+        assert result.exit_code == 0
+        assert "No merged branches" in result.output
+
+    def test_branches_dry_run(self, runner: CliRunner, tmp_path: Path):
+        from colonyos.cleanup import BranchInfo, BranchCleanupResult
+
+        branches = [
+            BranchInfo(name="colonyos/old", last_commit_date="2026-01-01", is_merged=True),
+        ]
+        cleanup_result = BranchCleanupResult(
+            deleted_local=["colonyos/old"],
+            deleted_remote=[],
+            skipped=[],
+            errors=[],
+        )
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cleanup.list_merged_branches", return_value=branches), \
+             patch("colonyos.cleanup.delete_branches", return_value=cleanup_result):
+            result = runner.invoke(app, ["cleanup", "branches"])
+        assert result.exit_code == 0
+        assert "would be deleted" in result.output
+        assert "Re-run with --execute" in result.output
+
+    def test_artifacts_no_stale(self, runner: CliRunner, tmp_path: Path):
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["cleanup", "artifacts"])
+        assert result.exit_code == 0
+        assert "No stale artifacts" in result.output
+
+    def test_artifacts_dry_run(self, runner: CliRunner, tmp_path: Path):
+        from colonyos.cleanup import ArtifactInfo, ArtifactCleanupResult
+
+        stale = [
+            ArtifactInfo(
+                run_id="run-old", date="2025-01-01T00:00:00+00:00",
+                status="completed", size_bytes=2048,
+                path=tmp_path / "run-old.json",
+            ),
+        ]
+        cleanup_result = ArtifactCleanupResult(
+            removed=stale, skipped=[], bytes_reclaimed=2048, errors=[],
+        )
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cleanup.list_stale_artifacts", return_value=(stale, [])), \
+             patch("colonyos.cleanup.delete_artifacts", return_value=cleanup_result):
+            result = runner.invoke(app, ["cleanup", "artifacts"])
+        assert result.exit_code == 0
+        assert "would be removed" in result.output
+
+    def test_scan_no_issues(self, runner: CliRunner, tmp_path: Path):
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cleanup.scan_directory", return_value=[]):
+            result = runner.invoke(app, ["cleanup", "scan"])
+        assert result.exit_code == 0
+        assert "No files exceed" in result.output
+
+    def test_scan_with_results(self, runner: CliRunner, tmp_path: Path):
+        from colonyos.cleanup import FileComplexity, ComplexityCategory
+
+        results = [
+            FileComplexity(
+                path="src/big.py", line_count=800,
+                function_count=25, category=ComplexityCategory.MASSIVE,
+            ),
+        ]
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cleanup.scan_directory", return_value=results):
+            result = runner.invoke(app, ["cleanup", "scan"])
+        assert result.exit_code == 0
+        assert "1 file(s) flagged" in result.output
+
+    def test_scan_retention_days_override(self, runner: CliRunner, tmp_path: Path):
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["cleanup", "artifacts", "--retention-days", "7"])
+        assert result.exit_code == 0
