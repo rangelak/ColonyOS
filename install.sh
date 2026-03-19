@@ -97,80 +97,33 @@ fi
 
 ok "Python $PY_VERSION"
 
-# --- Helpers: pip with PEP 668 fallback ---
+# --- Virtualenv Detection ---
 
-pip_install_user() {
-  # Try pip install --user first
-  if "$PYTHON" -m pip install --user "$@" 2>/dev/null; then
-    return 0
-  fi
-  # PEP 668 (externally-managed-environment on Debian 12+, Ubuntu 23.04+)
-  # warns against breaking system packages. We proceed with --break-system-packages
-  # only because we're installing into --user scope, not system-wide.
-  info "WARNING: pip --user install failed, likely due to PEP 668 (externally-managed-environment)."
-  info "Retrying with --break-system-packages to install into user site-packages."
-  info "This does NOT modify system Python packages. To avoid this, install pipx via your"
-  info "system package manager instead: apt install pipx / brew install pipx"
-  "$PYTHON" -m pip install --user --break-system-packages "$@"
-}
-
-install_pipx() {
-  pip_install_user pipx
-  "$PYTHON" -m pipx ensurepath
-}
-
-# --- pipx Detection / Installation ---
-
-if command -v pipx >/dev/null 2>&1; then
-  ok "pipx found"
-  INSTALLER="pipx"
-else
-  info "pipx not found."
-  if [ "$DRY_RUN" = true ]; then
-    info "(dry-run) would install pipx, then use it to install colonyos"
-    INSTALLER="pipx"
-  elif [ -t 0 ]; then
-    # Interactive terminal — ask the user
-    printf "  Install pipx for isolated package management? [Y/n] "
-    read -r REPLY < /dev/tty
-    case "$REPLY" in
-      [nN]*)
-        info "Falling back to pip install --user"
-        INSTALLER="pip"
-        ;;
-      *)
-        info "Installing pipx..."
-        install_pipx
-        INSTALLER="pipx"
-        ;;
-    esac
-  elif [ "$AUTO_YES" = true ]; then
-    # Non-interactive with explicit --yes flag
-    info "Non-interactive mode with --yes: installing pipx automatically..."
-    install_pipx
-    INSTALLER="pipx"
-  else
-    # Non-interactive without --yes — fail safe and tell the user how to proceed
-    fail "pipx is required but not installed, and no interactive terminal is available."
-    fail "Re-run with --yes to auto-install pipx, or install it manually first:"
-    fail "  apt install pipx  OR  brew install pipx  OR  pip install --user pipx"
-    fail ""
-    fail "Example: curl -fsSL https://raw.githubusercontent.com/rangelak/ColonyOS/main/install.sh | sh -s -- --yes"
-    exit 1
-  fi
+IN_VENV=false
+if [ -n "${VIRTUAL_ENV:-}" ] || "$PYTHON" -c "import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 1)" 2>/dev/null; then
+  IN_VENV=true
+  ok "Virtualenv detected ($("$PYTHON" -c "import sys; print(sys.prefix)"))"
 fi
 
 # --- Install ColonyOS ---
 
-info "Installing ColonyOS via $INSTALLER..."
-
-if [ "$INSTALLER" = "pipx" ]; then
+if [ "$IN_VENV" = true ]; then
+  info "Installing ColonyOS into active virtualenv..."
+  run_cmd "$PYTHON" -m pip install colonyos
+elif command -v pipx >/dev/null 2>&1; then
+  ok "pipx found"
+  info "Installing ColonyOS via pipx..."
   run_cmd pipx install colonyos
 else
-  if [ "$DRY_RUN" = true ]; then
-    info "(dry-run) would run: pip_install_user colonyos"
+  info "No virtualenv active and pipx not found."
+  info "Installing directly with pip..."
+  if "$PYTHON" -m pip install --user colonyos 2>/dev/null; then
+    : # success
+  elif "$PYTHON" -m pip install colonyos 2>/dev/null; then
+    : # success (some systems don't support --user)
   else
-    pip_install_user colonyos
+    info "pip install failed. Trying with --break-system-packages..."
+    "$PYTHON" -m pip install --user --break-system-packages colonyos
   fi
 fi
 

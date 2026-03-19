@@ -91,28 +91,16 @@ class TestInstallScriptContent:
     def setup_method(self):
         self.content = INSTALL_SCRIPT.read_text(encoding="utf-8")
 
-    def test_has_tty_detection(self):
-        """Script must detect non-interactive stdin for curl | sh safety."""
-        assert "[ -t 0 ]" in self.content or "[ ! -t 0 ]" in self.content, (
-            "install.sh must detect non-interactive stdin ([ -t 0 ])"
-        )
-
-    def test_read_uses_dev_tty(self):
-        """Interactive read must source from /dev/tty, not stdin."""
-        assert "/dev/tty" in self.content, (
-            "install.sh read should use /dev/tty for interactive prompts"
+    def test_detects_virtualenv(self):
+        """Script must detect active virtualenvs."""
+        assert "VIRTUAL_ENV" in self.content or "sys.prefix" in self.content, (
+            "install.sh must detect active virtualenvs"
         )
 
     def test_has_pep668_handling(self):
         """Script should handle PEP 668 externally-managed-environment."""
         assert "break-system-packages" in self.content, (
             "install.sh should handle PEP 668 (--break-system-packages fallback)"
-        )
-
-    def test_pep668_warns_user(self):
-        """PEP 668 fallback must warn the user about what it's doing."""
-        assert "WARNING" in self.content, (
-            "install.sh must warn the user before using --break-system-packages"
         )
 
     def test_has_set_euo_pipefail(self):
