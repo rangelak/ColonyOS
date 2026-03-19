@@ -71,3 +71,63 @@ _Date: 2026-03-19 | Feature: every_time_the_pipeline_starts_we_should_look_at_wh
 - **[testing]** CLI entry points (flags, import guards, argument parsing) need dedicated unit tests separate from the underlying logic tests.
 - **[code-quality]** Polling intervals using setInterval with stale closures cause subtle bugs; use refs or re-subscribe on dependency changes.
 - **[architecture]** Prompt templates should use concrete glob patterns instead of natural-language directory descriptions to reduce ambiguity.
+
+## Run: run-20260319_152207-801fef63d9
+_Date: 2026-03-19 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
+
+- **[architecture]** Verdict regex duplication across modules (cli vs orchestrator) — this is about duplicating business logic regex across modules. Existing entries menti
+- **[code-quality]** Console/resource creation inside helpers instead of accepting as parameter — dependency injection pattern.
+- **[security]** Prompt templates should prohibit LLM "cheat" fixes like `# type: ignore` or `# noqa`.
+- **[architecture]** Budget cap logic relying on optional config fields having non-None defaults is fragile.
+- **[code-quality]** Helpers that create their own Console/logger instances instead of accepting them as parameters break testability and consistency.
+- **[architecture]** Business-logic regexes duplicated across modules drift silently; extract to a single shared constant or function.
+- **[security]** Prompt templates sent to LLMs should explicitly prohibit suppression-based "fixes" like `# type: ignore` or `# noqa`.
+- **[code-quality]** Optional config fields assumed non-None without guards cause crashes when defaults are absent; validate at load time.
+- **[code-quality]** Helpers that create their own Console/logger instead of accepting one as a parameter break testability and consistency.
+- **[architecture]** Business-logic regexes duplicated across modules drift silently; extract to a shared constant or function.
+- **[security]** Prompt templates should explicitly prohibit suppression-based "fixes" like `# type: ignore` or `# noqa`.
+- **[code-quality]** Optional config fields assumed non-None without guards cause crashes when defaults are missing; validate at load.
+- **[code-quality]** Helpers that create their own I/O resources (e.g. Console) instead of accepting them as params reduce testability.
+- **[architecture]** Business-logic regexes duplicated across modules drift silently; extract to a shared constant or function.
+- **[security]** Prompt templates should prohibit LLM suppression-only fixes like `# type: ignore` or `# noqa`.
+- **[code-quality]** Optional config fields assumed non-None without validation cause crashes when defaults are absent.
+- **[code-quality]** Helpers that create own I/O resources (Console, logger) instead of accepting them as params reduce testability.
+- **[architecture]** Business-logic regexes duplicated across modules drift silently; extract shared constants.
+- **[security]** Prompt templates should explicitly prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
+- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load time.
+- **[code-quality]** Helpers that instantiate their own I/O resources (Console, logger) instead of accepting params reduce testability.
+- **[architecture]** Business-logic regexes duplicated across modules drift silently; extract to a shared constant.
+- **[security]** Prompt templates should explicitly prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
+- **[code-quality]** Optional config fields assumed non-None without validation crash when defaults are absent; validate at load time.
+- **[code-quality]** Helpers that instantiate their own I/O resources instead of accepting them as parameters reduce testability.
+- **[architecture]** Business-logic regexes duplicated across modules drift silently; extract to a shared constant.
+- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
+- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are absent; validate at load time.
+- **[code-quality]** Helpers that instantiate their own I/O resources instead of accepting them as parameters reduce testability.
+- **[architecture]** Business-logic regexes copied across modules drift silently; extract to a single shared constant.
+- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
+- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are absent; validate at load time.
+- **[code-quality]** Helpers that instantiate their own I/O resources instead of accepting them as parameters reduce testability.
+- **[architecture]** Business-logic regexes copied across modules drift silently; extract to a single shared constant.
+- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
+- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are absent; validate at load time.
+- **[code-quality]** Helpers that instantiate own I/O resources instead of accepting them as params reduce testability.
+- **[architecture]** Business-logic regexes copied across modules drift silently; extract to a single shared constant.
+- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
+- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are absent; validate at load.
+- **[code-quality]** Helpers that instantiate own I/O resources instead of accepting them as params reduce testability.
+- **[architecture]** Business-logic regexes copied across modules drift silently; extract to a single shared constant.
+- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
+- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are absent; validate at load.
+- **[code-quality]** Helpers that create own I/O objects (Console, logger) instead of accepting them as params hurt testability.
+- **[architecture]** Business-logic regexes copied across modules drift silently; extract to one shared constant.
+- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
+- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load time.
+- **[code-quality]** Helpers creating own I/O objects (Console, logger) instead of accepting params hurt testability.
+- **[architecture]** Business-logic regexes copied across modules drift silently; extract to one shared constant.
+- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
+- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load.
+- **[code-quality]** Helpers creating own I/O objects (Console, logger) instead of accepting params hurt testability.
+- **[architecture]** Business-logic regexes copied across modules drift silently; extract to one shared constant.
+- **[security]** Prompt templates must prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
+- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load.

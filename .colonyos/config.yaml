@@ -58,7 +58,7 @@ slack:
   channels:
     - colonyos-test
   trigger_mode: mention
-  auto_approve: false
+  auto_approve: true
   max_runs_per_hour: 3
   # allowed_user_ids:
   #   - U12345678  # Restrict who can trigger and approve pipelines

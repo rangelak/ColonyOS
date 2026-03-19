@@ -168,6 +168,7 @@ class RunLog:
     source_issue_url: str | None = None
     preflight: PreflightResult | None = None
     pr_url: str | None = None
+    post_fix_head_sha: str | None = None
 
     def mark_finished(self) -> None:
         self.finished_at = datetime.now(timezone.utc).isoformat()
@@ -266,6 +267,7 @@ class QueueItem:
     fix_rounds: int = 0
     parent_item_id: str | None = None
     head_sha: str | None = None
+    raw_prompt: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -288,6 +290,7 @@ class QueueItem:
             "fix_rounds": self.fix_rounds,
             "parent_item_id": self.parent_item_id,
             "head_sha": self.head_sha,
+            "raw_prompt": self.raw_prompt,
         }
 
     @classmethod
@@ -327,6 +330,7 @@ class QueueItem:
             fix_rounds=data.get("fix_rounds", 0),
             parent_item_id=data.get("parent_item_id"),
             head_sha=data.get("head_sha"),
+            raw_prompt=data.get("raw_prompt"),
         )
 
 

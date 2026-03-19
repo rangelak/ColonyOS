@@ -2039,6 +2039,7 @@ def watch(
                 id=fix_run_id,
                 source_type="slack_fix",
                 source_value=formatted_prompt,
+                raw_prompt=fix_prompt_text,
                 status=QueueItemStatus.PENDING,
                 slack_ts=thread_ts,
                 slack_channel=channel,
@@ -2224,6 +2225,7 @@ def watch(
                     id=run_id,
                     source_type="slack",
                     source_value=formatted_prompt,
+                    raw_prompt=prompt_text,
                     status=QueueItemStatus.PENDING,
                     slack_ts=ts,
                     slack_channel=channel,
@@ -2701,16 +2703,12 @@ def watch(
                             parent_item = qi
                             break
 
-            # Extract the raw prompt text from the parent's formatted
-            # source_value to avoid double-wrapping in <slack_message> tags.
-            # Defense-in-depth: re-sanitize extracted text in case the parent's
-            # source_value was populated from a non-Slack path in the future.
+            # Use stored raw_prompt when available; fall back to
+            # extract_raw_from_formatted_prompt for legacy queue items.
             from colonyos.sanitize import sanitize_untrusted_content
-            raw_prompt = (
-                extract_raw_from_formatted_prompt(parent_item.source_value)
-                if parent_item
-                else ""
-            )
+            raw_prompt = ""
+            if parent_item:
+                raw_prompt = parent_item.raw_prompt or extract_raw_from_formatted_prompt(parent_item.source_value)
             original_prompt = sanitize_untrusted_content(raw_prompt) if raw_prompt else ""
             prd_rel = ""
             task_rel = ""
@@ -2759,12 +2757,7 @@ def watch(
 
             elapsed_ms = int(time.time() * 1000) - start_ms
 
-            # Capture new HEAD SHA after fix so subsequent rounds use the
-            # updated value (fixes head_sha staleness bug).
-            new_head_sha = ""
-            if log.status == RunStatus.COMPLETED:
-                from colonyos.orchestrator import _get_head_sha
-                new_head_sha = _get_head_sha(self._repo_root)
+            new_head_sha = log.post_fix_head_sha or ""
 
             with self._state_lock:
                 item_to_run.cost_usd = log.total_cost_usd
