@@ -29,6 +29,7 @@ class Phase(str, Enum):
     DECISION = "decision"
     FIX = "fix"
     LEARN = "learn"
+    VERIFY = "verify"
     DELIVER = "deliver"
     CI_FIX = "ci_fix"
 
@@ -245,6 +246,7 @@ class QueueItem:
     branch_name: str | None = None
     fix_rounds: int = 0
     parent_item_id: str | None = None
+    head_sha: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -265,6 +267,7 @@ class QueueItem:
             "branch_name": self.branch_name,
             "fix_rounds": self.fix_rounds,
             "parent_item_id": self.parent_item_id,
+            "head_sha": self.head_sha,
         }
 
     @classmethod
@@ -296,6 +299,7 @@ class QueueItem:
             branch_name=data.get("branch_name"),
             fix_rounds=data.get("fix_rounds", 0),
             parent_item_id=data.get("parent_item_id"),
+            head_sha=data.get("head_sha"),
         )
 
 

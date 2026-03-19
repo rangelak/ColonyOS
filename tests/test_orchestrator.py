@@ -118,7 +118,7 @@ class TestPhaseReviewEnum:
 
     def test_phase_ordering(self):
         phases = list(Phase)
-        assert phases == [Phase.CEO, Phase.PLAN, Phase.TRIAGE, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.LEARN, Phase.DELIVER, Phase.CI_FIX]
+        assert phases == [Phase.CEO, Phase.PLAN, Phase.TRIAGE, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.LEARN, Phase.VERIFY, Phase.DELIVER, Phase.CI_FIX]
 
     def test_fix_phase_exists(self):
         assert Phase.FIX == "fix"
@@ -2364,9 +2364,10 @@ class TestRunThreadFix:
         mock_validate.return_value = (True, "")
         mock_check_pr.return_value = (42, "https://github.com/org/repo/pull/42")
         mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="main", stderr="")
-        mock_run_phase.return_value = PhaseResult(
-            phase=Phase.IMPLEMENT, success=True, cost_usd=1.0,
-        )
+
+        def _phase_result(phase, *args, **kwargs):
+            return PhaseResult(phase=phase, success=True, cost_usd=1.0)
+        mock_run_phase.side_effect = _phase_result
 
         config = ColonyConfig()
         save_config(tmp_path, config)
@@ -2383,7 +2384,8 @@ class TestRunThreadFix:
             quiet=True,
         )
         assert log.status == RunStatus.COMPLETED
-        assert len(log.phases) >= 1  # At least implement phase
+        # Implement + Verify + Deliver = 3 phases
+        assert len(log.phases) >= 2
 
     @patch("colonyos.orchestrator.subprocess")
     @patch("colonyos.orchestrator.validate_branch_exists")
@@ -2408,3 +2410,200 @@ class TestRunThreadFix:
             quiet=True,
         )
         assert log.status == RunStatus.FAILED
+
+    def test_invalid_branch_name_rejected(self, tmp_path: Path) -> None:
+        """Defense-in-depth: run_thread_fix rejects invalid git refs."""
+        config = ColonyConfig()
+        save_config(tmp_path, config)
+
+        log = run_thread_fix(
+            "fix the test",
+            branch_name="../../../etc/passwd",
+            pr_url=None,
+            original_prompt="original",
+            prd_rel="prd.md",
+            task_rel="tasks.md",
+            repo_root=tmp_path,
+            config=config,
+            quiet=True,
+        )
+        assert log.status == RunStatus.FAILED
+
+    def test_empty_branch_name_rejected(self, tmp_path: Path) -> None:
+        """Defense-in-depth: run_thread_fix rejects empty branch name."""
+        config = ColonyConfig()
+        save_config(tmp_path, config)
+
+        log = run_thread_fix(
+            "fix the test",
+            branch_name="",
+            pr_url=None,
+            original_prompt="original",
+            prd_rel="prd.md",
+            task_rel="tasks.md",
+            repo_root=tmp_path,
+            config=config,
+            quiet=True,
+        )
+        assert log.status == RunStatus.FAILED
+
+    @patch("colonyos.orchestrator._get_head_sha")
+    @patch("colonyos.orchestrator.subprocess")
+    @patch("colonyos.orchestrator.validate_branch_exists")
+    def test_head_sha_mismatch_fails(
+        self,
+        mock_validate: MagicMock,
+        mock_subprocess: MagicMock,
+        mock_get_sha: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """FR-7: HEAD SHA verification detects force-push tampering."""
+        mock_validate.return_value = (True, "")
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="main", stderr="")
+        mock_get_sha.return_value = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+        config = ColonyConfig()
+        save_config(tmp_path, config)
+
+        log = run_thread_fix(
+            "fix the test",
+            branch_name="colonyos/feature",
+            pr_url=None,
+            original_prompt="original",
+            prd_rel="prd.md",
+            task_rel="tasks.md",
+            repo_root=tmp_path,
+            config=config,
+            quiet=True,
+            expected_head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        assert log.status == RunStatus.FAILED
+
+    @patch("colonyos.orchestrator._get_head_sha")
+    @patch("colonyos.orchestrator.subprocess")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.check_open_pr")
+    @patch("colonyos.orchestrator.validate_branch_exists")
+    def test_head_sha_match_proceeds(
+        self,
+        mock_validate: MagicMock,
+        mock_check_pr: MagicMock,
+        mock_run_phase: MagicMock,
+        mock_subprocess: MagicMock,
+        mock_get_sha: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """FR-7: Matching HEAD SHA allows the fix to proceed."""
+        mock_validate.return_value = (True, "")
+        mock_check_pr.return_value = (42, "https://github.com/org/repo/pull/42")
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="main", stderr="")
+
+        def _phase_result(phase, *args, **kwargs):
+            return PhaseResult(phase=phase, success=True, cost_usd=1.0)
+        mock_run_phase.side_effect = _phase_result
+        expected_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        mock_get_sha.return_value = expected_sha
+
+        config = ColonyConfig()
+        save_config(tmp_path, config)
+
+        log = run_thread_fix(
+            "fix the test",
+            branch_name="colonyos/feature",
+            pr_url="https://github.com/org/repo/pull/42",
+            original_prompt="original",
+            prd_rel="prd.md",
+            task_rel="tasks.md",
+            repo_root=tmp_path,
+            config=config,
+            quiet=True,
+            expected_head_sha=expected_sha,
+        )
+        assert log.status == RunStatus.COMPLETED
+
+    @patch("colonyos.orchestrator.subprocess")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.check_open_pr")
+    @patch("colonyos.orchestrator.validate_branch_exists")
+    def test_verify_phase_runs(
+        self,
+        mock_validate: MagicMock,
+        mock_check_pr: MagicMock,
+        mock_run_phase: MagicMock,
+        mock_subprocess: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """FR-7: Verify phase runs between Implement and Deliver."""
+        mock_validate.return_value = (True, "")
+        mock_check_pr.return_value = (42, "https://github.com/org/repo/pull/42")
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="main", stderr="")
+
+        def _phase_result(phase, *args, **kwargs):
+            return PhaseResult(phase=phase, success=True, cost_usd=1.0)
+        mock_run_phase.side_effect = _phase_result
+
+        config = ColonyConfig()
+        save_config(tmp_path, config)
+
+        log = run_thread_fix(
+            "fix the test",
+            branch_name="colonyos/feature",
+            pr_url="https://github.com/org/repo/pull/42",
+            original_prompt="original",
+            prd_rel="prd.md",
+            task_rel="tasks.md",
+            repo_root=tmp_path,
+            config=config,
+            quiet=True,
+        )
+        assert log.status == RunStatus.COMPLETED
+        # Should have Implement, Verify, and Deliver phases
+        phase_names = [p.phase for p in log.phases]
+        assert Phase.VERIFY in phase_names
+        # Verify must come after Implement
+        impl_idx = phase_names.index(Phase.IMPLEMENT)
+        verify_idx = phase_names.index(Phase.VERIFY)
+        assert verify_idx > impl_idx
+
+    @patch("colonyos.orchestrator.subprocess")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.check_open_pr")
+    @patch("colonyos.orchestrator.validate_branch_exists")
+    def test_verify_phase_failure_stops_pipeline(
+        self,
+        mock_validate: MagicMock,
+        mock_check_pr: MagicMock,
+        mock_run_phase: MagicMock,
+        mock_subprocess: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Verify phase failure prevents Deliver from running."""
+        mock_validate.return_value = (True, "")
+        mock_check_pr.return_value = (42, "https://github.com/org/repo/pull/42")
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="main", stderr="")
+
+        def _phase_result(phase, *args, **kwargs):
+            if phase == Phase.IMPLEMENT:
+                return PhaseResult(phase=phase, success=True, cost_usd=1.0)
+            return PhaseResult(phase=phase, success=False, cost_usd=0.5, error="Tests failed")
+        mock_run_phase.side_effect = _phase_result
+
+        config = ColonyConfig()
+        save_config(tmp_path, config)
+
+        log = run_thread_fix(
+            "fix the test",
+            branch_name="colonyos/feature",
+            pr_url="https://github.com/org/repo/pull/42",
+            original_prompt="original",
+            prd_rel="prd.md",
+            task_rel="tasks.md",
+            repo_root=tmp_path,
+            config=config,
+            quiet=True,
+        )
+        assert log.status == RunStatus.FAILED
+        phase_names = [p.phase for p in log.phases]
+        assert Phase.VERIFY in phase_names
+        # Deliver should NOT have run
+        assert Phase.DELIVER not in phase_names

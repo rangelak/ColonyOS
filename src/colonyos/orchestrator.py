@@ -1640,7 +1640,7 @@ def _build_thread_fix_prompt(
 
     user = (
         f"Apply the requested fix on branch `{branch_name}`. "
-        f"The fix request is: {fix_request[:500]}"
+        f"The fix request is: {fix_request}"
     )
     return system, user
 
@@ -1658,14 +1658,16 @@ def run_thread_fix(
     verbose: bool = False,
     quiet: bool = False,
     ui_factory: object | None = None,
+    expected_head_sha: str | None = None,
 ) -> RunLog:
     """Execute a lightweight fix pipeline for a Slack thread-fix request.
 
     Skips Plan and triage phases. Runs:
-    1. Validate branch exists and PR is open
-    2. Checkout existing branch
+    1. Validate branch name, branch exists, and PR is open
+    2. Checkout existing branch and verify HEAD SHA (force-push defense)
     3. Implement phase with fix instructions
-    4. Deliver phase (push to existing branch, skip PR creation)
+    4. Verify phase (test suite)
+    5. Deliver phase (push to existing branch, skip PR creation)
 
     Returns a RunLog with phase results and cost.
     """
@@ -1687,6 +1689,14 @@ def run_thread_fix(
         task_rel=task_rel,
         pr_url=pr_url,
     )
+
+    # --- Defense-in-depth: validate branch name at point of use ---
+    if not is_valid_git_ref(branch_name):
+        _log(f"Thread fix: invalid branch name: {branch_name[:100]}")
+        log.status = RunStatus.FAILED
+        log.mark_finished()
+        _save_run_log(repo_root, log)
+        return log
 
     # --- Validate branch exists ---
     branch_ok, branch_err = validate_branch_exists(branch_name, repo_root)
@@ -1728,6 +1738,19 @@ def run_thread_fix(
         return log
 
     try:
+        # --- Verify HEAD SHA (defense against force-push tampering, FR-7) ---
+        if expected_head_sha:
+            current_sha = _get_head_sha(repo_root)
+            if current_sha and current_sha != expected_head_sha:
+                _log(
+                    f"Thread fix: HEAD SHA mismatch — expected {expected_head_sha[:12]}, "
+                    f"got {current_sha[:12]}. Branch may have been force-pushed."
+                )
+                log.status = RunStatus.FAILED
+                log.mark_finished()
+                _save_run_log(repo_root, log)
+                return log
+
         # --- Phase: Implement (with thread-fix instructions) ---
         _touch_heartbeat(repo_root)
         impl_ui = _make_ui()
@@ -1755,6 +1778,44 @@ def run_thread_fix(
         log.phases.append(impl_result)
 
         if not impl_result.success:
+            log.status = RunStatus.FAILED
+            log.mark_finished()
+            _save_run_log(repo_root, log)
+            return log
+
+        # --- Phase: Verify (test suite, FR-7) ---
+        _touch_heartbeat(repo_root)
+        verify_ui = _make_ui()
+        if verify_ui is not None:
+            verify_ui.phase_header(
+                "Verify (tests)", config.budget.per_phase,
+                config.get_model(Phase.IMPLEMENT),
+            )
+        else:
+            _log("=== Thread Fix: Verify ===")
+
+        verify_result = run_phase_sync(
+            Phase.VERIFY,
+            (
+                f"Run the full test suite for this project to verify the changes "
+                f"on branch `{branch_name}` do not introduce regressions. "
+                f"If any tests fail, report the failures but do NOT attempt fixes."
+            ),
+            cwd=repo_root,
+            system_prompt=(
+                "You are a verification agent. Your ONLY job is to run the "
+                "project's test suite and report the results. Do NOT modify "
+                "any code. Run the test command appropriate for this project "
+                "(e.g., pytest, npm test, cargo test, make test) and report "
+                "whether all tests pass. If tests fail, list the failing tests."
+            ),
+            model=config.get_model(Phase.IMPLEMENT),
+            budget_usd=config.budget.per_phase,
+            ui=verify_ui,
+        )
+        log.phases.append(verify_result)
+
+        if not verify_result.success:
             log.status = RunStatus.FAILED
             log.mark_finished()
             _save_run_log(repo_root, log)

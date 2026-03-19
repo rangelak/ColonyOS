@@ -1869,6 +1869,7 @@ def watch(
         extract_base_branch,
         extract_prompt_from_mention,
         find_parent_queue_item,
+        is_valid_git_ref,
         format_fix_acknowledgment,
         format_fix_error,
         format_fix_round_limit,
@@ -2025,6 +2026,7 @@ def watch(
                 parent_item_id=parent_item.id,
                 pr_url=parent_item.pr_url,
                 base_branch=parent_item.base_branch,
+                head_sha=parent_item.head_sha,
             )
             queue_state.items.append(fix_item)
             _save_queue_state(repo_root, queue_state)
@@ -2444,6 +2446,9 @@ def watch(
                 # Persist branch_name for thread-fix lookups (Task 1.3)
                 if log.branch_name:
                     item_to_run.branch_name = log.branch_name
+                # Persist HEAD SHA for force-push tamper detection (FR-7)
+                if log.preflight and log.preflight.head_sha:
+                    item_to_run.head_sha = log.preflight.head_sha
 
                 if log.status == RunStatus.COMPLETED:
                     item_to_run.status = QueueItemStatus.COMPLETED
@@ -2613,12 +2618,26 @@ def watch(
                 except Exception:
                     logger.debug("Failed to load parent run log for fix item", exc_info=True)
 
+            # Defense-in-depth: re-validate branch name from deserialized queue
+            # state before passing to subprocess (FR-7 security requirement).
+            fix_branch = item_to_run.branch_name or ""
+            if not fix_branch or not is_valid_git_ref(fix_branch):
+                logger.warning(
+                    "Fix item %s has invalid branch_name %r, marking failed",
+                    item_to_run.id, fix_branch[:100],
+                )
+                with self._state_lock:
+                    item_to_run.status = QueueItemStatus.FAILED
+                    item_to_run.error = "Invalid branch name in queue state"
+                    _save_queue_state(self._repo_root, self._queue_state)
+                return
+
             start_ms = int(time.time() * 1000)
             _touch_heartbeat(self._repo_root)
 
             log = _run_thread_fix(
                 item_to_run.source_value,
-                branch_name=item_to_run.branch_name or "",
+                branch_name=fix_branch,
                 pr_url=item_to_run.pr_url,
                 original_prompt=original_prompt,
                 prd_rel=prd_rel,
@@ -2628,6 +2647,7 @@ def watch(
                 verbose=self._verbose,
                 quiet=self._quiet,
                 ui_factory=ui_factory,
+                expected_head_sha=item_to_run.head_sha,
             )
 
             elapsed_ms = int(time.time() * 1000) - start_ms
