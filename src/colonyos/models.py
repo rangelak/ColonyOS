@@ -248,7 +248,7 @@ class QueueItem:
     SCHEMA_VERSION: ClassVar[int] = 2  # class-level constant; bump on structural changes
 
     id: str
-    source_type: str  # "prompt", "issue", "slack", or "slack_fix"
+    source_type: str  # "prompt", "issue", "slack", "slack_fix", or "github_review"
     source_value: str  # prompt text or issue number
     status: QueueItemStatus
     added_at: str = field(

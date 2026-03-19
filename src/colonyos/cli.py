@@ -3512,12 +3512,14 @@ def ui(port: int, no_open: bool, write: bool) -> None:
 
 
 @app.command("watch-github")
+@click.option("--polling-interval", type=int, default=None, help="Seconds between polls (default: 60).")
 @click.option("--max-hours", type=float, default=None, help="Maximum wall-clock hours for the watcher.")
 @click.option("--max-budget", type=float, default=None, help="Maximum aggregate USD spend.")
 @click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
 @click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
 @click.option("--dry-run", is_flag=True, help="Log triggers without executing pipeline.")
 def watch_github(
+    polling_interval: int | None,
     max_hours: float | None,
     max_budget: float | None,
     verbose: bool,
@@ -3549,11 +3551,12 @@ def watch_github(
 
     effective_max_hours = max_hours if max_hours is not None else config.budget.max_duration_hours
     effective_max_budget = max_budget if max_budget is not None else config.budget.max_total_usd
+    effective_polling_interval = polling_interval if polling_interval is not None else config.github.polling_interval_seconds
 
     click.echo(f"[colonyos] Starting GitHub watcher for {repo_root}")
     click.echo(f"[colonyos] Bot username: @{config.github.bot_username}")
     click.echo(f"[colonyos] Branch prefix: {config.branch_prefix}")
-    click.echo(f"[colonyos] Polling interval: {config.github.polling_interval_seconds}s")
+    click.echo(f"[colonyos] Polling interval: {effective_polling_interval}s")
 
     if dry_run:
         click.echo("[colonyos] DRY RUN MODE — no pipelines will execute")
@@ -3599,6 +3602,7 @@ def watch_github(
             branch_prefix=config.branch_prefix,
             max_hours=effective_max_hours,
             max_budget=effective_max_budget,
+            polling_interval=effective_polling_interval,
             dry_run=dry_run,
             verbose=verbose,
             quiet=quiet,
