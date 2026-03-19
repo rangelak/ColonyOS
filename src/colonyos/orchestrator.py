@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from hashlib import sha1
 from pathlib import Path
 
@@ -1689,7 +1690,6 @@ def run(
         # Save original branch so we can restore on failure (critical for
         # long-running watch processes where the next queue item must start
         # from a known state).
-        original_branch: str | None = None
         if base_branch:
             # Defense-in-depth: validate at the point of use, not just at entry.
             # This protects against callers that bypass triage (e.g. future CLI
@@ -1776,10 +1776,29 @@ def run(
     finally:
         if original_branch:
             try:
-                subprocess.run(
+                # Check for dirty working tree before attempting checkout
+                status_result = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    capture_output=True, text=True, cwd=repo_root, timeout=30,
+                )
+                if status_result.stdout.strip():
+                    _log(
+                        f"WARNING: Working tree is dirty, stashing changes "
+                        f"before restoring branch '{original_branch}'"
+                    )
+                    subprocess.run(
+                        ["git", "stash", "--include-untracked"],
+                        capture_output=True, text=True, cwd=repo_root, timeout=30,
+                    )
+                checkout_result = subprocess.run(
                     ["git", "checkout", original_branch],
                     capture_output=True, text=True, cwd=repo_root, timeout=30,
                 )
+                if checkout_result.returncode != 0:
+                    _log(
+                        f"WARNING: Failed to restore original branch '{original_branch}': "
+                        f"{checkout_result.stderr.strip()}"
+                    )
             except Exception:
                 _log(f"WARNING: Failed to restore original branch '{original_branch}'")
 
@@ -1800,7 +1819,7 @@ def _run_pipeline(
     offline: bool,
     quiet: bool,
     base_branch: str | None,
-    _make_ui: object,
+    _make_ui: Callable[..., PhaseUI | NullUI | None],
 ) -> RunLog:
     """Execute the pipeline phases. Extracted from run() for try/finally branch rollback."""
 

@@ -582,9 +582,11 @@ def _parse_triage_response(raw_text: str) -> TriageResult:
         )
         raw_branch = None
 
+    confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
+
     return TriageResult(
         actionable=bool(data.get("actionable", False)),
-        confidence=float(data.get("confidence", 0.0)),
+        confidence=confidence,
         summary=str(data.get("summary", "")),
         base_branch=raw_branch,
         reasoning=str(data.get("reasoning", "")),
@@ -594,6 +596,7 @@ def _parse_triage_response(raw_text: str) -> TriageResult:
 def triage_message(
     message_text: str,
     *,
+    repo_root: Path | None = None,
     project_name: str = "",
     project_description: str = "",
     project_stack: str = "",
@@ -604,9 +607,14 @@ def triage_message(
 
     Uses a single-turn haiku call with no tool access to minimize cost
     and prompt injection blast radius.
+
+    Args:
+        repo_root: Repository root directory. Falls back to cwd if not provided.
     """
     from colonyos.agent import run_phase_sync
     from colonyos.models import Phase
+
+    cwd = repo_root if repo_root is not None else Path.cwd()
 
     system, user = _build_triage_prompt(
         message_text,
@@ -620,7 +628,7 @@ def triage_message(
     result = run_phase_sync(
         Phase.TRIAGE,
         user,
-        cwd=Path("."),
+        cwd=cwd,
         system_prompt=system,
         model="haiku",
         budget_usd=0.05,  # tiny budget for triage

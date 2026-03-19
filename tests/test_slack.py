@@ -30,6 +30,7 @@ from colonyos.slack import (
     sanitize_slack_content,
     save_watch_state,
     should_process_message,
+    triage_message,
     wait_for_approval,
 )
 
@@ -1058,6 +1059,37 @@ class TestParseTriageResponseBranchValidation:
         raw = '{"actionable": true, "confidence": 0.9, "summary": "x", "base_branch": "main\\nmalicious", "reasoning": "y"}'
         result = _parse_triage_response(raw)
         assert result.base_branch is None
+
+
+class TestParseTriageResponseConfidenceClamping:
+    """Tests that confidence values are clamped to [0.0, 1.0]."""
+
+    def test_confidence_above_one_clamped(self) -> None:
+        raw = '{"actionable": true, "confidence": 5.0, "summary": "x", "base_branch": null, "reasoning": "y"}'
+        result = _parse_triage_response(raw)
+        assert result.confidence == 1.0
+
+    def test_confidence_below_zero_clamped(self) -> None:
+        raw = '{"actionable": true, "confidence": -0.5, "summary": "x", "base_branch": null, "reasoning": "y"}'
+        result = _parse_triage_response(raw)
+        assert result.confidence == 0.0
+
+    def test_confidence_within_range_unchanged(self) -> None:
+        raw = '{"actionable": true, "confidence": 0.75, "summary": "x", "base_branch": null, "reasoning": "y"}'
+        result = _parse_triage_response(raw)
+        assert result.confidence == 0.75
+
+
+class TestTriageMessageRepoRoot:
+    """Tests that triage_message accepts and uses repo_root parameter."""
+
+    def test_signature_accepts_repo_root(self) -> None:
+        """Verify triage_message has a repo_root keyword parameter."""
+        import inspect
+        sig = inspect.signature(triage_message)
+        assert "repo_root" in sig.parameters
+        param = sig.parameters["repo_root"]
+        assert param.default is None
 
 
 class TestPhaseTriageEnum:
