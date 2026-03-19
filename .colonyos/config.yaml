@@ -54,7 +54,7 @@ max_fix_iterations: 4
 auto_approve: true
 
 slack:
-  enabled: false
+  enabled: true
   channels:
     - colonyos-test
   trigger_mode: mention
