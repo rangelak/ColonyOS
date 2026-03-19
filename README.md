@@ -56,8 +56,6 @@ pip install colonyos
 # One-liner for CI or fresh machines
 curl -sSL https://raw.githubusercontent.com/rangelak/ColonyOS/main/install.sh | sh
 
-# Homebrew (macOS / Linux)
-brew tap colonyos/tap && brew install colonyos
 ```
 
 ### Optional extras

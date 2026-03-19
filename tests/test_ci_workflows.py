@@ -177,38 +177,6 @@ class TestReleaseWorkflow:
                         f"to a commit SHA — supply chain risk"
                     )
 
-    def test_has_update_homebrew_job(self):
-        """Release workflow must include a job to auto-update the Homebrew formula."""
-        assert "update-homebrew" in self.workflow["jobs"], (
-            "Release workflow must have an update-homebrew job (FR-5.4)"
-        )
-
-    def test_update_homebrew_pushes_to_main(self):
-        """Homebrew update must push directly to main."""
-        homebrew_job = self.workflow["jobs"]["update-homebrew"]
-        steps = homebrew_job.get("steps", [])
-        all_run = " ".join(str(s.get("run", "")) for s in steps)
-        assert "git push origin main" in all_run, (
-            "update-homebrew must push directly to main"
-        )
-
-    def test_update_homebrew_validates_version_format(self):
-        """Homebrew update must validate version format to prevent injection."""
-        homebrew_job = self.workflow["jobs"]["update-homebrew"]
-        steps = homebrew_job.get("steps", [])
-        all_run = " ".join(str(s.get("run", "")) for s in steps)
-        assert "grep" in all_run and "VERSION" in all_run, (
-            "update-homebrew must validate VERSION format before sed substitution"
-        )
-
-    def test_update_homebrew_has_contents_write(self):
-        """Homebrew update job must have contents: write permission."""
-        homebrew_job = self.workflow["jobs"]["update-homebrew"]
-        permissions = homebrew_job.get("permissions", {})
-        assert permissions.get("contents") == "write", (
-            "update-homebrew must have contents: write to push to main"
-        )
-
     def test_checksums_not_in_pypi_upload_path(self):
         """SHA256SUMS.txt must not be in the dist/ artifact uploaded to PyPI."""
         build_job = self.workflow["jobs"]["build"]
