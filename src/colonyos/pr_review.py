@@ -107,6 +107,7 @@ class PRState:
     state: str
     head_sha: str
     head_ref: str
+    url: str = ""  # e.g. https://github.com/owner/repo/pull/42
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +231,7 @@ def fetch_pr_state(pr_number: int, repo_root: Path) -> PRState:
         result = subprocess.run(
             [
                 "gh", "pr", "view", str(pr_number),
-                "--json", "state,headRefOid,headRefName",
+                "--json", "state,headRefOid,headRefName,url",
             ],
             capture_output=True,
             text=True,
@@ -263,6 +264,7 @@ def fetch_pr_state(pr_number: int, repo_root: Path) -> PRState:
         state=data.get("state", "unknown").lower(),
         head_sha=data.get("headRefOid", ""),
         head_ref=data.get("headRefName", ""),
+        url=data.get("url", ""),
     )
 
 
@@ -420,6 +422,31 @@ def format_summary_message(commits: list[tuple[str, str]]) -> str:
         lines.append(f"- `{short_sha}`: {summary}")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# URL helpers
+# ---------------------------------------------------------------------------
+
+
+def build_commit_url(pr_url: str, commit_sha: str) -> str:
+    """Build a GitHub commit URL from a PR URL and commit SHA.
+
+    Extracts the repo base URL from the PR URL and appends /commit/{sha}.
+
+    Args:
+        pr_url: PR URL like https://github.com/owner/repo/pull/42
+        commit_sha: Full or short commit SHA
+
+    Returns:
+        Commit URL like https://github.com/owner/repo/commit/{sha}
+    """
+    import re
+    match = re.match(r"(https?://github\.com/[^/]+/[^/]+)/pull/\d+", pr_url)
+    if match:
+        return f"{match.group(1)}/commit/{commit_sha}"
+    # Fallback: return a placeholder that at least identifies the commit
+    return f"commit:{commit_sha}"
 
 
 # ---------------------------------------------------------------------------

@@ -3536,9 +3536,9 @@ def pr_review(
 
     Use --watch for continuous monitoring of new comments.
     """
-    from colonyos.ci import parse_pr_ref
     from colonyos.pr_review import (
         PRReviewState,
+        build_commit_url,
         check_budget_cap,
         check_circuit_breaker,
         check_fix_rounds,
@@ -3628,10 +3628,12 @@ def pr_review(
             save_pr_review_state(repo_root, state)
             return fixes_applied
 
-        # Filter to new comments only
+        # Filter to new comments only (FR-8: only comments after watch_started_at)
+        # Also exclude already-processed comments for deduplication across restarts
         new_comments = [
             c for c in comments
             if not state.is_processed(c.id)
+            and c.created_at >= state.watch_started_at
         ]
 
         if not new_comments:
@@ -3684,12 +3686,12 @@ def pr_review(
             # Find PRD and task files for the branch
             prd_rel, task_rel = _find_branch_artifacts(repo_root, config, pr_state.head_ref)
 
-            # Run the fix pipeline
+            # Run the fix pipeline (FR-15: use source_type for analytics)
             try:
                 run_log = run_thread_fix(
                     fix_prompt=comment.body,
                     branch_name=pr_state.head_ref,
-                    pr_url=f"https://github.com/.../{pr_number}",  # Placeholder
+                    pr_url=pr_state.url,
                     original_prompt=triage_result.summary,
                     prd_rel=prd_rel,
                     task_rel=task_rel,
@@ -3698,6 +3700,8 @@ def pr_review(
                     verbose=verbose,
                     quiet=quiet,
                     expected_head_sha=pr_state.head_sha,
+                    source_type="pr_review_fix",
+                    review_comment_id=comment.id,
                 )
 
                 # Update state
@@ -3707,7 +3711,7 @@ def pr_review(
                 if run_log.status == RunStatus.COMPLETED:
                     # Get the commit SHA from the most recent commit
                     commit_sha = _get_latest_commit_sha(repo_root)
-                    commit_url = f"https://github.com/.../commit/{commit_sha}"
+                    commit_url = build_commit_url(pr_state.url, commit_sha)
 
                     # Post reply to comment thread (FR-5)
                     reply_msg = format_fix_reply(
@@ -3744,8 +3748,14 @@ def pr_review(
                     if pr_state.state in ("merged", "closed"):
                         click.echo(f"[colonyos] PR #{pr_number} is now {pr_state.state}. Exiting watch mode.")
                         break
-                except Exception:
-                    pass  # Continue watching even if state check fails
+                except Exception as exc:
+                    # Log the error but continue watching - transient network issues
+                    # shouldn't stop the watch loop. Log for debugging.
+                    logger.warning(
+                        "Failed to check PR #%d state during watch: %s",
+                        pr_number, exc,
+                    )
+                    # Continue watching
 
                 fixes = process_comments()
 

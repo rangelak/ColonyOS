@@ -885,6 +885,8 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
                 "task_rel": log.task_rel,
                 "source_issue": log.source_issue,
                 "source_issue_url": log.source_issue_url,
+                "source_type": log.source_type,
+                "review_comment_id": log.review_comment_id,
                 "preflight": log.preflight.to_dict() if log.preflight else None,
                 "last_successful_phase": last_successful_phase,
                 "resume_events": resume_events,
@@ -988,6 +990,8 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
             source_issue=data.get("source_issue"),
             source_issue_url=data.get("source_issue_url"),
             preflight=PreflightResult.from_dict(data["preflight"]) if data.get("preflight") else None,
+            source_type=data.get("source_type"),
+            review_comment_id=data.get("review_comment_id"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise click.ClickException(
@@ -1701,6 +1705,8 @@ def run_thread_fix(
     quiet: bool = False,
     ui_factory: object | None = None,
     expected_head_sha: str | None = None,
+    source_type: str | None = None,
+    review_comment_id: str | None = None,
 ) -> RunLog:
     """Execute a lightweight fix pipeline for a Slack thread-fix request.
 
@@ -1738,6 +1744,8 @@ def run_thread_fix(
         prd_rel=prd_rel,
         task_rel=task_rel,
         pr_url=pr_url,
+        source_type=source_type,
+        review_comment_id=review_comment_id,
     )
 
     # --- Defense-in-depth: validate branch name at point of use ---

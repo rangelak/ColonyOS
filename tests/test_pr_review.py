@@ -415,3 +415,80 @@ class TestSafetyGuards:
 
         state.fix_rounds = 3
         assert check_fix_rounds(state, max_rounds=3) is False  # At limit
+
+
+class TestBuildCommitUrl:
+    """Tests for commit URL building helper."""
+
+    def test_build_commit_url_from_pr_url(self) -> None:
+        from colonyos.pr_review import build_commit_url
+
+        pr_url = "https://github.com/owner/repo/pull/42"
+        commit_sha = "abc123def456"
+        result = build_commit_url(pr_url, commit_sha)
+        assert result == "https://github.com/owner/repo/commit/abc123def456"
+
+    def test_build_commit_url_with_short_sha(self) -> None:
+        from colonyos.pr_review import build_commit_url
+
+        pr_url = "https://github.com/myorg/myrepo/pull/123"
+        commit_sha = "abc123d"
+        result = build_commit_url(pr_url, commit_sha)
+        assert result == "https://github.com/myorg/myrepo/commit/abc123d"
+
+    def test_build_commit_url_with_invalid_url(self) -> None:
+        from colonyos.pr_review import build_commit_url
+
+        # Should return fallback format
+        result = build_commit_url("not-a-valid-url", "abc123")
+        assert result == "commit:abc123"
+
+
+class TestPRStateUrl:
+    """Tests for PRState url field."""
+
+    @patch("subprocess.run")
+    def test_fetch_pr_state_includes_url(
+        self, mock_run: MagicMock, tmp_path: Path
+    ) -> None:
+        from colonyos.pr_review import fetch_pr_state
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "state": "open",
+                "headRefOid": "abc123",
+                "headRefName": "feature-branch",
+                "url": "https://github.com/owner/repo/pull/42",
+            }),
+            stderr="",
+        )
+
+        result = fetch_pr_state(42, tmp_path)
+        assert result.url == "https://github.com/owner/repo/pull/42"
+        assert result.state == "open"
+        assert result.head_sha == "abc123"
+
+
+class TestTimestampFiltering:
+    """Tests for FR-8 timestamp filtering in watch mode."""
+
+    def test_watch_started_at_is_set_on_creation(self) -> None:
+        from colonyos.pr_review import PRReviewState
+        from datetime import datetime, timezone
+
+        state = PRReviewState(pr_number=42)
+        # Should have a valid ISO timestamp
+        assert state.watch_started_at is not None
+        # Should be parseable
+        parsed = datetime.fromisoformat(state.watch_started_at)
+        assert parsed.tzinfo is not None
+
+    def test_watch_started_at_roundtrip(self) -> None:
+        from colonyos.pr_review import PRReviewState
+
+        timestamp = "2025-01-01T12:00:00+00:00"
+        state = PRReviewState(pr_number=42, watch_started_at=timestamp)
+        d = state.to_dict()
+        restored = PRReviewState.from_dict(d)
+        assert restored.watch_started_at == timestamp

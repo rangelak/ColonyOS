@@ -152,6 +152,16 @@ class ResumeState:
 
 @dataclass
 class RunLog:
+    """Log of a single pipeline run.
+
+    The ``source_type`` field tracks the origin of the run for analytics:
+    - "prompt": Direct CLI prompt
+    - "issue": GitHub issue
+    - "slack": Slack message triggering full pipeline
+    - "slack_fix": Slack thread-fix request
+    - "pr_review_fix": PR review comment fix request
+    """
+
     run_id: str
     prompt: str
     status: RunStatus
@@ -169,6 +179,8 @@ class RunLog:
     preflight: PreflightResult | None = None
     pr_url: str | None = None
     post_fix_head_sha: str | None = None
+    source_type: str | None = None  # e.g. "prompt", "issue", "slack_fix", "pr_review_fix"
+    review_comment_id: str | None = None  # For pr_review_fix source_type (FR-16)
 
     def mark_finished(self) -> None:
         self.finished_at = datetime.now(timezone.utc).isoformat()
