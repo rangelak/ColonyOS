@@ -131,3 +131,12 @@ _Date: 2026-03-19 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[architecture]** Business-logic regexes copied across modules drift silently; extract to one shared constant.
 - **[security]** Prompt templates must prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
 - **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load.
+
+## Run: run-20260320_021817-80b2f39048
+_Date: 2026-03-20 | Feature: add_a_colonyos_pr_respond_pr_number_command_and_integrate_wi_
+
+- **[testing]** LLM-generated code must pass through a Verify phase before deployment; stochastic outputs need structural validation.
+- **[architecture]** Capture git HEAD SHA before branch restore operations; post-finally captures return the wrong commit reference.
+- **[architecture]** Finally blocks performing git checkout must include stash-before-checkout to prevent stranded branches on crash.
+- **[code-quality]** Reusing enum values for semantically different operations (e.g., REVIEW for scans) confuses audit trails.
+- **[architecture]** Parsers extracting structured data from LLM artifacts (e.g., PR URLs) need fallback strategies for format drift.

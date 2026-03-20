@@ -1,5 +1,32 @@
 # Changelog
 
+## 20260320_025400 — GitHub PR Comment Response Integration (`colonyos pr-respond`)
+
+Adds a `colonyos pr-respond <pr-number>` CLI command and `colonyos watch --github` mode that
+automatically addresses GitHub PR review comments. When reviewers comment on ColonyOS-generated
+PRs, the system fetches unaddressed comments, runs a fix agent to address them, pushes commits,
+and posts threaded replies summarizing the changes. Includes allowlist-based author validation,
+per-PR rate limiting, bot comment filtering, and full integration with existing `colonyos stats`
+and `colonyos show` observability.
+
+**Created:**
+- `src/colonyos/pr_comments.py` — PR comment fetching, parsing, grouping, reply posting, response marker handling
+- `src/colonyos/instructions/pr_comment_fix.md` — Instruction template for PR comment fix agent
+- `tests/test_pr_comments.py` — Comprehensive unit tests for comment processing (387 lines)
+- `tests/test_pr_respond_cli.py` — CLI integration tests for `pr-respond` command
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `pr-respond` command, extended `watch` with `--github` flag
+- `src/colonyos/config.py` — Added `GitHubWatchConfig` dataclass and parsing logic
+- `src/colonyos/models.py` — Added `source_type: "pr_comment"` to QueueItem schema
+- `src/colonyos/orchestrator.py` — Added `run_pr_comment_fix()` wrapper around `run_thread_fix()`
+- `README.md` — Updated CLI reference with `pr-respond` command and GitHub watch mode
+- `tests/test_config.py` — Tests for GitHubWatchConfig parsing and validation
+- `tests/test_models.py` — Tests for PR comment source type
+
+**PRD:** `cOS_prds/20260320_021817_prd_add_a_colonyos_pr_respond_pr_number_command_and_integrate_with_colonyos_watch_to.md`
+**Tasks:** `cOS_tasks/20260320_021817_tasks_add_a_colonyos_pr_respond_pr_number_command_and_integrate_with_colonyos_watch_to.md`
+
 ## 20260319_152207 — Slack Thread Fix Requests — Conversational PR Iteration
 
 Enables conversational iteration on PRs via Slack threads. When ColonyOS completes a pipeline
