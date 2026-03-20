@@ -57,6 +57,7 @@ class PhaseUI:
 
     Each phase gets its own instance.  For parallel reviews, each
     reviewer gets an instance with a ``prefix`` like ``"[Linus] "``.
+    For parallel tasks, each task gets a ``task_id`` like ``"3.0"``.
     """
 
     def __init__(
@@ -64,9 +65,15 @@ class PhaseUI:
         *,
         verbose: bool = False,
         prefix: str = "",
+        task_id: str | None = None,
     ) -> None:
         self._verbose = verbose
-        self._prefix = prefix
+        self._task_id = task_id
+        # If task_id is provided, generate a colored prefix
+        if task_id is not None:
+            self._prefix = make_task_prefix(task_id)
+        else:
+            self._prefix = prefix
         self._tool_name: str | None = None
         self._tool_json: str = ""
         self._tool_displayed: bool = False
@@ -235,6 +242,58 @@ def print_reviewer_legend(reviewers: list[tuple[int, str]]) -> None:
         color = _reviewer_color(i)
         console.print(
             f"  [{color}]R{i + 1}[/{color}] {role}",
+            highlight=False,
+        )
+    console.print()
+
+
+# -- parallel task helpers -------------------------------------------------
+
+
+def _task_color(index: int) -> str:
+    """Return a color for the given task index."""
+    return REVIEWER_COLORS[index % len(REVIEWER_COLORS)]
+
+
+def _parse_task_index(task_id: str) -> int:
+    """Parse the numeric part of a task ID for color assignment.
+
+    Examples:
+        "1.0" -> 0
+        "3.0" -> 2
+        "10.0" -> 9
+    """
+    try:
+        # Extract the major version number (before the dot)
+        major = int(task_id.split(".")[0])
+        return major - 1  # 0-indexed for color rotation
+    except (ValueError, IndexError):
+        return 0
+
+
+def make_task_prefix(task_id: str) -> str:
+    """Build a colored prefix like '[cyan][3.0][/cyan] ' for a task ID."""
+    index = _parse_task_index(task_id)
+    color = _task_color(index)
+    return f"[{color}][{task_id}][/{color}] "
+
+
+def print_task_legend(tasks: list[tuple[str, str]]) -> None:
+    """Print legend mapping task IDs -> task descriptions before parallel execution.
+
+    Args:
+        tasks: List of (task_id, description) tuples.
+    """
+    if not tasks:
+        return
+    console.print()
+    for task_id, description in tasks:
+        index = _parse_task_index(task_id)
+        color = _task_color(index)
+        # Truncate long descriptions
+        desc = description[:60] + "…" if len(description) > 60 else description
+        console.print(
+            f"  [{color}][{task_id}][/{color}] {desc}",
             highlight=False,
         )
     console.print()

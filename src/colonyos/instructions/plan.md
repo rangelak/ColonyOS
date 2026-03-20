@@ -51,6 +51,7 @@ Break the PRD into implementation tasks:
 2. Break each into actionable sub-tasks
 3. For every code-change task, the first sub-task must be writing/updating tests
 4. List all relevant files (existing files to modify and new files to create)
+5. **Annotate dependencies**: For each parent task, add a `depends_on:` annotation listing task IDs that must complete before this task can start
 
 Save the task file to: `{tasks_dir}/{task_filename}`
 
@@ -64,10 +65,29 @@ Save the task file to: `{tasks_dir}/{task_filename}`
 
 ## Tasks
 
-- [ ] 1.0 Parent Task Title
+- [ ] 1.0 Parent Task Title (foundation layer, no dependencies)
+  depends_on: []
   - [ ] 1.1 Write/update tests for ...
   - [ ] 1.2 Implement ...
-- [ ] 2.0 Parent Task Title
+- [ ] 2.0 Parent Task Title (depends on 1.0 completing first)
+  depends_on: [1.0]
   - [ ] 2.1 Write/update tests for ...
   - [ ] 2.2 Implement ...
+- [ ] 3.0 Parent Task Title (can run in parallel with 1.0 and 2.0)
+  depends_on: []
+  - [ ] 3.1 Write/update tests for ...
+  - [ ] 3.2 Implement ...
+- [ ] 4.0 Parent Task Title (depends on multiple tasks)
+  depends_on: [2.0, 3.0]
+  - [ ] 4.1 Write/update tests for ...
+  - [ ] 4.2 Implement ...
 ```
+
+### Dependency Guidelines
+
+When annotating dependencies:
+- **Independent tasks** (e.g., new modules, config changes) should have `depends_on: []`
+- **Dependent tasks** should list IDs of tasks whose code they build upon
+- **Integration tasks** typically depend on multiple other tasks
+- Tasks touching the same files should generally have dependencies to avoid conflicts
+- Maximize parallelism by keeping `depends_on` lists minimal

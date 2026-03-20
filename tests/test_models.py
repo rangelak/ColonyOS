@@ -499,3 +499,189 @@ class TestRunLogPrUrl:
         )
         log.mark_finished()
         assert log.pr_url == "https://github.com/org/repo/pull/99"
+
+
+class TestPhaseResultTaskId:
+    """Tests for task_id in PhaseResult.artifacts (Task 4.1)."""
+
+    def test_task_id_in_artifacts(self) -> None:
+        result = PhaseResult(
+            phase=Phase.IMPLEMENT,
+            success=True,
+            cost_usd=0.85,
+            artifacts={"task_id": "3.0", "result": "Completed rate limiting"},
+        )
+        assert result.artifacts["task_id"] == "3.0"
+        assert result.artifacts["result"] == "Completed rate limiting"
+
+    def test_artifacts_default_empty(self) -> None:
+        result = PhaseResult(phase=Phase.IMPLEMENT, success=True)
+        assert result.artifacts == {}
+
+    def test_backward_compat_no_task_id(self) -> None:
+        """Old PhaseResults without task_id in artifacts load fine."""
+        result = PhaseResult(
+            phase=Phase.IMPLEMENT,
+            success=True,
+            artifacts={"pr_url": "https://github.com/..."},
+        )
+        assert "task_id" not in result.artifacts
+        assert result.artifacts["pr_url"] == "https://github.com/..."
+
+
+class TestRunLogGetTaskResults:
+    """Tests for RunLog.get_task_results() helper method (Task 4.3)."""
+
+    def test_get_task_results_single_match(self) -> None:
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.COMPLETED,
+            phases=[
+                PhaseResult(
+                    phase=Phase.IMPLEMENT,
+                    success=True,
+                    artifacts={"task_id": "1.0"},
+                ),
+                PhaseResult(
+                    phase=Phase.IMPLEMENT,
+                    success=True,
+                    artifacts={"task_id": "2.0"},
+                ),
+            ],
+        )
+        results = log.get_task_results("1.0")
+        assert len(results) == 1
+        assert results[0].artifacts["task_id"] == "1.0"
+
+    def test_get_task_results_multiple_matches(self) -> None:
+        """A task may have multiple phase results (e.g., retry)."""
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.COMPLETED,
+            phases=[
+                PhaseResult(
+                    phase=Phase.IMPLEMENT,
+                    success=False,
+                    artifacts={"task_id": "1.0"},
+                ),
+                PhaseResult(
+                    phase=Phase.IMPLEMENT,
+                    success=True,
+                    artifacts={"task_id": "1.0"},
+                ),
+            ],
+        )
+        results = log.get_task_results("1.0")
+        assert len(results) == 2
+
+    def test_get_task_results_no_match(self) -> None:
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.COMPLETED,
+            phases=[
+                PhaseResult(
+                    phase=Phase.IMPLEMENT,
+                    success=True,
+                    artifacts={"task_id": "1.0"},
+                ),
+            ],
+        )
+        results = log.get_task_results("nonexistent")
+        assert results == []
+
+    def test_get_task_results_empty_phases(self) -> None:
+        log = RunLog(run_id="r-1", prompt="test", status=RunStatus.RUNNING)
+        results = log.get_task_results("1.0")
+        assert results == []
+
+
+class TestRunLogParallelMetadata:
+    """Tests for parallel implement metadata (Task 4.4)."""
+
+    def test_parallel_metadata_fields(self) -> None:
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.COMPLETED,
+            parallel_tasks=4,
+            wall_time_ms=120000,
+            agent_time_ms=360000,
+        )
+        assert log.parallel_tasks == 4
+        assert log.wall_time_ms == 120000
+        assert log.agent_time_ms == 360000
+
+    def test_parallel_metadata_defaults(self) -> None:
+        log = RunLog(run_id="r-1", prompt="test", status=RunStatus.RUNNING)
+        assert log.parallel_tasks is None
+        assert log.wall_time_ms is None
+        assert log.agent_time_ms is None
+
+    def test_parallelism_ratio(self) -> None:
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.COMPLETED,
+            wall_time_ms=100000,
+            agent_time_ms=300000,
+        )
+        # Ratio is agent_time / wall_time = 3.0x
+        ratio = log.get_parallelism_ratio()
+        assert ratio == 3.0
+
+    def test_parallelism_ratio_zero_wall_time(self) -> None:
+        log = RunLog(run_id="r-1", prompt="test", status=RunStatus.RUNNING)
+        ratio = log.get_parallelism_ratio()
+        assert ratio == 1.0  # Default to 1.0 for sequential
+
+    def test_mark_finished_preserves_parallel_metadata(self) -> None:
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.RUNNING,
+            parallel_tasks=3,
+            wall_time_ms=60000,
+            agent_time_ms=150000,
+        )
+        log.mark_finished()
+        assert log.parallel_tasks == 3
+        assert log.wall_time_ms == 60000
+        assert log.agent_time_ms == 150000
+
+
+class TestPhaseConflictResolve:
+    """Tests for Phase.CONFLICT_RESOLVE enum value (Task 7.5 prereq)."""
+
+    def test_conflict_resolve_enum_value(self) -> None:
+        assert Phase.CONFLICT_RESOLVE.value == "conflict_resolve"
+
+    def test_conflict_resolve_serialization_roundtrip(self) -> None:
+        assert Phase("conflict_resolve") == Phase.CONFLICT_RESOLVE
+
+    def test_conflict_resolve_phase_result(self) -> None:
+        result = PhaseResult(
+            phase=Phase.CONFLICT_RESOLVE,
+            success=True,
+            cost_usd=0.25,
+        )
+        assert result.phase == Phase.CONFLICT_RESOLVE
+
+
+class TestTaskStatus:
+    """Tests for TaskStatus enum (Task 10.4)."""
+
+    def test_task_status_values(self) -> None:
+        from colonyos.models import TaskStatus
+        assert TaskStatus.PENDING.value == "pending"
+        assert TaskStatus.RUNNING.value == "running"
+        assert TaskStatus.COMPLETED.value == "completed"
+        assert TaskStatus.FAILED.value == "failed"
+        assert TaskStatus.BLOCKED.value == "blocked"
+
+    def test_task_status_serialization(self) -> None:
+        from colonyos.models import TaskStatus
+        assert TaskStatus("pending") == TaskStatus.PENDING
+        assert TaskStatus("blocked") == TaskStatus.BLOCKED
