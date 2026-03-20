@@ -1848,17 +1848,16 @@ def _watch_github_prs(
     import time
 
     from colonyos.ci import validate_gh_auth
-    from colonyos.orchestrator import run_pr_comment_fix
     from colonyos.pr_comments import (
         fetch_pr_comments,
         fetch_pr_metadata,
         filter_unaddressed_comments,
-        format_pr_comment_as_prompt,
-        format_failure_reply,
-        format_success_reply,
+        get_head_sha,
         group_comments,
         is_allowed_commenter,
-        post_comment_reply,
+        load_pr_respond_state,
+        process_comment_group,
+        save_pr_respond_state,
         validate_colonyos_branch,
     )
 
@@ -1964,52 +1963,50 @@ def _watch_github_prs(
                     # Group and process comments
                     groups = group_comments(new_comments)
 
+                    # Load rate limiting state
+                    pr_respond_state = load_pr_respond_state(repo_root)
+                    max_per_hour = config.github_watch.max_responses_per_pr_per_hour
+
+                    # Get expected HEAD SHA for force-push defense
+                    expected_head_sha = get_head_sha(repo_root)
+
                     for group in groups:
+                        # Check rate limit before processing
+                        if not pr_respond_state.check_rate_limit(pr_number, max_per_hour):
+                            logger.info(
+                                "Rate limit reached for PR %d, skipping group %s",
+                                pr_number, group.path
+                            )
+                            continue
+
                         # Mark as processed before running to avoid re-trigger
                         for cid in group.comment_ids:
                             processed_comment_ids.add(cid)
 
-                        comment_text = format_pr_comment_as_prompt(
-                            group, pr_description=pr_description
+                        # Process the comment group using shared helper
+                        result = process_comment_group(
+                            group=group,
+                            pr_number=pr_number,
+                            branch_name=branch_name,
+                            pr_url=pr_url,
+                            pr_description=pr_description,
+                            repo_root=repo_root,
+                            config=config,
+                            verbose=verbose,
+                            quiet=quiet,
+                            expected_head_sha=expected_head_sha,
                         )
 
-                        try:
-                            log = run_pr_comment_fix(
-                                pr_number=pr_number,
-                                branch_name=branch_name,
-                                file_path=group.path,
-                                line_range=f"{group.start_line}-{group.end_line}",
-                                comment_text=comment_text,
-                                pr_url=pr_url,
-                                pr_description=pr_description,
-                                repo_root=repo_root,
-                                config=config,
-                                verbose=verbose,
-                                quiet=quiet,
-                            )
-                            total_cost += log.total_cost_usd
+                        total_cost += result.cost_usd
 
-                            # Post reply
-                            if log.status == RunStatus.COMPLETED:
-                                sha_result = subprocess.run(
-                                    ["git", "rev-parse", "--short", "HEAD"],
-                                    capture_output=True, text=True, timeout=10, cwd=repo_root,
-                                )
-                                commit_sha = sha_result.stdout.strip() if sha_result.returncode == 0 else "unknown"
-                                reply_body = format_success_reply(commit_sha, f"Addressed in {group.path}")
-                            else:
-                                reply_body = format_failure_reply(log.run_id)
-
-                            for cid in group.comment_ids:
-                                post_comment_reply(
-                                    cid,
-                                    reply_body,
-                                    repo_root,
-                                    marker=config.github_watch.comment_response_marker,
-                                )
-
-                        except Exception as exc:
-                            logger.error("Error processing PR %d comment group: %s", pr_number, exc)
+                        if result.success:
+                            # Update rate limit counter
+                            pr_respond_state.increment_count(pr_number)
+                            pr_respond_state.aggregate_cost_usd += result.cost_usd
+                            save_pr_respond_state(repo_root, pr_respond_state)
+                            # Update expected HEAD SHA for subsequent groups
+                            if result.commit_sha:
+                                expected_head_sha = result.commit_sha
 
                 except Exception as exc:
                     logger.warning("Error checking PR %d: %s", pr_number, exc)
@@ -3380,10 +3377,14 @@ def ci_fix(
 @click.argument("pr_ref")
 @click.option("-v", "--verbose", is_flag=True, help="Stream agent text output.")
 @click.option("-q", "--quiet", is_flag=True, help="Minimal output.")
+@click.option("--dry-run", is_flag=True, help="Display what would be addressed without making changes.")
+@click.option("--comment-id", type=int, default=None, help="Address only a specific review comment by ID.")
 def pr_respond(
     pr_ref: str,
     verbose: bool,
     quiet: bool,
+    dry_run: bool,
+    comment_id: int | None,
 ) -> None:
     """Respond to unaddressed PR review comments.
 
@@ -3395,18 +3396,16 @@ def pr_respond(
     via github_watch.allowed_comment_authors or org membership).
     """
     from colonyos.ci import parse_pr_ref, validate_gh_auth
-    from colonyos.orchestrator import run_pr_comment_fix
     from colonyos.pr_comments import (
-        CommentGroup,
         fetch_pr_comments,
         fetch_pr_metadata,
         filter_unaddressed_comments,
-        format_pr_comment_as_prompt,
-        format_failure_reply,
-        format_success_reply,
+        get_head_sha,
         group_comments,
         is_allowed_commenter,
-        post_comment_reply,
+        load_pr_respond_state,
+        process_comment_group,
+        save_pr_respond_state,
         validate_colonyos_branch,
     )
 
@@ -3483,6 +3482,17 @@ def pr_respond(
         click.echo(f"[colonyos] All comments on PR #{pr_number} have been addressed.")
         return
 
+    # Filter to specific comment if --comment-id provided
+    if comment_id is not None:
+        unaddressed = [c for c in unaddressed if c.id == comment_id]
+        if not unaddressed:
+            click.echo(
+                f"[colonyos] Comment {comment_id} not found, already addressed, "
+                f"or not from an allowed user.",
+                err=True,
+            )
+            sys.exit(1)
+
     if not quiet:
         click.echo(
             f"[colonyos] Found {len(unaddressed)} unaddressed comment(s) on PR #{pr_number}"
@@ -3491,8 +3501,52 @@ def pr_respond(
     # Group comments for batch processing
     groups = group_comments(unaddressed)
 
+    # Load rate limiting state
+    pr_respond_state = load_pr_respond_state(repo_root)
+
+    # Check per-PR rate limit
+    max_per_hour = config.github_watch.max_responses_per_pr_per_hour
+    current_count = pr_respond_state.get_hourly_count(pr_number)
+    if current_count >= max_per_hour:
+        click.echo(
+            f"[colonyos] Rate limit reached: PR #{pr_number} has received "
+            f"{current_count}/{max_per_hour} response(s) this hour. "
+            f"Try again later or increase github_watch.max_responses_per_pr_per_hour.",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Calculate how many groups we can process within rate limit
+    remaining_capacity = max_per_hour - current_count
+    if len(groups) > remaining_capacity:
+        if not quiet:
+            click.echo(
+                f"[colonyos] Note: {len(groups)} comment group(s) found but only "
+                f"{remaining_capacity} response(s) remaining in rate limit this hour."
+            )
+        groups = groups[:remaining_capacity]
+
+    # Dry-run mode: just show what would be done
+    if dry_run:
+        click.echo(f"[colonyos] DRY-RUN: Would address {len(groups)} comment group(s):")
+        for i, group in enumerate(groups, 1):
+            click.echo(
+                f"  {i}. {group.path}:{group.start_line}-{group.end_line} "
+                f"({len(group.comment_ids)} comment(s))"
+            )
+            for comment in group.comments:
+                # Truncate body for display
+                body_preview = comment.body[:80].replace("\n", " ")
+                if len(comment.body) > 80:
+                    body_preview += "..."
+                click.echo(f"     - @{comment.user_login}: {body_preview}")
+        return
+
     success_count = 0
     failure_count = 0
+
+    # Get expected HEAD SHA for force-push defense (FR-39)
+    expected_head_sha = get_head_sha(repo_root)
 
     for i, group in enumerate(groups, 1):
         if not quiet:
@@ -3501,59 +3555,33 @@ def pr_respond(
                 f"{group.path}:{group.start_line}-{group.end_line}"
             )
 
-        # Build prompt from comment group
-        comment_text = format_pr_comment_as_prompt(group, pr_description=pr_description)
+        # Process the comment group using shared helper
+        result = process_comment_group(
+            group=group,
+            pr_number=pr_number,
+            branch_name=branch_name,
+            pr_url=pr_url,
+            pr_description=pr_description,
+            repo_root=repo_root,
+            config=config,
+            verbose=verbose,
+            quiet=quiet,
+            expected_head_sha=expected_head_sha,
+        )
 
-        # Run the fix pipeline
-        try:
-            log = run_pr_comment_fix(
-                pr_number=pr_number,
-                branch_name=branch_name,
-                file_path=group.path,
-                line_range=f"{group.start_line}-{group.end_line}",
-                comment_text=comment_text,
-                pr_url=pr_url,
-                pr_description=pr_description,
-                repo_root=repo_root,
-                config=config,
-                verbose=verbose,
-                quiet=quiet,
-            )
-        except Exception as exc:
-            click.echo(f"[colonyos] Error processing group: {exc}", err=True)
-            failure_count += 1
-            continue
-
-        # Post reply comments
-        if log.status == RunStatus.COMPLETED:
-            # Get the commit SHA from git
-            sha_result = subprocess.run(
-                ["git", "rev-parse", "--short", "HEAD"],
-                capture_output=True, text=True, timeout=10, cwd=repo_root,
-            )
-            commit_sha = sha_result.stdout.strip() if sha_result.returncode == 0 else "unknown"
-
-            summary = f"Addressed feedback in {group.path}"
-            reply_body = format_success_reply(commit_sha, summary)
-
-            for comment_id in group.comment_ids:
-                post_comment_reply(
-                    comment_id,
-                    reply_body,
-                    repo_root,
-                    marker=config.github_watch.comment_response_marker,
-                )
+        if result.success:
             success_count += 1
+            # Update rate limit counter and persist
+            pr_respond_state.increment_count(pr_number)
+            pr_respond_state.aggregate_cost_usd += result.cost_usd
+            save_pr_respond_state(repo_root, pr_respond_state)
+            # Update expected HEAD SHA for subsequent groups
+            if result.commit_sha:
+                expected_head_sha = result.commit_sha
         else:
-            reply_body = format_failure_reply(log.run_id)
-            for comment_id in group.comment_ids:
-                post_comment_reply(
-                    comment_id,
-                    reply_body,
-                    repo_root,
-                    marker=config.github_watch.comment_response_marker,
-                )
             failure_count += 1
+            if not quiet and result.run_id:
+                click.echo(f"[colonyos] Fix failed. See run: {result.run_id}", err=True)
 
     # Final summary
     click.echo(

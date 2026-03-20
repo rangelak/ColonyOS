@@ -11,13 +11,17 @@ import pytest
 from colonyos.config import GitHubWatchConfig
 from colonyos.pr_comments import (
     CommentGroup,
+    PRRespondState,
     ReviewComment,
     fetch_pr_comments,
     filter_unaddressed_comments,
     format_pr_comment_as_prompt,
     group_comments,
     is_allowed_commenter,
+    load_pr_respond_state,
     post_comment_reply,
+    save_pr_respond_state,
+    validate_file_path,
 )
 
 
@@ -299,10 +303,13 @@ class TestPostCommentReply:
             )
 
         assert result is True
-        # Verify the marker was prepended
+        # Verify the marker was prepended in the -F body argument
         call_args = mock_run.call_args
-        stdin_data = call_args.kwargs.get("input", "")
-        assert "<!-- colonyos-response -->" in stdin_data
+        cmd = call_args.args[0]
+        # The -F flag passes the body; find the body=... argument
+        body_args = [arg for arg in cmd if arg.startswith("body=")]
+        assert len(body_args) == 1
+        assert "<!-- colonyos-response -->" in body_args[0]
 
     def test_failed_reply(self, tmp_path: Path):
         with patch("subprocess.run") as mock_run:
@@ -378,3 +385,160 @@ class TestFormatPRCommentAsPrompt:
         # XML tags should be stripped
         assert "<script>" not in prompt
         assert "Fix this" in prompt
+
+
+class TestValidateFilePath:
+    """Tests for file path validation (path traversal defense)."""
+
+    def test_valid_relative_path(self):
+        assert validate_file_path("src/main.py") is True
+        assert validate_file_path("test/test_main.py") is True
+        assert validate_file_path("README.md") is True
+
+    def test_rejects_absolute_paths(self):
+        assert validate_file_path("/etc/passwd") is False
+        assert validate_file_path("/home/user/file.txt") is False
+
+    def test_rejects_windows_absolute_paths(self):
+        assert validate_file_path("C:\\Windows\\System32") is False
+
+    def test_rejects_path_traversal(self):
+        assert validate_file_path("../secrets.txt") is False
+        assert validate_file_path("foo/../../../etc/passwd") is False
+        assert validate_file_path("..") is False
+
+    def test_rejects_home_directory_references(self):
+        assert validate_file_path("~/secret.txt") is False
+        assert validate_file_path("foo/~/bar") is False
+
+    def test_rejects_empty_path(self):
+        assert validate_file_path("") is False
+
+    def test_validates_against_repo_root(self, tmp_path: Path):
+        # Create a test file
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").touch()
+
+        # Valid path within repo
+        assert validate_file_path("src/main.py", tmp_path) is True
+
+        # Path traversal should fail even with repo root check
+        assert validate_file_path("../outside.txt", tmp_path) is False
+
+
+class TestPRRespondState:
+    """Tests for PR respond rate limiting state."""
+
+    def test_initial_state(self):
+        state = PRRespondState()
+        assert state.get_hourly_count(42) == 0
+        assert state.aggregate_cost_usd == 0.0
+
+    def test_increment_count(self):
+        state = PRRespondState()
+        state.increment_count(42)
+        assert state.get_hourly_count(42) == 1
+
+        state.increment_count(42)
+        assert state.get_hourly_count(42) == 2
+
+    def test_check_rate_limit(self):
+        state = PRRespondState()
+        assert state.check_rate_limit(42, max_per_hour=3) is True
+
+        state.increment_count(42)
+        state.increment_count(42)
+        state.increment_count(42)
+
+        # Should be at limit now
+        assert state.check_rate_limit(42, max_per_hour=3) is False
+
+    def test_separate_pr_counts(self):
+        state = PRRespondState()
+        state.increment_count(42)
+        state.increment_count(42)
+        state.increment_count(43)
+
+        assert state.get_hourly_count(42) == 2
+        assert state.get_hourly_count(43) == 1
+
+    def test_serialization(self):
+        state = PRRespondState()
+        state.increment_count(42)
+        state.aggregate_cost_usd = 1.5
+
+        data = state.to_dict()
+        restored = PRRespondState.from_dict(data)
+
+        assert restored.get_hourly_count(42) == 1
+        assert restored.aggregate_cost_usd == 1.5
+
+    def test_persistence(self, tmp_path: Path):
+        # Create runs directory
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        state = PRRespondState()
+        state.increment_count(42)
+        state.aggregate_cost_usd = 2.5
+
+        save_pr_respond_state(tmp_path, state)
+
+        loaded = load_pr_respond_state(tmp_path)
+        assert loaded.get_hourly_count(42) == 1
+        assert loaded.aggregate_cost_usd == 2.5
+
+    def test_load_missing_file_returns_new_state(self, tmp_path: Path):
+        # Create runs directory but no state file
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        state = load_pr_respond_state(tmp_path)
+        assert state.get_hourly_count(42) == 0
+
+
+class TestFetchPRCommentsPathValidation:
+    """Tests for path validation in fetch_pr_comments."""
+
+    def test_skips_comments_with_invalid_paths(self, tmp_path: Path):
+        """Test that comments with invalid paths are filtered out."""
+        comments_json = json.dumps([
+            {
+                "id": 1,
+                "body": "Valid path comment",
+                "path": "src/main.py",
+                "line": 10,
+                "user": {"login": "user1", "type": "User"},
+                "created_at": "2026-03-15T10:00:00Z",
+            },
+            {
+                "id": 2,
+                "body": "Path traversal attempt",
+                "path": "../../../etc/passwd",
+                "line": 1,
+                "user": {"login": "attacker", "type": "User"},
+                "created_at": "2026-03-15T10:01:00Z",
+            },
+            {
+                "id": 3,
+                "body": "Absolute path attempt",
+                "path": "/etc/shadow",
+                "line": 1,
+                "user": {"login": "attacker", "type": "User"},
+                "created_at": "2026-03-15T10:02:00Z",
+            },
+        ])
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=comments_json,
+                stderr="",
+            )
+
+            comments = fetch_pr_comments(42, tmp_path, skip_bot_comments=False)
+
+            # Only the valid path comment should be returned
+            assert len(comments) == 1
+            assert comments[0].id == 1
+            assert comments[0].path == "src/main.py"

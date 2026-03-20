@@ -31,6 +31,59 @@ logger = logging.getLogger(__name__)
 DEFAULT_ADJACENCY_THRESHOLD = 10
 
 
+def validate_file_path(path: str, repo_root: Path | None = None) -> bool:
+    """Validate a file path is safe (no path traversal or absolute paths).
+
+    Parameters
+    ----------
+    path:
+        The file path to validate.
+    repo_root:
+        Optional repository root to validate path is contained within.
+
+    Returns
+    -------
+    bool
+        True if the path is safe, False otherwise.
+    """
+    if not path:
+        return False
+
+    # Reject absolute paths
+    if path.startswith("/") or (len(path) > 1 and path[1] == ":"):
+        logger.warning("Rejected absolute path in comment: %s", path[:100])
+        return False
+
+    # Reject path traversal sequences
+    if ".." in path:
+        logger.warning("Rejected path traversal in comment: %s", path[:100])
+        return False
+
+    # Reject suspicious patterns
+    if path.startswith("~") or "~/" in path:
+        logger.warning("Rejected home directory path in comment: %s", path[:100])
+        return False
+
+    # If repo_root provided, verify path would resolve within it
+    if repo_root is not None:
+        try:
+            resolved = (repo_root / path).resolve()
+            repo_resolved = repo_root.resolve()
+            # Ensure the resolved path starts with the repo root
+            if not str(resolved).startswith(str(repo_resolved)):
+                logger.warning(
+                    "Path escapes repository root: %s -> %s",
+                    path[:100],
+                    str(resolved)[:100],
+                )
+                return False
+        except (OSError, ValueError) as exc:
+            logger.warning("Path validation error for %s: %s", path[:100], exc)
+            return False
+
+    return True
+
+
 @dataclass
 class ReviewComment:
     """Represents a single GitHub PR review comment."""
@@ -141,6 +194,14 @@ def fetch_pr_comments(
         )
         if skip_bot_comments and comment.is_bot:
             logger.debug("Skipping bot comment %d from %s", comment.id, comment.user_login)
+            continue
+        # Validate file path to prevent path traversal
+        if not validate_file_path(comment.path, repo_root):
+            logger.warning(
+                "Skipping comment %d with invalid path: %s",
+                comment.id,
+                comment.path[:100] if comment.path else "(empty)",
+            )
             continue
         comments.append(comment)
 
@@ -359,7 +420,6 @@ def post_comment_reply(
             ],
             capture_output=True,
             text=True,
-            input=full_body,
             timeout=15,
             cwd=repo_root,
         )
@@ -548,3 +608,250 @@ def validate_colonyos_branch(
         True if the branch matches the prefix.
     """
     return branch_name.startswith(branch_prefix)
+
+
+# ---------------------------------------------------------------------------
+# Per-PR rate limiting state
+# ---------------------------------------------------------------------------
+
+_MAX_HOURLY_KEYS = 168  # One week of hourly keys
+
+
+@dataclass
+class PRRespondState:
+    """Persistent state for per-PR rate limiting."""
+
+    pr_response_counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    """Maps PR number to {hour_key: response_count}."""
+
+    aggregate_cost_usd: float = 0.0
+    last_updated_iso: str = field(
+        default_factory=lambda: ""
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize state for persistence."""
+        return {
+            "pr_response_counts": self.pr_response_counts,
+            "aggregate_cost_usd": self.aggregate_cost_usd,
+            "last_updated_iso": self.last_updated_iso,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PRRespondState":
+        """Deserialize state from persistence."""
+        return cls(
+            pr_response_counts=data.get("pr_response_counts", {}),
+            aggregate_cost_usd=data.get("aggregate_cost_usd", 0.0),
+            last_updated_iso=data.get("last_updated_iso", ""),
+        )
+
+    def get_hourly_count(self, pr_number: int) -> int:
+        """Get the response count for a PR in the current hour."""
+        from datetime import datetime, timezone
+        current_hour = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+        pr_key = str(pr_number)
+        return self.pr_response_counts.get(pr_key, {}).get(current_hour, 0)
+
+    def increment_count(self, pr_number: int) -> None:
+        """Increment the response count for a PR in the current hour."""
+        from datetime import datetime, timezone
+        current_hour = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+        pr_key = str(pr_number)
+
+        if pr_key not in self.pr_response_counts:
+            self.pr_response_counts[pr_key] = {}
+
+        self.pr_response_counts[pr_key][current_hour] = (
+            self.pr_response_counts[pr_key].get(current_hour, 0) + 1
+        )
+        self.last_updated_iso = datetime.now(timezone.utc).isoformat()
+
+        # Prune old hourly keys to prevent unbounded growth
+        self._prune_old_hourly_counts()
+
+    def _prune_old_hourly_counts(self) -> None:
+        """Remove hourly count keys older than _MAX_HOURLY_KEYS."""
+        for pr_key in list(self.pr_response_counts.keys()):
+            counts = self.pr_response_counts[pr_key]
+            if len(counts) > _MAX_HOURLY_KEYS:
+                # Sort keys and keep only the newest
+                sorted_keys = sorted(counts.keys(), reverse=True)
+                self.pr_response_counts[pr_key] = {
+                    k: counts[k] for k in sorted_keys[:_MAX_HOURLY_KEYS]
+                }
+            # Remove empty PR entries
+            if not self.pr_response_counts[pr_key]:
+                del self.pr_response_counts[pr_key]
+
+    def check_rate_limit(self, pr_number: int, max_per_hour: int) -> bool:
+        """Return True if under the rate limit for this PR."""
+        return self.get_hourly_count(pr_number) < max_per_hour
+
+
+def load_pr_respond_state(repo_root: Path) -> PRRespondState:
+    """Load PR respond state from disk, or create new state if not found."""
+    from colonyos.config import runs_dir_path
+
+    state_path = runs_dir_path(repo_root) / "pr_respond_state.json"
+    if not state_path.exists():
+        return PRRespondState()
+
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        return PRRespondState.from_dict(data)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to load PR respond state: %s", exc)
+        return PRRespondState()
+
+
+def save_pr_respond_state(repo_root: Path, state: PRRespondState) -> None:
+    """Save PR respond state to disk."""
+    from colonyos.config import runs_dir_path
+
+    state_path = runs_dir_path(repo_root) / "pr_respond_state.json"
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(state.to_dict(), indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning("Failed to save PR respond state: %s", exc)
+
+
+def get_head_sha(repo_root: Path) -> str | None:
+    """Get the current HEAD SHA of the repository.
+
+    Parameters
+    ----------
+    repo_root:
+        Repository root directory.
+
+    Returns
+    -------
+    str | None
+        The short HEAD SHA, or None if unable to determine.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=repo_root,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
+@dataclass
+class ProcessGroupResult:
+    """Result of processing a comment group."""
+
+    success: bool
+    run_id: str | None
+    cost_usd: float
+    commit_sha: str | None
+
+
+def process_comment_group(
+    *,
+    group: CommentGroup,
+    pr_number: int,
+    branch_name: str,
+    pr_url: str,
+    pr_description: str,
+    repo_root: Path,
+    config: Any,  # ColonyConfig — use Any to avoid circular import
+    verbose: bool = False,
+    quiet: bool = False,
+    expected_head_sha: str | None = None,
+) -> ProcessGroupResult:
+    """Process a single comment group through the fix pipeline and post replies.
+
+    This is the shared implementation used by both `pr-respond` CLI command
+    and `watch --github` mode.
+
+    Parameters
+    ----------
+    group:
+        The comment group to process.
+    pr_number:
+        The PR number.
+    branch_name:
+        The branch name.
+    pr_url:
+        The PR URL.
+    pr_description:
+        The PR description text.
+    repo_root:
+        Repository root directory.
+    config:
+        ColonyConfig instance.
+    verbose:
+        Whether to stream agent output.
+    quiet:
+        Whether to suppress output.
+    expected_head_sha:
+        Optional expected HEAD SHA for force-push defense.
+
+    Returns
+    -------
+    ProcessGroupResult
+        Result with success status, run ID, cost, and commit SHA.
+    """
+    from colonyos.orchestrator import run_pr_comment_fix
+
+    comment_text = format_pr_comment_as_prompt(group, pr_description=pr_description)
+
+    try:
+        log = run_pr_comment_fix(
+            pr_number=pr_number,
+            branch_name=branch_name,
+            file_path=group.path,
+            line_range=f"{group.start_line}-{group.end_line}",
+            comment_text=comment_text,
+            pr_url=pr_url,
+            pr_description=pr_description,
+            repo_root=repo_root,
+            config=config,
+            verbose=verbose,
+            quiet=quiet,
+            expected_head_sha=expected_head_sha,
+        )
+    except Exception as exc:
+        logger.error("Error processing comment group: %s", exc)
+        return ProcessGroupResult(
+            success=False,
+            run_id=None,
+            cost_usd=0.0,
+            commit_sha=None,
+        )
+
+    # Determine success and get commit SHA
+    from colonyos.models import RunStatus
+    success = log.status == RunStatus.COMPLETED
+    commit_sha = get_head_sha(repo_root) if success else None
+
+    # Build and post reply
+    if success:
+        summary = f"Addressed feedback in {group.path}"
+        reply_body = format_success_reply(commit_sha or "unknown", summary)
+    else:
+        reply_body = format_failure_reply(log.run_id)
+
+    # Post replies to all comments in the group
+    marker = config.github_watch.comment_response_marker
+    for cid in group.comment_ids:
+        post_comment_reply(cid, reply_body, repo_root, marker=marker)
+
+    return ProcessGroupResult(
+        success=success,
+        run_id=log.run_id,
+        cost_usd=log.total_cost_usd,
+        commit_sha=commit_sha,
+    )

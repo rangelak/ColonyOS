@@ -231,6 +231,14 @@ flowchart TD
 | `colonyos ci-fix PR --wait` | Fix, then wait for CI re-run to pass |
 | `colonyos ci-fix PR --max-retries N` | Retry the fix-push-wait cycle up to N times |
 
+### PR review comments
+
+| Command | Description |
+|---|---|
+| `colonyos pr-respond PR_NUMBER` | Address unaddressed PR review comments automatically |
+| `colonyos pr-respond PR --dry-run` | Display what would be addressed without making changes |
+| `colonyos pr-respond PR --comment-id ID` | Address only a specific review comment by ID |
+
 ### Analytics & inspection
 
 | Command | Description |
@@ -260,6 +268,8 @@ flowchart TD
 | Command | Description |
 |---|---|
 | `colonyos watch` | Watch Slack channels and trigger runs from messages |
+| `colonyos watch --github` | Watch GitHub PRs for review comments instead of Slack |
+| `colonyos watch --github --pr N` | Watch specific PR(s) for review comments |
 | `colonyos watch --dry-run` | Log triggers without executing |
 | `colonyos watch --max-hours N` | Wall-clock limit for the watcher |
 | `colonyos watch --max-budget N` | Aggregate USD spend limit |
