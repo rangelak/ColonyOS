@@ -88,13 +88,14 @@ class TestCheckPrMerged:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,
-                stdout='{"state": "MERGED", "mergedAt": "2026-03-20T10:00:00Z"}',
+                stdout='{"state": "MERGED", "mergedAt": "2026-03-20T10:00:00Z", "title": "Fix the bug"}',
                 stderr="",
             )
-            is_merged, merged_at = check_pr_merged(42, tmp_path)
+            is_merged, merged_at, pr_title = check_pr_merged(42, tmp_path)
 
         assert is_merged is True
         assert merged_at == "2026-03-20T10:00:00Z"
+        assert pr_title == "Fix the bug"
 
     def test_open_pr(self, tmp_path: Path) -> None:
         from colonyos.pr_watcher import check_pr_merged
@@ -102,13 +103,14 @@ class TestCheckPrMerged:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,
-                stdout='{"state": "OPEN", "mergedAt": null}',
+                stdout='{"state": "OPEN", "mergedAt": null, "title": "WIP: Fix bug"}',
                 stderr="",
             )
-            is_merged, merged_at = check_pr_merged(42, tmp_path)
+            is_merged, merged_at, pr_title = check_pr_merged(42, tmp_path)
 
         assert is_merged is False
         assert merged_at is None
+        assert pr_title is None  # Only returned when merged
 
     def test_closed_pr_not_merged(self, tmp_path: Path) -> None:
         from colonyos.pr_watcher import check_pr_merged
@@ -116,13 +118,14 @@ class TestCheckPrMerged:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,
-                stdout='{"state": "CLOSED", "mergedAt": null}',
+                stdout='{"state": "CLOSED", "mergedAt": null, "title": "Abandoned PR"}',
                 stderr="",
             )
-            is_merged, merged_at = check_pr_merged(42, tmp_path)
+            is_merged, merged_at, pr_title = check_pr_merged(42, tmp_path)
 
         assert is_merged is False
         assert merged_at is None
+        assert pr_title is None  # Only returned when merged
 
     def test_gh_command_failure(self, tmp_path: Path) -> None:
         from colonyos.pr_watcher import check_pr_merged
@@ -133,10 +136,11 @@ class TestCheckPrMerged:
                 stdout="",
                 stderr="not found",
             )
-            is_merged, merged_at = check_pr_merged(42, tmp_path)
+            is_merged, merged_at, pr_title = check_pr_merged(42, tmp_path)
 
         assert is_merged is False
         assert merged_at is None
+        assert pr_title is None
 
     def test_timeout_returns_none(self, tmp_path: Path) -> None:
         from colonyos.pr_watcher import check_pr_merged
@@ -144,10 +148,11 @@ class TestCheckPrMerged:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(cmd=["gh"], timeout=5)
-            is_merged, merged_at = check_pr_merged(42, tmp_path)
+            is_merged, merged_at, pr_title = check_pr_merged(42, tmp_path)
 
         assert is_merged is False
         assert merged_at is None
+        assert pr_title is None
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +235,7 @@ class TestPollMergedPrs:
         client = MagicMock()
 
         with patch("colonyos.pr_watcher.check_pr_merged") as mock_check:
-            mock_check.return_value = (True, "2026-03-20T10:00:00Z")
+            mock_check.return_value = (True, "2026-03-20T10:00:00Z", "PR Title")
             with patch("colonyos.pr_watcher.post_merge_notification") as mock_post:
                 with patch("colonyos.pr_watcher.update_run_log_merged_at"):
                     count = poll_merged_prs(
@@ -347,7 +352,7 @@ class TestPollMergedPrs:
         client = MagicMock()
 
         with patch("colonyos.pr_watcher.check_pr_merged") as mock_check:
-            mock_check.return_value = (False, None)  # Not merged
+            mock_check.return_value = (False, None, None)  # Not merged
             count = poll_merged_prs(
                 repo_root=tmp_path,
                 queue_state=queue_state,
@@ -549,3 +554,237 @@ class TestMergeWatcher:
 
         # Should not crash - the thread should exit cleanly
         assert not watcher.is_alive()
+
+
+# ---------------------------------------------------------------------------
+# Tests for queue state persistence (FR-4)
+# ---------------------------------------------------------------------------
+
+
+class TestQueueStatePersistence:
+    """Tests for persisting queue state after setting merge_notified=True."""
+
+    def _make_queue_item(
+        self,
+        item_id: str = "q-1",
+        status: QueueItemStatus = QueueItemStatus.COMPLETED,
+        pr_url: str | None = "https://github.com/org/repo/pull/42",
+        merge_notified: bool = False,
+        slack_ts: str = "100.000",
+        slack_channel: str = "C123",
+        raw_prompt: str = "Fix the bug",
+        cost_usd: float = 2.0,
+        duration_ms: int = 120000,
+        run_id: str = "run-123",
+    ) -> QueueItem:
+        return QueueItem(
+            id=item_id,
+            source_type="slack",
+            source_value="test",
+            status=status,
+            pr_url=pr_url,
+            merge_notified=merge_notified,
+            slack_ts=slack_ts,
+            slack_channel=slack_channel,
+            raw_prompt=raw_prompt,
+            cost_usd=cost_usd,
+            duration_ms=duration_ms,
+            run_id=run_id,
+        )
+
+    def test_calls_save_callback_after_notification(self, tmp_path: Path) -> None:
+        """Verify that save_queue_state callback is called after merge_notified is set."""
+        from colonyos.pr_watcher import poll_merged_prs
+
+        item = self._make_queue_item()
+        queue_state = QueueState(queue_id="test", items=[item])
+        watch_state = SlackWatchState(watch_id="test")
+        config = SlackConfig(enabled=True, notify_on_merge=True)
+        state_lock = Lock()
+        client = MagicMock()
+        save_callback = MagicMock()
+
+        with patch("colonyos.pr_watcher.check_pr_merged") as mock_check:
+            mock_check.return_value = (True, "2026-03-20T10:00:00Z", "PR Title")
+            with patch("colonyos.pr_watcher.post_merge_notification"):
+                with patch("colonyos.pr_watcher.update_run_log_merged_at"):
+                    poll_merged_prs(
+                        repo_root=tmp_path,
+                        queue_state=queue_state,
+                        watch_state=watch_state,
+                        slack_client=client,
+                        config=config,
+                        state_lock=state_lock,
+                        save_queue_state=save_callback,
+                    )
+
+        # Callback should have been called to persist state
+        save_callback.assert_called_once()
+        assert item.merge_notified is True
+
+
+# ---------------------------------------------------------------------------
+# Tests for rate limiting (FR-7)
+# ---------------------------------------------------------------------------
+
+
+class TestRateLimiting:
+    """Tests for GitHub API rate limit tracking."""
+
+    def test_check_and_update_rate_limit_resets_on_hour_change(self) -> None:
+        from colonyos.pr_watcher import _check_and_update_rate_limit, _get_current_hour_key
+
+        watch_state = SlackWatchState(watch_id="test")
+        state_lock = Lock()
+
+        # Set old hour key
+        watch_state.gh_api_hour_key = "2020-01-01T00"
+        watch_state.gh_api_calls_this_hour = 100
+
+        # Should reset counter since hour has changed
+        result = _check_and_update_rate_limit(watch_state, state_lock)
+
+        assert result is True
+        assert watch_state.gh_api_calls_this_hour == 0
+        assert watch_state.gh_api_hour_key == _get_current_hour_key()
+
+    def test_check_and_update_rate_limit_returns_false_at_threshold(self) -> None:
+        from colonyos.pr_watcher import (
+            _check_and_update_rate_limit,
+            _get_current_hour_key,
+            _GH_RATE_LIMIT_THRESHOLD,
+        )
+
+        watch_state = SlackWatchState(watch_id="test")
+        state_lock = Lock()
+
+        # Set current hour key and max out the counter
+        watch_state.gh_api_hour_key = _get_current_hour_key()
+        watch_state.gh_api_calls_this_hour = _GH_RATE_LIMIT_THRESHOLD
+
+        result = _check_and_update_rate_limit(watch_state, state_lock)
+
+        assert result is False  # Should pause polling
+
+    def test_increment_api_call_count(self) -> None:
+        from colonyos.pr_watcher import _increment_api_call_count
+
+        watch_state = SlackWatchState(watch_id="test")
+        state_lock = Lock()
+        watch_state.gh_api_calls_this_hour = 5
+
+        _increment_api_call_count(watch_state, state_lock)
+
+        assert watch_state.gh_api_calls_this_hour == 6
+
+
+# ---------------------------------------------------------------------------
+# Tests for PR title fallback (FR-2)
+# ---------------------------------------------------------------------------
+
+
+class TestPrTitleFallback:
+    """Tests for falling back to PR title when raw_prompt is not available."""
+
+    def _make_queue_item(
+        self,
+        item_id: str = "q-1",
+        raw_prompt: str | None = None,
+        source_value: str = "test source",
+    ) -> QueueItem:
+        return QueueItem(
+            id=item_id,
+            source_type="slack",
+            source_value=source_value,
+            status=QueueItemStatus.COMPLETED,
+            pr_url="https://github.com/org/repo/pull/42",
+            merge_notified=False,
+            slack_ts="100.000",
+            slack_channel="C123",
+            raw_prompt=raw_prompt,
+            cost_usd=2.0,
+            duration_ms=120000,
+            run_id="run-123",
+        )
+
+    def test_uses_raw_prompt_when_available(self, tmp_path: Path) -> None:
+        from colonyos.pr_watcher import poll_merged_prs
+
+        item = self._make_queue_item(raw_prompt="User request prompt")
+        queue_state = QueueState(queue_id="test", items=[item])
+        watch_state = SlackWatchState(watch_id="test")
+        config = SlackConfig(enabled=True, notify_on_merge=True)
+        state_lock = Lock()
+        client = MagicMock()
+
+        with patch("colonyos.pr_watcher.check_pr_merged") as mock_check:
+            mock_check.return_value = (True, "2026-03-20T10:00:00Z", "PR Title")
+            with patch("colonyos.pr_watcher.post_merge_notification") as mock_post:
+                with patch("colonyos.pr_watcher.update_run_log_merged_at"):
+                    poll_merged_prs(
+                        repo_root=tmp_path,
+                        queue_state=queue_state,
+                        watch_state=watch_state,
+                        slack_client=client,
+                        config=config,
+                        state_lock=state_lock,
+                    )
+
+        # Should use raw_prompt, not PR title
+        call_args = mock_post.call_args
+        assert call_args.kwargs["feature_title"] == "User request prompt"
+
+    def test_falls_back_to_pr_title_when_no_raw_prompt(self, tmp_path: Path) -> None:
+        from colonyos.pr_watcher import poll_merged_prs
+
+        item = self._make_queue_item(raw_prompt=None)
+        queue_state = QueueState(queue_id="test", items=[item])
+        watch_state = SlackWatchState(watch_id="test")
+        config = SlackConfig(enabled=True, notify_on_merge=True)
+        state_lock = Lock()
+        client = MagicMock()
+
+        with patch("colonyos.pr_watcher.check_pr_merged") as mock_check:
+            mock_check.return_value = (True, "2026-03-20T10:00:00Z", "PR Title from GitHub")
+            with patch("colonyos.pr_watcher.post_merge_notification") as mock_post:
+                with patch("colonyos.pr_watcher.update_run_log_merged_at"):
+                    poll_merged_prs(
+                        repo_root=tmp_path,
+                        queue_state=queue_state,
+                        watch_state=watch_state,
+                        slack_client=client,
+                        config=config,
+                        state_lock=state_lock,
+                    )
+
+        # Should use PR title as fallback
+        call_args = mock_post.call_args
+        assert call_args.kwargs["feature_title"] == "PR Title from GitHub"
+
+    def test_falls_back_to_source_value_when_no_pr_title(self, tmp_path: Path) -> None:
+        from colonyos.pr_watcher import poll_merged_prs
+
+        item = self._make_queue_item(raw_prompt=None, source_value="source fallback")
+        queue_state = QueueState(queue_id="test", items=[item])
+        watch_state = SlackWatchState(watch_id="test")
+        config = SlackConfig(enabled=True, notify_on_merge=True)
+        state_lock = Lock()
+        client = MagicMock()
+
+        with patch("colonyos.pr_watcher.check_pr_merged") as mock_check:
+            # No PR title returned
+            mock_check.return_value = (True, "2026-03-20T10:00:00Z", None)
+            with patch("colonyos.pr_watcher.post_merge_notification") as mock_post:
+                with patch("colonyos.pr_watcher.update_run_log_merged_at"):
+                    poll_merged_prs(
+                        repo_root=tmp_path,
+                        queue_state=queue_state,
+                        watch_state=watch_state,
+                        slack_client=client,
+                        config=config,
+                        state_lock=state_lock,
+                    )
+
+        # Should fall back to source_value
+        call_args = mock_post.call_args
+        assert call_args.kwargs["feature_title"] == "source fallback"

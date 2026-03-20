@@ -23,12 +23,10 @@ import os
 import re
 import subprocess
 import tempfile
-import threading
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Callable
 
 from colonyos.config import SlackConfig, runs_dir_path
 from colonyos.slack import post_merge_notification
@@ -47,6 +45,60 @@ PR_URL_PATTERN = re.compile(
 
 # Maximum age for PRs to poll (7 days)
 _POLLING_WINDOW_DAYS = 7
+
+# GitHub API rate limit threshold (FR-7)
+# GitHub authenticated users get 5000 requests/hour.
+# We pause at 4500 to leave headroom for other operations.
+_GH_RATE_LIMIT_THRESHOLD = 4500
+
+
+def _get_current_hour_key() -> str:
+    """Get the current hour key for rate limit tracking (e.g., '2026-03-20T03')."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+
+
+def _check_and_update_rate_limit(
+    watch_state: "SlackWatchState",
+    state_lock: Lock,
+) -> bool:
+    """Check if we're approaching the GitHub API rate limit.
+
+    Updates the hour counter and checks if we should pause polling.
+
+    Args:
+        watch_state: Current watch state with rate limit tracking.
+        state_lock: Threading lock for state access.
+
+    Returns:
+        True if we should continue polling, False if rate limit is approaching.
+    """
+    current_hour = _get_current_hour_key()
+
+    with state_lock:
+        # Reset counter if hour has changed
+        if watch_state.gh_api_hour_key != current_hour:
+            watch_state.gh_api_hour_key = current_hour
+            watch_state.gh_api_calls_this_hour = 0
+
+        # Check if we're approaching the limit
+        if watch_state.gh_api_calls_this_hour >= _GH_RATE_LIMIT_THRESHOLD:
+            return False
+
+        return True
+
+
+def _increment_api_call_count(
+    watch_state: "SlackWatchState",
+    state_lock: Lock,
+) -> None:
+    """Increment the GitHub API call counter.
+
+    Args:
+        watch_state: Current watch state with rate limit tracking.
+        state_lock: Threading lock for state access.
+    """
+    with state_lock:
+        watch_state.gh_api_calls_this_hour += 1
 
 
 def extract_pr_number_from_url(pr_url: str) -> int | None:
@@ -73,7 +125,7 @@ def extract_pr_number_from_url(pr_url: str) -> int | None:
         return None
 
 
-def check_pr_merged(pr_number: int, repo_root: Path) -> tuple[bool, str | None]:
+def check_pr_merged(pr_number: int, repo_root: Path) -> tuple[bool, str | None, str | None]:
     """Check if a PR has been merged via `gh pr view`.
 
     Args:
@@ -81,15 +133,16 @@ def check_pr_merged(pr_number: int, repo_root: Path) -> tuple[bool, str | None]:
         repo_root: Repository root directory (used as cwd for `gh`).
 
     Returns:
-        A tuple of (is_merged, merged_at_iso). If the PR is merged,
-        merged_at_iso contains the ISO timestamp from GitHub's mergedAt field.
-        Otherwise, merged_at_iso is None.
+        A tuple of (is_merged, merged_at_iso, pr_title). If the PR is merged,
+        merged_at_iso contains the ISO timestamp from GitHub's mergedAt field
+        and pr_title contains the PR title for fallback (FR-2).
+        Otherwise, both are None.
     """
     try:
         result = subprocess.run(
             [
                 "gh", "pr", "view", str(pr_number),
-                "--json", "state,mergedAt",
+                "--json", "state,mergedAt,title",
             ],
             capture_output=True,
             text=True,
@@ -98,10 +151,10 @@ def check_pr_merged(pr_number: int, repo_root: Path) -> tuple[bool, str | None]:
         )
     except FileNotFoundError:
         logger.warning("GitHub CLI (gh) not found")
-        return False, None
+        return False, None, None
     except subprocess.TimeoutExpired:
         logger.warning("Timed out checking PR #%d", pr_number)
-        return False, None
+        return False, None, None
 
     if result.returncode != 0:
         logger.warning(
@@ -109,21 +162,22 @@ def check_pr_merged(pr_number: int, repo_root: Path) -> tuple[bool, str | None]:
             pr_number,
             result.stderr.strip()[:200],
         )
-        return False, None
+        return False, None, None
 
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError:
         logger.warning("Failed to parse gh pr view output for PR #%d", pr_number)
-        return False, None
+        return False, None, None
 
     state = data.get("state", "").upper()
     merged_at = data.get("mergedAt")
+    title = data.get("title")
 
     if state == "MERGED" and merged_at:
-        return True, merged_at
+        return True, merged_at, title
 
-    return False, None
+    return False, None, None
 
 
 def is_within_polling_window(added_at_iso: str) -> bool:
@@ -228,6 +282,7 @@ def poll_merged_prs(
     slack_client: "SlackClient",
     config: SlackConfig,
     state_lock: Lock,
+    save_queue_state: Callable[[], None] | None = None,
 ) -> int:
     """Poll for merged PRs and send notifications.
 
@@ -236,7 +291,7 @@ def poll_merged_prs(
     2. Checks each PR's merge status via `gh pr view`
     3. Posts notifications for merged PRs
     4. Updates RunLog with merged_at timestamp
-    5. Marks items as notified
+    5. Marks items as notified and persists queue state
 
     Thread safety:
     - Acquires state_lock when reading/writing queue state
@@ -249,6 +304,7 @@ def poll_merged_prs(
         slack_client: Slack client instance.
         config: Slack configuration.
         state_lock: Threading lock for state access.
+        save_queue_state: Optional callback to persist queue state after updates.
 
     Returns:
         Number of notifications sent.
@@ -278,6 +334,14 @@ def poll_merged_prs(
 
     # Check each item (lock released during API calls)
     for item, idx in items_to_check:
+        # Check rate limit before making API call (FR-7)
+        if not _check_and_update_rate_limit(watch_state, state_lock):
+            logger.info(
+                "GitHub API rate limit approaching (%d calls this hour), pausing polling",
+                watch_state.gh_api_calls_this_hour,
+            )
+            break
+
         # Validate PR URL before calling gh
         pr_number = extract_pr_number_from_url(item.pr_url or "")
         if pr_number is None:
@@ -288,8 +352,11 @@ def poll_merged_prs(
             )
             continue
 
+        # Track API call (FR-7)
+        _increment_api_call_count(watch_state, state_lock)
+
         # Check if PR is merged (network call, no lock held)
-        is_merged, merged_at = check_pr_merged(pr_number, repo_root)
+        is_merged, merged_at, pr_title = check_pr_merged(pr_number, repo_root)
 
         if not is_merged:
             continue
@@ -301,8 +368,8 @@ def poll_merged_prs(
             merged_at,
         )
 
-        # Get feature title from raw_prompt or fall back to source_value
-        feature_title = item.raw_prompt or item.source_value or "Feature"
+        # Get feature title: prefer raw_prompt, fall back to PR title (FR-2), then source_value
+        feature_title = item.raw_prompt or pr_title or item.source_value or "Feature"
 
         # Post notification
         try:
@@ -328,9 +395,11 @@ def poll_merged_prs(
                 if item.run_id and merged_at:
                     update_run_log_merged_at(repo_root, item.run_id, merged_at)
 
-                # Mark as notified under lock
+                # Mark as notified under lock and persist state (FR-4)
                 with state_lock:
                     queue_state.items[idx].merge_notified = True
+                    if save_queue_state is not None:
+                        save_queue_state()
 
         except Exception as exc:
             # Don't mark as notified on failure - will retry next cycle
@@ -376,6 +445,7 @@ class MergeWatcher(Thread):
         config: SlackConfig,
         state_lock: Lock,
         shutdown_event: Event,
+        save_queue_state: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(daemon=True, name="merge-watcher")
         self._repo_root = repo_root
@@ -385,6 +455,7 @@ class MergeWatcher(Thread):
         self._config = config
         self._state_lock = state_lock
         self._shutdown = shutdown_event
+        self._save_queue_state = save_queue_state
 
     def run(self) -> None:
         """Main thread loop."""
@@ -402,6 +473,7 @@ class MergeWatcher(Thread):
                     slack_client=self._slack_client,
                     config=self._config,
                     state_lock=self._state_lock,
+                    save_queue_state=self._save_queue_state,
                 )
                 if count > 0:
                     logger.info(

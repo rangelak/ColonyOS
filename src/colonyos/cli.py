@@ -2952,6 +2952,10 @@ def watch(
     from colonyos.pr_watcher import MergeWatcher
     merge_watcher: MergeWatcher | None = None
     if config.slack.notify_on_merge:
+        # Create save callback for queue state persistence (FR-4)
+        def _save_queue_state_for_watcher() -> None:
+            _save_queue_state(repo_root, queue_state)
+
         # Wait for Slack client to be available before starting merge watcher
         def _start_merge_watcher_when_ready() -> None:
             nonlocal merge_watcher
@@ -2965,6 +2969,7 @@ def watch(
                     config=config.slack,
                     state_lock=state_lock,
                     shutdown_event=shutdown_event,
+                    save_queue_state=_save_queue_state_for_watcher,
                 )
                 merge_watcher.start()
 

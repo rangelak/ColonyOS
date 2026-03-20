@@ -587,6 +587,9 @@ class SlackWatchState:
     consecutive_failures: int = 0
     queue_paused: bool = False
     queue_paused_at: str | None = None  # ISO timestamp when queue was paused
+    # GitHub API rate limit tracking (FR-7)
+    gh_api_calls_this_hour: int = 0
+    gh_api_hour_key: str = ""  # Format: "2026-03-20T03" (truncated to hour)
 
     def reset_daily_cost_if_needed(self) -> None:
         """Reset daily cost counter if the UTC date has changed."""
@@ -629,6 +632,8 @@ class SlackWatchState:
             "consecutive_failures": self.consecutive_failures,
             "queue_paused": self.queue_paused,
             "queue_paused_at": self.queue_paused_at,
+            "gh_api_calls_this_hour": self.gh_api_calls_this_hour,
+            "gh_api_hour_key": self.gh_api_hour_key,
         }
 
     @classmethod
@@ -648,6 +653,8 @@ class SlackWatchState:
             consecutive_failures=data.get("consecutive_failures", 0),
             queue_paused=bool(data.get("queue_paused", False)),
             queue_paused_at=data.get("queue_paused_at"),
+            gh_api_calls_this_hour=data.get("gh_api_calls_this_hour", 0),
+            gh_api_hour_key=data.get("gh_api_hour_key", ""),
         )
 
 
