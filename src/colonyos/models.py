@@ -159,6 +159,10 @@ class ResumeState:
     prd_rel: str
     task_rel: str
     last_successful_phase: str
+    # Parallel task resume information (FR-8)
+    failed_task_ids: list[str] = field(default_factory=list)
+    blocked_task_ids: list[str] = field(default_factory=list)
+    completed_task_ids: list[str] = field(default_factory=list)
 
 
 @dataclass

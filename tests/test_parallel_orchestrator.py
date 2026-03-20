@@ -9,6 +9,9 @@ import pytest
 from colonyos.config import ColonyConfig, ParallelImplementConfig
 from colonyos.models import Phase, PhaseResult, TaskStatus
 from colonyos.parallel_orchestrator import (
+    ConflictResolutionFailed,
+    ManualInterventionRequired,
+    MergeLockTimeout,
     ParallelOrchestrator,
     ParallelRunState,
     TaskState,
@@ -239,10 +242,11 @@ class TestRunAllAsync:
         orchestrator.parse_tasks()
         orchestrator.create_worktrees()
 
-        def mock_runner(task_id: str, worktree: Path, desc: str) -> PhaseResult:
+        def mock_runner(task_id: str, worktree: Path, desc: str, budget: float) -> PhaseResult:
             return PhaseResult(
                 phase=Phase.IMPLEMENT,
                 success=True,
+                cost_usd=budget * 0.5,  # Use half the budget
                 artifacts={"task_id": task_id},
             )
 
@@ -270,11 +274,12 @@ class TestRunAllAsync:
 
         execution_order = []
 
-        def mock_runner(task_id: str, worktree: Path, desc: str) -> PhaseResult:
+        def mock_runner(task_id: str, worktree: Path, desc: str, budget: float) -> PhaseResult:
             execution_order.append(task_id)
             return PhaseResult(
                 phase=Phase.IMPLEMENT,
                 success=True,
+                cost_usd=budget * 0.5,
                 artifacts={"task_id": task_id},
             )
 
@@ -303,3 +308,195 @@ class TestShouldUseParallel:
     def test_zero_tasks(self) -> None:
         config = ColonyConfig()
         assert should_use_parallel(config, task_count=0) is False
+
+
+class TestBudgetAllocation:
+    """Tests for FR-7: Budget allocation per-agent."""
+
+    def test_budget_allocation_per_task(self, tmp_repo: Path) -> None:
+        """Each task should receive budget = phase_budget / max_parallel_agents."""
+        config = ColonyConfig(
+            parallel_implement=ParallelImplementConfig(max_parallel_agents=3)
+        )
+        task_content = """
+- [ ] 1.0 Task A
+  depends_on: []
+- [ ] 2.0 Task B
+  depends_on: []
+- [ ] 3.0 Task C
+  depends_on: []
+"""
+        phase_budget = 6.0
+        orchestrator = ParallelOrchestrator(
+            repo_root=tmp_repo,
+            config=config,
+            task_file_content=task_content,
+            base_branch="main",
+            phase_budget_usd=phase_budget,
+        )
+        orchestrator.parse_tasks()
+
+        # Each task should get 6.0 / 3 = 2.0 budget
+        expected_budget = 2.0
+        for task in orchestrator.state.tasks.values():
+            assert task.budget_usd == expected_budget
+
+    def test_budget_passed_to_agent_runner(self, tmp_repo: Path) -> None:
+        """Agent runner should receive the allocated budget."""
+        config = ColonyConfig(
+            parallel_implement=ParallelImplementConfig(max_parallel_agents=2)
+        )
+        task_content = """
+- [ ] 1.0 Task A
+  depends_on: []
+"""
+        phase_budget = 4.0
+        orchestrator = ParallelOrchestrator(
+            repo_root=tmp_repo,
+            config=config,
+            task_file_content=task_content,
+            base_branch="main",
+            phase_budget_usd=phase_budget,
+        )
+        orchestrator.parse_tasks()
+        orchestrator.create_worktrees()
+
+        received_budgets = []
+
+        def mock_runner(task_id: str, worktree: Path, desc: str, budget: float) -> PhaseResult:
+            received_budgets.append(budget)
+            return PhaseResult(
+                phase=Phase.IMPLEMENT,
+                success=True,
+                cost_usd=budget * 0.5,
+                artifacts={"task_id": task_id},
+            )
+
+        asyncio.run(orchestrator.run_all(mock_runner))
+
+        # Should receive budget = 4.0 / 2 = 2.0
+        assert received_budgets == [2.0]
+        orchestrator.cleanup_worktrees()
+
+    def test_summary_includes_budget_info(self, tmp_repo: Path) -> None:
+        """Summary should include budget allocation info."""
+        config = ColonyConfig(
+            parallel_implement=ParallelImplementConfig(max_parallel_agents=2)
+        )
+        task_content = """
+- [ ] 1.0 Task A
+  depends_on: []
+"""
+        phase_budget = 10.0
+        orchestrator = ParallelOrchestrator(
+            repo_root=tmp_repo,
+            config=config,
+            task_file_content=task_content,
+            base_branch="main",
+            phase_budget_usd=phase_budget,
+        )
+        orchestrator.parse_tasks()
+
+        summary = orchestrator.get_summary()
+        assert summary["phase_budget_usd"] == 10.0
+        assert summary["per_task_budget_usd"] == 5.0  # 10.0 / 2
+        assert "task_costs" in summary
+
+
+class TestMergeLock:
+    """Tests for FR-5: Asyncio merge lock with timeout."""
+
+    def test_merge_lock_exists(self, tmp_repo: Path) -> None:
+        """ParallelOrchestrator should have an asyncio merge lock."""
+        config = ColonyConfig()
+        task_content = """
+- [ ] 1.0 Task A
+  depends_on: []
+"""
+        orchestrator = ParallelOrchestrator(
+            repo_root=tmp_repo,
+            config=config,
+            task_file_content=task_content,
+            base_branch="main",
+        )
+        assert hasattr(orchestrator, "_merge_lock")
+        assert isinstance(orchestrator._merge_lock, asyncio.Lock)
+
+    def test_merge_timeout_from_config(self, tmp_repo: Path) -> None:
+        """Merge timeout should come from config."""
+        config = ColonyConfig(
+            parallel_implement=ParallelImplementConfig(merge_timeout_seconds=120)
+        )
+        task_content = """
+- [ ] 1.0 Task A
+  depends_on: []
+"""
+        orchestrator = ParallelOrchestrator(
+            repo_root=tmp_repo,
+            config=config,
+            task_file_content=task_content,
+            base_branch="main",
+        )
+        assert orchestrator._merge_timeout_seconds == 120
+
+
+class TestConflictHandling:
+    """Tests for FR-6: Conflict resolution and strategies."""
+
+    def test_conflict_resolver_callback(self, tmp_repo: Path) -> None:
+        """Orchestrator should accept a conflict resolver callback."""
+        config = ColonyConfig()
+        task_content = """
+- [ ] 1.0 Task A
+  depends_on: []
+"""
+
+        def mock_resolver(
+            conflict_files: list,
+            task_id: str,
+            working_dir: Path,
+            prd_path: str,
+            task_file_path: str,
+            budget_usd: float,
+        ) -> PhaseResult:
+            return PhaseResult(phase=Phase.CONFLICT_RESOLVE, success=True)
+
+        orchestrator = ParallelOrchestrator(
+            repo_root=tmp_repo,
+            config=config,
+            task_file_content=task_content,
+            base_branch="main",
+            conflict_resolver=mock_resolver,
+        )
+        assert orchestrator.conflict_resolver is mock_resolver
+
+    def test_prd_and_task_file_paths_stored(self, tmp_repo: Path) -> None:
+        """Orchestrator should store PRD and task file paths for conflict resolution."""
+        config = ColonyConfig()
+        task_content = """
+- [ ] 1.0 Task A
+  depends_on: []
+"""
+        orchestrator = ParallelOrchestrator(
+            repo_root=tmp_repo,
+            config=config,
+            task_file_content=task_content,
+            base_branch="main",
+            prd_path="cOS_prds/test_prd.md",
+            task_file_path="cOS_tasks/test_tasks.md",
+        )
+        assert orchestrator.prd_path == "cOS_prds/test_prd.md"
+        assert orchestrator.task_file_path == "cOS_tasks/test_tasks.md"
+
+
+class TestTaskStateWithBudget:
+    """Tests for TaskState budget tracking."""
+
+    def test_task_state_has_budget_fields(self) -> None:
+        state = TaskState(task_id="1.0", budget_usd=5.0)
+        assert state.budget_usd == 5.0
+        assert state.actual_cost_usd == 0.0
+
+    def test_task_state_default_budget(self) -> None:
+        state = TaskState(task_id="1.0")
+        assert state.budget_usd == 0.0
