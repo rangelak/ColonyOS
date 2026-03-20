@@ -131,3 +131,12 @@ _Date: 2026-03-19 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[architecture]** Business-logic regexes copied across modules drift silently; extract to one shared constant.
 - **[security]** Prompt templates must prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
 - **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load.
+
+## Run: run-20260320_025613-33b2772034
+_Date: 2026-03-20 | Feature: add_a_colonyos_pr_review_pr_number_command_that_monitors_git_
+
+- **[testing]** Verify phases must not be skipped; stochastic model outputs need structural validation before deployment.
+- **[code-quality]** State capture (e.g., HEAD SHA) must happen before branch restoration in finally blocks to avoid wrong values.
+- **[architecture]** IDs generated at API boundaries must be threaded through to internal components; don't let internals re-generate.
+- **[testing]** Token/auth verification must target endpoints that actually require authentication to catch invalid tokens.
+- **[architecture]** Implemented functions must be wired into call sites; untested integration paths are effectively dead code.
