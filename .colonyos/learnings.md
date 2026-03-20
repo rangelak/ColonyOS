@@ -131,3 +131,12 @@ _Date: 2026-03-19 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[architecture]** Business-logic regexes copied across modules drift silently; extract to one shared constant.
 - **[security]** Prompt templates must prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
 - **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load.
+
+## Run: run-20260320_041029-963bfe43be
+_Date: 2026-03-20 | Feature: add_a_parallel_implement_mode_that_spawns_multiple_agent_ses_
+
+- **[code-quality]** `finally` blocks restoring state must capture return values before cleanup; calling getters after state change returns wrong data.
+- **[testing]** Missing test coverage for phases/code paths explicitly required by PRDs often indicates the code itself was never implemented.
+- **[architecture]** Separate deterministic logic (git checks, validation) from LLM calls to avoid wasting compute on closed-form answers.
+- **[code-quality]** Use `removeprefix("* ")` not `lstrip("* ")` when stripping known prefixes; lstrip removes any matching chars.
+- **[security]** Fail-closed on external API errors (GitHub, network) is the correct default; fail-open creates silent security gaps.
