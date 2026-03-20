@@ -1,15 +1,6 @@
 # ColonyOS Learnings Ledger
 
 
-## Run: run-20260317_235155-03a2bb3fed
-_Date: 2026-03-18 | Feature: add_github_issue_integration_to_colonyos_so_users_can_point__
-
-- **[code-quality]** Docstrings and comments must stay in sync with code; renaming functions without updating docs creates lying documentation.
-- **[testing]** Test function names get corrupted during bulk find-replace; verify test names remain valid after refactoring.
-- **[code-quality]** Catch specific exception types (e.g., OSError, TimeoutExpired) instead of bare `except Exception` to avoid swallowing bugs.
-- **[code-quality]** Use line-anchored regex (`^target:`) instead of substring checks (`"target:" in text`) when parsing structured files.
-- **[architecture]** Extract duplicated inner functions (e.g., UI factories) into shared helpers rather than copy-pasting closures across methods.
-
 ## Run: run-20260318_001555-d784c3e835
 _Date: 2026-03-18 | Feature: add_a_colonyos_stats_cli_command_that_reads_all_persisted_ru_
 
@@ -131,3 +122,17 @@ _Date: 2026-03-19 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[architecture]** Business-logic regexes copied across modules drift silently; extract to one shared constant.
 - **[security]** Prompt templates must prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
 - **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load.
+
+## Run: run-20260320_014013-54a5e2b206
+_Date: 2026-03-20 | Feature: add_a_colonyos_watch_github_command_that_listens_to_github_w_
+
+- **[code-quality]** `lstrip("prefix")` removes individual chars, not the string; use `removeprefix()` for fixed prefixes.
+- **[architecture]** Capture stateful values (e.g. HEAD SHA) before cleanup blocks execute, not after branch restoration.
+- **[testing]** AI-generated code requires a Verify phase before delivery; stochastic outputs need structural validation.
+- **[code-quality]** Reusing enum values for semantically different operations (e.g., `Phase.REVIEW` for scans) confuses audit logs.
+- **[architecture]** Finally blocks that restore state must include stash logic to handle mid-operation crashes gracefully.
+- **[code-quality]** `lstrip("prefix")` removes chars not strings; use `removeprefix()` for fixed-prefix parsing.
+- **[architecture]** Capture stateful values (HEAD SHA) before cleanup/finally blocks, not after branch restoration.
+- **[testing]** AI-generated code requires a Verify phase before delivery; stochastic outputs need structural validation.
+- **[code-quality]** Reusing enum values for semantically different operations (e.g., REVIEW for scans) confuses audit logs.
+- **[architecture]** Finally blocks restoring state must include stash logic to handle mid-operation crashes gracefully.

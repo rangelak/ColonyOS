@@ -1,5 +1,28 @@
 # Changelog
 
+## 20260320_021800 — GitHub Watch Command for PR Review Auto-Fixes
+
+Added `colonyos watch-github` command that monitors GitHub PR review events and automatically
+runs the existing `run_thread_fix()` pipeline to address reviewer feedback. When a reviewer
+clicks "Request Changes" on a `colonyos/*` branch PR, the watcher detects the event, extracts
+file/line comments, and runs an AI-powered fix agent to push corrections. Includes per-PR
+fix round limits, cost caps, reviewer allowlists for security, and status comments on PRs.
+
+**Created:**
+- `src/colonyos/github_watcher.py` — Event polling, detection logic, state persistence, fix triggering (~500 LOC)
+- `src/colonyos/instructions/github_fix.md` — Agent instruction template for GitHub-initiated fixes
+- `tests/test_github_watcher.py` — Comprehensive tests for event detection, state management, security filters
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `watch-github` subcommand with `--poll-interval`, `--dry-run` flags
+- `src/colonyos/config.py` — Added `GitHubWatchConfig` dataclass (`max_fix_rounds_per_pr`, `max_fix_cost_per_pr_usd`, `allowed_reviewers`, etc.)
+- `README.md` — Updated CLI reference with `watch-github` command
+- `tests/test_cli.py` — CLI integration tests for `watch-github`
+- `tests/test_config.py` — Config parsing tests for `github_watch` section
+
+**PRD:** `cOS_prds/20260320_014013_prd_add_a_colonyos_watch_github_command_that_listens_to_github_webhook_events_or_pol.md`
+**Tasks:** `cOS_tasks/20260320_014013_tasks_add_a_colonyos_watch_github_command_that_listens_to_github_webhook_events_or_pol.md`
+
 ## 20260319_152207 — Slack Thread Fix Requests — Conversational PR Iteration
 
 Enables conversational iteration on PRs via Slack threads. When ColonyOS completes a pipeline
