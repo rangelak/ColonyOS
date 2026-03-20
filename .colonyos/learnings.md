@@ -131,3 +131,12 @@ _Date: 2026-03-19 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[architecture]** Business-logic regexes copied across modules drift silently; extract to one shared constant.
 - **[security]** Prompt templates must prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
 - **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load.
+
+## Run: run-20260320_033855-8729f1e3ec
+_Date: 2026-03-20 | Feature: add_a_pr_lifecycle_watcher_that_monitors_merged_prs_and_post_
+
+- **[testing]** LLM-generated code must pass through a Verify phase (test suite) before pushing; stochastic outputs need structural validation.
+- **[code-quality]** Error handlers that default to "success" states (e.g., is_clean=True on OSError) are fail-open bugs; unknown state should halt.
+- **[security]** List and detail API endpoints for the same resource must apply consistent sanitization or XSS defenses.
+- **[code-quality]** Token/auth verification endpoints must actually require auth; verifying against an unprotected endpoint always succeeds.
+- **[style]** Commit package lockfiles (package-lock.json, yarn.lock) even when pre-built assets are distributed; they ensure contributor reproducibility.

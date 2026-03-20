@@ -1,5 +1,22 @@
 # Changelog
 
+## 20260320_041200 — PR Lifecycle Watcher — Merge Notifications for Slack
+
+Added a background polling task within `colonyos watch` that monitors merged PRs created by ColonyOS and posts completion notifications back to the originating Slack thread. This closes the feedback loop for users who request features via Slack: request → progress updates → shipped notification.
+
+**Created / Modified:**
+- `src/colonyos/pr_watcher.py` — Background polling thread, GitHub merge detection, Slack notification posting
+- `src/colonyos/models.py` — Added `merge_notified` field to `QueueItem`, `merged_at` field to `RunLog`
+- `src/colonyos/config.py` — Added `notify_on_merge` and `merge_poll_interval_sec` fields to `SlackConfig`
+- `src/colonyos/cli.py` — Integrated PR watcher thread into `colonyos watch` command
+- `src/colonyos/slack.py` — Added merge notification posting helpers
+- `tests/test_pr_watcher.py` — Comprehensive tests for merge detection, notification, and edge cases
+- `tests/test_models.py` — Tests for new model fields and schema versioning
+- `tests/test_config.py` — Tests for merge notification config parsing
+
+**PRD:** `cOS_prds/20260320_033855_prd_add_a_pr_lifecycle_watcher_that_monitors_merged_prs_and_posts_completion_notific.md`
+**Tasks:** `cOS_tasks/20260320_033855_tasks_add_a_pr_lifecycle_watcher_that_monitors_merged_prs_and_posts_completion_notific.md`
+
 ## 20260319_152207 — Slack Thread Fix Requests — Conversational PR Iteration
 
 Enables conversational iteration on PRs via Slack threads. When ColonyOS completes a pipeline
