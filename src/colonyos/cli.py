@@ -1828,8 +1828,227 @@ def show(run_id: str, as_json: bool, phase: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Watch command (Slack integration)
+# Watch command (Slack integration & GitHub PR comments)
 # ---------------------------------------------------------------------------
+
+
+def _watch_github_prs(
+    pr_numbers: list[int],
+    max_hours: float | None,
+    max_budget: float | None,
+    verbose: bool,
+    quiet: bool,
+    dry_run: bool,
+) -> None:
+    """Watch GitHub PRs for review comments and auto-respond.
+
+    This function polls specified PRs (or all open ColonyOS PRs) for new
+    review comments and triggers the pr-respond pipeline.
+    """
+    import time
+
+    from colonyos.ci import validate_gh_auth
+    from colonyos.orchestrator import run_pr_comment_fix
+    from colonyos.pr_comments import (
+        fetch_pr_comments,
+        fetch_pr_metadata,
+        filter_unaddressed_comments,
+        format_pr_comment_as_prompt,
+        format_failure_reply,
+        format_success_reply,
+        group_comments,
+        is_allowed_commenter,
+        post_comment_reply,
+        validate_colonyos_branch,
+    )
+
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+
+    if not config.github_watch.enabled:
+        click.echo(
+            "GitHub watch is not enabled. "
+            "Set `github_watch.enabled: true` in .colonyos/config.yaml.",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Pre-flight checks
+    validate_gh_auth()
+
+    effective_max_hours = max_hours if max_hours is not None else config.budget.max_duration_hours
+    effective_max_budget = max_budget if max_budget is not None else config.budget.max_total_usd
+
+    poll_interval = config.github_watch.poll_interval_seconds
+    start_time = time.monotonic()
+    total_cost = 0.0
+
+    # Track processed comment IDs to avoid reprocessing
+    processed_comment_ids: set[int] = set()
+
+    if not quiet:
+        click.echo(f"[colonyos] Starting GitHub PR watch (poll interval: {poll_interval}s)")
+        if pr_numbers:
+            click.echo(f"[colonyos] Watching PRs: {pr_numbers}")
+        else:
+            click.echo("[colonyos] Watching all open ColonyOS PRs")
+
+    try:
+        while True:
+            # Check termination conditions
+            elapsed_hours = (time.monotonic() - start_time) / 3600
+            if elapsed_hours >= effective_max_hours:
+                click.echo(f"[colonyos] Max hours ({effective_max_hours}) reached. Stopping.")
+                break
+            if total_cost >= effective_max_budget:
+                click.echo(f"[colonyos] Max budget (${effective_max_budget}) reached. Stopping.")
+                break
+
+            # Get list of PRs to check
+            prs_to_check = pr_numbers if pr_numbers else _get_open_colonyos_prs(repo_root, config)
+
+            for pr_number in prs_to_check:
+                try:
+                    # Fetch PR metadata
+                    pr_meta = fetch_pr_metadata(pr_number, repo_root)
+                    branch_name = pr_meta["head_branch"]
+                    pr_url = pr_meta["url"]
+                    pr_description = pr_meta["body"]
+
+                    # Skip non-ColonyOS branches
+                    if not validate_colonyos_branch(branch_name, config.branch_prefix):
+                        continue
+
+                    # Fetch and filter comments
+                    all_comments = fetch_pr_comments(
+                        pr_number,
+                        repo_root,
+                        skip_bot_comments=config.github_watch.skip_bot_comments,
+                    )
+
+                    # Filter to allowed commenters
+                    allowed_comments = [
+                        c for c in all_comments
+                        if is_allowed_commenter(c.user_login, config.github_watch, repo_root)
+                    ]
+
+                    # Filter out already-addressed and already-processed comments
+                    unaddressed = filter_unaddressed_comments(
+                        allowed_comments,
+                        repo_root,
+                        marker=config.github_watch.comment_response_marker,
+                    )
+                    new_comments = [c for c in unaddressed if c.id not in processed_comment_ids]
+
+                    if not new_comments:
+                        continue
+
+                    if not quiet:
+                        click.echo(
+                            f"[colonyos] PR #{pr_number}: {len(new_comments)} new comment(s)"
+                        )
+
+                    if not config.github_watch.auto_respond:
+                        # Just report, don't act
+                        for c in new_comments:
+                            click.echo(f"  - {c.path}:{c.line} by @{c.user_login}")
+                            processed_comment_ids.add(c.id)
+                        continue
+
+                    if dry_run:
+                        for c in new_comments:
+                            click.echo(f"  [dry-run] Would process: {c.path}:{c.line}")
+                            processed_comment_ids.add(c.id)
+                        continue
+
+                    # Group and process comments
+                    groups = group_comments(new_comments)
+
+                    for group in groups:
+                        # Mark as processed before running to avoid re-trigger
+                        for cid in group.comment_ids:
+                            processed_comment_ids.add(cid)
+
+                        comment_text = format_pr_comment_as_prompt(
+                            group, pr_description=pr_description
+                        )
+
+                        try:
+                            log = run_pr_comment_fix(
+                                pr_number=pr_number,
+                                branch_name=branch_name,
+                                file_path=group.path,
+                                line_range=f"{group.start_line}-{group.end_line}",
+                                comment_text=comment_text,
+                                pr_url=pr_url,
+                                pr_description=pr_description,
+                                repo_root=repo_root,
+                                config=config,
+                                verbose=verbose,
+                                quiet=quiet,
+                            )
+                            total_cost += log.total_cost_usd
+
+                            # Post reply
+                            if log.status == RunStatus.COMPLETED:
+                                sha_result = subprocess.run(
+                                    ["git", "rev-parse", "--short", "HEAD"],
+                                    capture_output=True, text=True, timeout=10, cwd=repo_root,
+                                )
+                                commit_sha = sha_result.stdout.strip() if sha_result.returncode == 0 else "unknown"
+                                reply_body = format_success_reply(commit_sha, f"Addressed in {group.path}")
+                            else:
+                                reply_body = format_failure_reply(log.run_id)
+
+                            for cid in group.comment_ids:
+                                post_comment_reply(
+                                    cid,
+                                    reply_body,
+                                    repo_root,
+                                    marker=config.github_watch.comment_response_marker,
+                                )
+
+                        except Exception as exc:
+                            logger.error("Error processing PR %d comment group: %s", pr_number, exc)
+
+                except Exception as exc:
+                    logger.warning("Error checking PR %d: %s", pr_number, exc)
+                    continue
+
+            # Wait for next poll
+            if not quiet:
+                click.echo(f"[colonyos] Sleeping {poll_interval}s until next poll...")
+            time.sleep(poll_interval)
+
+    except KeyboardInterrupt:
+        click.echo("\n[colonyos] GitHub watch interrupted.")
+
+
+def _get_open_colonyos_prs(repo_root: Path, config: ColonyConfig) -> list[int]:
+    """Get list of open PRs with ColonyOS branch prefix."""
+    try:
+        result = subprocess.run(
+            [
+                "gh", "pr", "list",
+                "--json", "number,headRefName",
+                "--limit", "50",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=repo_root,
+        )
+        if result.returncode != 0:
+            return []
+
+        prs = json.loads(result.stdout)
+        return [
+            pr["number"]
+            for pr in prs
+            if pr.get("headRefName", "").startswith(config.branch_prefix)
+        ]
+    except Exception:
+        return []
 
 
 @app.command()
@@ -1838,14 +2057,30 @@ def show(run_id: str, as_json: bool, phase: str | None) -> None:
 @click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
 @click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
 @click.option("--dry-run", is_flag=True, help="Log triggers without executing pipeline.")
+@click.option("--github", is_flag=True, help="Watch GitHub PRs for review comments instead of Slack.")
+@click.option("--pr", "pr_numbers", multiple=True, type=int, help="Specific PR numbers to watch (with --github).")
 def watch(
     max_hours: float | None,
     max_budget: float | None,
     verbose: bool,
     quiet: bool,
     dry_run: bool,
+    github: bool,
+    pr_numbers: tuple[int, ...],
 ) -> None:
-    """Watch Slack channels and trigger pipeline runs from messages."""
+    """Watch Slack channels (or GitHub PRs with --github) and trigger pipeline runs."""
+    if github:
+        _watch_github_prs(
+            pr_numbers=list(pr_numbers),
+            max_hours=max_hours,
+            max_budget=max_budget,
+            verbose=verbose,
+            quiet=quiet,
+            dry_run=dry_run,
+        )
+        return
+
+    # Original Slack watch logic below
     import signal
     import threading
 
@@ -3134,6 +3369,199 @@ def ci_fix(
     log.mark_finished()
     _save_run_log(repo_root, log)
     sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# colonyos pr-respond — fix PR review comments
+# ---------------------------------------------------------------------------
+
+
+@app.command("pr-respond")
+@click.argument("pr_ref")
+@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output.")
+@click.option("-q", "--quiet", is_flag=True, help="Minimal output.")
+def pr_respond(
+    pr_ref: str,
+    verbose: bool,
+    quiet: bool,
+) -> None:
+    """Respond to unaddressed PR review comments.
+
+    PR_REF is a pull request number (e.g. 42) or full GitHub PR URL.
+    Fetches review comments, runs an AI agent to address the feedback,
+    and pushes fix commits. Posts reply comments with the fix status.
+
+    This command only addresses comments from allowed users (configured
+    via github_watch.allowed_comment_authors or org membership).
+    """
+    from colonyos.ci import parse_pr_ref, validate_gh_auth
+    from colonyos.orchestrator import run_pr_comment_fix
+    from colonyos.pr_comments import (
+        CommentGroup,
+        fetch_pr_comments,
+        fetch_pr_metadata,
+        filter_unaddressed_comments,
+        format_pr_comment_as_prompt,
+        format_failure_reply,
+        format_success_reply,
+        group_comments,
+        is_allowed_commenter,
+        post_comment_reply,
+        validate_colonyos_branch,
+    )
+
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+
+    # Parse PR reference
+    try:
+        pr_number = parse_pr_ref(pr_ref)
+    except ValueError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    # Pre-flight checks
+    validate_gh_auth()
+
+    if not quiet:
+        click.echo(f"[colonyos] Fetching PR #{pr_number} comments...")
+
+    # Fetch PR metadata
+    try:
+        pr_meta = fetch_pr_metadata(pr_number, repo_root)
+    except click.ClickException as exc:
+        click.echo(f"Error: {exc.message}", err=True)
+        sys.exit(1)
+
+    branch_name = pr_meta["head_branch"]
+    pr_url = pr_meta["url"]
+    pr_description = pr_meta["body"]
+
+    # Validate branch is a ColonyOS branch
+    if not validate_colonyos_branch(branch_name, config.branch_prefix):
+        click.echo(
+            f"Error: Branch '{branch_name}' does not use ColonyOS prefix "
+            f"'{config.branch_prefix}'. PR-respond only works on ColonyOS branches.",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Fetch review comments
+    try:
+        all_comments = fetch_pr_comments(
+            pr_number,
+            repo_root,
+            skip_bot_comments=config.github_watch.skip_bot_comments,
+        )
+    except click.ClickException as exc:
+        click.echo(f"Error: {exc.message}", err=True)
+        sys.exit(1)
+
+    if not all_comments:
+        click.echo(f"[colonyos] No review comments found on PR #{pr_number}.")
+        return
+
+    # Filter to allowed commenters
+    allowed_comments = [
+        c for c in all_comments
+        if is_allowed_commenter(c.user_login, config.github_watch, repo_root)
+    ]
+    if not allowed_comments:
+        click.echo(
+            f"[colonyos] No comments from allowed users. "
+            f"Checked {len(all_comments)} comment(s)."
+        )
+        return
+
+    # Filter out already-addressed comments
+    unaddressed = filter_unaddressed_comments(
+        allowed_comments,
+        repo_root,
+        marker=config.github_watch.comment_response_marker,
+    )
+    if not unaddressed:
+        click.echo(f"[colonyos] All comments on PR #{pr_number} have been addressed.")
+        return
+
+    if not quiet:
+        click.echo(
+            f"[colonyos] Found {len(unaddressed)} unaddressed comment(s) on PR #{pr_number}"
+        )
+
+    # Group comments for batch processing
+    groups = group_comments(unaddressed)
+
+    success_count = 0
+    failure_count = 0
+
+    for i, group in enumerate(groups, 1):
+        if not quiet:
+            click.echo(
+                f"[colonyos] Processing comment group {i}/{len(groups)}: "
+                f"{group.path}:{group.start_line}-{group.end_line}"
+            )
+
+        # Build prompt from comment group
+        comment_text = format_pr_comment_as_prompt(group, pr_description=pr_description)
+
+        # Run the fix pipeline
+        try:
+            log = run_pr_comment_fix(
+                pr_number=pr_number,
+                branch_name=branch_name,
+                file_path=group.path,
+                line_range=f"{group.start_line}-{group.end_line}",
+                comment_text=comment_text,
+                pr_url=pr_url,
+                pr_description=pr_description,
+                repo_root=repo_root,
+                config=config,
+                verbose=verbose,
+                quiet=quiet,
+            )
+        except Exception as exc:
+            click.echo(f"[colonyos] Error processing group: {exc}", err=True)
+            failure_count += 1
+            continue
+
+        # Post reply comments
+        if log.status == RunStatus.COMPLETED:
+            # Get the commit SHA from git
+            sha_result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=10, cwd=repo_root,
+            )
+            commit_sha = sha_result.stdout.strip() if sha_result.returncode == 0 else "unknown"
+
+            summary = f"Addressed feedback in {group.path}"
+            reply_body = format_success_reply(commit_sha, summary)
+
+            for comment_id in group.comment_ids:
+                post_comment_reply(
+                    comment_id,
+                    reply_body,
+                    repo_root,
+                    marker=config.github_watch.comment_response_marker,
+                )
+            success_count += 1
+        else:
+            reply_body = format_failure_reply(log.run_id)
+            for comment_id in group.comment_ids:
+                post_comment_reply(
+                    comment_id,
+                    reply_body,
+                    repo_root,
+                    marker=config.github_watch.comment_response_marker,
+                )
+            failure_count += 1
+
+    # Final summary
+    click.echo(
+        f"[colonyos] PR #{pr_number} complete: {success_count} group(s) fixed, "
+        f"{failure_count} failed."
+    )
+    if failure_count > 0:
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------

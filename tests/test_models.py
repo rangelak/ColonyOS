@@ -499,3 +499,111 @@ class TestRunLogPrUrl:
         )
         log.mark_finished()
         assert log.pr_url == "https://github.com/org/repo/pull/99"
+
+
+class TestQueueItemPRCommentFields:
+    """Tests for PR comment tracking: source_type='pr_comment', comment_ids, pr_number."""
+
+    def test_pr_comment_source_type(self) -> None:
+        item = QueueItem(
+            id="q-pr-1",
+            source_type="pr_comment",
+            source_value="42",  # PR number as source_value
+            status=QueueItemStatus.PENDING,
+            comment_ids=[123456, 123457],
+            pr_number=42,
+        )
+        assert item.source_type == "pr_comment"
+        assert item.comment_ids == [123456, 123457]
+        assert item.pr_number == 42
+
+    def test_comment_ids_default_none(self) -> None:
+        item = QueueItem(
+            id="q-pr-2",
+            source_type="prompt",
+            source_value="fix bug",
+            status=QueueItemStatus.PENDING,
+        )
+        assert item.comment_ids is None
+        assert item.pr_number is None
+
+    def test_to_dict_includes_pr_comment_fields(self) -> None:
+        item = QueueItem(
+            id="q-pr-3",
+            source_type="pr_comment",
+            source_value="42",
+            status=QueueItemStatus.PENDING,
+            comment_ids=[111, 222, 333],
+            pr_number=42,
+        )
+        d = item.to_dict()
+        assert d["source_type"] == "pr_comment"
+        assert d["comment_ids"] == [111, 222, 333]
+        assert d["pr_number"] == 42
+
+    def test_from_dict_with_pr_comment_fields(self) -> None:
+        d = {
+            "id": "q-pr-4",
+            "source_type": "pr_comment",
+            "source_value": "99",
+            "status": "pending",
+            "comment_ids": [444, 555],
+            "pr_number": 99,
+        }
+        item = QueueItem.from_dict(d)
+        assert item.source_type == "pr_comment"
+        assert item.comment_ids == [444, 555]
+        assert item.pr_number == 99
+
+    def test_from_dict_backward_compat_missing_pr_comment_fields(self) -> None:
+        """Old QueueItem dicts without pr_comment fields load with defaults."""
+        d = {
+            "id": "q-old-pr",
+            "source_type": "slack",
+            "source_value": "old item",
+            "status": "completed",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.comment_ids is None
+        assert item.pr_number is None
+
+    def test_roundtrip_pr_comment(self) -> None:
+        item = QueueItem(
+            id="q-pr-rt",
+            source_type="pr_comment",
+            source_value="123",
+            status=QueueItemStatus.COMPLETED,
+            comment_ids=[777, 888, 999],
+            pr_number=123,
+            branch_name="colonyos/feature",
+            cost_usd=3.50,
+            pr_url="https://github.com/org/repo/pull/123",
+        )
+        d = item.to_dict()
+        restored = QueueItem.from_dict(d)
+        assert restored.source_type == item.source_type
+        assert restored.comment_ids == item.comment_ids
+        assert restored.pr_number == item.pr_number
+        assert restored.branch_name == item.branch_name
+        assert restored.pr_url == item.pr_url
+
+    def test_schema_version_bump(self) -> None:
+        """Schema version should be 3 after adding pr_comment fields."""
+        assert QueueItem.SCHEMA_VERSION == 3
+
+    def test_from_dict_handles_schema_version_2(self) -> None:
+        """Items with schema_version 2 load gracefully with None for new fields."""
+        d = {
+            "schema_version": 2,
+            "id": "q-v2",
+            "source_type": "slack",
+            "source_value": "test",
+            "status": "pending",
+            "slack_ts": "123.456",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.id == "q-v2"
+        assert item.comment_ids is None
+        assert item.pr_number is None
+        # Existing v2 fields still work
+        assert item.slack_ts == "123.456"

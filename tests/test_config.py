@@ -945,3 +945,154 @@ class TestSlackAutoApproveWarning:
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
             load_config(tmp_repo)
         assert not any("allowed_user_ids" in msg for msg in caplog.messages)
+
+
+class TestGitHubWatchConfig:
+    """Tests for GitHubWatchConfig dataclass and parsing."""
+
+    def test_default_values(self, tmp_repo: Path) -> None:
+        """Default values when github_watch section is absent."""
+        config = load_config(tmp_repo)
+        assert config.github_watch.enabled is False
+        assert config.github_watch.poll_interval_seconds == 60
+        assert config.github_watch.auto_respond is False
+        assert config.github_watch.max_responses_per_pr_per_hour == 3
+        assert config.github_watch.budget_per_response == 5.0
+        assert config.github_watch.allowed_comment_authors == []
+        assert config.github_watch.skip_bot_comments is True
+        assert config.github_watch.comment_response_marker == "<!-- colonyos-response -->"
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        """All fields parsed correctly from config file."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "github_watch": {
+                    "enabled": True,
+                    "poll_interval_seconds": 120,
+                    "auto_respond": True,
+                    "max_responses_per_pr_per_hour": 5,
+                    "budget_per_response": 10.0,
+                    "allowed_comment_authors": ["alice", "bob"],
+                    "skip_bot_comments": False,
+                    "comment_response_marker": "<!-- custom-marker -->",
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.github_watch.enabled is True
+        assert config.github_watch.poll_interval_seconds == 120
+        assert config.github_watch.auto_respond is True
+        assert config.github_watch.max_responses_per_pr_per_hour == 5
+        assert config.github_watch.budget_per_response == 10.0
+        assert config.github_watch.allowed_comment_authors == ["alice", "bob"]
+        assert config.github_watch.skip_bot_comments is False
+        assert config.github_watch.comment_response_marker == "<!-- custom-marker -->"
+
+    def test_poll_interval_below_minimum_raises(self, tmp_repo: Path) -> None:
+        """poll_interval_seconds must be >= 10."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github_watch": {"poll_interval_seconds": 5}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="poll_interval_seconds must be >= 10"):
+            load_config(tmp_repo)
+
+    def test_max_responses_per_pr_per_hour_below_one_raises(self, tmp_repo: Path) -> None:
+        """max_responses_per_pr_per_hour must be >= 1."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github_watch": {"max_responses_per_pr_per_hour": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="max_responses_per_pr_per_hour must be >= 1"):
+            load_config(tmp_repo)
+
+    def test_budget_per_response_not_positive_raises(self, tmp_repo: Path) -> None:
+        """budget_per_response must be > 0."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github_watch": {"budget_per_response": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="budget_per_response must be > 0"):
+            load_config(tmp_repo)
+
+    def test_negative_budget_per_response_raises(self, tmp_repo: Path) -> None:
+        """Negative budget_per_response raises."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github_watch": {"budget_per_response": -1.0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="budget_per_response must be > 0"):
+            load_config(tmp_repo)
+
+    def test_empty_allowed_comment_authors_is_valid(self, tmp_repo: Path) -> None:
+        """Empty allowed_comment_authors means check org membership."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"github_watch": {"allowed_comment_authors": []}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.github_watch.allowed_comment_authors == []
+
+    def test_missing_section_gets_defaults(self, tmp_repo: Path) -> None:
+        """Config file without github_watch section gets defaults."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "sonnet"}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.github_watch.enabled is False
+        assert config.github_watch.poll_interval_seconds == 60
+
+    def test_roundtrip_save_load(self, tmp_repo: Path) -> None:
+        """GitHubWatchConfig survives save/load cycle."""
+        from colonyos.config import GitHubWatchConfig
+
+        original = ColonyConfig(
+            github_watch=GitHubWatchConfig(
+                enabled=True,
+                poll_interval_seconds=90,
+                auto_respond=True,
+                max_responses_per_pr_per_hour=4,
+                budget_per_response=7.5,
+                allowed_comment_authors=["reviewer1"],
+                skip_bot_comments=False,
+                comment_response_marker="<!-- test -->",
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.github_watch.enabled is True
+        assert loaded.github_watch.poll_interval_seconds == 90
+        assert loaded.github_watch.auto_respond is True
+        assert loaded.github_watch.max_responses_per_pr_per_hour == 4
+        assert loaded.github_watch.budget_per_response == 7.5
+        assert loaded.github_watch.allowed_comment_authors == ["reviewer1"]
+        assert loaded.github_watch.skip_bot_comments is False
+        assert loaded.github_watch.comment_response_marker == "<!-- test -->"
+
+    def test_roundtrip_defaults_not_persisted_when_disabled(self, tmp_repo: Path) -> None:
+        """When github_watch is disabled with defaults, section may be omitted."""
+        from colonyos.config import GitHubWatchConfig
+
+        original = ColonyConfig(github_watch=GitHubWatchConfig())
+        save_config(tmp_repo, original)
+        raw = yaml.safe_load(
+            (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
+        )
+        # Section may be omitted when all defaults
+        assert "github_watch" not in raw or raw.get("github_watch", {}).get("enabled") is False

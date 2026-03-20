@@ -1939,6 +1939,282 @@ def run_thread_fix(
                 ) from exc
 
 
+def run_pr_comment_fix(
+    *,
+    pr_number: int,
+    branch_name: str,
+    file_path: str,
+    line_range: str,
+    comment_text: str,
+    pr_url: str,
+    pr_description: str,
+    repo_root: Path,
+    config: ColonyConfig,
+    verbose: bool = False,
+    quiet: bool = False,
+    ui_factory: object | None = None,
+    expected_head_sha: str | None = None,
+) -> RunLog:
+    """Execute a lightweight fix pipeline for a PR review comment.
+
+    Similar to run_thread_fix, but tailored for addressing reviewer feedback:
+    1. Validate branch name, branch exists, and PR is open
+    2. Clean working tree check (stash if needed)
+    3. Checkout existing branch and verify HEAD SHA (force-push defense)
+    4. Implement phase with PR comment fix instructions
+    5. Verify phase (test suite)
+    6. Deliver phase (push to existing branch, skip PR creation)
+
+    Returns a RunLog with phase results and cost.
+
+    .. warning:: Concurrency
+
+       This function modifies the git working tree (checkout, commit, push).
+       Callers **must** serialize access — e.g., via the ``pipeline_semaphore``
+       in ``QueueExecutor``. Concurrent invocations will cause working tree
+       corruption.
+    """
+
+    def _make_ui(prefix: str = "") -> PhaseUI | NullUI | None:
+        if ui_factory is not None:
+            return ui_factory(prefix)  # type: ignore[operator]
+        if quiet:
+            return None
+        return PhaseUI(verbose=verbose, prefix=prefix)
+
+    run_id = _build_run_id(f"pr-comment-{pr_number}-{file_path}")
+    log = RunLog(
+        run_id=run_id,
+        prompt=f"PR #{pr_number} review comment fix: {file_path}",
+        status=RunStatus.RUNNING,
+        branch_name=branch_name,
+        pr_url=pr_url,
+    )
+
+    # --- Defense-in-depth: validate branch name at point of use ---
+    if not is_valid_git_ref(branch_name):
+        return _fail_run_log(
+            repo_root, log,
+            f"PR comment fix: invalid branch name: {branch_name[:100]}",
+        )
+
+    # --- Validate branch exists ---
+    branch_ok, branch_err = validate_branch_exists(branch_name, repo_root)
+    if not branch_ok:
+        return _fail_run_log(
+            repo_root, log,
+            f"PR comment fix: branch validation failed: {branch_err}",
+        )
+
+    # --- Validate PR is still open ---
+    pr_check_num, _ = check_open_pr(branch_name, repo_root)
+    if pr_check_num is None:
+        return _fail_run_log(
+            repo_root, log,
+            f"PR comment fix: no open PR found for branch {branch_name}",
+        )
+
+    # --- Ensure working tree is clean before checkout ---
+    tree_clean, dirty_output = _check_working_tree_clean(repo_root)
+    if not tree_clean:
+        _log(
+            f"PR comment fix: working tree not clean, stashing changes: "
+            f"{dirty_output[:200]}"
+        )
+        try:
+            subprocess.run(
+                ["git", "stash", "push", "-m",
+                 f"colonyos-pr-comment-fix-{branch_name}"],
+                capture_output=True, text=True, cwd=repo_root, timeout=30,
+            )
+        except Exception as exc:
+            return _fail_run_log(
+                repo_root, log,
+                f"PR comment fix: stash failed: {exc}",
+            )
+
+    # --- Checkout branch ---
+    original_branch = _get_current_branch(repo_root)
+    try:
+        checkout_result = subprocess.run(
+            ["git", "checkout", branch_name],
+            capture_output=True, text=True, cwd=repo_root, timeout=30,
+        )
+        if checkout_result.returncode != 0:
+            return _fail_run_log(
+                repo_root, log,
+                f"PR comment fix: checkout failed: {checkout_result.stderr.strip()}",
+            )
+    except Exception as exc:
+        return _fail_run_log(
+            repo_root, log,
+            f"PR comment fix: checkout error: {exc}",
+        )
+
+    try:
+        # --- Verify HEAD SHA (defense against force-push tampering) ---
+        if expected_head_sha:
+            current_sha = _get_head_sha(repo_root)
+            if current_sha and current_sha != expected_head_sha:
+                return _fail_run_log(
+                    repo_root, log,
+                    f"PR comment fix: HEAD SHA mismatch — expected "
+                    f"{expected_head_sha[:12]}, got {current_sha[:12]}. "
+                    f"Branch may have been force-pushed.",
+                )
+
+        # --- Phase: Implement (with PR comment fix instructions) ---
+        _touch_heartbeat(repo_root)
+        impl_ui = _make_ui()
+        if impl_ui is not None:
+            impl_ui.phase_header(
+                "Implement (PR comment fix)", config.budget.per_phase,
+                config.get_model(Phase.IMPLEMENT), branch_name,
+            )
+        else:
+            _log("=== PR Comment Fix: Implement ===")
+
+        system, user = _build_pr_comment_fix_prompt(
+            config=config,
+            branch_name=branch_name,
+            pr_url=pr_url,
+            file_path=file_path,
+            line_range=line_range,
+            comment_text=comment_text,
+            pr_description=pr_description,
+        )
+        impl_result = run_phase_sync(
+            Phase.IMPLEMENT,
+            user,
+            cwd=repo_root,
+            system_prompt=system,
+            model=config.get_model(Phase.IMPLEMENT),
+            budget_usd=config.budget.per_phase,
+            ui=impl_ui,
+        )
+        log.phases.append(impl_result)
+
+        if not impl_result.success:
+            return _fail_run_log(repo_root, log, "PR comment fix: Implement phase failed")
+
+        # --- Phase: Verify (test suite) ---
+        _touch_heartbeat(repo_root)
+        verify_ui = _make_ui()
+        if verify_ui is not None:
+            verify_ui.phase_header(
+                "Verify (tests)", config.budget.per_phase,
+                config.get_model(Phase.VERIFY),
+            )
+        else:
+            _log("=== PR Comment Fix: Verify ===")
+
+        verify_system = _load_instruction("thread_fix_verify.md")
+        verify_result = run_phase_sync(
+            Phase.VERIFY,
+            (
+                f"Run the full test suite for this project to verify the changes "
+                f"on branch `{branch_name}` do not introduce regressions. "
+                f"If any tests fail, report the failures but do NOT attempt fixes."
+            ),
+            cwd=repo_root,
+            system_prompt=verify_system,
+            model=config.get_model(Phase.VERIFY),
+            budget_usd=config.budget.per_phase,
+            ui=verify_ui,
+            allowed_tools=["Read", "Bash", "Glob", "Grep"],
+        )
+        log.phases.append(verify_result)
+
+        if not verify_result.success:
+            return _fail_run_log(repo_root, log, "PR comment fix: Verify phase failed")
+
+        # --- Phase: Deliver (push to existing branch, no new PR) ---
+        if config.phases.deliver:
+            _touch_heartbeat(repo_root)
+            deliver_ui = _make_ui()
+            if deliver_ui is not None:
+                deliver_ui.phase_header(
+                    "Deliver (push)", config.budget.per_phase,
+                    config.get_model(Phase.DELIVER),
+                )
+            else:
+                _log("=== PR Comment Fix: Deliver ===")
+
+            system, user = _build_deliver_prompt(
+                config, prd_rel="", branch_name=branch_name,
+                skip_pr_creation=True,
+            )
+            deliver_result = run_phase_sync(
+                Phase.DELIVER,
+                user,
+                cwd=repo_root,
+                system_prompt=system,
+                model=config.get_model(Phase.DELIVER),
+                budget_usd=config.budget.per_phase,
+                ui=deliver_ui,
+            )
+            log.phases.append(deliver_result)
+
+            if not deliver_result.success:
+                return _fail_run_log(repo_root, log, "PR comment fix: Deliver phase failed")
+
+        log.status = RunStatus.COMPLETED
+        log.mark_finished()
+        _save_run_log(repo_root, log)
+        _log(f"PR comment fix complete. Total cost: ${log.total_cost_usd:.4f}")
+        return log
+
+    finally:
+        # Restore original branch
+        if original_branch:
+            try:
+                restore = subprocess.run(
+                    ["git", "checkout", original_branch],
+                    capture_output=True, text=True, cwd=repo_root, timeout=30,
+                )
+                if restore.returncode != 0:
+                    raise BranchRestoreError(
+                        f"git checkout '{original_branch}' exited "
+                        f"{restore.returncode}: {restore.stderr.strip()}"
+                    )
+            except BranchRestoreError:
+                raise
+            except Exception as exc:
+                raise BranchRestoreError(
+                    f"Failed to restore original branch '{original_branch}': {exc}"
+                ) from exc
+
+
+def _build_pr_comment_fix_prompt(
+    config: ColonyConfig,
+    branch_name: str,
+    pr_url: str,
+    file_path: str,
+    line_range: str,
+    comment_text: str,
+    pr_description: str,
+) -> tuple[str, str]:
+    """Build system and user prompts for PR comment fix instructions."""
+    template = _load_instruction("pr_comment_fix.md")
+
+    system = _format_base(config) + "\n\n" + template.format(
+        branch_name=branch_name,
+        pr_url=pr_url,
+        file_path=file_path,
+        line_range=line_range,
+        comment_text=sanitize_untrusted_content(comment_text),
+        pr_description=sanitize_untrusted_content(pr_description),
+    )
+
+    user = (
+        f"Address the PR review comment(s) in `{file_path}` around lines "
+        f"{line_range}. Make the specific changes requested by the reviewer. "
+        f"Commit your changes with a clear message referencing the review feedback."
+    )
+
+    return system, user
+
+
 def run(
     prompt: str,
     *,

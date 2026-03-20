@@ -108,6 +108,20 @@ class SlackConfig:
 
 
 @dataclass
+class GitHubWatchConfig:
+    """Configuration for GitHub PR comment watching and auto-response."""
+
+    enabled: bool = False
+    poll_interval_seconds: int = 60
+    auto_respond: bool = False
+    max_responses_per_pr_per_hour: int = 3
+    budget_per_response: float = 5.0
+    allowed_comment_authors: list[str] = field(default_factory=list)
+    skip_bot_comments: bool = True
+    comment_response_marker: str = "<!-- colonyos-response -->"
+
+
+@dataclass
 class ColonyConfig:
     project: ProjectInfo | None = None
     personas: list[Persona] = field(default_factory=list)
@@ -128,6 +142,7 @@ class ColonyConfig:
     ci_fix: CIFixConfig = field(default_factory=CIFixConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
+    github_watch: GitHubWatchConfig = field(default_factory=GitHubWatchConfig)
 
     def get_model(self, phase: Phase) -> str:
         """Return the model for a phase, falling back to the global default."""
@@ -294,6 +309,41 @@ def _parse_cleanup_config(raw: dict) -> CleanupConfig:
     )
 
 
+def _parse_github_watch_config(raw: dict) -> GitHubWatchConfig:
+    """Parse the ``github_watch`` section from config.yaml."""
+    if not raw:
+        return GitHubWatchConfig()
+
+    poll_interval_seconds = int(raw.get("poll_interval_seconds", 60))
+    if poll_interval_seconds < 10:
+        raise ValueError(
+            f"github_watch.poll_interval_seconds must be >= 10, got {poll_interval_seconds}"
+        )
+
+    max_responses_per_pr_per_hour = int(raw.get("max_responses_per_pr_per_hour", 3))
+    if max_responses_per_pr_per_hour < 1:
+        raise ValueError(
+            f"github_watch.max_responses_per_pr_per_hour must be >= 1, got {max_responses_per_pr_per_hour}"
+        )
+
+    budget_per_response = float(raw.get("budget_per_response", 5.0))
+    if budget_per_response <= 0:
+        raise ValueError(
+            f"github_watch.budget_per_response must be > 0, got {budget_per_response}"
+        )
+
+    return GitHubWatchConfig(
+        enabled=bool(raw.get("enabled", False)),
+        poll_interval_seconds=poll_interval_seconds,
+        auto_respond=bool(raw.get("auto_respond", False)),
+        max_responses_per_pr_per_hour=max_responses_per_pr_per_hour,
+        budget_per_response=budget_per_response,
+        allowed_comment_authors=list(raw.get("allowed_comment_authors", [])),
+        skip_bot_comments=bool(raw.get("skip_bot_comments", True)),
+        comment_response_marker=str(raw.get("comment_response_marker", "<!-- colonyos-response -->")),
+    )
+
+
 def load_config(repo_root: Path) -> ColonyConfig:
     config_path = repo_root / CONFIG_DIR / CONFIG_FILE
     if not config_path.exists():
@@ -373,6 +423,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         ci_fix=_parse_ci_fix_config(raw.get("ci_fix", {})),
         slack=_parse_slack_config(raw.get("slack", {})),
         cleanup=_parse_cleanup_config(raw.get("cleanup", {})),
+        github_watch=_parse_github_watch_config(raw.get("github_watch", {})),
     )
 
 
@@ -479,6 +530,19 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
 
     if config.vision:
         data["vision"] = config.vision
+
+    # Only persist github_watch if enabled or non-default values
+    if config.github_watch.enabled or config.github_watch.allowed_comment_authors:
+        data["github_watch"] = {
+            "enabled": config.github_watch.enabled,
+            "poll_interval_seconds": config.github_watch.poll_interval_seconds,
+            "auto_respond": config.github_watch.auto_respond,
+            "max_responses_per_pr_per_hour": config.github_watch.max_responses_per_pr_per_hour,
+            "budget_per_response": config.github_watch.budget_per_response,
+            "allowed_comment_authors": list(config.github_watch.allowed_comment_authors),
+            "skip_bot_comments": config.github_watch.skip_bot_comments,
+            "comment_response_marker": config.github_watch.comment_response_marker,
+        }
 
     config_path = config_dir / CONFIG_FILE
     config_path.write_text(

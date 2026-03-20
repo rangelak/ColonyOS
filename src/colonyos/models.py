@@ -245,10 +245,10 @@ class QueueItem:
     corruption".
     """
 
-    SCHEMA_VERSION: ClassVar[int] = 2  # class-level constant; bump on structural changes
+    SCHEMA_VERSION: ClassVar[int] = 3  # class-level constant; bump on structural changes
 
     id: str
-    source_type: str  # "prompt", "issue", "slack", or "slack_fix"
+    source_type: str  # "prompt", "issue", "slack", "slack_fix", or "pr_comment"
     source_value: str  # prompt text or issue number
     status: QueueItemStatus
     added_at: str = field(
@@ -268,6 +268,9 @@ class QueueItem:
     parent_item_id: str | None = None
     head_sha: str | None = None
     raw_prompt: str | None = None
+    # PR comment tracking (schema_version >= 3)
+    comment_ids: list[int] | None = None
+    pr_number: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -291,6 +294,8 @@ class QueueItem:
             "parent_item_id": self.parent_item_id,
             "head_sha": self.head_sha,
             "raw_prompt": self.raw_prompt,
+            "comment_ids": self.comment_ids,
+            "pr_number": self.pr_number,
         }
 
     @classmethod
@@ -331,6 +336,8 @@ class QueueItem:
             parent_item_id=data.get("parent_item_id"),
             head_sha=data.get("head_sha"),
             raw_prompt=data.get("raw_prompt"),
+            comment_ids=data.get("comment_ids"),
+            pr_number=data.get("pr_number"),
         )
 
 
