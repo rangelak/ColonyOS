@@ -1401,6 +1401,28 @@ def status(limit: int) -> None:
                 click.echo(f"  {wf.name}: (corrupted)")
         click.echo()
 
+    # --- PR Review state summaries (FR-17) ---
+    pr_review_files = sorted(runs_dir.glob("pr_review_state_*.json"), reverse=True)
+    if pr_review_files:
+        click.echo("=== PR Review Sessions ===\n")
+        for prf in pr_review_files[:5]:
+            try:
+                data = json.loads(prf.read_text(encoding="utf-8"))
+                pr_num = data.get("pr_number", "?")
+                fix_rounds = data.get("fix_rounds", 0)
+                cost = data.get("cumulative_cost_usd", 0)
+                processed = len(data.get("processed_comment_ids", {}))
+                paused = data.get("queue_paused", False)
+                status_tag = " [paused]" if paused else ""
+                click.echo(
+                    f"  PR #{pr_num}: {fix_rounds} fixes applied, "
+                    f"{processed} comments processed, "
+                    f"${cost:.4f} spent{status_tag}"
+                )
+            except (json.JSONDecodeError, KeyError):
+                click.echo(f"  {prf.name}: (corrupted)")
+        click.echo()
+
     # --- Learnings ledger ---
     from colonyos.learnings import count_learnings, learnings_path as _learnings_path
 
@@ -3590,7 +3612,7 @@ def pr_review(
 
     def process_comments() -> list[tuple[str, str]]:
         """Process new actionable comments. Returns list of (sha, summary) for fixes."""
-        nonlocal state
+        nonlocal state, pr_state
         fixes_applied: list[tuple[str, str]] = []
 
         # Safety checks
@@ -3607,9 +3629,15 @@ def pr_review(
             return fixes_applied
 
         if not check_circuit_breaker(state, config.pr_review.circuit_breaker_threshold):
+            # Set pause state for circuit breaker cooldown
+            if not state.queue_paused:
+                state.queue_paused = True
+                state.queue_paused_at = datetime.now(timezone.utc).isoformat()
+                save_pr_review_state(repo_root, state)
+            cooldown = config.pr_review.circuit_breaker_cooldown_minutes
             click.echo(
                 f"[colonyos] Circuit breaker triggered ({state.consecutive_failures} failures). "
-                "Pausing."
+                f"Will auto-recover after {cooldown} minutes."
             )
             return fixes_applied
 
@@ -3630,10 +3658,12 @@ def pr_review(
 
         # Filter to new comments only (FR-8: only comments after watch_started_at)
         # Also exclude already-processed comments for deduplication across restarts
+        # Use datetime parsing for robust ISO timestamp comparison
+        watch_started_dt = datetime.fromisoformat(state.watch_started_at)
         new_comments = [
             c for c in comments
             if not state.is_processed(c.id)
-            and c.created_at >= state.watch_started_at
+            and datetime.fromisoformat(c.created_at) >= watch_started_dt
         ]
 
         if not new_comments:
@@ -3687,9 +3717,13 @@ def pr_review(
             prd_rel, task_rel = _find_branch_artifacts(repo_root, config, pr_state.head_ref)
 
             # Run the fix pipeline (FR-15: use source_type for analytics)
+            # Security: Sanitize untrusted comment body before passing to fix agent
+            from colonyos.sanitize import sanitize_untrusted_content
+            sanitized_comment_body = sanitize_untrusted_content(comment.body)
+
             try:
                 run_log = run_thread_fix(
-                    fix_prompt=comment.body,
+                    fix_prompt=sanitized_comment_body,
                     branch_name=pr_state.head_ref,
                     pr_url=pr_state.url,
                     original_prompt=triage_result.summary,
@@ -3702,6 +3736,14 @@ def pr_review(
                     expected_head_sha=pr_state.head_sha,
                     source_type="pr_review_fix",
                     review_comment_id=comment.id,
+                    # PR review context for template selection and rich prompts
+                    pr_review_context={
+                        "file_path": comment.path,
+                        "line_number": comment.line,
+                        "reviewer_username": comment.reviewer,
+                        "comment_url": comment.html_url,
+                        "review_comment": sanitized_comment_body,
+                    },
                 )
 
                 # Update state
@@ -3723,6 +3765,16 @@ def pr_review(
                     state.consecutive_failures = 0
                     state.mark_processed(comment.id, run_log.run_id)
                     click.echo(f"[colonyos] Fix applied: {commit_sha[:7]}")
+
+                    # Update expected HEAD SHA for subsequent fixes in this cycle
+                    # This prevents SHA mismatch errors when processing multiple comments
+                    from colonyos.pr_review import PRState
+                    pr_state = PRState(
+                        state=pr_state.state,
+                        head_sha=commit_sha,
+                        head_ref=pr_state.head_ref,
+                        url=pr_state.url,
+                    )
                 else:
                     state.consecutive_failures += 1
                     state.mark_processed(comment.id, f"failed-{run_log.run_id}")
@@ -3757,6 +3809,32 @@ def pr_review(
                     )
                     # Continue watching
 
+                # Skip processing if circuit breaker is open (still cooling down)
+                if state.queue_paused:
+                    # Check if cooldown has expired for auto-recovery
+                    if state.queue_paused_at:
+                        try:
+                            paused_at = datetime.fromisoformat(state.queue_paused_at)
+                            cooldown_sec = config.pr_review.circuit_breaker_cooldown_minutes * 60
+                            elapsed = (datetime.now(timezone.utc) - paused_at).total_seconds()
+                            if elapsed >= cooldown_sec:
+                                # Auto-recover
+                                state.queue_paused = False
+                                state.queue_paused_at = None
+                                state.consecutive_failures = 0
+                                save_pr_review_state(repo_root, state)
+                                click.echo("[colonyos] Circuit breaker auto-recovered after cooldown.")
+                            else:
+                                remaining = (cooldown_sec - elapsed) / 60
+                                if not quiet:
+                                    click.echo(f"[colonyos] Circuit breaker paused. {remaining:.0f} minutes remaining.")
+                                time.sleep(effective_poll_interval)
+                                continue
+                        except (ValueError, TypeError):
+                            # Malformed timestamp; remain paused
+                            time.sleep(effective_poll_interval)
+                            continue
+
                 fixes = process_comments()
 
                 # Post summary if fixes were applied (FR-6)
@@ -3768,9 +3846,38 @@ def pr_review(
                 if not check_budget_cap(state, effective_budget):
                     click.echo("[colonyos] Budget exhausted. Exiting watch mode.")
                     break
+
+                # Circuit breaker with cooldown/recovery (FR-13)
                 if not check_circuit_breaker(state, config.pr_review.circuit_breaker_threshold):
-                    click.echo("[colonyos] Circuit breaker open. Exiting watch mode.")
-                    break
+                    if not state.queue_paused:
+                        # First trigger: set pause timestamp
+                        state.queue_paused = True
+                        state.queue_paused_at = datetime.now(timezone.utc).isoformat()
+                        save_pr_review_state(repo_root, state)
+                        cooldown = config.pr_review.circuit_breaker_cooldown_minutes
+                        click.echo(
+                            f"[colonyos] Circuit breaker triggered ({state.consecutive_failures} "
+                            f"consecutive failures). Will auto-recover after {cooldown} minutes."
+                        )
+                    else:
+                        # Check if cooldown has expired for auto-recovery
+                        if state.queue_paused_at:
+                            try:
+                                paused_at = datetime.fromisoformat(state.queue_paused_at)
+                                cooldown_sec = config.pr_review.circuit_breaker_cooldown_minutes * 60
+                                elapsed = (datetime.now(timezone.utc) - paused_at).total_seconds()
+                                if elapsed >= cooldown_sec:
+                                    # Auto-recover
+                                    state.queue_paused = False
+                                    state.queue_paused_at = None
+                                    state.consecutive_failures = 0
+                                    save_pr_review_state(repo_root, state)
+                                    click.echo("[colonyos] Circuit breaker auto-recovered after cooldown.")
+                            except (ValueError, TypeError):
+                                pass  # Malformed timestamp; remain paused
+                    # Sleep during pause, then loop to re-check
+                    time.sleep(effective_poll_interval)
+                    continue
 
                 time.sleep(effective_poll_interval)
 

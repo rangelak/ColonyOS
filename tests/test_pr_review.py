@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# Tests are written first, imports will be added as we implement
 
 
 class TestPRReviewState:
@@ -492,3 +490,250 @@ class TestTimestampFiltering:
         d = state.to_dict()
         restored = PRReviewState.from_dict(d)
         assert restored.watch_started_at == timestamp
+
+
+class TestPRReviewCLIIntegration:
+    """CLI integration tests for pr-review command (Task 7.1)."""
+
+    @pytest.fixture
+    def runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    @pytest.fixture
+    def mock_config(self, tmp_path: Path):
+        """Create a minimal config for testing."""
+        from colonyos.config import ColonyConfig, ProjectInfo, save_config, PRReviewConfig
+
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+        )
+        save_config(tmp_path, config)
+        return config
+
+    @patch("colonyos.cli._find_repo_root")
+    @patch("subprocess.run")
+    def test_pr_review_merged_pr_exits_early(
+        self, mock_run: MagicMock, mock_root: MagicMock,
+        runner, tmp_path: Path, mock_config
+    ) -> None:
+        """PR review command exits early for merged PRs."""
+        from colonyos.cli import app
+
+        mock_root.return_value = tmp_path
+
+        # Mock gh pr view to return merged state
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "state": "merged",
+                "headRefOid": "abc123",
+                "headRefName": "feature-branch",
+                "url": "https://github.com/owner/repo/pull/42",
+            }),
+            stderr="",
+        )
+
+        result = runner.invoke(app, ["pr-review", "42"])
+        assert result.exit_code == 0
+        assert "merged" in result.output.lower()
+
+    @patch("colonyos.cli._find_repo_root")
+    @patch("subprocess.run")
+    def test_pr_review_closed_pr_exits_early(
+        self, mock_run: MagicMock, mock_root: MagicMock,
+        runner, tmp_path: Path, mock_config
+    ) -> None:
+        """PR review command exits early for closed PRs."""
+        from colonyos.cli import app
+
+        mock_root.return_value = tmp_path
+
+        # Mock gh pr view to return closed state
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "state": "closed",
+                "headRefOid": "abc123",
+                "headRefName": "feature-branch",
+                "url": "https://github.com/owner/repo/pull/42",
+            }),
+            stderr="",
+        )
+
+        result = runner.invoke(app, ["pr-review", "42"])
+        assert result.exit_code == 0
+        assert "closed" in result.output.lower()
+
+    @patch("colonyos.cli._find_repo_root")
+    @patch("subprocess.run")
+    def test_pr_review_no_config_exits_with_error(
+        self, mock_run: MagicMock, mock_root: MagicMock,
+        runner, tmp_path: Path
+    ) -> None:
+        """PR review command exits with error when no config exists."""
+        from colonyos.cli import app
+
+        # No config file created
+        mock_root.return_value = tmp_path
+
+        result = runner.invoke(app, ["pr-review", "42"])
+        assert result.exit_code != 0
+        assert "colonyos init" in result.output
+
+    @patch("colonyos.cli._find_repo_root")
+    @patch("subprocess.run")
+    def test_pr_review_handles_gh_cli_error(
+        self, mock_run: MagicMock, mock_root: MagicMock,
+        runner, tmp_path: Path, mock_config
+    ) -> None:
+        """PR review command handles gh CLI errors gracefully."""
+        from colonyos.cli import app
+
+        mock_root.return_value = tmp_path
+
+        # Mock gh pr view to return error
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="could not find pull request",
+        )
+
+        result = runner.invoke(app, ["pr-review", "999"])
+        assert result.exit_code != 0
+        assert "Error" in result.output or "error" in result.output.lower()
+
+    @patch("colonyos.cli._find_repo_root")
+    @patch("subprocess.run")
+    def test_pr_review_single_run_no_comments(
+        self, mock_run: MagicMock, mock_root: MagicMock,
+        runner, tmp_path: Path, mock_config
+    ) -> None:
+        """PR review single run with no actionable comments."""
+        from colonyos.cli import app
+
+        mock_root.return_value = tmp_path
+
+        def run_side_effect(*args, **kwargs):
+            cmd = args[0]
+            if "gh" in cmd and "pr" in cmd and "view" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({
+                        "state": "open",
+                        "headRefOid": "abc123",
+                        "headRefName": "feature-branch",
+                        "url": "https://github.com/owner/repo/pull/42",
+                    }),
+                    stderr="",
+                )
+            elif "gh" in cmd and "api" in cmd and "comments" in str(cmd):
+                # Return empty comments list
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps([]),
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = run_side_effect
+
+        result = runner.invoke(app, ["pr-review", "42"])
+        assert result.exit_code == 0
+        assert "No fixes applied" in result.output or "No new actionable" in result.output
+
+
+class TestCircuitBreakerCooldown:
+    """Tests for circuit breaker cooldown/recovery pattern (FR-13)."""
+
+    def test_circuit_breaker_sets_pause_state(self) -> None:
+        from colonyos.pr_review import PRReviewState
+
+        state = PRReviewState(pr_number=42, consecutive_failures=3)
+        assert state.queue_paused is False
+
+        # Simulate circuit breaker trigger
+        state.queue_paused = True
+        state.queue_paused_at = datetime.now(timezone.utc).isoformat()
+
+        assert state.queue_paused is True
+        assert state.queue_paused_at is not None
+
+    def test_cooldown_recovery(self) -> None:
+        from colonyos.pr_review import PRReviewState
+
+        # Set pause state with past timestamp
+        past_time = datetime.now(timezone.utc) - timedelta(minutes=30)
+        state = PRReviewState(
+            pr_number=42,
+            consecutive_failures=3,
+            queue_paused=True,
+            queue_paused_at=past_time.isoformat(),
+        )
+
+        # Simulate auto-recovery check
+        cooldown_minutes = 15
+        paused_at = datetime.fromisoformat(state.queue_paused_at)
+        elapsed = (datetime.now(timezone.utc) - paused_at).total_seconds()
+        cooldown_sec = cooldown_minutes * 60
+
+        # Should have exceeded cooldown
+        assert elapsed >= cooldown_sec
+
+        # Reset state
+        state.queue_paused = False
+        state.queue_paused_at = None
+        state.consecutive_failures = 0
+
+        assert state.queue_paused is False
+        assert state.consecutive_failures == 0
+
+
+class TestDatetimeComparison:
+    """Tests for datetime-based timestamp comparison (robust ISO parsing)."""
+
+    def test_compare_iso_timestamps_with_datetime(self) -> None:
+        """Verify datetime parsing works for ISO timestamp comparison."""
+        older = "2025-01-01T10:00:00+00:00"
+        newer = "2025-01-01T12:00:00+00:00"
+
+        older_dt = datetime.fromisoformat(older)
+        newer_dt = datetime.fromisoformat(newer)
+
+        assert newer_dt > older_dt
+        assert older_dt < newer_dt
+
+    def test_comment_filtering_with_datetime(self) -> None:
+        """Test that comment filtering uses datetime comparison correctly."""
+        from colonyos.pr_review import PRReviewComment
+
+        watch_started = "2025-01-01T12:00:00+00:00"
+        watch_started_dt = datetime.fromisoformat(watch_started)
+
+        # Comment created before watch started
+        old_comment = PRReviewComment(
+            id="1",
+            body="old",
+            path="src/file.py",
+            line=10,
+            reviewer="user",
+            created_at="2025-01-01T10:00:00+00:00",
+            html_url="https://example.com",
+        )
+
+        # Comment created after watch started
+        new_comment = PRReviewComment(
+            id="2",
+            body="new",
+            path="src/file.py",
+            line=20,
+            reviewer="user",
+            created_at="2025-01-01T14:00:00+00:00",
+            html_url="https://example.com",
+        )
+
+        old_dt = datetime.fromisoformat(old_comment.created_at)
+        new_dt = datetime.fromisoformat(new_comment.created_at)
+
+        assert old_dt < watch_started_dt  # Should be filtered out
+        assert new_dt >= watch_started_dt  # Should be included

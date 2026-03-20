@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -441,7 +442,6 @@ def build_commit_url(pr_url: str, commit_sha: str) -> str:
     Returns:
         Commit URL like https://github.com/owner/repo/commit/{sha}
     """
-    import re
     match = re.match(r"(https?://github\.com/[^/]+/[^/]+)/pull/\d+", pr_url)
     if match:
         return f"{match.group(1)}/commit/{commit_sha}"
@@ -478,27 +478,3 @@ def check_fix_rounds(state: PRReviewState, max_rounds: int) -> bool:
     return state.fix_rounds < max_rounds
 
 
-def verify_head_sha(expected_sha: str, repo_root: Path) -> tuple[bool, str]:
-    """Verify the current HEAD SHA matches the expected SHA.
-
-    Returns (True, current_sha) if match, (False, current_sha) if mismatch.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=repo_root,
-        )
-        if result.returncode != 0:
-            return False, ""
-
-        current_sha = result.stdout.strip()
-        if current_sha == expected_sha:
-            return True, current_sha
-        return False, current_sha
-
-    except Exception as exc:
-        logger.warning("Failed to verify HEAD SHA: %s", exc)
-        return False, ""
