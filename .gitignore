@@ -11,4 +11,5 @@ build/
 .colonyos/queue.json
 web/node_modules/
 src/colonyos/web_dist/
+generated/
 .DS_Store

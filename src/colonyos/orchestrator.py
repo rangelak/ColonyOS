@@ -75,6 +75,7 @@ _COLONYOS_OUTPUT_PREFIXES = (
     "cOS_reviews/",
     "cOS_proposals/",
     ".colonyos/",
+    "generated/",
 )
 
 
