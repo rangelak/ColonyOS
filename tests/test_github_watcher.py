@@ -431,3 +431,196 @@ class TestCircuitBreaker:
         state = GitHubWatchState(watch_id="test", consecutive_failures=2)
         state.consecutive_failures = 0  # Reset on success
         assert state.consecutive_failures == 0
+
+
+# ---------------------------------------------------------------------------
+# Audit logging tests (PRD 6.3)
+# ---------------------------------------------------------------------------
+
+
+class TestFixTriggerAuditEntry:
+    """Tests for FixTriggerAuditEntry dataclass."""
+
+    def test_to_dict_has_all_fields(self) -> None:
+        from colonyos.github_watcher import FixTriggerAuditEntry
+
+        entry = FixTriggerAuditEntry(
+            timestamp="2026-03-20T01:00:00+00:00",
+            event_id="123:456",
+            pr_number=123,
+            reviewer="alice",
+            branch="colonyos/fix",
+            fix_round=1,
+            cost_usd=2.50,
+            outcome="completed",
+            run_id="run-123",
+            error=None,
+        )
+        d = entry.to_dict()
+        assert d["timestamp"] == "2026-03-20T01:00:00+00:00"
+        assert d["event_id"] == "123:456"
+        assert d["pr_number"] == 123
+        assert d["reviewer"] == "alice"
+        assert d["branch"] == "colonyos/fix"
+        assert d["fix_round"] == 1
+        assert d["cost_usd"] == 2.50
+        assert d["outcome"] == "completed"
+        assert d["run_id"] == "run-123"
+        assert d["error"] is None
+
+
+class TestLogFixTriggerAudit:
+    """Tests for audit log writing."""
+
+    def test_writes_audit_entry_to_file(self, tmp_path: Path) -> None:
+        import json
+        from colonyos.github_watcher import FixTriggerAuditEntry, log_fix_trigger_audit
+
+        # Create .colonyos/runs directory
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        entry = FixTriggerAuditEntry(
+            timestamp="2026-03-20T01:00:00+00:00",
+            event_id="123:456",
+            pr_number=123,
+            reviewer="alice",
+            branch="colonyos/fix",
+            fix_round=1,
+            cost_usd=0.0,
+            outcome="started",
+        )
+        log_fix_trigger_audit(tmp_path, entry)
+
+        audit_path = runs_dir / "github_watch_audit.jsonl"
+        assert audit_path.exists()
+
+        lines = audit_path.read_text().strip().split("\n")
+        assert len(lines) == 1
+        data = json.loads(lines[0])
+        assert data["pr_number"] == 123
+        assert data["reviewer"] == "alice"
+        assert data["outcome"] == "started"
+
+    def test_appends_multiple_entries(self, tmp_path: Path) -> None:
+        import json
+        from colonyos.github_watcher import FixTriggerAuditEntry, log_fix_trigger_audit
+
+        # Create .colonyos/runs directory
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        entry1 = FixTriggerAuditEntry(
+            timestamp="2026-03-20T01:00:00+00:00",
+            event_id="123:456",
+            pr_number=123,
+            reviewer="alice",
+            branch="colonyos/fix",
+            fix_round=1,
+            cost_usd=0.0,
+            outcome="started",
+        )
+        entry2 = FixTriggerAuditEntry(
+            timestamp="2026-03-20T01:01:00+00:00",
+            event_id="123:456",
+            pr_number=123,
+            reviewer="alice",
+            branch="colonyos/fix",
+            fix_round=1,
+            cost_usd=2.50,
+            outcome="completed",
+            run_id="run-abc",
+        )
+        log_fix_trigger_audit(tmp_path, entry1)
+        log_fix_trigger_audit(tmp_path, entry2)
+
+        audit_path = runs_dir / "github_watch_audit.jsonl"
+        lines = audit_path.read_text().strip().split("\n")
+        assert len(lines) == 2
+
+
+# ---------------------------------------------------------------------------
+# Find run log by branch tests
+# ---------------------------------------------------------------------------
+
+
+class TestFindRunLogForBranch:
+    """Tests for find_run_log_for_branch."""
+
+    def test_returns_none_when_no_runs_dir(self, tmp_path: Path) -> None:
+        from colonyos.github_watcher import find_run_log_for_branch
+
+        result = find_run_log_for_branch(tmp_path, "colonyos/some-branch")
+        assert result is None
+
+    def test_returns_none_when_no_matching_branch(self, tmp_path: Path) -> None:
+        import json
+        from colonyos.github_watcher import find_run_log_for_branch
+
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        # Create a run log for a different branch
+        run_log = {
+            "run_id": "run-123",
+            "branch_name": "colonyos/other-branch",
+            "started_at": "2026-03-20T01:00:00",
+            "prd_rel": "cOS_prds/prd.md",
+            "task_rel": "cOS_tasks/tasks.md",
+        }
+        (runs_dir / "run-123.json").write_text(json.dumps(run_log))
+
+        result = find_run_log_for_branch(tmp_path, "colonyos/some-branch")
+        assert result is None
+
+    def test_returns_matching_run_log(self, tmp_path: Path) -> None:
+        import json
+        from colonyos.github_watcher import find_run_log_for_branch
+
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        # Create a run log for the target branch
+        run_log = {
+            "run_id": "run-456",
+            "branch_name": "colonyos/target-branch",
+            "started_at": "2026-03-20T01:00:00",
+            "prd_rel": "cOS_prds/prd.md",
+            "task_rel": "cOS_tasks/tasks.md",
+            "prompt": "Original feature prompt",
+        }
+        (runs_dir / "run-456.json").write_text(json.dumps(run_log))
+
+        result = find_run_log_for_branch(tmp_path, "colonyos/target-branch")
+        assert result is not None
+        assert result["run_id"] == "run-456"
+        assert result["prd_rel"] == "cOS_prds/prd.md"
+        assert result["prompt"] == "Original feature prompt"
+
+    def test_returns_most_recent_run_log(self, tmp_path: Path) -> None:
+        import json
+        from colonyos.github_watcher import find_run_log_for_branch
+
+        runs_dir = tmp_path / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        # Create two run logs for the same branch, different timestamps
+        run_log_old = {
+            "run_id": "run-old",
+            "branch_name": "colonyos/target-branch",
+            "started_at": "2026-03-19T01:00:00",
+            "prd_rel": "cOS_prds/old.md",
+        }
+        run_log_new = {
+            "run_id": "run-new",
+            "branch_name": "colonyos/target-branch",
+            "started_at": "2026-03-20T01:00:00",
+            "prd_rel": "cOS_prds/new.md",
+        }
+        (runs_dir / "run-old.json").write_text(json.dumps(run_log_old))
+        (runs_dir / "run-new.json").write_text(json.dumps(run_log_new))
+
+        result = find_run_log_for_branch(tmp_path, "colonyos/target-branch")
+        assert result is not None
+        assert result["run_id"] == "run-new"
+        assert result["prd_rel"] == "cOS_prds/new.md"

@@ -18,16 +18,20 @@ import json
 import logging
 import os
 import re
+import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from colonyos.config import GitHubWatchConfig, runs_dir_path
-from colonyos.models import QueueItem, QueueItemStatus
+from colonyos.models import QueueItem, QueueItemStatus, RunStatus
 from colonyos.sanitize import sanitize_untrusted_content
+
+if TYPE_CHECKING:
+    from colonyos.config import ColonyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -496,3 +500,373 @@ def post_pr_comment(
     except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
         logger.warning("Failed to post PR comment: %s", exc)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Structured audit logging (PRD 6.3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FixTriggerAuditEntry:
+    """Structured audit log entry for fix triggers."""
+
+    timestamp: str
+    event_id: str
+    pr_number: int
+    reviewer: str
+    branch: str
+    fix_round: int
+    cost_usd: float
+    outcome: str  # "started", "completed", "failed", "skipped"
+    run_id: str | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "timestamp": self.timestamp,
+            "event_id": self.event_id,
+            "pr_number": self.pr_number,
+            "reviewer": self.reviewer,
+            "branch": self.branch,
+            "fix_round": self.fix_round,
+            "cost_usd": self.cost_usd,
+            "outcome": self.outcome,
+            "run_id": self.run_id,
+            "error": self.error,
+        }
+
+
+def log_fix_trigger_audit(
+    repo_root: Path,
+    entry: FixTriggerAuditEntry,
+) -> None:
+    """Append a structured audit entry to the GitHub watcher audit log.
+
+    Writes to ``cOS_runs/github_watch_audit.jsonl`` in JSON Lines format
+    for easy parsing and analysis.
+    """
+    audit_path = runs_dir_path(repo_root) / "github_watch_audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Append to audit log (atomic append via file mode)
+    try:
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry.to_dict()) + "\n")
+    except OSError as exc:
+        logger.warning("Failed to write audit log: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Helper: Find run log by branch name
+# ---------------------------------------------------------------------------
+
+
+def find_run_log_for_branch(
+    repo_root: Path,
+    branch_name: str,
+) -> dict[str, Any] | None:
+    """Find the most recent run log for a given branch.
+
+    Scans ``cOS_runs/run-*.json`` files looking for a matching ``branch_name``.
+    Returns the most recent matching run log as a dict, or None if not found.
+    """
+    runs_dir = runs_dir_path(repo_root)
+    if not runs_dir.exists():
+        return None
+
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for f in runs_dir.glob("run-*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if data.get("branch_name") == branch_name:
+                matches.append((data.get("started_at", ""), data))
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    if not matches:
+        return None
+
+    # Return most recent by started_at
+    matches.sort(key=lambda x: x[0], reverse=True)
+    return matches[0][1]
+
+
+# ---------------------------------------------------------------------------
+# Core poll and process logic
+# ---------------------------------------------------------------------------
+
+
+def poll_and_process_reviews(
+    *,
+    repo_root: Path,
+    config: "ColonyConfig",
+    watch_state: GitHubWatchState,
+    dry_run: bool = False,
+    verbose: bool = False,
+    quiet: bool = False,
+) -> list[tuple[int, str, float]]:
+    """Poll GitHub for review events and process any found.
+
+    Returns a list of (pr_number, run_id, cost) tuples for successfully
+    processed fixes.
+    """
+    from colonyos.github import check_open_pr
+    from colonyos.orchestrator import run_thread_fix
+
+    results: list[tuple[int, str, float]] = []
+
+    max_fix_rounds = config.github_watch.max_fix_rounds_per_pr
+    max_fix_cost = config.github_watch.max_fix_cost_per_pr_usd
+    max_runs_per_hour = config.slack.max_runs_per_hour
+
+    # Get list of ColonyOS branches with open PRs
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "list", "--state", "open", "--json", "number,headRefName,reviews"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=str(repo_root),
+        )
+        if result.returncode != 0:
+            logger.warning("gh pr list failed: %s", result.stderr[:200])
+            return results
+        prs = json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as exc:
+        logger.warning("Failed to fetch PRs: %s", exc)
+        return results
+
+    for pr in prs:
+        pr_number = pr.get("number")
+        branch = pr.get("headRefName", "")
+        reviews = pr.get("reviews", [])
+
+        # Only process colonyos/* branches
+        if not is_colonyos_branch(branch):
+            continue
+
+        # Validate branch name
+        if not is_valid_git_ref(branch):
+            logger.warning("Invalid branch name '%s', skipping", branch[:100])
+            continue
+
+        # Check each review for "CHANGES_REQUESTED" state
+        for review in reviews:
+            review_state = review.get("state", "")
+            reviewer = review.get("author", {}).get("login", "unknown")
+            review_id = review.get("id", 0)
+
+            # Only process "CHANGES_REQUESTED" reviews
+            if review_state != "CHANGES_REQUESTED":
+                continue
+
+            # Build event ID for deduplication
+            event_id = f"{pr_number}:{review_id}"
+
+            # Skip if already processed
+            if watch_state.is_event_processed(event_id):
+                continue
+
+            # Check reviewer allowlist
+            if not is_reviewer_allowed(reviewer, config.github_watch):
+                logger.info(
+                    "Reviewer '%s' not in allowed_reviewers, skipping PR #%d",
+                    reviewer, pr_number
+                )
+                continue
+
+            # Check rate limit
+            if not check_github_rate_limit(watch_state, max_runs_per_hour):
+                logger.warning("Rate limit exceeded, skipping PR #%d", pr_number)
+                continue
+
+            # Check per-PR round limit
+            current_rounds = watch_state.get_pr_rounds(pr_number)
+            if current_rounds >= max_fix_rounds:
+                logger.info(
+                    "PR #%d has reached round limit (%d/%d)",
+                    pr_number, current_rounds, max_fix_rounds
+                )
+                if not dry_run:
+                    post_pr_comment(
+                        pr_number,
+                        format_fix_limit_comment("rounds", current_rounds, max_fix_rounds)
+                    )
+                    # Log audit entry for skipped due to limit
+                    log_fix_trigger_audit(repo_root, FixTriggerAuditEntry(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        event_id=event_id,
+                        pr_number=pr_number,
+                        reviewer=reviewer,
+                        branch=branch,
+                        fix_round=current_rounds,
+                        cost_usd=0.0,
+                        outcome="skipped",
+                        error="round_limit_exceeded",
+                    ))
+                continue
+
+            # Check per-PR cost limit
+            current_cost = watch_state.get_pr_cost(pr_number)
+            if current_cost >= max_fix_cost:
+                logger.info(
+                    "PR #%d has reached cost limit ($%.2f/$%.2f)",
+                    pr_number, current_cost, max_fix_cost
+                )
+                if not dry_run:
+                    post_pr_comment(
+                        pr_number,
+                        format_fix_limit_comment("cost", current_cost, max_fix_cost)
+                    )
+                    # Log audit entry for skipped due to cost limit
+                    log_fix_trigger_audit(repo_root, FixTriggerAuditEntry(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        event_id=event_id,
+                        pr_number=pr_number,
+                        reviewer=reviewer,
+                        branch=branch,
+                        fix_round=current_rounds,
+                        cost_usd=current_cost,
+                        outcome="skipped",
+                        error="cost_limit_exceeded",
+                    ))
+                continue
+
+            # Log the event
+            if verbose or not quiet:
+                logger.info(
+                    "Detected: PR #%d changes requested by @%s",
+                    pr_number, reviewer
+                )
+
+            if dry_run:
+                watch_state.mark_event_processed(event_id, "dry-run")
+                continue
+
+            # Fetch review comments
+            comments = fetch_review_comments(pr_number, review_id)
+
+            # If no file-specific comments, use the review body
+            if not comments:
+                review_body = review.get("body", "")
+                if review_body:
+                    comments = [
+                        ReviewComment(
+                            file_path="(general)",
+                            line=0,
+                            body=review_body,
+                            reviewer=reviewer,
+                        )
+                    ]
+
+            if not comments:
+                logger.warning("No comments found for PR #%d review, skipping", pr_number)
+                watch_state.mark_event_processed(event_id, "no-comments")
+                continue
+
+            # Format fix prompt
+            fix_prompt = format_github_fix_prompt(
+                comments,
+                pr_number=pr_number,
+                branch=branch,
+            )
+
+            # Post start comment
+            round_num = watch_state.get_pr_rounds(pr_number) + 1
+            post_pr_comment(pr_number, format_fix_start_comment(reviewer, round_num))
+
+            # Log audit entry for started
+            log_fix_trigger_audit(repo_root, FixTriggerAuditEntry(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                event_id=event_id,
+                pr_number=pr_number,
+                reviewer=reviewer,
+                branch=branch,
+                fix_round=round_num,
+                cost_usd=0.0,
+                outcome="started",
+            ))
+
+            # Find PRD and task file for this branch
+            run_log_data = find_run_log_for_branch(repo_root, branch)
+            prd_rel = ""
+            task_rel = ""
+            original_prompt = ""
+            if run_log_data:
+                prd_rel = run_log_data.get("prd_rel", "")
+                task_rel = run_log_data.get("task_rel", "")
+                original_prompt = run_log_data.get("prompt", "")
+
+            # Get PR URL
+            _, pr_url = check_open_pr(branch, repo_root)
+
+            # Run the fix pipeline
+            try:
+                log = run_thread_fix(
+                    fix_prompt,
+                    branch_name=branch,
+                    pr_url=pr_url,
+                    original_prompt=original_prompt,
+                    prd_rel=prd_rel,
+                    task_rel=task_rel,
+                    repo_root=repo_root,
+                    config=config,
+                    verbose=verbose,
+                    quiet=quiet,
+                )
+
+                fix_cost = log.total_cost_usd
+
+                # Update state
+                watch_state.mark_event_processed(event_id, log.run_id)
+                watch_state.increment_pr_rounds(pr_number)
+                watch_state.add_pr_cost(pr_number, fix_cost)
+                watch_state.aggregate_cost_usd += fix_cost
+                watch_state.daily_cost_usd += fix_cost
+                increment_github_hourly_count(watch_state)
+                watch_state.runs_triggered += 1
+                watch_state.consecutive_failures = 0
+
+                # Post completion comment
+                commit_sha = log.post_fix_head_sha or "unknown"
+                post_pr_comment(pr_number, format_fix_complete_comment(commit_sha, fix_cost))
+
+                # Log audit entry for completed
+                log_fix_trigger_audit(repo_root, FixTriggerAuditEntry(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    event_id=event_id,
+                    pr_number=pr_number,
+                    reviewer=reviewer,
+                    branch=branch,
+                    fix_round=round_num,
+                    cost_usd=fix_cost,
+                    outcome="completed" if log.status == RunStatus.COMPLETED else "failed",
+                    run_id=log.run_id,
+                    error=None if log.status == RunStatus.COMPLETED else "pipeline_failed",
+                ))
+
+                if log.status == RunStatus.COMPLETED:
+                    results.append((pr_number, log.run_id, fix_cost))
+                else:
+                    watch_state.consecutive_failures += 1
+
+            except Exception as exc:
+                logger.exception("Fix pipeline failed for PR #%d: %s", pr_number, exc)
+                watch_state.mark_event_processed(event_id, "error")
+                watch_state.consecutive_failures += 1
+
+                # Log audit entry for error
+                log_fix_trigger_audit(repo_root, FixTriggerAuditEntry(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    event_id=event_id,
+                    pr_number=pr_number,
+                    reviewer=reviewer,
+                    branch=branch,
+                    fix_round=round_num,
+                    cost_usd=0.0,
+                    outcome="failed",
+                    error=str(exc)[:500],
+                ))
+
+    return results
