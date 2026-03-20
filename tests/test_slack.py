@@ -1635,3 +1635,116 @@ class TestThreadFixTemplateDefensiveInstructions:
         assert "user-supplied input" in content
         # Both sections should have the note
         assert content.count("Security note") >= 2
+
+
+# ---------------------------------------------------------------------------
+# Merge notification formatting tests
+# ---------------------------------------------------------------------------
+
+
+class TestFormatMergeNotification:
+    """Tests for format_merge_notification()."""
+
+    def test_basic_format(self) -> None:
+        from colonyos.slack import format_merge_notification
+        result = format_merge_notification(
+            pr_number=42,
+            feature_title="Fix CSV export",
+            cost_usd=3.42,
+            duration_ms=2820000,  # 47 minutes
+        )
+        assert "🎉" in result
+        assert "#42" in result
+        assert "Fix CSV export" in result
+        assert "$3.42" in result
+        assert "47" in result  # minutes
+
+    def test_title_truncation(self) -> None:
+        from colonyos.slack import format_merge_notification
+        long_title = "x" * 100
+        result = format_merge_notification(
+            pr_number=1,
+            feature_title=long_title,
+            cost_usd=1.0,
+            duration_ms=60000,
+        )
+        # Should truncate to 80 chars with ellipsis
+        assert "..." in result
+        assert "x" * 80 in result
+        assert "x" * 81 not in result
+
+    def test_title_exactly_80_chars(self) -> None:
+        from colonyos.slack import format_merge_notification
+        title_80 = "x" * 80
+        result = format_merge_notification(
+            pr_number=1,
+            feature_title=title_80,
+            cost_usd=1.0,
+            duration_ms=60000,
+        )
+        # Should NOT truncate
+        assert "..." not in result
+        assert title_80 in result
+
+    def test_title_short(self) -> None:
+        from colonyos.slack import format_merge_notification
+        result = format_merge_notification(
+            pr_number=99,
+            feature_title="Fix bug",
+            cost_usd=0.50,
+            duration_ms=30000,
+        )
+        assert "Fix bug" in result
+        assert "..." not in result
+
+    def test_duration_formatting(self) -> None:
+        from colonyos.slack import format_merge_notification
+        # 90 seconds = 1.5 minutes → "1 minute"
+        result = format_merge_notification(1, "test", 1.0, 90000)
+        assert "1 minute" in result
+
+        # 120000 ms = 2 minutes
+        result2 = format_merge_notification(1, "test", 1.0, 120000)
+        assert "2 minutes" in result2
+
+
+class TestPostMergeNotification:
+    """Tests for post_merge_notification()."""
+
+    def test_posts_message(self) -> None:
+        from colonyos.slack import post_merge_notification
+
+        client = MagicMock()
+        post_merge_notification(
+            client=client,
+            channel="C123",
+            thread_ts="1234.5",
+            pr_number=42,
+            feature_title="Fix CSV export",
+            cost_usd=3.42,
+            duration_ms=2820000,
+        )
+        client.chat_postMessage.assert_called_once()
+        call_kwargs = client.chat_postMessage.call_args[1]
+        assert call_kwargs["channel"] == "C123"
+        assert call_kwargs["thread_ts"] == "1234.5"
+        assert "🎉" in call_kwargs["text"]
+        assert "#42" in call_kwargs["text"]
+
+    def test_message_contains_notification_content(self) -> None:
+        from colonyos.slack import post_merge_notification
+
+        client = MagicMock()
+        post_merge_notification(
+            client=client,
+            channel="C999",
+            thread_ts="9999.0",
+            pr_number=123,
+            feature_title="Add dark mode",
+            cost_usd=5.00,
+            duration_ms=3600000,  # 60 minutes
+        )
+        call_kwargs = client.chat_postMessage.call_args[1]
+        assert "Add dark mode" in call_kwargs["text"]
+        assert "$5.00" in call_kwargs["text"]
+        assert "60 minutes" in call_kwargs["text"]

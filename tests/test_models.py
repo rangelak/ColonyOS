@@ -499,3 +499,104 @@ class TestRunLogPrUrl:
         )
         log.mark_finished()
         assert log.pr_url == "https://github.com/org/repo/pull/99"
+
+
+class TestRunLogMergedAt:
+    """Tests for RunLog.merged_at field."""
+
+    def test_default_none(self) -> None:
+        log = RunLog(run_id="r-1", prompt="test", status=RunStatus.RUNNING)
+        assert log.merged_at is None
+
+    def test_set_merged_at(self) -> None:
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.COMPLETED,
+            merged_at="2026-03-20T10:00:00Z",
+        )
+        assert log.merged_at == "2026-03-20T10:00:00Z"
+
+    def test_mark_finished_preserves_merged_at(self) -> None:
+        log = RunLog(
+            run_id="r-1",
+            prompt="test",
+            status=RunStatus.RUNNING,
+            merged_at="2026-03-20T10:00:00Z",
+        )
+        log.mark_finished()
+        assert log.merged_at == "2026-03-20T10:00:00Z"
+
+
+class TestQueueItemMergeNotified:
+    """Tests for QueueItem.merge_notified field and schema version bump."""
+
+    def test_default_false(self) -> None:
+        item = QueueItem(
+            id="q-1",
+            source_type="slack",
+            source_value="fix bug",
+            status=QueueItemStatus.COMPLETED,
+        )
+        assert item.merge_notified is False
+
+    def test_set_merge_notified(self) -> None:
+        item = QueueItem(
+            id="q-1",
+            source_type="slack",
+            source_value="fix bug",
+            status=QueueItemStatus.COMPLETED,
+            merge_notified=True,
+        )
+        assert item.merge_notified is True
+
+    def test_to_dict_includes_merge_notified(self) -> None:
+        item = QueueItem(
+            id="q-1",
+            source_type="slack",
+            source_value="fix bug",
+            status=QueueItemStatus.COMPLETED,
+            merge_notified=True,
+        )
+        d = item.to_dict()
+        assert d["merge_notified"] is True
+
+    def test_from_dict_with_merge_notified(self) -> None:
+        d = {
+            "id": "q-1",
+            "source_type": "slack",
+            "source_value": "fix bug",
+            "status": "completed",
+            "merge_notified": True,
+        }
+        item = QueueItem.from_dict(d)
+        assert item.merge_notified is True
+
+    def test_from_dict_backward_compat_missing_merge_notified(self) -> None:
+        """Old QueueItem dicts without merge_notified should load with False default."""
+        d = {
+            "id": "q-old",
+            "source_type": "slack",
+            "source_value": "old item",
+            "status": "completed",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.merge_notified is False
+
+    def test_roundtrip_merge_notified(self) -> None:
+        item = QueueItem(
+            id="q-rt",
+            source_type="slack",
+            source_value="roundtrip test",
+            status=QueueItemStatus.COMPLETED,
+            pr_url="https://github.com/org/repo/pull/42",
+            merge_notified=True,
+        )
+        d = item.to_dict()
+        restored = QueueItem.from_dict(d)
+        assert restored.merge_notified is True
+        assert restored.pr_url == item.pr_url
+
+    def test_schema_version_is_3(self) -> None:
+        """QueueItem.SCHEMA_VERSION should be 3 after merge tracking was added."""
+        assert QueueItem.SCHEMA_VERSION == 3

@@ -2948,6 +2948,33 @@ def watch(
     executor_thread = threading.Thread(target=queue_executor.run, daemon=True, name="queue-executor")
     executor_thread.start()
 
+    # Start the merge watcher thread (polls for merged PRs and sends notifications)
+    from colonyos.pr_watcher import MergeWatcher
+    merge_watcher: MergeWatcher | None = None
+    if config.slack.notify_on_merge:
+        # Wait for Slack client to be available before starting merge watcher
+        def _start_merge_watcher_when_ready() -> None:
+            nonlocal merge_watcher
+            _slack_client_ready.wait(timeout=60)
+            if _slack_client is not None and not shutdown_event.is_set():
+                merge_watcher = MergeWatcher(
+                    repo_root=repo_root,
+                    queue_state=queue_state,
+                    watch_state=watch_state,
+                    slack_client=_slack_client,
+                    config=config.slack,
+                    state_lock=state_lock,
+                    shutdown_event=shutdown_event,
+                )
+                merge_watcher.start()
+
+        merge_watcher_starter = threading.Thread(
+            target=_start_merge_watcher_when_ready,
+            daemon=True,
+            name="merge-watcher-starter",
+        )
+        merge_watcher_starter.start()
+
     try:
         handler = start_socket_mode(bolt_app)
         handler.connect()
@@ -2973,6 +3000,8 @@ def watch(
     finally:
         shutdown_event.set()
         executor_thread.join(timeout=60)
+        if merge_watcher is not None:
+            merge_watcher.join(timeout=10)
         with state_lock:
             _save_queue_state(repo_root, queue_state)
             save_watch_state(repo_root, watch_state)

@@ -314,6 +314,64 @@ def format_fix_error(error_type: str, detail: str) -> str:
     return f":x: *{error_type}*: {detail}"
 
 
+def format_merge_notification(
+    pr_number: int,
+    feature_title: str,
+    cost_usd: float,
+    duration_ms: int,
+) -> str:
+    """Format the merge notification message posted when a PR is merged.
+
+    Args:
+        pr_number: The PR number that was merged.
+        feature_title: The feature title (from QueueItem.raw_prompt or PR title).
+        cost_usd: Total cost of the pipeline run.
+        duration_ms: Total duration of the pipeline run in milliseconds.
+
+    Returns:
+        Formatted notification string.
+    """
+    # Truncate title to 80 chars with ellipsis if longer
+    if len(feature_title) > 80:
+        feature_title = feature_title[:80] + "..."
+
+    # Convert duration to minutes
+    minutes = duration_ms // 60000
+    minute_word = "minute" if minutes == 1 else "minutes"
+
+    return (
+        f"🎉 PR #{pr_number} merged! Your feature '{feature_title}' is now live.\n"
+        f"Total: ${cost_usd:.2f}, {minutes} {minute_word}"
+    )
+
+
+def post_merge_notification(
+    client: SlackClient,
+    channel: str,
+    thread_ts: str,
+    pr_number: int,
+    feature_title: str,
+    cost_usd: float,
+    duration_ms: int,
+) -> None:
+    """Post a merge notification as a threaded reply.
+
+    Args:
+        client: Slack client instance.
+        channel: Channel ID to post to.
+        thread_ts: Thread timestamp to reply to.
+        pr_number: The PR number that was merged.
+        feature_title: The feature title.
+        cost_usd: Total cost of the pipeline run.
+        duration_ms: Total duration of the pipeline run in milliseconds.
+    """
+    client.chat_postMessage(
+        channel=channel,
+        thread_ts=thread_ts,
+        text=format_merge_notification(pr_number, feature_title, cost_usd, duration_ms),
+    )
+
+
 def post_acknowledgment(
     client: SlackClient,
     channel: str,

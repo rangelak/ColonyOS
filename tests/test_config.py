@@ -945,3 +945,75 @@ class TestSlackAutoApproveWarning:
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
             load_config(tmp_repo)
         assert not any("allowed_user_ids" in msg for msg in caplog.messages)
+
+
+class TestSlackMergeNotificationConfig:
+    """Tests for SlackConfig.notify_on_merge and merge_poll_interval_sec."""
+
+    def test_default_values(self) -> None:
+        config = SlackConfig()
+        assert config.notify_on_merge is True
+        assert config.merge_poll_interval_sec == 300
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "slack": {
+                    "enabled": True,
+                    "channels": ["C12345"],
+                    "notify_on_merge": False,
+                    "merge_poll_interval_sec": 60,
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.notify_on_merge is False
+        assert config.slack.merge_poll_interval_sec == 60
+
+    def test_missing_new_fields_use_defaults(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"enabled": True}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.notify_on_merge is True
+        assert config.slack.merge_poll_interval_sec == 300
+
+    def test_poll_interval_below_minimum_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"merge_poll_interval_sec": 29}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="merge_poll_interval_sec must be at least 30"):
+            load_config(tmp_repo)
+
+    def test_poll_interval_exactly_30_accepted(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"merge_poll_interval_sec": 30}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.merge_poll_interval_sec == 30
+
+    def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                channels=["C123"],
+                notify_on_merge=False,
+                merge_poll_interval_sec=120,
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.slack.notify_on_merge is False
+        assert loaded.slack.merge_poll_interval_sec == 120

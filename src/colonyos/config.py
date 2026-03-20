@@ -105,6 +105,8 @@ class SlackConfig:
     max_consecutive_failures: int = 3
     circuit_breaker_cooldown_minutes: int = 30
     max_fix_rounds_per_thread: int = 3
+    notify_on_merge: bool = True
+    merge_poll_interval_sec: int = 300
 
 
 @dataclass
@@ -218,6 +220,14 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
     enabled = bool(raw.get("enabled", False))
     auto_approve = bool(raw.get("auto_approve", False))
 
+    # Merge notification config
+    notify_on_merge = bool(raw.get("notify_on_merge", True))
+    merge_poll_interval_sec = int(raw.get("merge_poll_interval_sec", 300))
+    if merge_poll_interval_sec < 30:
+        raise ValueError(
+            f"slack.merge_poll_interval_sec must be at least 30 seconds, got {merge_poll_interval_sec}"
+        )
+
     return SlackConfig(
         enabled=enabled,
         channels=list(raw.get("channels", [])),
@@ -232,6 +242,8 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
         max_consecutive_failures=max_consecutive_failures,
         circuit_breaker_cooldown_minutes=circuit_breaker_cooldown_minutes,
         max_fix_rounds_per_thread=max_fix_rounds_per_thread,
+        notify_on_merge=notify_on_merge,
+        merge_poll_interval_sec=merge_poll_interval_sec,
     )
 
 
@@ -449,6 +461,8 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "max_consecutive_failures": config.slack.max_consecutive_failures,
             "circuit_breaker_cooldown_minutes": config.slack.circuit_breaker_cooldown_minutes,
             "max_fix_rounds_per_thread": config.slack.max_fix_rounds_per_thread,
+            "notify_on_merge": config.slack.notify_on_merge,
+            "merge_poll_interval_sec": config.slack.merge_poll_interval_sec,
         }
         if config.slack.triage_scope:
             slack_data["triage_scope"] = config.slack.triage_scope

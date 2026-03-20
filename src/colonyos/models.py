@@ -169,6 +169,7 @@ class RunLog:
     preflight: PreflightResult | None = None
     pr_url: str | None = None
     post_fix_head_sha: str | None = None
+    merged_at: str | None = None
 
     def mark_finished(self) -> None:
         self.finished_at = datetime.now(timezone.utc).isoformat()
@@ -245,7 +246,7 @@ class QueueItem:
     corruption".
     """
 
-    SCHEMA_VERSION: ClassVar[int] = 2  # class-level constant; bump on structural changes
+    SCHEMA_VERSION: ClassVar[int] = 3  # class-level constant; bump on structural changes
 
     id: str
     source_type: str  # "prompt", "issue", "slack", or "slack_fix"
@@ -268,6 +269,7 @@ class QueueItem:
     parent_item_id: str | None = None
     head_sha: str | None = None
     raw_prompt: str | None = None
+    merge_notified: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -291,6 +293,7 @@ class QueueItem:
             "parent_item_id": self.parent_item_id,
             "head_sha": self.head_sha,
             "raw_prompt": self.raw_prompt,
+            "merge_notified": self.merge_notified,
         }
 
     @classmethod
@@ -331,6 +334,7 @@ class QueueItem:
             parent_item_id=data.get("parent_item_id"),
             head_sha=data.get("head_sha"),
             raw_prompt=data.get("raw_prompt"),
+            merge_notified=data.get("merge_notified", False),
         )
 
 
