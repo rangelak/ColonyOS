@@ -3504,3 +3504,327 @@ def ui(port: int, no_open: bool, write: bool) -> None:
         uvicorn.run(fast_app, host="127.0.0.1", port=port, log_level="warning")
     except KeyboardInterrupt:
         click.echo("\n[colonyos] Dashboard stopped.")
+
+
+# ---------------------------------------------------------------------------
+# PR Review Command
+# ---------------------------------------------------------------------------
+
+
+@app.command("pr-review")
+@click.argument("pr_number", type=int)
+@click.option("--watch", is_flag=True, help="Continuously poll for new review comments.")
+@click.option("--poll-interval", default=None, type=int, help="Poll interval in seconds (default: 60).")
+@click.option("--max-cost", default=None, type=float, help="Override per-PR budget cap (default: $5).")
+@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output.")
+@click.option("-q", "--quiet", is_flag=True, help="Minimal output.")
+def pr_review(
+    pr_number: int,
+    watch: bool,
+    poll_interval: int | None,
+    max_cost: float | None,
+    verbose: bool,
+    quiet: bool,
+) -> None:
+    """Monitor and auto-fix PR review comments.
+
+    PR_NUMBER is the pull request number to monitor.
+
+    Fetches inline review comments, triages them for actionability,
+    and runs the fix pipeline for actionable feedback. Posts replies
+    to comment threads with fix commit links.
+
+    Use --watch for continuous monitoring of new comments.
+    """
+    from colonyos.ci import parse_pr_ref
+    from colonyos.pr_review import (
+        PRReviewState,
+        check_budget_cap,
+        check_circuit_breaker,
+        check_fix_rounds,
+        fetch_pr_review_comments,
+        fetch_pr_state,
+        format_fix_reply,
+        format_summary_message,
+        load_pr_review_state,
+        post_pr_review_reply,
+        post_pr_summary_comment,
+        save_pr_review_state,
+        triage_pr_review_comment,
+    )
+    from colonyos.orchestrator import run_thread_fix
+
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+
+    if not config.project:
+        click.echo(
+            "No ColonyOS config found. Run `colonyos init` first.",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Resolve poll interval and budget
+    effective_poll_interval = poll_interval or config.pr_review.poll_interval_seconds
+    effective_budget = max_cost or config.pr_review.budget_per_pr
+
+    # Check PR state (FR-14: skip merged/closed PRs)
+    try:
+        pr_state = fetch_pr_state(pr_number, repo_root)
+    except Exception as exc:
+        click.echo(f"Error fetching PR #{pr_number}: {exc}", err=True)
+        sys.exit(1)
+
+    if pr_state.state in ("merged", "closed"):
+        click.echo(f"PR #{pr_number} is {pr_state.state}. Nothing to do.")
+        return
+
+    click.echo(f"[colonyos] Monitoring PR #{pr_number} on branch {pr_state.head_ref}")
+    click.echo(f"[colonyos] Budget: ${effective_budget:.2f}, Poll interval: {effective_poll_interval}s")
+
+    # Load or create state
+    state = load_pr_review_state(repo_root, pr_number)
+    if state is None:
+        state = PRReviewState(pr_number=pr_number)
+        save_pr_review_state(repo_root, state)
+
+    def process_comments() -> list[tuple[str, str]]:
+        """Process new actionable comments. Returns list of (sha, summary) for fixes."""
+        nonlocal state
+        fixes_applied: list[tuple[str, str]] = []
+
+        # Safety checks
+        if not check_budget_cap(state, effective_budget):
+            click.echo(
+                f"[colonyos] Budget cap reached (${state.cumulative_cost_usd:.2f} spent). "
+                "Pausing auto-fixes."
+            )
+            post_pr_summary_comment(
+                pr_number,
+                f"Max budget reached (${state.cumulative_cost_usd:.2f} spent), pausing auto-fixes.",
+                repo_root,
+            )
+            return fixes_applied
+
+        if not check_circuit_breaker(state, config.pr_review.circuit_breaker_threshold):
+            click.echo(
+                f"[colonyos] Circuit breaker triggered ({state.consecutive_failures} failures). "
+                "Pausing."
+            )
+            return fixes_applied
+
+        if not check_fix_rounds(state, config.pr_review.max_fix_rounds_per_pr):
+            click.echo(
+                f"[colonyos] Max fix rounds reached ({state.fix_rounds}). Stopping."
+            )
+            return fixes_applied
+
+        # Fetch comments
+        try:
+            comments = fetch_pr_review_comments(pr_number, repo_root)
+        except Exception as exc:
+            click.echo(f"[colonyos] Error fetching comments: {exc}", err=True)
+            state.consecutive_failures += 1
+            save_pr_review_state(repo_root, state)
+            return fixes_applied
+
+        # Filter to new comments only
+        new_comments = [
+            c for c in comments
+            if not state.is_processed(c.id)
+        ]
+
+        if not new_comments:
+            if not quiet:
+                click.echo(f"[colonyos] No new actionable comments found.")
+            return fixes_applied
+
+        click.echo(f"[colonyos] Found {len(new_comments)} new comment(s) to process.")
+
+        for comment in new_comments:
+            if not check_budget_cap(state, effective_budget):
+                click.echo("[colonyos] Budget cap reached during processing. Stopping.")
+                break
+
+            # Triage the comment
+            if not quiet:
+                click.echo(f"[colonyos] Triaging comment {comment.id} from @{comment.reviewer}...")
+
+            try:
+                triage_result = triage_pr_review_comment(
+                    comment.body,
+                    file_path=comment.path,
+                    line_number=comment.line,
+                    repo_root=repo_root,
+                    project_name=config.project.name if config.project else "",
+                    project_description=config.project.description if config.project else "",
+                    project_stack=config.project.stack if config.project else "",
+                    vision=config.vision,
+                )
+            except Exception as exc:
+                click.echo(f"[colonyos] Triage error: {exc}", err=True)
+                state.mark_processed(comment.id, "triage-error")
+                save_pr_review_state(repo_root, state)
+                continue
+
+            if not triage_result.actionable:
+                if not quiet:
+                    click.echo(
+                        f"[colonyos] Comment {comment.id} not actionable: {triage_result.reasoning[:100]}"
+                    )
+                state.mark_processed(comment.id, "not-actionable")
+                save_pr_review_state(repo_root, state)
+                continue
+
+            click.echo(
+                f"[colonyos] Comment {comment.id} is actionable ({triage_result.confidence:.0%}): "
+                f"{triage_result.summary}"
+            )
+
+            # Find PRD and task files for the branch
+            prd_rel, task_rel = _find_branch_artifacts(repo_root, config, pr_state.head_ref)
+
+            # Run the fix pipeline
+            try:
+                run_log = run_thread_fix(
+                    fix_prompt=comment.body,
+                    branch_name=pr_state.head_ref,
+                    pr_url=f"https://github.com/.../{pr_number}",  # Placeholder
+                    original_prompt=triage_result.summary,
+                    prd_rel=prd_rel,
+                    task_rel=task_rel,
+                    repo_root=repo_root,
+                    config=config,
+                    verbose=verbose,
+                    quiet=quiet,
+                    expected_head_sha=pr_state.head_sha,
+                )
+
+                # Update state
+                state.cumulative_cost_usd += run_log.total_cost_usd
+                state.fix_rounds += 1
+
+                if run_log.status == RunStatus.COMPLETED:
+                    # Get the commit SHA from the most recent commit
+                    commit_sha = _get_latest_commit_sha(repo_root)
+                    commit_url = f"https://github.com/.../commit/{commit_sha}"
+
+                    # Post reply to comment thread (FR-5)
+                    reply_msg = format_fix_reply(
+                        commit_sha, commit_url, triage_result.summary
+                    )
+                    post_pr_review_reply(pr_number, comment.id, reply_msg, repo_root)
+
+                    fixes_applied.append((commit_sha, triage_result.summary))
+                    state.consecutive_failures = 0
+                    state.mark_processed(comment.id, run_log.run_id)
+                    click.echo(f"[colonyos] Fix applied: {commit_sha[:7]}")
+                else:
+                    state.consecutive_failures += 1
+                    state.mark_processed(comment.id, f"failed-{run_log.run_id}")
+                    click.echo(f"[colonyos] Fix failed for comment {comment.id}")
+
+            except Exception as exc:
+                click.echo(f"[colonyos] Fix error: {exc}", err=True)
+                state.consecutive_failures += 1
+                state.mark_processed(comment.id, "fix-error")
+
+            save_pr_review_state(repo_root, state)
+
+        return fixes_applied
+
+    # Single run or watch mode
+    if watch:
+        click.echo("[colonyos] Watch mode enabled. Press Ctrl+C to stop.")
+        try:
+            while True:
+                # Re-check PR state each cycle
+                try:
+                    pr_state = fetch_pr_state(pr_number, repo_root)
+                    if pr_state.state in ("merged", "closed"):
+                        click.echo(f"[colonyos] PR #{pr_number} is now {pr_state.state}. Exiting watch mode.")
+                        break
+                except Exception:
+                    pass  # Continue watching even if state check fails
+
+                fixes = process_comments()
+
+                # Post summary if fixes were applied (FR-6)
+                if fixes:
+                    summary_msg = format_summary_message(fixes)
+                    post_pr_summary_comment(pr_number, summary_msg, repo_root)
+
+                # Check safety guards before sleeping
+                if not check_budget_cap(state, effective_budget):
+                    click.echo("[colonyos] Budget exhausted. Exiting watch mode.")
+                    break
+                if not check_circuit_breaker(state, config.pr_review.circuit_breaker_threshold):
+                    click.echo("[colonyos] Circuit breaker open. Exiting watch mode.")
+                    break
+
+                time.sleep(effective_poll_interval)
+
+        except KeyboardInterrupt:
+            click.echo("\n[colonyos] Watch mode stopped.")
+    else:
+        # Single run
+        fixes = process_comments()
+        if fixes:
+            summary_msg = format_summary_message(fixes)
+            post_pr_summary_comment(pr_number, summary_msg, repo_root)
+            click.echo(f"[colonyos] Applied {len(fixes)} fix(es).")
+        else:
+            click.echo("[colonyos] No fixes applied.")
+
+    # Final state save
+    save_pr_review_state(repo_root, state)
+    click.echo(f"[colonyos] Total cost: ${state.cumulative_cost_usd:.2f}")
+
+
+def _find_branch_artifacts(
+    repo_root: Path,
+    config: ColonyConfig,
+    branch_name: str,
+) -> tuple[str, str]:
+    """Find PRD and task files associated with a branch.
+
+    Returns (prd_rel, task_rel) paths relative to repo root.
+    Falls back to empty strings if not found.
+    """
+    prd_dir = repo_root / config.prds_dir
+    task_dir = repo_root / config.tasks_dir
+
+    # Try to find files that match the branch slug
+    branch_slug = branch_name.replace(config.branch_prefix, "").replace("/", "_")
+
+    prd_rel = ""
+    task_rel = ""
+
+    if prd_dir.exists():
+        for prd_file in prd_dir.glob("*prd*.md"):
+            if branch_slug in prd_file.name or branch_name in prd_file.name:
+                prd_rel = str(prd_file.relative_to(repo_root))
+                break
+
+    if task_dir.exists():
+        for task_file in task_dir.glob("*tasks*.md"):
+            if branch_slug in task_file.name or branch_name in task_file.name:
+                task_rel = str(task_file.relative_to(repo_root))
+                break
+
+    return prd_rel, task_rel
+
+
+def _get_latest_commit_sha(repo_root: Path) -> str:
+    """Get the SHA of the latest commit."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=repo_root,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return "unknown"
