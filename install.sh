@@ -18,11 +18,11 @@
 set -euo pipefail
 
 DRY_RUN=false
-AUTO_YES=false
+export AUTO_YES=false
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
-    --yes) AUTO_YES=true ;;
+    --yes) export AUTO_YES=true ;;
     *) echo "Unknown option: $arg"; exit 1 ;;
   esac
 done
