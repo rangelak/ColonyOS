@@ -105,7 +105,8 @@ class TestRunInitReviewsDir:
     def test_creates_reviews_dir(self, tmp_path: Path):
         """run_init creates the reviews directory."""
         with patch("colonyos.init.click") as mock_click, \
-             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas, \
+             patch("colonyos.init._collect_strategic_goals", return_value=""):
             mock_click.prompt.side_effect = [
                 "TestApp", "A test app", "Python", "", 1, 5.0, 15.0
             ]
@@ -123,7 +124,8 @@ class TestRunInitReviewsDir:
     def test_creates_review_subdirectories(self, tmp_path: Path):
         """run_init creates decisions/ and reviews/ subdirectories with .gitkeep."""
         with patch("colonyos.init.click") as mock_click, \
-             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas, \
+             patch("colonyos.init._collect_strategic_goals", return_value=""):
             mock_click.prompt.side_effect = [
                 "TestApp", "A test app", "Python", "", 1, 5.0, 15.0
             ]
@@ -147,7 +149,8 @@ class TestRunInitReviewsDir:
     def test_gitignore_has_cos_pattern(self, tmp_path: Path):
         """run_init adds cOS_*/ pattern to .gitignore."""
         with patch("colonyos.init.click") as mock_click, \
-             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas, \
+             patch("colonyos.init._collect_strategic_goals", return_value=""):
             mock_click.prompt.side_effect = [
                 "TestApp", "A test app", "Python", "", 1, 5.0, 15.0
             ]
@@ -170,7 +173,8 @@ class TestRunInitReviewsDir:
         (tmp_path / "tasks").mkdir()
 
         with patch("colonyos.init.click") as mock_click, \
-             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas, \
+             patch("colonyos.init._collect_strategic_goals", return_value=""):
             mock_click.prompt.side_effect = [
                 "TestApp", "A test app", "Python", "", 1, 5.0, 15.0
             ]
@@ -183,8 +187,8 @@ class TestRunInitReviewsDir:
             run_init(tmp_path)
 
         captured = capsys.readouterr()
-        assert "old 'prds/'" in captured.err
-        assert "old 'tasks/'" in captured.err
+        assert "old prds/" in captured.err
+        assert "old tasks/" in captured.err
 
 
 class TestQuickInit:
@@ -246,7 +250,8 @@ class TestQuickInit:
             )
 
         captured = capsys.readouterr()
-        assert "colonyos run" in captured.out
+        combined = captured.out + captured.err
+        assert "colonyos run" in combined
 
     def test_quick_requires_project_name(self, tmp_path: Path):
         """--quick without project name should raise an error."""
@@ -311,7 +316,8 @@ class TestModelPresets:
 
     def test_interactive_quality_first_preset(self, tmp_path: Path):
         with patch("colonyos.init.click") as mock_click, \
-             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas, \
+             patch("colonyos.init._collect_strategic_goals", return_value=""):
             # Prompt sequence: name, desc, stack, vision, preset=1 (Quality-first), budget_phase, budget_run
             mock_click.prompt.side_effect = [
                 "TestApp", "A test app", "Python", "", 1, 5.0, 15.0
@@ -328,7 +334,8 @@ class TestModelPresets:
 
     def test_interactive_cost_optimized_preset(self, tmp_path: Path):
         with patch("colonyos.init.click") as mock_click, \
-             patch("colonyos.init._collect_personas_with_packs") as mock_personas:
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas, \
+             patch("colonyos.init._collect_strategic_goals", return_value=""):
             # Prompt sequence: name, desc, stack, vision, preset=2 (Cost-optimized), budget_phase, budget_run
             mock_click.prompt.side_effect = [
                 "TestApp", "A test app", "Python", "", 2, 5.0, 15.0

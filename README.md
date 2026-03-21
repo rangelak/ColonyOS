@@ -142,7 +142,7 @@ flowchart LR
 
 | Phase | What happens |
 |---|---|
-| **CEO** *(auto mode only)* | Analyzes the project, its history (reads `CHANGELOG.md`), and strategic direction. Proposes the single highest-impact feature to build next. |
+| **CEO** *(auto mode only)* | Reviews the strategic directions landscape doc (if present), analyzes the project and its history (`CHANGELOG.md`), then proposes the single highest-impact feature. Optionally refreshes directions after each proposal. |
 | **Plan** | Explores the codebase, generates a PRD with clarifying Q&A from your defined personas (running as parallel subagents), and produces a task breakdown. |
 | **Implement** | Creates a feature branch, writes tests first, then implements each task. Commits incrementally. |
 | **Verify** *(optional)* | Runs your test command (e.g. `pytest`, `npm test`). Failed tests trigger implement retries with failure context before the expensive review phase. |
@@ -177,6 +177,10 @@ flowchart TD
 | `colonyos init --quick` | Zero-prompt setup with defaults |
 | `colonyos init --personas` | Re-run just the persona workshop |
 | `colonyos status` | Show recent runs, loop summaries, and cost breakdown |
+| `colonyos directions` | View CEO strategic directions |
+| `colonyos directions --regenerate` | Regenerate directions from scratch |
+| `colonyos directions --static` | Lock directions (CEO reads but never rewrites) |
+| `colonyos directions --auto-update` | Unlock directions to evolve each CEO iteration |
 
 ### Running the pipeline
 
@@ -342,6 +346,16 @@ phases:
 max_fix_iterations: 2        # review/fix cycles before decision gate
 auto_approve: true           # skip human confirmation in autonomous mode
 ```
+
+### Strategic directions
+
+```yaml
+directions_auto_update: true   # false = directions stay read-only between iterations
+```
+
+The CEO agent reads `.colonyos/directions.md` before every proposal for landscape context, inspiration from similar projects, and the user's north star goals. Generate it with `colonyos directions --regenerate`.
+
+When `directions_auto_update` is `true` (default), a lightweight agent refreshes the document after each CEO proposal. Set to `false` if you prefer to hand-curate your directions and keep them static.
 
 ### Verification gate
 
@@ -547,12 +561,13 @@ your-repo/
 │   └── 20260317_proposal_ceo_proposal.md           # CEO proposals
 └── .colonyos/
     ├── config.yaml                                 # project configuration
+    ├── directions.md                               # CEO landscape & inspiration doc
     ├── learnings.md                                # cross-run learnings
     └── runs/                                       # run logs (gitignored)
         └── run-20260317-abc123.json
 ```
 
-The CEO reads `CHANGELOG.md` before proposing new features to avoid duplicating past work. Run logs (costs, durations, session IDs) and loop state go to `.colonyos/runs/`, which is gitignored.
+The CEO reads `CHANGELOG.md` and `directions.md` before proposing new features — the changelog avoids duplicating past work, while directions provide landscape context and inspiration from similar projects. Run logs (costs, durations, session IDs) and loop state go to `.colonyos/runs/`, which is gitignored.
 
 ---
 
@@ -565,6 +580,7 @@ src/colonyos/
 ├── orchestrator.py     # Phase chaining: CEO → Plan → Implement → Verify → Review → Deliver → Learn
 ├── agent.py            # Claude Agent SDK wrapper, parallel execution support
 ├── config.py           # .colonyos/config.yaml loader + validation
+├── directions.py       # CEO strategic directions — generation, updates, display
 ├── models.py           # Persona, PhaseResult, RunLog, LoopState, QueueItem
 ├── naming.py           # Deterministic timestamped filenames, slug generation
 ├── persona_packs.py    # Prebuilt persona packs (startup, backend, fullstack, opensource)
@@ -581,6 +597,7 @@ src/colonyos/
 ├── sanitize.py         # Input sanitization for untrusted content (Slack, issues)
 ├── instructions/       # Markdown templates passed as system prompts
 │   ├── ceo.md          # Autonomous feature proposal
+│   ├── directions_gen.md  # Landscape doc generation prompt
 │   ├── plan.md         # PRD + task generation with persona Q&A
 │   ├── implement.md    # Test-first implementation
 │   ├── review.md       # Per-persona structured review with VERDICT output
