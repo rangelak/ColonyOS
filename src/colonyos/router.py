@@ -241,6 +241,9 @@ def route_query(
         allowed_tools=[],  # no tool access
     )
 
+    # Extract text from artifacts. run_phase_sync returns a single-entry dict
+    # keyed by artifact name; we take the first (and only) value. If the SDK
+    # ever returns multiple artifacts, revisit to use a well-known key.
     raw_text = ""
     if result.artifacts:
         raw_text = next(iter(result.artifacts.values()), "")
@@ -314,7 +317,7 @@ def answer_question(
     project_name: str = "",
     project_description: str = "",
     project_stack: str = "",
-    model: str = "haiku",
+    model: str = "sonnet",
     qa_budget: float = DEFAULT_QA_BUDGET,
 ) -> str:
     """Answer a question about the codebase using a read-only Q&A agent.
@@ -359,7 +362,7 @@ def answer_question(
         allowed_tools=read_only_tools,
     )
 
-    # Extract the answer from the result
+    # Extract answer from artifacts (single-entry dict; see route_query comment).
     if result.artifacts:
         answer = next(iter(result.artifacts.values()), "")
         if answer:
@@ -401,13 +404,14 @@ def log_router_decision(
         logger.warning("Failed to create runs directory: %s", runs_dir)
         return None
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    now = datetime.now(timezone.utc)
+    timestamp = now.strftime("%Y%m%d_%H%M%S_%f")
     log_path = runs_dir / f"triage_{timestamp}.json"
 
     safe_prompt = sanitize_untrusted_content(prompt)
 
     log_data = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now.isoformat(),
         "source": source,
         "prompt": safe_prompt,
         "category": result.category.value,

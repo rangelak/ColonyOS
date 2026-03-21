@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from colonyos.config import ColonyConfig, RouterConfig, load_config
 from colonyos.router import (
     RouterCategory,
     RouterResult,
@@ -580,8 +581,8 @@ class TestAnswerQuestion:
             call_args = mock_run.call_args[0]
             assert call_args[0] == Phase.QA
 
-    def test_uses_haiku_model_by_default(self, tmp_repo: Path) -> None:
-        """answer_question should use haiku model by default."""
+    def test_uses_sonnet_model_by_default(self, tmp_repo: Path) -> None:
+        """answer_question should use sonnet model by default (matching RouterConfig.qa_model)."""
         from colonyos.router import answer_question
         with patch("colonyos.agent.run_phase_sync") as mock_run:
             mock_run.return_value = MagicMock(
@@ -591,7 +592,7 @@ class TestAnswerQuestion:
             )
             answer_question("test question", repo_root=tmp_repo)
             call_kwargs = mock_run.call_args[1]
-            assert call_kwargs["model"] == "haiku"
+            assert call_kwargs["model"] == "sonnet"
 
     def test_uses_read_only_tools(self, tmp_repo: Path) -> None:
         """answer_question should only have read-only tools (Read, Glob, Grep)."""
@@ -676,8 +677,8 @@ class TestAnswerQuestion:
         sig = inspect.signature(answer_question)
         assert "model" in sig.parameters
         param = sig.parameters["model"]
-        # Default should be haiku
-        assert param.default == "haiku"
+        # Default should match RouterConfig.qa_model default (sonnet)
+        assert param.default == "sonnet"
 
 
 class TestAnswerQuestionIntegration:
@@ -876,3 +877,262 @@ class TestLogRouterDecision:
         assert log_path is not None
         data = json.loads(log_path.read_text())
         assert data["source"] == "cli"
+
+    def test_timestamp_consistency(self, tmp_repo: Path) -> None:
+        """Filename timestamp and JSON body timestamp should be derived from same instant."""
+        result = RouterResult(
+            category=RouterCategory.CODE_CHANGE,
+            confidence=0.9,
+            summary="Test",
+            reasoning="Test",
+        )
+        log_path = log_router_decision(
+            repo_root=tmp_repo,
+            prompt="fix bug",
+            result=result,
+        )
+        assert log_path is not None
+        data = json.loads(log_path.read_text())
+        # The filename contains the timestamp with microseconds
+        # e.g. triage_20260321_125008_123456.json
+        fname = log_path.stem  # triage_YYYYMMDD_HHMMSS_ffffff
+        parts = fname.split("_")
+        # parts: ["triage", "YYYYMMDD", "HHMMSS", "ffffff"]
+        assert len(parts) == 4, f"Expected 4 parts in filename, got {parts}"
+        file_date = parts[1]
+        file_time = parts[2]
+        # The JSON timestamp should contain the same date/time
+        body_ts = data["timestamp"]
+        assert file_date[:4] in body_ts  # year
+        assert file_date[4:6] in body_ts  # month
+
+    def test_filename_includes_microseconds(self, tmp_repo: Path) -> None:
+        """Filename should include microseconds to avoid collisions."""
+        result = RouterResult(
+            category=RouterCategory.CODE_CHANGE,
+            confidence=0.9,
+            summary="Test",
+            reasoning="Test",
+        )
+        log_path = log_router_decision(
+            repo_root=tmp_repo,
+            prompt="fix bug",
+            result=result,
+        )
+        assert log_path is not None
+        # Filename format: triage_YYYYMMDD_HHMMSS_ffffff.json
+        fname = log_path.stem
+        parts = fname.split("_")
+        assert len(parts) == 4
+        # Last part should be 6-digit microseconds
+        assert len(parts[3]) == 6
+        assert parts[3].isdigit()
+
+# ---------------------------------------------------------------------------
+# _handle_routed_query integration tests (Tasks 6.1, 7.1)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleRoutedQuery:
+    """Integration tests for the shared routing helper used by both CLI run() and REPL."""
+
+    @pytest.fixture
+    def tmp_repo(self, tmp_path: Path) -> Path:
+        """Create a temporary repo directory with minimal config."""
+        config_dir = tmp_path / ".colonyos"
+        config_dir.mkdir()
+        return tmp_path
+
+    @pytest.fixture
+    def config(self, tmp_repo: Path) -> ColonyConfig:
+        """Load default config for testing."""
+        return load_config(tmp_repo)
+
+    def test_question_returns_answer(self, tmp_repo: Path, config: ColonyConfig) -> None:
+        """QUESTION category should return the Q&A answer string."""
+        from colonyos.cli import _handle_routed_query
+
+        with patch("colonyos.router.route_query") as mock_route, \
+             patch("colonyos.router.answer_question") as mock_answer, \
+             patch("colonyos.router.log_router_decision"):
+            mock_route.return_value = RouterResult(
+                category=RouterCategory.QUESTION,
+                confidence=0.9,
+                summary="Asking about auth",
+                reasoning="User is asking a question",
+            )
+            mock_answer.return_value = "Auth uses JWT tokens."
+            result = _handle_routed_query(
+                "how does auth work?", config, tmp_repo, source="cli",
+            )
+            assert result == "Auth uses JWT tokens."
+            mock_answer.assert_called_once()
+
+    def test_code_change_returns_none(self, tmp_repo: Path, config: ColonyConfig) -> None:
+        """CODE_CHANGE category should return None (proceed to pipeline)."""
+        from colonyos.cli import _handle_routed_query
+
+        with patch("colonyos.router.route_query") as mock_route, \
+             patch("colonyos.router.log_router_decision"):
+            mock_route.return_value = RouterResult(
+                category=RouterCategory.CODE_CHANGE,
+                confidence=0.95,
+                summary="Add feature",
+                reasoning="Code change request",
+            )
+            result = _handle_routed_query(
+                "add a health check", config, tmp_repo, source="cli",
+            )
+            assert result is None
+
+    def test_status_returns_suggestion(self, tmp_repo: Path, config: ColonyConfig) -> None:
+        """STATUS category should return a suggestion string."""
+        from colonyos.cli import _handle_routed_query
+
+        with patch("colonyos.router.route_query") as mock_route, \
+             patch("colonyos.router.log_router_decision"):
+            mock_route.return_value = RouterResult(
+                category=RouterCategory.STATUS,
+                confidence=0.9,
+                summary="Queue status",
+                reasoning="Status query",
+                suggested_command="colonyos status",
+            )
+            result = _handle_routed_query(
+                "show queue status", config, tmp_repo, source="repl",
+            )
+            assert result is not None
+            assert "colonyos status" in result
+
+    def test_out_of_scope_returns_message(self, tmp_repo: Path, config: ColonyConfig) -> None:
+        """OUT_OF_SCOPE category should return a rejection message."""
+        from colonyos.cli import _handle_routed_query
+
+        with patch("colonyos.router.route_query") as mock_route, \
+             patch("colonyos.router.log_router_decision"):
+            mock_route.return_value = RouterResult(
+                category=RouterCategory.OUT_OF_SCOPE,
+                confidence=0.85,
+                summary="Weather question",
+                reasoning="Not code related",
+            )
+            result = _handle_routed_query(
+                "what is the weather?", config, tmp_repo, source="cli",
+            )
+            assert result is not None
+            assert "doesn't seem related" in result
+
+    def test_low_confidence_returns_none(self, tmp_repo: Path, config: ColonyConfig) -> None:
+        """Low-confidence result should fail-open (return None for pipeline)."""
+        from colonyos.cli import _handle_routed_query
+
+        with patch("colonyos.router.route_query") as mock_route, \
+             patch("colonyos.router.log_router_decision"):
+            mock_route.return_value = RouterResult(
+                category=RouterCategory.QUESTION,
+                confidence=0.3,  # below default threshold of 0.7
+                summary="Maybe a question",
+                reasoning="Uncertain",
+            )
+            result = _handle_routed_query(
+                "hmm something", config, tmp_repo, source="repl",
+            )
+            assert result is None
+
+    def test_logs_routing_decision(self, tmp_repo: Path, config: ColonyConfig) -> None:
+        """_handle_routed_query should log the routing decision."""
+        from colonyos.cli import _handle_routed_query
+
+        with patch("colonyos.router.route_query") as mock_route, \
+             patch("colonyos.router.log_router_decision") as mock_log:
+            mock_route.return_value = RouterResult(
+                category=RouterCategory.CODE_CHANGE,
+                confidence=0.9,
+                summary="Feature",
+                reasoning="Code change",
+            )
+            _handle_routed_query(
+                "add feature", config, tmp_repo, source="cli",
+            )
+            mock_log.assert_called_once()
+            call_kwargs = mock_log.call_args[1]
+            assert call_kwargs["source"] == "cli"
+            assert call_kwargs["repo_root"] == tmp_repo
+
+
+# ---------------------------------------------------------------------------
+# Slack Q&A integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestSlackQuestionRouting:
+    """Tests for Slack question routing via triage_message."""
+
+    @pytest.fixture
+    def tmp_repo(self, tmp_path: Path) -> Path:
+        config_dir = tmp_path / ".colonyos"
+        config_dir.mkdir()
+        return tmp_path
+
+    def test_question_populates_answer(self, tmp_repo: Path) -> None:
+        """When router classifies as QUESTION, triage_message should populate answer."""
+        from colonyos.slack import triage_message
+
+        with patch("colonyos.router.route_query") as mock_route, \
+             patch("colonyos.router.answer_question") as mock_answer, \
+             patch("colonyos.router.log_router_decision"):
+            mock_route.return_value = RouterResult(
+                category=RouterCategory.QUESTION,
+                confidence=0.9,
+                summary="Asking about code",
+                reasoning="User question",
+            )
+            mock_answer.return_value = "The function does X."
+            result = triage_message(
+                "what does this function do?",
+                repo_root=tmp_repo,
+            )
+            assert result.actionable is False
+            assert result.answer == "The function does X."
+            mock_answer.assert_called_once()
+
+    def test_code_change_no_answer(self, tmp_repo: Path) -> None:
+        """CODE_CHANGE triage should not populate answer."""
+        from colonyos.slack import triage_message
+
+        with patch("colonyos.router.route_query") as mock_route, \
+             patch("colonyos.router.log_router_decision"):
+            mock_route.return_value = RouterResult(
+                category=RouterCategory.CODE_CHANGE,
+                confidence=0.95,
+                summary="Add feature",
+                reasoning="Code change",
+            )
+            result = triage_message(
+                "add a health check endpoint",
+                repo_root=tmp_repo,
+            )
+            assert result.actionable is True
+            assert result.answer is None
+
+    def test_question_answer_error_fallback(self, tmp_repo: Path) -> None:
+        """If answer_question fails, triage_message should still return with error answer."""
+        from colonyos.slack import triage_message
+
+        with patch("colonyos.router.route_query") as mock_route, \
+             patch("colonyos.router.answer_question") as mock_answer, \
+             patch("colonyos.router.log_router_decision"):
+            mock_route.return_value = RouterResult(
+                category=RouterCategory.QUESTION,
+                confidence=0.9,
+                summary="Question",
+                reasoning="User question",
+            )
+            mock_answer.side_effect = RuntimeError("LLM error")
+            result = triage_message(
+                "how does auth work?",
+                repo_root=tmp_repo,
+            )
+            assert result.actionable is False
+            assert result.answer is not None
+            assert "unable" in result.answer.lower() or "error" in result.answer.lower()

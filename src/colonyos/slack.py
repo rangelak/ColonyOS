@@ -665,6 +665,7 @@ class TriageResult:
     summary: str
     base_branch: str | None
     reasoning: str
+    answer: str | None = None
 
 
 def _build_triage_prompt(
@@ -804,7 +805,12 @@ def triage_message(
             triage_scope=triage_scope,
         )
 
-    from colonyos.router import RouterCategory, log_router_decision, route_query
+    from colonyos.router import (
+        RouterCategory,
+        answer_question,
+        log_router_decision,
+        route_query,
+    )
 
     router_result = route_query(
         message_text,
@@ -832,12 +838,29 @@ def triage_message(
     # Extract base_branch from message text using existing patterns
     raw_branch = _extract_base_branch_from_text(message_text)
 
+    # For QUESTION category, invoke the Q&A agent so the caller can
+    # post the answer back to Slack instead of silently dropping it.
+    qa_answer: str | None = None
+    if router_result.category == RouterCategory.QUESTION:
+        try:
+            qa_answer = answer_question(
+                message_text,
+                repo_root=effective_root,
+                project_name=project_name,
+                project_description=project_description,
+                project_stack=project_stack,
+            )
+        except Exception:
+            logger.exception("Q&A agent failed for Slack question")
+            qa_answer = "I was unable to answer your question due to an error."
+
     return TriageResult(
         actionable=actionable,
         confidence=router_result.confidence,
         summary=router_result.summary,
         base_branch=raw_branch,
         reasoning=router_result.reasoning,
+        answer=qa_answer,
     )
 
 

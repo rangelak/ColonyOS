@@ -60,7 +60,7 @@
 
 - [x] 6.0 Integrate Router into CLI `run` Command
   depends_on: [1.0, 3.0, 5.0]
-  - [ ] 6.1 Write integration tests for `colonyos run` with routing enabled
+  - [x] 6.1 Write integration tests for `colonyos run` with routing enabled
   - [x] 6.2 Add `--no-triage` flag to `run()` command in cli.py
   - [x] 6.3 Add routing logic before `run_orchestrator()` call: check config.router.enabled, call `route_query()`
   - [x] 6.4 Handle `CODE_CHANGE` category: proceed to `run_orchestrator()` as before
@@ -71,7 +71,7 @@
 
 - [x] 7.0 Integrate Router into REPL
   depends_on: [6.0]
-  - [ ] 7.1 Write tests for REPL routing behavior
+  - [x] 7.1 Write tests for REPL routing behavior
   - [x] 7.2 Update `_run_repl()` in cli.py to call `route_query()` before `run_orchestrator()`
   - [x] 7.3 Ensure existing command routing (lines 398-411) takes precedence over intent routing
   - [x] 7.4 Display routing decision to user: "Treating this as a [question/feature request]..."
@@ -95,5 +95,5 @@
   depends_on: [6.0, 7.0, 8.0, 9.0]
   - [ ] 10.1 Add router configuration section to README.md CLI Reference
   - [ ] 10.2 Add `--no-triage` flag to README.md run command documentation
-  - [ ] 10.3 Write end-to-end integration tests covering all routing paths
+  - [x] 10.3 Write end-to-end integration tests covering all routing paths
   - [x] 10.4 Run full test suite and fix any regressions

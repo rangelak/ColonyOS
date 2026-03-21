@@ -306,6 +306,89 @@ def _print_repl_help(command_name: str | None = None) -> None:
     con.print()
 
 
+def _handle_routed_query(
+    prompt: str,
+    config: ColonyConfig,
+    repo_root: Path,
+    source: str,
+    quiet: bool = False,
+) -> str | None:
+    """Classify a user prompt via the intent router and handle non-pipeline categories.
+
+    Returns ``None`` if the prompt should proceed to the full pipeline
+    (CODE_CHANGE or low-confidence fallback).  Returns a user-visible
+    string for QUESTION (the answer), STATUS, and OUT_OF_SCOPE so the
+    caller can display it and skip the pipeline.
+    """
+    from colonyos.router import (
+        RouterCategory,
+        answer_question,
+        log_router_decision,
+        route_query,
+    )
+
+    if not quiet:
+        click.echo(click.style("Classifying intent...", dim=True))
+
+    router_result = route_query(
+        prompt,
+        repo_root=repo_root,
+        project_name=config.project.name if config.project else "",
+        project_description=config.project.description if config.project else "",
+        project_stack=config.project.stack if config.project else "",
+        vision=config.vision,
+        source=source,
+    )
+
+    log_router_decision(
+        repo_root=repo_root,
+        prompt=prompt,
+        result=router_result,
+        source=source,
+    )
+
+    if router_result.confidence < config.router.confidence_threshold:
+        if not quiet:
+            click.echo(click.style(
+                f"Low confidence ({router_result.confidence:.0%}), treating as feature request...",
+                dim=True,
+            ))
+        return None  # proceed to pipeline
+
+    if router_result.category == RouterCategory.QUESTION:
+        if not quiet:
+            click.echo(click.style("Treating this as a question...", dim=True))
+        answer = answer_question(
+            prompt,
+            repo_root=repo_root,
+            project_name=config.project.name if config.project else "",
+            project_description=config.project.description if config.project else "",
+            project_stack=config.project.stack if config.project else "",
+            model=config.router.qa_model,
+            qa_budget=config.router.qa_budget,
+        )
+        return answer
+
+    if router_result.category == RouterCategory.STATUS:
+        suggested = router_result.suggested_command or "colonyos status"
+        return click.style(
+            f"This looks like a status query. Try: {suggested}",
+            fg="yellow",
+        )
+
+    if router_result.category == RouterCategory.OUT_OF_SCOPE:
+        return click.style(
+            "This request doesn't seem related to coding or this project. "
+            "For code changes, describe the feature you want to build.",
+            fg="yellow",
+        )
+
+    # CODE_CHANGE: proceed to pipeline
+    if not quiet:
+        click.echo(click.style("Treating this as a feature request...", dim=True))
+    return None
+
+
 def _run_repl() -> None:
     """Interactive REPL that routes both commands and feature prompts.
 
@@ -412,73 +495,20 @@ def _run_repl() -> None:
 
             # --- intent routing for feature prompts ---
             if config.router.enabled:
-                from colonyos.router import (
-                    RouterCategory,
-                    answer_question,
-                    log_router_decision,
-                    route_query,
-                )
-
-                click.echo(click.style("Classifying intent...", dim=True))
-
-                router_result = route_query(
-                    stripped,
-                    repo_root=repo_root,
-                    project_name=config.project.name if config.project else "",
-                    project_description=config.project.description if config.project else "",
-                    project_stack=config.project.stack if config.project else "",
-                    vision=config.vision,
-                    source="repl",
-                )
-
-                log_router_decision(
-                    repo_root=repo_root,
-                    prompt=stripped,
-                    result=router_result,
-                    source="repl",
-                )
-
-                if router_result.confidence < config.router.confidence_threshold:
+                try:
+                    handled = _handle_routed_query(
+                        stripped, config, repo_root, source="repl",
+                    )
+                except KeyboardInterrupt:
                     click.echo(click.style(
-                        f"Low confidence ({router_result.confidence:.0%}), treating as feature request...",
+                        "\nInterrupted. Returning to prompt.",
                         dim=True,
                     ))
-                elif router_result.category == RouterCategory.QUESTION:
-                    click.echo(click.style("Treating this as a question...", dim=True))
-                    try:
-                        answer = answer_question(
-                            stripped,
-                            repo_root=repo_root,
-                            project_name=config.project.name if config.project else "",
-                            project_description=config.project.description if config.project else "",
-                            project_stack=config.project.stack if config.project else "",
-                            model=config.router.qa_model,
-                            qa_budget=config.router.qa_budget,
-                        )
-                        click.echo()
-                        click.echo(answer)
-                    except KeyboardInterrupt:
-                        click.echo(click.style(
-                            "\nAnswer interrupted. Returning to prompt.",
-                            dim=True,
-                        ))
                     continue
-                elif router_result.category == RouterCategory.STATUS:
-                    suggested = router_result.suggested_command or "colonyos status"
-                    click.echo(click.style(
-                        f"This looks like a status query. Try: {suggested}",
-                        fg="yellow",
-                    ))
+                if handled is not None:
+                    click.echo()
+                    click.echo(handled)
                     continue
-                elif router_result.category == RouterCategory.OUT_OF_SCOPE:
-                    click.echo(click.style(
-                        "This request doesn't seem related to coding or this project. "
-                        "For code changes, describe the feature you want to build.",
-                        fg="yellow",
-                    ))
-                    continue
-                else:
-                    click.echo(click.style("Treating this as a feature request...", dim=True))
 
             # --- feature prompt (default) ---
             per_run_cap = config.budget.per_run
@@ -676,75 +706,17 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
         )
 
         if should_route:
-            from colonyos.router import (
-                RouterCategory,
-                answer_question,
-                log_router_decision,
-                route_query,
-            )
-
-            if not quiet:
-                click.echo(click.style("Classifying intent...", dim=True))
-
-            router_result = route_query(
-                effective_prompt,
-                repo_root=repo_root,
-                project_name=config.project.name if config.project else "",
-                project_description=config.project.description if config.project else "",
-                project_stack=config.project.stack if config.project else "",
-                vision=config.vision,
-                source="cli",
-            )
-
-            # Log the routing decision for audit trail
-            log_router_decision(
-                repo_root=repo_root,
-                prompt=effective_prompt,
-                result=router_result,
-                source="cli",
-            )
-
-            # Check confidence threshold for fail-open behavior
-            if router_result.confidence < config.router.confidence_threshold:
-                if not quiet:
-                    click.echo(click.style(
-                        f"Low confidence ({router_result.confidence:.0%}), treating as feature request...",
-                        dim=True,
-                    ))
-                # Fall through to full pipeline
-            elif router_result.category == RouterCategory.QUESTION:
-                if not quiet:
-                    click.echo(click.style("Treating this as a question...", dim=True))
-                answer = answer_question(
-                    effective_prompt,
-                    repo_root=repo_root,
-                    project_name=config.project.name if config.project else "",
-                    project_description=config.project.description if config.project else "",
-                    project_stack=config.project.stack if config.project else "",
-                    model=config.router.qa_model,
-                    qa_budget=config.router.qa_budget,
+            try:
+                handled = _handle_routed_query(
+                    effective_prompt, config, repo_root, source="cli", quiet=quiet,
                 )
+            except KeyboardInterrupt:
+                click.echo(click.style("\nInterrupted.", dim=True))
+                return
+            if handled is not None:
                 click.echo()
-                click.echo(answer)
+                click.echo(handled)
                 return
-            elif router_result.category == RouterCategory.STATUS:
-                suggested = router_result.suggested_command or "colonyos status"
-                click.echo(click.style(
-                    f"This looks like a status query. Try: {suggested}",
-                    fg="yellow",
-                ))
-                return
-            elif router_result.category == RouterCategory.OUT_OF_SCOPE:
-                click.echo(click.style(
-                    "This request doesn't seem related to coding or this project. "
-                    "For code changes, describe the feature you want to build.",
-                    fg="yellow",
-                ))
-                return
-            else:
-                # CODE_CHANGE: proceed to full pipeline
-                if not quiet:
-                    click.echo(click.style("Treating this as a feature request...", dim=True))
 
         log = run_orchestrator(
             effective_prompt,
@@ -2519,6 +2491,18 @@ def watch(
                 return
 
             if not triage_result.actionable:
+                # If the router answered a question, post the answer back
+                if triage_result.answer:
+                    try:
+                        client.chat_postMessage(  # type: ignore[union-attr]
+                            channel=channel,
+                            thread_ts=ts,
+                            text=triage_result.answer,
+                        )
+                    except Exception:
+                        logger.debug("Failed to post Q&A answer to Slack", exc_info=True)
+                    return
+
                 logger.info("Triage skipped message %s:%s: %s", channel, ts, triage_result.reasoning[:100])
                 if config.slack.triage_verbose:
                     try:
