@@ -722,10 +722,12 @@ def _build_ceo_prompt(
                 "or propose a novel feature if no open issue is high-impact enough.\n"
             )
             for iss in open_issues:
+                safe_title = sanitize_untrusted_content(iss.title)
+                safe_labels = [sanitize_untrusted_content(l) for l in iss.labels]
                 label_str = (
-                    " [" + ", ".join(iss.labels) + "]" if iss.labels else ""
+                    " [" + ", ".join(safe_labels) + "]" if safe_labels else ""
                 )
-                lines.append(f"- #{iss.number}: {iss.title}{label_str}")
+                lines.append(f"- #{iss.number}: {safe_title}{label_str}")
             issues_section = "\n".join(lines) + "\n\n"
     except Exception:
         import logging as _logging
@@ -734,12 +736,44 @@ def _build_ceo_prompt(
             "Failed to fetch open issues for CEO context, proceeding without."
         )
 
+    # Fetch open PRs so the CEO avoids duplicating in-flight work (non-blocking)
+    prs_section = ""
+    try:
+        from colonyos.github import fetch_open_prs
+
+        open_prs = fetch_open_prs(repo_root)
+        if open_prs:
+            lines = ["## Open Pull Requests (Work In Progress)\n"]
+            lines.append(
+                "These PRs represent features **currently being developed or awaiting review**. "
+                "Your proposal MUST NOT overlap with or duplicate any of these. "
+                "Treat them as work that is already underway.\n"
+            )
+            for pr in open_prs:
+                safe_title = sanitize_untrusted_content(pr.title)
+                safe_branch = sanitize_untrusted_content(pr.branch)
+                safe_labels = [sanitize_untrusted_content(l) for l in pr.labels]
+                label_str = (
+                    " [" + ", ".join(safe_labels) + "]" if safe_labels else ""
+                )
+                lines.append(
+                    f"- PR #{pr.number}: {safe_title} (branch: `{safe_branch}`){label_str}"
+                )
+            prs_section = "\n".join(lines) + "\n\n"
+    except Exception:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "Failed to fetch open PRs for CEO context, proceeding without."
+        )
+
     user = (
         "## Development History\n\n"
         "Below is the complete changelog of features already built. "
         "Your proposal MUST NOT duplicate any of these. "
         "Your proposal MUST build upon or complement existing work.\n\n"
         f"{changelog}\n\n---\n\n"
+        f"{prs_section}"
         f"{issues_section}"
         "Analyze this project and propose the single most impactful feature to build next. "
         "Output your proposal in the format described in the instructions."

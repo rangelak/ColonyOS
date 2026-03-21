@@ -11,12 +11,14 @@ import pytest
 
 from colonyos.github import (
     GitHubIssue,
+    GitHubPR,
     _COMMENTS_CHAR_CAP,
     _MAX_COMMENTS,
     _sanitize_untrusted_content,
     check_open_pr,
     fetch_issue,
     fetch_open_issues,
+    fetch_open_prs,
     format_issue_as_prompt,
     parse_issue_ref,
 )
@@ -440,3 +442,111 @@ class TestCheckOpenPr:
         number, url = check_open_pr("colonyos/feature", tmp_path)
         assert number is None
         assert url is None
+
+
+# ---------------------------------------------------------------------------
+# fetch_open_prs
+# ---------------------------------------------------------------------------
+
+
+class TestFetchOpenPrs:
+    @patch("colonyos.github.subprocess.run")
+    def test_success(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(  # type: ignore[attr-defined]
+            args=[], returncode=0,
+            stdout=json.dumps([
+                {
+                    "number": 10,
+                    "title": "Add webhooks",
+                    "headRefName": "colonyos/add-webhooks",
+                    "url": "https://github.com/org/repo/pull/10",
+                    "labels": [{"name": "feature"}],
+                },
+                {
+                    "number": 11,
+                    "title": "Fix auth flow",
+                    "headRefName": "colonyos/fix-auth",
+                    "url": "https://github.com/org/repo/pull/11",
+                    "labels": [],
+                },
+            ]),
+            stderr="",
+        )
+        prs = fetch_open_prs(tmp_path)
+        assert len(prs) == 2
+        assert prs[0].number == 10
+        assert prs[0].title == "Add webhooks"
+        assert prs[0].branch == "colonyos/add-webhooks"
+        assert prs[0].url == "https://github.com/org/repo/pull/10"
+        assert prs[0].labels == ["feature"]
+        assert prs[1].number == 11
+        assert prs[1].labels == []
+
+    @patch("colonyos.github.subprocess.run")
+    def test_empty_list(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(  # type: ignore[attr-defined]
+            args=[], returncode=0, stdout="[]", stderr="",
+        )
+        assert fetch_open_prs(tmp_path) == []
+
+    @patch("colonyos.github.subprocess.run")
+    def test_gh_failure_returns_empty(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(  # type: ignore[attr-defined]
+            args=[], returncode=1, stdout="", stderr="auth required",
+        )
+        assert fetch_open_prs(tmp_path) == []
+
+    @patch("colonyos.github.subprocess.run")
+    def test_timeout_returns_empty(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=10)  # type: ignore[attr-defined]
+        assert fetch_open_prs(tmp_path) == []
+
+    @patch("colonyos.github.subprocess.run")
+    def test_file_not_found_returns_empty(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.side_effect = FileNotFoundError()  # type: ignore[attr-defined]
+        assert fetch_open_prs(tmp_path) == []
+
+    @patch("colonyos.github.subprocess.run")
+    def test_non_array_json_returns_empty(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(  # type: ignore[attr-defined]
+            args=[], returncode=0, stdout='{"error": "unexpected"}', stderr="",
+        )
+        assert fetch_open_prs(tmp_path) == []
+
+    @patch("colonyos.github.subprocess.run")
+    def test_custom_limit(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(  # type: ignore[attr-defined]
+            args=[], returncode=0, stdout="[]", stderr="",
+        )
+        fetch_open_prs(tmp_path, limit=5)
+        call_args = mock_run.call_args[0][0]  # type: ignore[attr-defined]
+        assert "--limit" in call_args
+        idx = call_args.index("--limit")
+        assert call_args[idx + 1] == "5"
+
+    def test_limit_validation_zero(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="limit must be an integer"):
+            fetch_open_prs(tmp_path, limit=0)
+
+    def test_limit_validation_negative(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="limit must be an integer"):
+            fetch_open_prs(tmp_path, limit=-1)
+
+    def test_limit_validation_too_high(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="limit must be an integer"):
+            fetch_open_prs(tmp_path, limit=101)
+
+    @patch("colonyos.github.subprocess.run")
+    def test_missing_fields_use_defaults(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(  # type: ignore[attr-defined]
+            args=[], returncode=0,
+            stdout=json.dumps([{"number": 5}]),
+            stderr="",
+        )
+        prs = fetch_open_prs(tmp_path)
+        assert len(prs) == 1
+        assert prs[0].number == 5
+        assert prs[0].title == ""
+        assert prs[0].branch == ""
+        assert prs[0].url == ""
+        assert prs[0].labels == []
