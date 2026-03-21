@@ -140,3 +140,20 @@ _Date: 2026-03-20 | Feature: add_a_colonyos_pr_review_pr_number_command_that_mon
 - **[architecture]** IDs generated at API boundaries must be threaded through to internal components; don't let internals re-generate.
 - **[testing]** Token/auth verification must target endpoints that actually require authentication to catch invalid tokens.
 - **[architecture]** Implemented functions must be wired into call sites; untested integration paths are effectively dead code.
+
+## Run: run-20260320_041029-963bfe43be
+_Date: 2026-03-20 | Feature: add_a_parallel_implement_mode_that_spawns_multiple_agent_ses_
+
+- **[code-quality]** `finally` blocks restoring state must capture return values before cleanup; calling getters after state change returns wrong data.
+- **[testing]** Missing test coverage for phases/code paths explicitly required by PRDs often indicates the code itself was never implemented.
+- **[architecture]** Separate deterministic logic (git checks, validation) from LLM calls to avoid wasting compute on closed-form answers.
+- **[code-quality]** Use `removeprefix("* ")` not `lstrip("* ")` when stripping known prefixes; lstrip removes any matching chars.
+- **[security]** Fail-closed on external API errors (GitHub, network) is the correct default; fail-open creates silent security gaps.
+
+## Run: run-20260320_011056-33ff47e4ff
+_Date: 2026-03-20 | Feature: add_a_parallel_progress_tracker_that_provides_real_time_visi_
+
+- **[architecture]** Finally blocks that restore state (e.g., git checkout) must run after capturing post-operation values like HEAD SHA.
+- **[testing]** Auth token verification must hit an auth-required endpoint; testing against public endpoints always succeeds.
+- **[code-quality]** Defined-but-unused constants (e.g., blocklists) signal divergence between intent and implementation; delete or wire them in.
+- **[architecture]** LLM pipeline outputs require a structural verification gate (e.g., tests) before push; skipping creates unvalidated deployments.

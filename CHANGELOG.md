@@ -23,6 +23,60 @@ and replies on the original comment thread with what was fixed and a link to the
 **PRD:** `cOS_prds/20260320_025613_prd_add_a_colonyos_pr_review_pr_number_command_that_monitors_github_pr_review_commen.md`
 **Tasks:** `cOS_tasks/20260320_025613_tasks_add_a_colonyos_pr_review_pr_number_command_that_monitors_github_pr_review_commen.md`
 
+## 20260320_051500 — Parallel Implement Mode
+
+Enables concurrent task execution during the Implement phase by spawning multiple agent
+sessions in isolated git worktrees. Features DAG-based dependency tracking with
+`depends_on: []` annotations in task files, topological task scheduling, incremental
+merge strategy with asyncio locking, automatic conflict resolution via dedicated agent,
+and graceful degradation to sequential mode when worktrees aren't available (e.g., shallow clones).
+Includes parallelism stats in `colonyos stats` output showing wall time vs agent time savings.
+
+**Created:**
+- `src/colonyos/dag.py` — DAG parser with dependency annotation parsing, cycle detection, topological sort
+- `src/colonyos/worktree.py` — Git worktree manager for ephemeral task isolation
+- `src/colonyos/parallel_orchestrator.py` — ParallelImplementOrchestrator with task scheduling, merge coordination
+- `src/colonyos/parallel_preflight.py` — Worktree support detection and graceful degradation
+- `src/colonyos/instructions/implement_parallel.md` — Agent instructions for parallel task execution
+- `src/colonyos/instructions/conflict_resolve.md` — Agent instructions for merge conflict resolution
+- `tests/test_dag.py` — DAG parsing, cycle detection, topological sort tests
+- `tests/test_worktree.py` — Worktree creation, cleanup, failure handling tests
+- `tests/test_parallel_orchestrator.py` — Parallel orchestration, merge, conflict resolution tests
+- `tests/test_parallel_preflight.py` — Worktree support detection tests
+- `tests/test_parallel_config.py` — Parallel implement configuration tests
+
+**Modified:**
+- `src/colonyos/config.py` — Added `ParallelImplementConfig` dataclass, config parsing
+- `src/colonyos/models.py` — Added `Phase.CONFLICT_RESOLVE`, `TaskStatus` enum, parallel metadata fields
+- `src/colonyos/orchestrator.py` — Integration with parallel orchestrator, task dependency handling
+- `src/colonyos/instructions/plan.md` — Instructions for annotating task dependencies
+- `src/colonyos/stats.py` — Parallelism stats columns (Wall Time, Agent Time, Parallelism ratio)
+- `src/colonyos/ui.py` — Task legend printing, per-task prefixes for parallel output streams
+- `README.md` — Updated with parallel implement documentation
+- `tests/test_stats.py`, `tests/test_ui.py`, `tests/test_models.py`, `tests/test_orchestrator.py` — Extended tests
+
+**PRD:** `cOS_prds/20260320_041029_prd_add_a_parallel_implement_mode_that_spawns_multiple_agent_sessions_to_implement_i.md`
+**Tasks:** `cOS_tasks/20260320_041029_tasks_add_a_parallel_implement_mode_that_spawns_multiple_agent_sessions_to_implement_i.md`
+
+## 20260320_014500 — Parallel Progress Tracker for Real-Time Review Visibility
+
+Added a parallel progress tracker that provides real-time visibility into concurrent
+reviewer operations during the review phase. Shows a compact status line with per-reviewer
+completion status, elapsed times, and running cost totals. Auto-detects TTY mode and
+degrades gracefully to log-style output in CI environments.
+
+**Created / Modified:**
+- `src/colonyos/ui.py` — Added `ParallelProgressLine` class with TTY-aware rendering
+- `src/colonyos/agent.py` — Extended `run_phases_parallel()` with `on_complete` callback using `asyncio.as_completed()`
+- `src/colonyos/orchestrator.py` — Integrated progress tracker into review loop
+- `src/colonyos/sanitize.py` — Added `sanitize_display_text()` for ANSI/control character stripping
+- `tests/test_ui.py` — Tests for `ParallelProgressLine` rendering and TTY detection
+- `tests/test_sanitize.py` — Tests for display text sanitization
+- `tests/test_agent.py` — Tests for `on_complete` callback behavior
+
+**PRD:** `cOS_prds/20260320_011056_prd_add_a_parallel_progress_tracker_that_provides_real_time_visibility_into_concurre.md`
+**Tasks:** `cOS_tasks/20260320_011056_tasks_add_a_parallel_progress_tracker_that_provides_real_time_visibility_into_concurre.md`
+
 ## 20260319_152207 — Slack Thread Fix Requests — Conversational PR Iteration
 
 Enables conversational iteration on PRs via Slack threads. When ColonyOS completes a pipeline

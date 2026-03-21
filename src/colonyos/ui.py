@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 import re
 import time
+from typing import TYPE_CHECKING, TypedDict
 
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.padding import Padding
 from rich.theme import Theme
+
+if TYPE_CHECKING:
+    from colonyos.models import PhaseResult
 
 _theme = Theme({
     "markdown.code": "bold cyan",
@@ -57,6 +61,7 @@ class PhaseUI:
 
     Each phase gets its own instance.  For parallel reviews, each
     reviewer gets an instance with a ``prefix`` like ``"[Linus] "``.
+    For parallel tasks, each task gets a ``task_id`` like ``"3.0"``.
     """
 
     def __init__(
@@ -64,9 +69,15 @@ class PhaseUI:
         *,
         verbose: bool = False,
         prefix: str = "",
+        task_id: str | None = None,
     ) -> None:
         self._verbose = verbose
-        self._prefix = prefix
+        self._task_id = task_id
+        # If task_id is provided, generate a colored prefix
+        if task_id is not None:
+            self._prefix = make_task_prefix(task_id)
+        else:
+            self._prefix = prefix
         self._tool_name: str | None = None
         self._tool_json: str = ""
         self._tool_displayed: bool = False
@@ -240,6 +251,58 @@ def print_reviewer_legend(reviewers: list[tuple[int, str]]) -> None:
     console.print()
 
 
+# -- parallel task helpers -------------------------------------------------
+
+
+def _task_color(index: int) -> str:
+    """Return a color for the given task index."""
+    return REVIEWER_COLORS[index % len(REVIEWER_COLORS)]
+
+
+def _parse_task_index(task_id: str) -> int:
+    """Parse the numeric part of a task ID for color assignment.
+
+    Examples:
+        "1.0" -> 0
+        "3.0" -> 2
+        "10.0" -> 9
+    """
+    try:
+        # Extract the major version number (before the dot)
+        major = int(task_id.split(".")[0])
+        return major - 1  # 0-indexed for color rotation
+    except (ValueError, IndexError):
+        return 0
+
+
+def make_task_prefix(task_id: str) -> str:
+    """Build a colored prefix like '[cyan][3.0][/cyan] ' for a task ID."""
+    index = _parse_task_index(task_id)
+    color = _task_color(index)
+    return f"[{color}][{task_id}][/{color}] "
+
+
+def print_task_legend(tasks: list[tuple[str, str]]) -> None:
+    """Print legend mapping task IDs -> task descriptions before parallel execution.
+
+    Args:
+        tasks: List of (task_id, description) tuples.
+    """
+    if not tasks:
+        return
+    console.print()
+    for task_id, description in tasks:
+        index = _parse_task_index(task_id)
+        color = _task_color(index)
+        # Truncate long descriptions
+        desc = description[:60] + "…" if len(description) > 60 else description
+        console.print(
+            f"  [{color}][{task_id}][/{color}] {desc}",
+            highlight=False,
+        )
+    console.print()
+
+
 
 def _looks_like_markdown(text: str) -> bool:
     """Return True if text contains markdown formatting worth rendering."""
@@ -265,3 +328,253 @@ def _format_duration(ms: int) -> str:
         return f"{secs}s"
     mins, secs = divmod(secs, 60)
     return f"{mins}m {secs}s"
+
+
+# -- Verdict extraction for progress tracking ---------------------------------
+
+_VERDICT_PATTERN = re.compile(r"VERDICT:\s*(approve|request-changes)", re.IGNORECASE)
+
+
+def _extract_review_verdict(result_text: str) -> str:
+    """Extract verdict from review result text.
+
+    Returns:
+        'approved', 'request-changes', or 'unknown'
+    """
+    match = _VERDICT_PATTERN.search(result_text)
+    if match:
+        verdict = match.group(1).lower()
+        if verdict == "approve":
+            return "approved"
+        return verdict
+    return "unknown"
+
+
+# -- Parallel Progress Tracker ------------------------------------------------
+
+
+def _get_default_console() -> Console:
+    """Return the module-level console instance.
+
+    This avoids using globals() for runtime lookup while still allowing
+    the console to be overridden in tests.
+    """
+    return console
+
+
+class _ReviewerState(TypedDict):
+    """Type definition for reviewer state tracking."""
+
+    status: str  # 'pending', 'approved', 'request-changes', 'failed'
+    cost_usd: float
+    duration_ms: int
+
+
+class ParallelProgressLine:
+    """Real-time progress indicator for parallel reviewer execution.
+
+    Shows a compact single-line status during review phases:
+    ``Reviews: R1 ✓ | R2 ✓ | R3 ⏳ (45s) | R4 ⏳ (32s) — 2/4 complete, $0.42``
+
+    In non-TTY mode (CI/logs), outputs one log line per completion event.
+
+    Args:
+        reviewers: List of (index, role_name) tuples for each reviewer.
+        is_tty: Whether output is a TTY (enables inline rewrite).
+        console: Optional Console instance for output (for testing).
+    """
+
+    # Status icons (hardcoded, not from user input)
+    _ICON_PENDING = "⏳"
+    _ICON_APPROVED = "✓"
+    _ICON_CHANGES = "⚠"
+    _ICON_FAILED = "✗"
+
+    def __init__(
+        self,
+        reviewers: list[tuple[int, str]],
+        is_tty: bool,
+        console: Console | None = None,
+    ) -> None:
+        from colonyos.sanitize import sanitize_display_text
+
+        self._reviewers = reviewers
+        self._is_tty = is_tty
+        # Use passed console or fall back to module-level console
+        self._console: Console = console if console is not None else _get_default_console()
+        self._start_time = time.monotonic()
+
+        # Sanitize and store reviewer names
+        self._sanitized_names: dict[int, str] = {}
+        for idx, name in reviewers:
+            self._sanitized_names[idx] = sanitize_display_text(name)
+
+        # State tracking: index -> {status, cost_usd, duration_ms}
+        self._states: dict[int, _ReviewerState] = {}
+        for idx, _ in reviewers:
+            self._states[idx] = {
+                "status": "pending",
+                "cost_usd": 0.0,
+                "duration_ms": 0,
+            }
+
+        # Track the most recently completed reviewer for non-TTY rendering
+        self._last_completed_index: int | None = None
+
+    @property
+    def total_cost_usd(self) -> float:
+        """Total cost across all completed reviewers."""
+        return sum(
+            float(s["cost_usd"])
+            for s in self._states.values()
+            if s["status"] != "pending"
+        )
+
+    @property
+    def completed_count(self) -> int:
+        """Number of reviewers that have completed."""
+        return sum(1 for s in self._states.values() if s["status"] != "pending")
+
+    def on_reviewer_complete(self, index: int, result: "PhaseResult") -> None:
+        """Update state when a reviewer completes and render progress.
+
+        Args:
+            index: The original call order index of the reviewer.
+            result: The PhaseResult from the completed review.
+        """
+        # Determine status from result
+        if not result.success:
+            status = "failed"
+        else:
+            result_text = result.artifacts.get("result", "")
+            verdict = _extract_review_verdict(result_text)
+            if verdict == "approved":
+                status = "approved"
+            elif verdict == "request-changes":
+                status = "request-changes"
+            else:
+                # Default to approved if we can't parse (safer assumption)
+                status = "approved"
+
+        self._states[index] = {
+            "status": status,
+            "cost_usd": result.cost_usd or 0.0,
+            "duration_ms": result.duration_ms,
+        }
+
+        # Track which reviewer just completed for non-TTY rendering
+        self._last_completed_index = index
+
+        self._render()
+
+    def _render(self) -> None:
+        """Render progress line to console."""
+        if self._is_tty:
+            self._render_tty()
+        else:
+            self._render_non_tty()
+
+    def _render_tty(self) -> None:
+        """Render single-line progress with inline rewrite for TTY."""
+        parts: list[str] = []
+        elapsed_now = time.monotonic() - self._start_time
+
+        for idx, _ in self._reviewers:
+            state = self._states[idx]
+            status = state["status"]
+            color = _reviewer_color(idx)
+            label = f"[{color}]R{idx + 1}[/{color}]"
+
+            if status == "pending":
+                secs = int(elapsed_now)
+                parts.append(f"{label} {self._ICON_PENDING} ({secs}s)")
+            elif status == "approved":
+                parts.append(f"{label} [green]{self._ICON_APPROVED}[/green]")
+            elif status == "request-changes":
+                parts.append(f"{label} [yellow]{self._ICON_CHANGES}[/yellow]")
+            elif status == "failed":
+                parts.append(f"{label} [red]{self._ICON_FAILED}[/red]")
+
+        completed = self.completed_count
+        total = len(self._reviewers)
+        cost = self.total_cost_usd
+
+        line = " | ".join(parts)
+        summary = f"{completed}/{total} complete, ${cost:.2f}"
+
+        # Use carriage return to overwrite line, then clear to end of line
+        self._console.print(
+            f"\r  Reviews: {line} — {summary}",
+            end="",
+            highlight=False,
+        )
+
+        # If all complete, print newline to finalize
+        if completed == total:
+            self._console.print()
+
+    def _render_non_tty(self) -> None:
+        """Render log-style output for non-TTY environments."""
+        # Print only the reviewer that just completed (tracked in on_reviewer_complete)
+        idx = self._last_completed_index
+        if idx is None:
+            return
+
+        state = self._states[idx]
+        status = state["status"]
+        cost = state["cost_usd"]
+        duration_ms = state["duration_ms"]
+        duration_str = _format_duration(duration_ms)
+        name = self._sanitized_names.get(idx, f"R{idx + 1}")
+
+        icon = {
+            "approved": self._ICON_APPROVED,
+            "request-changes": self._ICON_CHANGES,
+            "failed": self._ICON_FAILED,
+        }.get(status, "?")
+
+        self._console.print(
+            f"  R{idx + 1} {icon} {name} ({status}) ${cost:.2f} in {duration_str}",
+            highlight=False,
+        )
+
+    def print_summary(self, round_num: int) -> None:
+        """Print a summary line after all reviewers complete.
+
+        Args:
+            round_num: The review round number (1-indexed).
+        """
+        approved_count = sum(
+            1 for s in self._states.values() if s["status"] == "approved"
+        )
+        changes_count = sum(
+            1 for s in self._states.values() if s["status"] == "request-changes"
+        )
+        failed_count = sum(
+            1 for s in self._states.values() if s["status"] == "failed"
+        )
+
+        # Build list of reviewers who requested changes
+        changes_names: list[str] = []
+        for idx, _ in self._reviewers:
+            if self._states[idx]["status"] == "request-changes":
+                changes_names.append(self._sanitized_names.get(idx, f"R{idx + 1}"))
+
+        cost = self.total_cost_usd
+
+        # Build summary parts
+        parts: list[str] = []
+        if approved_count > 0:
+            parts.append(f"{approved_count} approved")
+        if changes_count > 0:
+            names = ", ".join(changes_names)
+            parts.append(f"{changes_count} request-changes ({names})")
+        if failed_count > 0:
+            parts.append(f"{failed_count} failed")
+
+        summary = ", ".join(parts) if parts else "no reviewers"
+
+        self._console.print(
+            f"\n  Review round {round_num}: {summary} — ${cost:.2f} total\n",
+            highlight=False,
+        )

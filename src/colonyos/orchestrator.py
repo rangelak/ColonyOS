@@ -13,6 +13,13 @@ from claude_agent_sdk import AgentDefinition
 
 from colonyos.agent import run_phase_sync, run_phases_parallel_sync
 from colonyos.config import ColonyConfig, runs_dir_path
+from colonyos.dag import parse_task_file
+from colonyos.models import TaskStatus
+from colonyos.parallel_orchestrator import (
+    ParallelOrchestrator,
+    should_use_parallel,
+    ManualInterventionRequired,
+)
 from colonyos.learnings import (
     LearningEntry,
     append_learnings,
@@ -34,7 +41,7 @@ from colonyos.naming import (
 from colonyos.github import check_open_pr
 from colonyos.sanitize import sanitize_untrusted_content
 from colonyos.slack import is_valid_git_ref
-from colonyos.ui import NullUI, PhaseUI, make_reviewer_prefix, print_reviewer_legend
+from colonyos.ui import NullUI, ParallelProgressLine, PhaseUI, make_reviewer_prefix, print_reviewer_legend
 
 
 def _touch_heartbeat(repo_root: Path) -> None:
@@ -428,6 +435,264 @@ def _build_implement_prompt(
 def reviewer_personas(config: ColonyConfig) -> list[Persona]:
     """Return only personas that have reviewer=True."""
     return [p for p in config.personas if p.reviewer]
+
+
+def _build_parallel_implement_prompt(
+    config: ColonyConfig,
+    task_id: str,
+    task_description: str,
+    worktree_path: Path,
+    prd_path: str,
+    task_file_path: str,
+    base_branch: str,
+) -> tuple[str, str]:
+    """Build the system and user prompts for a parallel implement task."""
+    impl_template = _load_instruction("implement_parallel.md")
+
+    system = _format_base(config) + "\n\n" + impl_template.format(
+        task_id=task_id,
+        task_description=task_description,
+        worktree_path=str(worktree_path),
+        prd_path=prd_path,
+        task_file=task_file_path,
+        base_branch=base_branch,
+    )
+
+    user = (
+        f"Implement task {task_id}: {task_description}\n\n"
+        f"Work in worktree at: {worktree_path}\n"
+        f"Read the PRD at `{prd_path}` for context.\n"
+        f"Read the task list at `{task_file_path}` for your specific task."
+    )
+    return system, user
+
+
+def _build_conflict_resolve_prompt(
+    config: ColonyConfig,
+    conflict_files: list[str],
+    task_id: str,
+    target_branch: str,
+    working_dir: Path,
+) -> tuple[str, str]:
+    """Build the system and user prompts for conflict resolution."""
+    template = _load_instruction("conflict_resolve.md")
+
+    system = _format_base(config) + "\n\n" + template.format(
+        target_branch=target_branch,
+        conflicting_branches=f"task-{task_id}",
+        conflict_files=", ".join(conflict_files),
+        working_dir=str(working_dir),
+    )
+
+    user = (
+        f"Resolve merge conflicts from task {task_id}.\n\n"
+        f"Conflicting files: {', '.join(conflict_files)}\n\n"
+        f"Analyze both sides of each conflict and merge them correctly."
+    )
+    return system, user
+
+
+def _run_parallel_implement(
+    *,
+    log: RunLog,
+    repo_root: Path,
+    config: ColonyConfig,
+    branch_name: str,
+    prd_rel: str,
+    task_rel: str,
+    _make_ui,
+) -> PhaseResult | None:
+    """Run parallel implementation using the ParallelOrchestrator.
+
+    This function implements Task 6.4 and 6.6 from the PRD.
+
+    Args:
+        log: The run log to append results to.
+        repo_root: Path to the repository root.
+        config: ColonyOS configuration.
+        branch_name: The feature branch name.
+        prd_rel: Path to the PRD file.
+        task_rel: Path to the task file.
+        _make_ui: Factory for creating UI objects.
+
+    Returns:
+        The overall PhaseResult for the parallel implement phase,
+        or None if parallel mode is not available (falls back to sequential).
+    """
+    import asyncio
+
+    # Read task file content
+    task_file_path = repo_root / task_rel
+    if not task_file_path.exists():
+        _log(f"Task file not found: {task_rel}")
+        return None
+
+    task_content = task_file_path.read_text(encoding="utf-8")
+
+    # Parse tasks to count them
+    dependencies = parse_task_file(task_content)
+    task_count = len(dependencies)
+
+    if not should_use_parallel(config, task_count):
+        _log(f"Parallel mode not applicable (task_count={task_count})")
+        return None
+
+    _log(f"Parallel implement mode: {task_count} tasks detected")
+
+    # Create the parallel orchestrator
+    def make_agent_runner(prd_path: str, task_file: str, base_branch: str):
+        """Create an agent runner closure that captures context."""
+        def agent_runner(
+            task_id: str,
+            worktree_path: Path,
+            task_description: str,
+            budget_usd: float,
+        ) -> PhaseResult:
+            # Build prompts for this task
+            system, user = _build_parallel_implement_prompt(
+                config,
+                task_id,
+                task_description,
+                worktree_path,
+                prd_path,
+                task_file,
+                base_branch,
+            )
+
+            # Create a task-specific UI with prefix
+            task_ui = _make_ui(prefix=f"[{task_id}] ")
+
+            # Run the agent
+            result = run_phase_sync(
+                Phase.IMPLEMENT,
+                user,
+                cwd=worktree_path,  # Run in the worktree
+                system_prompt=system,
+                model=config.get_model(Phase.IMPLEMENT),
+                budget_usd=budget_usd,
+                ui=task_ui,
+            )
+
+            # Add task_id to artifacts for tracking (FR-10)
+            result.artifacts["task_id"] = task_id
+
+            return result
+
+        return agent_runner
+
+    def make_conflict_resolver(prd_path: str, task_file: str, base_branch: str):
+        """Create a conflict resolver closure that captures context."""
+        def conflict_resolver(
+            conflict_files: list[str],
+            task_id: str,
+            working_dir: Path,
+            prd_path_arg: str,
+            task_file_path_arg: str,
+            budget_usd: float,
+        ) -> PhaseResult:
+            system, user = _build_conflict_resolve_prompt(
+                config,
+                conflict_files,
+                task_id,
+                base_branch,
+                working_dir,
+            )
+
+            conflict_ui = _make_ui(prefix=f"[CONFLICT {task_id}] ")
+
+            result = run_phase_sync(
+                Phase.CONFLICT_RESOLVE,
+                user,
+                cwd=working_dir,
+                system_prompt=system,
+                model=config.get_model(Phase.IMPLEMENT),  # Use implement model
+                budget_usd=budget_usd,
+                ui=conflict_ui,
+            )
+
+            return result
+
+        return conflict_resolver
+
+    try:
+        orchestrator = ParallelOrchestrator(
+            repo_root=repo_root,
+            config=config,
+            task_file_content=task_content,
+            base_branch=branch_name,
+            prd_path=prd_rel,
+            task_file_path=task_rel,
+            phase_budget_usd=config.budget.per_phase,
+            conflict_resolver=make_conflict_resolver(prd_rel, task_rel, branch_name),
+        )
+
+        orchestrator.parse_tasks()
+
+        # Check preflight
+        if not orchestrator.preflight():
+            _log("Parallel preflight failed, falling back to sequential")
+            return None
+
+        # Create worktrees
+        _log(f"Creating {len(orchestrator.state.tasks)} worktrees...")
+        orchestrator.create_worktrees()
+
+        # Run all tasks in parallel
+        agent_runner = make_agent_runner(prd_rel, task_rel, branch_name)
+
+        _log("Starting parallel task execution...")
+        state = asyncio.run(orchestrator.run_all(agent_runner))
+
+        # Merge results back
+        _log("Merging task branches...")
+        try:
+            conflicts = asyncio.run(orchestrator.merge_worktrees())
+            if conflicts:
+                _log(f"Warning: Unresolved conflicts in: {conflicts}")
+        except ManualInterventionRequired as e:
+            _log(f"Manual intervention required: {e}")
+            # Still continue - partial work is preserved
+
+        # Clean up worktrees
+        orchestrator.cleanup_worktrees()
+
+        # Add all task results to log
+        for task_id, task in state.tasks.items():
+            if task.phase_result is not None:
+                log.phases.append(task.phase_result)
+
+        # Update log with parallel metadata (FR-11)
+        summary = orchestrator.get_summary()
+        log.parallel_tasks = summary["total_tasks"]
+        log.wall_time_ms = summary["wall_time_ms"]
+        log.agent_time_ms = summary["agent_time_ms"]
+
+        # Create aggregate result
+        any_failed = len(state.failed) > 0
+        aggregate_result = PhaseResult(
+            phase=Phase.IMPLEMENT,
+            success=not any_failed,
+            cost_usd=summary["total_actual_cost_usd"],
+            duration_ms=summary["wall_time_ms"],
+            artifacts={
+                "parallel_tasks": str(summary["total_tasks"]),
+                "completed": str(summary["completed"]),
+                "failed": str(summary["failed"]),
+                "blocked": str(summary["blocked"]),
+                "parallelism_ratio": f"{summary['parallelism_ratio']:.2f}x",
+            },
+            error=f"{len(state.failed)} task(s) failed" if any_failed else None,
+        )
+
+        return aggregate_result
+
+    except Exception as e:
+        _log(f"Parallel implement failed with exception: {e}")
+        return PhaseResult(
+            phase=Phase.IMPLEMENT,
+            success=False,
+            error=str(e),
+        )
 
 
 def _build_persona_review_prompt(
@@ -1003,6 +1268,7 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
                         "session_id": p.session_id,
                         "model": p.model,
                         "error": p.error,
+                        "artifacts": p.artifacts,  # FR-10: Include artifacts for task_id tracking
                     }
                     for p in log.phases
                 ],
@@ -1078,6 +1344,7 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
                 session_id=p.get("session_id", ""),
                 model=p.get("model"),
                 error=p.get("error"),
+                artifacts=p.get("artifacts", {}),  # FR-10: Include artifacts for task_id tracking
             ))
 
         log = RunLog(
@@ -1184,6 +1451,11 @@ def prepare_resume(repo_root: Path, run_id: str) -> ResumeState:
 
     This is the public API for resume preparation, used by the CLI.
     Returns a ResumeState with all data needed to resume the run.
+
+    For parallel implement runs (FR-8), this also identifies:
+    - completed_task_ids: Tasks that succeeded (don't re-run)
+    - failed_task_ids: Tasks that failed (need retry)
+    - blocked_task_ids: Tasks blocked by failed dependencies (need retry after deps)
     """
     log = _load_run_log(repo_root, run_id)
     _validate_resume_preconditions(repo_root, log)
@@ -1198,12 +1470,33 @@ def prepare_resume(repo_root: Path, run_id: str) -> ResumeState:
             "No successful phases found in run log. Nothing to resume from."
         )
 
+    # Extract parallel task status from phase artifacts (FR-8)
+    completed_task_ids: list[str] = []
+    failed_task_ids: list[str] = []
+    blocked_task_ids: list[str] = []
+
+    for p in log.phases:
+        if p.phase == Phase.IMPLEMENT and "task_id" in p.artifacts:
+            task_id = p.artifacts["task_id"]
+            if p.success:
+                completed_task_ids.append(task_id)
+            else:
+                # Check if blocked (error message indicates this)
+                error = p.error or ""
+                if "Blocked" in error or "blocked" in error.lower():
+                    blocked_task_ids.append(task_id)
+                else:
+                    failed_task_ids.append(task_id)
+
     return ResumeState(
         log=log,
         branch_name=log.branch_name,  # type: ignore[arg-type]
         prd_rel=log.prd_rel,  # type: ignore[arg-type]
         task_rel=log.task_rel,  # type: ignore[arg-type]
         last_successful_phase=last_successful_phase,
+        completed_task_ids=completed_task_ids,
+        failed_task_ids=failed_task_ids,
+        blocked_task_ids=blocked_task_ids,
     )
 
 
@@ -1416,7 +1709,21 @@ def run_standalone_review(
                 ui=persona_ui,
             ))
 
-        results = run_phases_parallel_sync(review_calls)
+        # Create progress tracker for real-time status updates
+        progress_tracker: ParallelProgressLine | None = None
+        if not quiet:
+            is_tty = sys.stderr.isatty()
+            reviewer_list = [(i, p.role) for i, p in enumerate(reviewers)]
+            progress_tracker = ParallelProgressLine(reviewer_list, is_tty=is_tty)
+
+        results = run_phases_parallel_sync(
+            review_calls,
+            on_complete=progress_tracker.on_reviewer_complete if progress_tracker else None,
+        )
+
+        # Print summary after all reviewers complete
+        if progress_tracker is not None:
+            progress_tracker.print_summary(round_num=round_num)
 
         # Save each persona's review artifact
         for persona, result in zip(reviewers, results):
@@ -2370,16 +2677,36 @@ def _run_pipeline(
             impl_ui.phase_header("Implement", config.budget.per_phase, config.get_model(Phase.IMPLEMENT), branch_name)
         else:
             _log("=== Phase 2: Implement ===")
-        system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name, repo_root=repo_root)
-        impl_result = run_phase_sync(
-            Phase.IMPLEMENT,
-            user,
-            cwd=repo_root,
-            system_prompt=system,
-            model=config.get_model(Phase.IMPLEMENT),
-            budget_usd=config.budget.per_phase,
-            ui=impl_ui,
-        )
+
+        # Try parallel implement mode first (Task 6.6)
+        impl_result = None
+        if config.parallel_implement.enabled:
+            impl_result = _run_parallel_implement(
+                log=log,
+                repo_root=repo_root,
+                config=config,
+                branch_name=branch_name,
+                prd_rel=prd_rel,
+                task_rel=task_rel,
+                _make_ui=_make_ui,
+            )
+            if impl_result is not None:
+                _log(f"Parallel implement completed: {impl_result.artifacts.get('parallelism_ratio', '1.0x')}")
+
+        # Fall back to sequential if parallel mode is not available or disabled
+        if impl_result is None:
+            _log("Using sequential implement mode")
+            system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name, repo_root=repo_root)
+            impl_result = run_phase_sync(
+                Phase.IMPLEMENT,
+                user,
+                cwd=repo_root,
+                system_prompt=system,
+                model=config.get_model(Phase.IMPLEMENT),
+                budget_usd=config.budget.per_phase,
+                ui=impl_ui,
+            )
+
         log.phases.append(impl_result)
 
         if not impl_result.success:
@@ -2444,7 +2771,21 @@ def _run_pipeline(
                         ui=persona_ui,
                     ))
 
-                results = run_phases_parallel_sync(review_calls)
+                # Create progress tracker for real-time status updates
+                progress_tracker: ParallelProgressLine | None = None
+                if not quiet:
+                    is_tty = sys.stderr.isatty()
+                    reviewer_list = [(i, p.role) for i, p in enumerate(reviewers)]
+                    progress_tracker = ParallelProgressLine(reviewer_list, is_tty=is_tty)
+
+                results = run_phases_parallel_sync(
+                    review_calls,
+                    on_complete=progress_tracker.on_reviewer_complete if progress_tracker else None,
+                )
+
+                # Print summary after all reviewers complete
+                if progress_tracker is not None:
+                    progress_tracker.print_summary(round_num=iteration + 1)
 
                 # Save each persona's review artifact
                 for persona, result in zip(reviewers, results):

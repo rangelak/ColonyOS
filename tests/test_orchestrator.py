@@ -119,7 +119,7 @@ class TestPhaseReviewEnum:
 
     def test_phase_ordering(self):
         phases = list(Phase)
-        assert phases == [Phase.CEO, Phase.PLAN, Phase.TRIAGE, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.LEARN, Phase.VERIFY, Phase.DELIVER, Phase.CI_FIX]
+        assert phases == [Phase.CEO, Phase.PLAN, Phase.TRIAGE, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.LEARN, Phase.VERIFY, Phase.DELIVER, Phase.CI_FIX, Phase.CONFLICT_RESOLVE]
 
     def test_fix_phase_exists(self):
         assert Phase.FIX == "fix"
@@ -2906,3 +2906,181 @@ class TestStashOmitsIncludeUntracked:
         # The stash push command should be present but without --include-untracked
         assert '"git", "stash", "push", "-m"' in source
         assert "--include-untracked" not in source
+
+
+class TestParallelImplementIntegration:
+    """Integration tests for parallel implement mode (Task 13.1-13.3)."""
+
+    def test_parallel_implement_function_exists(self) -> None:
+        """_run_parallel_implement should be importable from orchestrator."""
+        from colonyos.orchestrator import _run_parallel_implement
+        assert callable(_run_parallel_implement)
+
+    def test_parallel_implement_prompt_builder_exists(self) -> None:
+        """_build_parallel_implement_prompt should be importable."""
+        from colonyos.orchestrator import _build_parallel_implement_prompt
+        assert callable(_build_parallel_implement_prompt)
+
+    def test_conflict_resolve_prompt_builder_exists(self) -> None:
+        """_build_conflict_resolve_prompt should be importable."""
+        from colonyos.orchestrator import _build_conflict_resolve_prompt
+        assert callable(_build_conflict_resolve_prompt)
+
+    def test_build_parallel_implement_prompt(self, tmp_path: Path) -> None:
+        """Test building a parallel implement prompt."""
+        from colonyos.orchestrator import _build_parallel_implement_prompt
+
+        config = ColonyConfig()
+        system, user = _build_parallel_implement_prompt(
+            config,
+            task_id="1.0",
+            task_description="Add user model",
+            worktree_path=tmp_path / "worktree",
+            prd_path="cOS_prds/test_prd.md",
+            task_file_path="cOS_tasks/test_tasks.md",
+            base_branch="main",
+        )
+
+        assert "1.0" in system
+        assert "Add user model" in user
+        assert "worktree" in system
+        assert "cOS_prds/test_prd.md" in user
+
+    def test_build_conflict_resolve_prompt(self, tmp_path: Path) -> None:
+        """Test building a conflict resolution prompt."""
+        from colonyos.orchestrator import _build_conflict_resolve_prompt
+
+        config = ColonyConfig()
+        system, user = _build_conflict_resolve_prompt(
+            config,
+            conflict_files=["src/file.py", "src/other.py"],
+            task_id="2.0",
+            target_branch="feature/branch",
+            working_dir=tmp_path,
+        )
+
+        assert "2.0" in user
+        assert "src/file.py" in user or "src/file.py" in system
+        assert "Resolve" in user
+
+    def test_prepare_resume_includes_parallel_task_info(self, tmp_path: Path) -> None:
+        """prepare_resume should include failed/blocked task IDs for parallel runs."""
+        # Create a run log with parallel task results
+        log = RunLog(
+            run_id="test-parallel-resume",
+            prompt="test parallel resume",
+            status=RunStatus.FAILED,
+            branch_name="colonyos/test",
+            prd_rel="prd.md",
+            task_rel="tasks.md",
+            phases=[
+                PhaseResult(
+                    phase=Phase.PLAN,
+                    success=True,
+                    artifacts={},
+                ),
+                PhaseResult(
+                    phase=Phase.IMPLEMENT,
+                    success=True,
+                    artifacts={"task_id": "1.0"},
+                ),
+                PhaseResult(
+                    phase=Phase.IMPLEMENT,
+                    success=False,
+                    error="Task failed",
+                    artifacts={"task_id": "2.0"},
+                ),
+                PhaseResult(
+                    phase=Phase.IMPLEMENT,
+                    success=False,
+                    error="Blocked by failed dependencies",
+                    artifacts={"task_id": "3.0"},
+                ),
+            ],
+        )
+
+        # Save the log
+        _save_run_log(tmp_path, log)
+
+        # Mock branch validation to skip actual git checks
+        with patch("colonyos.orchestrator._validate_resume_preconditions"):
+            # Prepare resume (need to load log manually since we skipped validation)
+            from colonyos.orchestrator import _load_run_log
+            loaded_log = _load_run_log(tmp_path, log.run_id)
+
+            # Now call the actual function with mocked validation
+            resume_state = prepare_resume(tmp_path, log.run_id)
+
+            # Check parallel task info
+            assert "1.0" in resume_state.completed_task_ids
+            assert "2.0" in resume_state.failed_task_ids
+            assert "3.0" in resume_state.blocked_task_ids
+
+    def test_run_parallel_implement_returns_none_when_single_task(self, tmp_path: Path) -> None:
+        """_run_parallel_implement should return None when only one task."""
+        from colonyos.orchestrator import _run_parallel_implement
+
+        config = ColonyConfig()
+        log = RunLog(
+            run_id="test-single-task",
+            prompt="test",
+            status=RunStatus.RUNNING,
+        )
+
+        # Create task file with only one task
+        task_file = tmp_path / "cOS_tasks" / "test_tasks.md"
+        task_file.parent.mkdir(parents=True, exist_ok=True)
+        task_file.write_text("""
+- [ ] 1.0 Single task
+  depends_on: []
+""")
+
+        result = _run_parallel_implement(
+            log=log,
+            repo_root=tmp_path,
+            config=config,
+            branch_name="test-branch",
+            prd_rel="cOS_prds/test_prd.md",
+            task_rel="cOS_tasks/test_tasks.md",
+            _make_ui=lambda **kwargs: None,
+        )
+
+        # Should return None for single task (falls back to sequential)
+        assert result is None
+
+    def test_run_parallel_implement_returns_none_when_disabled(self, tmp_path: Path) -> None:
+        """_run_parallel_implement should return None when parallel is disabled."""
+        from colonyos.orchestrator import _run_parallel_implement
+        from colonyos.config import ParallelImplementConfig
+
+        config = ColonyConfig(
+            parallel_implement=ParallelImplementConfig(enabled=False)
+        )
+        log = RunLog(
+            run_id="test-disabled",
+            prompt="test",
+            status=RunStatus.RUNNING,
+        )
+
+        # Create task file with multiple tasks
+        task_file = tmp_path / "cOS_tasks" / "test_tasks.md"
+        task_file.parent.mkdir(parents=True, exist_ok=True)
+        task_file.write_text("""
+- [ ] 1.0 Task A
+  depends_on: []
+- [ ] 2.0 Task B
+  depends_on: []
+""")
+
+        result = _run_parallel_implement(
+            log=log,
+            repo_root=tmp_path,
+            config=config,
+            branch_name="test-branch",
+            prd_rel="cOS_prds/test_prd.md",
+            task_rel="cOS_tasks/test_tasks.md",
+            _make_ui=lambda **kwargs: None,
+        )
+
+        # Should return None when disabled
+        assert result is None
