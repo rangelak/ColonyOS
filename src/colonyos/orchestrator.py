@@ -93,7 +93,7 @@ def _ensure_branch_exists(repo_root: Path, branch_name: str) -> None:
         raise PreflightError(
             f"Failed to create feature branch '{branch_name}': {result.stderr.strip()}"
         )
-    logger.info("Created feature branch '%s' for parallel implement", branch_name)
+    _log(f"Created feature branch '{branch_name}' for parallel implement")
 
 
 _COLONYOS_OUTPUT_PREFIXES = (
