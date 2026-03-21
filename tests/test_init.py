@@ -3,13 +3,614 @@ from unittest.mock import patch, call, MagicMock
 
 import pytest
 import click
+import json
 import yaml
 
 from colonyos.config import ColonyConfig, save_config
-from colonyos.models import Persona, ProjectInfo
-from colonyos.init import MODEL_PRESETS, select_persona_pack, _collect_personas_with_packs, run_init
-from colonyos.persona_packs import PACKS
+from colonyos.models import Persona, PhaseResult, Phase, ProjectInfo, RepoContext
+from colonyos.init import (
+    MODEL_PRESETS,
+    _AI_INIT_TIMEOUT_SECONDS,
+    _AiInitTimeout,
+    _friendly_init_error,
+    select_persona_pack,
+    _collect_personas_with_packs,
+    run_init,
+    scan_repo_context,
+    _build_init_system_prompt,
+    _parse_ai_config_response,
+    render_config_preview,
+    run_ai_init,
+)
+from colonyos.persona_packs import PACKS, pack_keys, packs_summary
 
+
+# ---------------------------------------------------------------------------
+# Task 1: RepoContext and scan_repo_context
+# ---------------------------------------------------------------------------
+
+class TestRepoContext:
+    def test_dataclass_fields(self):
+        ctx = RepoContext(name="foo", description="bar", stack="Python")
+        assert ctx.name == "foo"
+        assert ctx.description == "bar"
+        assert ctx.stack == "Python"
+        assert ctx.readme_excerpt == ""
+        assert ctx.manifest_type == ""
+        assert ctx.raw_signals == {}
+
+    def test_frozen(self):
+        ctx = RepoContext(name="foo", description="", stack="")
+        with pytest.raises(AttributeError):
+            ctx.name = "bar"
+
+
+class TestScanRepoContext:
+    def test_detects_pyproject_toml(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "myapp"\ndescription = "A cool app"\n',
+            encoding="utf-8",
+        )
+        ctx = scan_repo_context(tmp_path)
+        assert ctx.name == "myapp"
+        assert ctx.description == "A cool app"
+        assert "Python" in ctx.stack
+        assert ctx.manifest_type == "pyproject.toml"
+
+    def test_detects_package_json(self, tmp_path: Path):
+        pkg = {"name": "my-js-app", "description": "A JS app"}
+        (tmp_path / "package.json").write_text(
+            json.dumps(pkg), encoding="utf-8"
+        )
+        ctx = scan_repo_context(tmp_path)
+        assert ctx.name == "my-js-app"
+        assert ctx.description == "A JS app"
+        assert "JavaScript" in ctx.stack
+
+    def test_detects_cargo_toml(self, tmp_path: Path):
+        (tmp_path / "Cargo.toml").write_text(
+            '[package]\nname = "rustapp"\n', encoding="utf-8"
+        )
+        ctx = scan_repo_context(tmp_path)
+        assert ctx.name == "rustapp"
+        assert "Rust" in ctx.stack
+
+    def test_detects_go_mod(self, tmp_path: Path):
+        (tmp_path / "go.mod").write_text(
+            "module github.com/user/goapp\n\ngo 1.21\n", encoding="utf-8"
+        )
+        ctx = scan_repo_context(tmp_path)
+        assert ctx.name == "goapp"
+        assert "Go" in ctx.stack
+
+    def test_detects_readme(self, tmp_path: Path):
+        (tmp_path / "README.md").write_text("# My Project\nCool stuff.", encoding="utf-8")
+        ctx = scan_repo_context(tmp_path)
+        assert "My Project" in ctx.readme_excerpt
+
+    def test_empty_repo_falls_back_to_dirname(self, tmp_path: Path):
+        ctx = scan_repo_context(tmp_path)
+        assert ctx.name == tmp_path.name
+        assert ctx.stack == ""
+        assert ctx.manifest_type == ""
+
+    def test_truncates_large_files(self, tmp_path: Path):
+        (tmp_path / "README.md").write_text("x" * 5000, encoding="utf-8")
+        ctx = scan_repo_context(tmp_path)
+        assert len(ctx.raw_signals["README.md"]) == 2000
+
+    def test_detects_requirements_txt(self, tmp_path: Path):
+        (tmp_path / "requirements.txt").write_text("flask\nrequests\n", encoding="utf-8")
+        ctx = scan_repo_context(tmp_path)
+        assert "Python" in ctx.stack
+
+    def test_detects_gemfile(self, tmp_path: Path):
+        (tmp_path / "Gemfile").write_text('source "https://rubygems.org"\n', encoding="utf-8")
+        ctx = scan_repo_context(tmp_path)
+        assert "Ruby" in ctx.stack
+
+    def test_detects_multiple_stacks(self, tmp_path: Path):
+        (tmp_path / "package.json").write_text('{"name": "multi"}', encoding="utf-8")
+        (tmp_path / "requirements.txt").write_text("flask\n", encoding="utf-8")
+        ctx = scan_repo_context(tmp_path)
+        assert "JavaScript" in ctx.stack
+        assert "Python" in ctx.stack
+
+    def test_detects_github_workflow(self, tmp_path: Path):
+        wf_dir = tmp_path / ".github" / "workflows"
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "ci.yml").write_text("name: CI\non: push\n", encoding="utf-8")
+        ctx = scan_repo_context(tmp_path)
+        assert ".github/workflows/ci.yml" in ctx.raw_signals
+
+
+# ---------------------------------------------------------------------------
+# Task 2: Build system prompt and parse response
+# ---------------------------------------------------------------------------
+
+class TestBuildInitSystemPrompt:
+    def test_contains_pack_keys(self):
+        ctx = RepoContext(name="test", description="", stack="Python")
+        prompt = _build_init_system_prompt(ctx)
+        for key in pack_keys():
+            assert key in prompt
+
+    def test_contains_preset_names(self):
+        ctx = RepoContext(name="test", description="", stack="")
+        prompt = _build_init_system_prompt(ctx)
+        for name in MODEL_PRESETS:
+            assert name in prompt
+
+    def test_contains_defaults(self):
+        ctx = RepoContext(name="test", description="", stack="")
+        prompt = _build_init_system_prompt(ctx)
+        assert "per_phase" in prompt
+        assert "per_run" in prompt
+
+    def test_contains_repo_context(self):
+        ctx = RepoContext(name="myproject", description="A great project", stack="Python")
+        prompt = _build_init_system_prompt(ctx)
+        assert "myproject" in prompt
+        assert "A great project" in prompt
+
+
+class TestParseAiConfigResponse:
+    def test_valid_response(self):
+        response = json.dumps({
+            "pack_key": "startup",
+            "preset_name": "Cost-optimized",
+            "project_name": "MyApp",
+            "project_description": "A cool app",
+            "project_stack": "Python/FastAPI",
+            "vision": "Build the best app",
+        })
+        result = _parse_ai_config_response(response)
+        assert result is not None
+        assert result["pack_key"] == "startup"
+        assert result["preset_name"] == "Cost-optimized"
+        assert result["project_name"] == "MyApp"
+
+    def test_malformed_json(self):
+        result = _parse_ai_config_response("not json at all")
+        assert result is None
+
+    def test_invalid_pack_key(self):
+        response = json.dumps({
+            "pack_key": "nonexistent_pack",
+            "preset_name": "Cost-optimized",
+            "project_name": "MyApp",
+            "project_description": "",
+            "project_stack": "",
+            "vision": "",
+        })
+        result = _parse_ai_config_response(response)
+        assert result is None
+
+    def test_invalid_preset_name(self):
+        response = json.dumps({
+            "pack_key": "startup",
+            "preset_name": "Nonexistent-preset",
+            "project_name": "MyApp",
+            "project_description": "",
+            "project_stack": "",
+            "vision": "",
+        })
+        result = _parse_ai_config_response(response)
+        assert result is None
+
+    def test_missing_project_name(self):
+        response = json.dumps({
+            "pack_key": "startup",
+            "preset_name": "Cost-optimized",
+            "project_name": "",
+            "project_description": "",
+            "project_stack": "",
+            "vision": "",
+        })
+        result = _parse_ai_config_response(response)
+        assert result is None
+
+    def test_handles_markdown_fences(self):
+        inner = json.dumps({
+            "pack_key": "backend",
+            "preset_name": "Quality-first",
+            "project_name": "API",
+            "project_description": "An API",
+            "project_stack": "Python",
+            "vision": "",
+        })
+        response = f"```json\n{inner}\n```"
+        result = _parse_ai_config_response(response)
+        assert result is not None
+        assert result["pack_key"] == "backend"
+
+    def test_not_a_dict(self):
+        result = _parse_ai_config_response("[1, 2, 3]")
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Task 3: run_ai_init
+# ---------------------------------------------------------------------------
+
+class TestRunAiInit:
+    def _make_success_result(self, response_json: str) -> PhaseResult:
+        return PhaseResult(
+            phase=Phase.PLAN,
+            success=True,
+            cost_usd=0.003,
+            artifacts={"result": response_json},
+        )
+
+    def test_happy_path(self, tmp_path: Path):
+        response = json.dumps({
+            "pack_key": "startup",
+            "preset_name": "Cost-optimized",
+            "project_name": "TestApp",
+            "project_description": "A test app",
+            "project_stack": "Python",
+            "vision": "",
+        })
+        result = self._make_success_result(response)
+
+        with patch("colonyos.agent.run_phase_sync", return_value=result), \
+             patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init.render_config_preview"):
+            mock_click.echo = click.echo
+            mock_click.confirm.return_value = True  # Save config
+            config = run_ai_init(tmp_path)
+
+        assert config.project is not None
+        assert config.project.name == "TestApp"
+        assert config.model == "sonnet"  # Cost-optimized preset
+        assert len(config.personas) == len(PACKS[0].personas)  # startup pack
+
+    def test_fallback_on_llm_failure(self, tmp_path: Path):
+        failed_result = PhaseResult(
+            phase=Phase.PLAN,
+            success=False,
+            error="API error",
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=failed_result), \
+             patch("colonyos.init.run_init") as mock_run_init, \
+             patch("colonyos.init.click") as mock_click:
+            mock_click.echo = click.echo
+            mock_run_init.return_value = ColonyConfig()
+            run_ai_init(tmp_path)
+
+        mock_run_init.assert_called_once()
+        # Should pass defaults (RepoContext) to manual wizard
+        call_kwargs = mock_run_init.call_args
+        assert "defaults" in call_kwargs.kwargs or (
+            len(call_kwargs.args) > 0
+        )
+
+    def test_fallback_on_parse_failure(self, tmp_path: Path):
+        result = PhaseResult(
+            phase=Phase.PLAN,
+            success=True,
+            cost_usd=0.003,
+            artifacts={"result": "not valid json"},
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=result), \
+             patch("colonyos.init.run_init") as mock_run_init, \
+             patch("colonyos.init.click") as mock_click:
+            mock_click.echo = click.echo
+            mock_run_init.return_value = ColonyConfig()
+            run_ai_init(tmp_path)
+
+        mock_run_init.assert_called_once()
+
+    def test_fallback_on_exception(self, tmp_path: Path):
+        with patch("colonyos.agent.run_phase_sync", side_effect=RuntimeError("boom")), \
+             patch("colonyos.init.run_init") as mock_run_init, \
+             patch("colonyos.init.click") as mock_click:
+            mock_click.echo = click.echo
+            mock_run_init.return_value = ColonyConfig()
+            run_ai_init(tmp_path)
+
+        mock_run_init.assert_called_once()
+
+    def test_user_rejects_falls_back_to_manual(self, tmp_path: Path):
+        response = json.dumps({
+            "pack_key": "backend",
+            "preset_name": "Quality-first",
+            "project_name": "TestApp",
+            "project_description": "A test app",
+            "project_stack": "Python",
+            "vision": "",
+        })
+        result = self._make_success_result(response)
+
+        with patch("colonyos.agent.run_phase_sync", return_value=result), \
+             patch("colonyos.init.run_init") as mock_run_init, \
+             patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init.render_config_preview"):
+            mock_click.echo = click.echo
+            mock_click.confirm.return_value = False  # Reject config
+            mock_run_init.return_value = ColonyConfig()
+            run_ai_init(tmp_path)
+
+        mock_run_init.assert_called_once()
+
+    def test_displays_cost(self, tmp_path: Path, capsys):
+        response = json.dumps({
+            "pack_key": "startup",
+            "preset_name": "Cost-optimized",
+            "project_name": "TestApp",
+            "project_description": "",
+            "project_stack": "Python",
+            "vision": "",
+        })
+        result = self._make_success_result(response)
+
+        with patch("colonyos.agent.run_phase_sync", return_value=result), \
+             patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init.render_config_preview"):
+            mock_click.echo = click.echo
+            mock_click.confirm.return_value = True
+            run_ai_init(tmp_path)
+
+        captured = capsys.readouterr()
+        assert "$0.003" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Task 4: Config preview
+# ---------------------------------------------------------------------------
+
+class TestRenderConfigPreview:
+    def test_renders_project_info(self):
+        from io import StringIO
+        from rich.console import Console
+
+        output = StringIO()
+        console = Console(file=output, force_terminal=True, width=120)
+
+        config = ColonyConfig(
+            project=ProjectInfo(name="TestApp", description="A test", stack="Python"),
+            personas=list(PACKS[0].personas),
+            model="sonnet",
+            phase_models={"implement": "opus"},
+        )
+        render_config_preview(config, "Startup Team", "Cost-optimized", console=console)
+
+        text = output.getvalue()
+        assert "TestApp" in text
+        assert "Startup Team" in text
+        assert "Cost-optimized" in text
+
+    def test_renders_budget(self):
+        from io import StringIO
+        from rich.console import Console
+
+        output = StringIO()
+        console = Console(file=output, force_terminal=True, width=120)
+
+        config = ColonyConfig(
+            project=ProjectInfo(name="App", description="", stack=""),
+            personas=[Persona(role="Eng", expertise="BE", perspective="P")],
+        )
+        render_config_preview(config, "Custom", "Quality-first", console=console)
+
+        text = output.getvalue()
+        assert "$5.00" in text  # default per_phase
+        assert "$15.00" in text  # default per_run
+
+    def test_renders_persona_roles(self):
+        from io import StringIO
+        from rich.console import Console
+
+        output = StringIO()
+        console = Console(file=output, force_terminal=True, width=120)
+
+        personas = [
+            Persona(role="API Designer", expertise="REST", perspective="P"),
+            Persona(role="DBA", expertise="SQL", perspective="P"),
+        ]
+        config = ColonyConfig(
+            project=ProjectInfo(name="App", description="", stack=""),
+            personas=personas,
+        )
+        render_config_preview(config, "Backend / API", "Quality-first", console=console)
+
+        text = output.getvalue()
+        assert "API Designer" in text
+        assert "DBA" in text
+
+
+# ---------------------------------------------------------------------------
+# Task 5: CLI routing (tested via imports; see test_cli.py for CliRunner tests)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Task 6: Fallback pre-fill defaults
+# ---------------------------------------------------------------------------
+
+class TestFallbackPreFill:
+    def test_collect_project_info_uses_defaults(self):
+        defaults = RepoContext(name="detected-name", description="detected-desc", stack="Python")
+        with patch("colonyos.init.click") as mock_click:
+            mock_click.prompt.side_effect = ["detected-name", "detected-desc", "Python"]
+            mock_click.echo = click.echo
+            from colonyos.init import collect_project_info
+            result = collect_project_info(defaults=defaults)
+
+        # Check that prompt was called with defaults
+        calls = mock_click.prompt.call_args_list
+        assert calls[0][1].get("default") == "detected-name" or calls[0][0][0] == "Project name"
+        assert result.name == "detected-name"
+
+    def test_run_init_passes_defaults_to_collect(self, tmp_path: Path):
+        defaults = RepoContext(name="myapp", description="cool", stack="Go")
+        with patch("colonyos.init.collect_project_info") as mock_collect, \
+             patch("colonyos.init._collect_personas_with_packs") as mock_personas, \
+             patch("colonyos.init.click") as mock_click:
+            mock_collect.return_value = ProjectInfo(name="myapp", description="cool", stack="Go")
+            mock_personas.return_value = [Persona(role="E", expertise="B", perspective="P")]
+            mock_click.prompt.side_effect = ["", 1, 5.0, 15.0]
+            mock_click.echo = click.echo
+            mock_click.IntRange = click.IntRange
+            run_init(tmp_path, defaults=defaults)
+
+        mock_collect.assert_called_once_with(defaults=defaults)
+
+
+# ---------------------------------------------------------------------------
+# Task 7: Error handling
+# ---------------------------------------------------------------------------
+
+class TestErrorHandling:
+    def test_auth_failure_falls_back(self, tmp_path: Path):
+        with patch("colonyos.agent.run_phase_sync", side_effect=Exception("authentication failed")), \
+             patch("colonyos.init.run_init") as mock_run_init, \
+             patch("colonyos.init.click") as mock_click:
+            mock_click.echo = click.echo
+            mock_run_init.return_value = ColonyConfig()
+            run_ai_init(tmp_path)
+
+        mock_run_init.assert_called_once()
+
+    def test_empty_repo_still_works(self, tmp_path: Path):
+        """AI init should handle empty repos gracefully."""
+        response = json.dumps({
+            "pack_key": "startup",
+            "preset_name": "Cost-optimized",
+            "project_name": tmp_path.name,
+            "project_description": "",
+            "project_stack": "",
+            "vision": "",
+        })
+        result = PhaseResult(
+            phase=Phase.PLAN,
+            success=True,
+            cost_usd=0.001,
+            artifacts={"result": response},
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=result), \
+             patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init.render_config_preview"):
+            mock_click.echo = click.echo
+            mock_click.confirm.return_value = True
+            config = run_ai_init(tmp_path)
+
+        assert config.project is not None
+        assert config.project.name == tmp_path.name
+
+    def test_no_partial_state_on_failure(self, tmp_path: Path):
+        """On failure, no .colonyos directory should be created."""
+        with patch("colonyos.agent.run_phase_sync", side_effect=Exception("boom")), \
+             patch("colonyos.init.run_init", side_effect=click.Abort()):
+            try:
+                run_ai_init(tmp_path)
+            except click.Abort:
+                pass
+
+        assert not (tmp_path / ".colonyos" / "config.yaml").exists()
+
+    def test_auth_failure_shows_friendly_message(self, tmp_path: Path, capsys):
+        """Auth failures should produce a human-readable message, not raw exc."""
+        with patch("colonyos.agent.run_phase_sync", side_effect=Exception("authentication failed")), \
+             patch("colonyos.init.run_init") as mock_run_init, \
+             patch("colonyos.init.click") as mock_click:
+            mock_click.echo = click.echo
+            mock_run_init.return_value = ColonyConfig()
+            run_ai_init(tmp_path)
+
+        captured = capsys.readouterr()
+        assert "Authentication failed" in captured.out
+
+    def test_credit_balance_shows_friendly_message(self, tmp_path: Path, capsys):
+        """Credit balance errors should produce a friendly message."""
+        with patch("colonyos.agent.run_phase_sync", side_effect=Exception("credit balance is too low")), \
+             patch("colonyos.init.run_init") as mock_run_init, \
+             patch("colonyos.init.click") as mock_click:
+            mock_click.echo = click.echo
+            mock_run_init.return_value = ColonyConfig()
+            run_ai_init(tmp_path)
+
+        captured = capsys.readouterr()
+        assert "Credit balance" in captured.out
+
+    def test_rate_limit_shows_friendly_message(self, tmp_path: Path, capsys):
+        """Rate-limit errors should produce a friendly message."""
+        with patch("colonyos.agent.run_phase_sync", side_effect=Exception("rate limit exceeded")), \
+             patch("colonyos.init.run_init") as mock_run_init, \
+             patch("colonyos.init.click") as mock_click:
+            mock_click.echo = click.echo
+            mock_run_init.return_value = ColonyConfig()
+            run_ai_init(tmp_path)
+
+        captured = capsys.readouterr()
+        assert "Rate limited" in captured.out
+
+    def test_timeout_shows_friendly_message(self, tmp_path: Path, capsys):
+        """Timeout errors should produce a friendly message."""
+        with patch("colonyos.agent.run_phase_sync", side_effect=_AiInitTimeout("timed out")), \
+             patch("colonyos.init.run_init") as mock_run_init, \
+             patch("colonyos.init.click") as mock_click:
+            mock_click.echo = click.echo
+            mock_run_init.return_value = ColonyConfig()
+            run_ai_init(tmp_path)
+
+        captured = capsys.readouterr()
+        assert "timed out" in captured.out
+
+    def test_run_phase_sync_called_with_default_permission_mode(self, tmp_path: Path):
+        """run_ai_init must pass permission_mode='default' to run_phase_sync."""
+        response = json.dumps({
+            "pack_key": "startup",
+            "preset_name": "Cost-optimized",
+            "project_name": "TestApp",
+            "project_description": "",
+            "project_stack": "Python",
+            "vision": "",
+        })
+        result = PhaseResult(
+            phase=Phase.PLAN,
+            success=True,
+            cost_usd=0.003,
+            artifacts={"result": response},
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=result) as mock_rps, \
+             patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init.render_config_preview"):
+            mock_click.echo = click.echo
+            mock_click.confirm.return_value = True
+            run_ai_init(tmp_path)
+
+        mock_rps.assert_called_once()
+        call_kwargs = mock_rps.call_args
+        assert call_kwargs.kwargs.get("permission_mode") == "default"
+
+
+class TestFriendlyInitError:
+    def test_auth_error(self):
+        msg = _friendly_init_error(Exception("authentication failed"))
+        assert "Authentication failed" in msg
+
+    def test_credit_balance_error(self):
+        msg = _friendly_init_error(Exception("credit balance too low"))
+        assert "Credit balance" in msg
+
+    def test_rate_limit_error(self):
+        msg = _friendly_init_error(Exception("rate limit exceeded"))
+        assert "Rate limited" in msg
+
+    def test_timeout_error(self):
+        msg = _friendly_init_error(_AiInitTimeout("timed out"))
+        assert "timed out" in msg
+        assert str(_AI_INIT_TIMEOUT_SECONDS) in msg
+
+    def test_generic_error(self):
+        msg = _friendly_init_error(Exception("something weird"))
+        assert "something weird" in msg
+
+
+# ---------------------------------------------------------------------------
+# Original tests (preserved)
+# ---------------------------------------------------------------------------
 
 class TestSelectPersonaPack:
     def test_returns_pack_personas_when_pack_selected(self):
@@ -351,3 +952,24 @@ class TestModelPresets:
         assert config.model == "sonnet"
 
 
+# ---------------------------------------------------------------------------
+# packs_summary helper
+# ---------------------------------------------------------------------------
+
+class TestPacksSummary:
+    def test_returns_list_of_dicts(self):
+        result = packs_summary()
+        assert isinstance(result, list)
+        assert len(result) == len(PACKS)
+
+    def test_each_entry_has_required_keys(self):
+        for entry in packs_summary():
+            assert "key" in entry
+            assert "name" in entry
+            assert "description" in entry
+            assert "persona_roles" in entry
+            assert isinstance(entry["persona_roles"], list)
+
+    def test_keys_match_pack_keys(self):
+        summary_keys = [e["key"] for e in packs_summary()]
+        assert summary_keys == pack_keys()

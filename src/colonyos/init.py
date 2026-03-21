@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import json
+import logging
+import signal
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 from rich.table import Table
 from rich.text import Text
 
 from colonyos.config import (
+    DEFAULTS,
+    VALID_MODELS,
     ColonyConfig,
     BudgetConfig,
     PhasesConfig,
@@ -15,9 +21,26 @@ from colonyos.config import (
     load_config,
     save_config,
 )
-from colonyos.models import Persona, Phase, ProjectInfo
-from colonyos.persona_packs import PACKS, get_pack
+from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, RepoContext
+from colonyos.persona_packs import PACKS, get_pack, pack_keys, packs_summary
 from colonyos.ui import console
+
+logger = logging.getLogger(__name__)
+
+_MANIFEST_FILES: list[tuple[str, str]] = [
+    ("README.md", ""),
+    ("README.rst", ""),
+    ("package.json", "javascript"),
+    ("pyproject.toml", "python"),
+    ("Cargo.toml", "rust"),
+    ("go.mod", "go"),
+    ("requirements.txt", "python"),
+    ("Gemfile", "ruby"),
+    ("pom.xml", "java"),
+    ("build.gradle", "java"),
+]
+
+_MANIFEST_TRUNCATE_CHARS = 2000
 
 
 MODEL_PRESETS: dict[str, dict[str, str | dict[str, str]]] = {
@@ -57,11 +80,506 @@ def _prompt(text: str, default: str = "") -> str:
     )
 
 
-def collect_project_info() -> ProjectInfo:
+# ---------------------------------------------------------------------------
+# Repo auto-detection (FR-2) — deterministic, zero LLM tokens
+# ---------------------------------------------------------------------------
+
+def scan_repo_context(repo_root: Path) -> RepoContext:
+    """Deterministically scan well-known manifest files to gather repo signals.
+
+    Returns a ``RepoContext`` with the best-effort project name, description,
+    stack, and truncated raw file contents.  This function never calls an LLM.
+    """
+    raw_signals: dict[str, str] = {}
+
+    for rel_path, _stack_hint in _MANIFEST_FILES:
+        full = repo_root / rel_path
+        if full.is_file():
+            try:
+                content = full.read_text(encoding="utf-8", errors="replace")[
+                    :_MANIFEST_TRUNCATE_CHARS
+                ]
+                raw_signals[rel_path] = content
+            except OSError:
+                pass
+
+    # Also grab first CI workflow file
+    workflows_dir = repo_root / ".github" / "workflows"
+    if workflows_dir.is_dir():
+        yml_files = sorted(workflows_dir.glob("*.yml"))
+        if yml_files:
+            try:
+                content = yml_files[0].read_text(encoding="utf-8", errors="replace")[
+                    :_MANIFEST_TRUNCATE_CHARS
+                ]
+                raw_signals[f".github/workflows/{yml_files[0].name}"] = content
+            except OSError:
+                pass
+
+    # Extract project info from manifests
+    name = ""
+    description = ""
+    stack_parts: list[str] = []
+    manifest_type = ""
+    readme_excerpt = ""
+
+    # README
+    for readme_name in ("README.md", "README.rst"):
+        if readme_name in raw_signals:
+            readme_excerpt = raw_signals[readme_name]
+            break
+
+    # package.json
+    if "package.json" in raw_signals:
+        manifest_type = manifest_type or "package.json"
+        stack_parts.append("JavaScript/Node.js")
+        try:
+            pkg = json.loads(raw_signals["package.json"])
+            name = name or pkg.get("name", "")
+            description = description or pkg.get("description", "")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # pyproject.toml
+    if "pyproject.toml" in raw_signals:
+        manifest_type = manifest_type or "pyproject.toml"
+        stack_parts.append("Python")
+        content = raw_signals["pyproject.toml"]
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("name") and "=" in stripped:
+                val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                name = name or val
+            if stripped.startswith("description") and "=" in stripped:
+                val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                description = description or val
+
+    # Cargo.toml
+    if "Cargo.toml" in raw_signals:
+        manifest_type = manifest_type or "Cargo.toml"
+        stack_parts.append("Rust")
+        content = raw_signals["Cargo.toml"]
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("name") and "=" in stripped:
+                val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                name = name or val
+
+    # go.mod
+    if "go.mod" in raw_signals:
+        manifest_type = manifest_type or "go.mod"
+        stack_parts.append("Go")
+        content = raw_signals["go.mod"]
+        for line in content.splitlines():
+            if line.startswith("module "):
+                mod_path = line.split(None, 1)[1].strip()
+                name = name or mod_path.rsplit("/", 1)[-1]
+                break
+
+    # requirements.txt
+    if "requirements.txt" in raw_signals and "Python" not in stack_parts:
+        stack_parts.append("Python")
+        manifest_type = manifest_type or "requirements.txt"
+
+    # Gemfile
+    if "Gemfile" in raw_signals:
+        stack_parts.append("Ruby")
+        manifest_type = manifest_type or "Gemfile"
+
+    # pom.xml / build.gradle
+    if "pom.xml" in raw_signals or "build.gradle" in raw_signals:
+        stack_parts.append("Java")
+        manifest_type = manifest_type or ("pom.xml" if "pom.xml" in raw_signals else "build.gradle")
+
+    # Fallback: use directory name as project name
+    if not name:
+        name = repo_root.name
+
+    stack = ", ".join(stack_parts) if stack_parts else ""
+
+    return RepoContext(
+        name=name,
+        description=description,
+        stack=stack,
+        readme_excerpt=readme_excerpt,
+        manifest_type=manifest_type,
+        raw_signals=raw_signals,
+    )
+
+
+# ---------------------------------------------------------------------------
+# LLM system prompt and response parsing (FR-3)
+# ---------------------------------------------------------------------------
+
+def _build_init_system_prompt(repo_context: RepoContext) -> str:
+    """Compose the system prompt for the AI-assisted init LLM call."""
+    packs_info = json.dumps(packs_summary(), indent=2)
+    presets_info = json.dumps(
+        {k: {"model": v["model"], "phase_models": v["phase_models"]} for k, v in MODEL_PRESETS.items()},
+        indent=2,
+    )
+    defaults_info = json.dumps(DEFAULTS, indent=2)
+    valid_pack_keys = pack_keys()
+
+    return f"""\
+You are a project setup assistant for ColonyOS, a development pipeline tool.
+
+Your job: analyze the repository context below and recommend the best
+configuration. Output ONLY a JSON object — no markdown fences, no
+explanation text.
+
+## Repository Context
+
+- **Project name (detected):** {repo_context.name}
+- **Description (detected):** {repo_context.description}
+- **Tech stack (detected):** {repo_context.stack}
+- **Manifest type:** {repo_context.manifest_type}
+
+### README excerpt
+{repo_context.readme_excerpt[:1500] if repo_context.readme_excerpt else "(none)"}
+
+## Available Persona Packs
+{packs_info}
+
+## Available Model Presets
+{presets_info}
+
+## Default Configuration Values
+{defaults_info}
+
+## Your Task
+
+Choose the best persona pack and model preset for this project.
+Fill in project name, description, and stack.
+Optionally suggest a vision string if the README contains an obvious
+mission statement — otherwise leave it empty.
+
+## Required JSON Output Schema
+
+{{
+  "pack_key": one of {valid_pack_keys},
+  "preset_name": one of {list(MODEL_PRESETS.keys())},
+  "project_name": "string",
+  "project_description": "string",
+  "project_stack": "string",
+  "vision": "string (optional, empty string if unsure)"
+}}
+
+Output ONLY the JSON object. No other text."""
+
+
+def _parse_ai_config_response(raw_text: str) -> dict[str, Any] | None:
+    """Parse and validate the LLM's JSON response.
+
+    Returns a validated dict with keys (pack_key, preset_name,
+    project_name, project_description, project_stack, vision),
+    or None if parsing/validation fails.
+    """
+    # Try to extract JSON from the response (handle markdown fences)
+    text = raw_text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        # Remove first and last fence lines
+        start = 1
+        end = len(lines)
+        for i in range(len(lines) - 1, 0, -1):
+            if lines[i].strip().startswith("```"):
+                end = i
+                break
+        text = "\n".join(lines[start:end])
+
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        logger.debug("AI init response failed JSON parse: %s", raw_text[:200])
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    # Validate pack_key
+    pk = data.get("pack_key")
+    if pk not in pack_keys():
+        logger.debug("AI init response invalid pack_key: %s", pk)
+        return None
+
+    # Validate preset_name
+    preset = data.get("preset_name")
+    if preset not in MODEL_PRESETS:
+        logger.debug("AI init response invalid preset_name: %s", preset)
+        return None
+
+    # Validate project_name is present and non-empty
+    pname = data.get("project_name")
+    if not pname or not isinstance(pname, str):
+        logger.debug("AI init response missing project_name")
+        return None
+
+    return {
+        "pack_key": pk,
+        "preset_name": preset,
+        "project_name": str(data.get("project_name", "")),
+        "project_description": str(data.get("project_description", "")),
+        "project_stack": str(data.get("project_stack", "")),
+        "vision": str(data.get("vision", "")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Config preview (FR-4)
+# ---------------------------------------------------------------------------
+
+def render_config_preview(
+    config: ColonyConfig,
+    pack_name: str,
+    preset_name: str,
+    *,
+    console: Any | None = None,
+) -> None:
+    """Render a Rich panel previewing the proposed configuration.
+
+    Accepts an optional ``console`` parameter for testability; when None a
+    new ``Console`` is created.
+    """
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+
+    if console is None:
+        console = Console()
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("Key", style="bold cyan")
+    table.add_column("Value")
+
+    if config.project:
+        table.add_row("Project", config.project.name)
+        table.add_row("Description", config.project.description or "(none)")
+        table.add_row("Tech stack", config.project.stack or "(none)")
+    table.add_row("", "")
+
+    table.add_row("Persona pack", pack_name)
+    roles = ", ".join(p.role for p in config.personas)
+    table.add_row("Personas", roles)
+    table.add_row("", "")
+
+    table.add_row("Model preset", preset_name)
+    table.add_row("Default model", config.model)
+    if config.phase_models:
+        overrides = ", ".join(f"{k}={v}" for k, v in config.phase_models.items())
+        table.add_row("Phase overrides", overrides)
+    table.add_row("", "")
+
+    table.add_row("Budget / phase", f"${config.budget.per_phase:.2f}")
+    table.add_row("Budget / run", f"${config.budget.per_run:.2f}")
+
+    if config.vision:
+        table.add_row("", "")
+        table.add_row("Vision", config.vision)
+
+    console.print(Panel(
+        table,
+        title="Proposed Configuration",
+        title_align="left",
+        border_style="bright_blue",
+        padding=(1, 2),
+        expand=True,
+    ))
+    console.print(
+        "  [dim]Config will be saved to .colonyos/config.yaml — "
+        "you can edit it later.[/dim]\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AI-assisted init (FR-1, FR-3, FR-5, FR-6)
+# ---------------------------------------------------------------------------
+
+_AI_INIT_TIMEOUT_SECONDS = 30
+
+
+class _AiInitTimeout(Exception):
+    """Raised when the AI init LLM call exceeds the allowed time."""
+
+
+def _friendly_init_error(exc: Exception) -> str:
+    """Extract a human-readable message from SDK exceptions during init.
+
+    Mirrors the ``_friendly_error`` helper in ``agent.py`` but is tailored
+    to the init context where the user may not yet have a working API key.
+    """
+    raw = str(exc)
+    stderr = getattr(exc, "stderr", None) or ""
+    result = getattr(exc, "result", None) or ""
+
+    for text in (result, stderr, raw):
+        lower = text.lower()
+        if "credit balance" in lower:
+            return "Credit balance is too low to run AI setup."
+        if "authentication" in lower or "unauthorized" in lower:
+            return f"Authentication failed — check your API key or Claude login. {text.strip()}"
+        if "rate limit" in lower:
+            return f"Rate limited by the API. {text.strip()}"
+
+    if isinstance(exc, _AiInitTimeout):
+        return f"AI setup timed out after {_AI_INIT_TIMEOUT_SECONDS}s."
+
+    return raw
+
+
+def run_ai_init(
+    repo_root: Path,
+    *,
+    doctor_check: bool = False,
+) -> ColonyConfig:
+    """AI-assisted init: scan repo, call LLM, propose config, confirm.
+
+    Falls back to ``run_init()`` on any failure.
+    """
+    from colonyos.agent import run_phase_sync
+    from colonyos.models import Phase
+
+    # --- Doctor pre-check (same as run_init) ---
+    if doctor_check:
+        from colonyos.doctor import run_doctor_checks
+
+        checks = run_doctor_checks(repo_root)
+        hard_prereqs = {"Python ≥ 3.11", "Claude Code CLI", "Git"}
+        failures = [name for name, ok, _ in checks if not ok and name in hard_prereqs]
+        if failures:
+            raise click.ClickException(
+                f"Missing prerequisite(s): {', '.join(failures)}. "
+                f"Run `colonyos doctor` for details."
+            )
+
+    # Step 1: Deterministic repo scan
+    repo_ctx = scan_repo_context(repo_root)
+
+    # Step 2: LLM call
+    click.echo(
+        "\nUsing Claude Haiku to analyze your repo (typically <$0.05)...\n"
+    )
+
+    system_prompt = _build_init_system_prompt(repo_ctx)
+    prompt = (
+        "Analyze this repository and recommend the best ColonyOS configuration. "
+        "Output only valid JSON matching the schema in your instructions."
+    )
+
+    def _timeout_handler(signum: int, frame: object) -> None:
+        raise _AiInitTimeout(
+            f"AI init LLM call exceeded {_AI_INIT_TIMEOUT_SECONDS}s deadline"
+        )
+
+    try:
+        # Install a SIGALRM-based timeout on platforms that support it
+        _has_alarm = hasattr(signal, "SIGALRM")
+        if _has_alarm:
+            old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+            signal.alarm(_AI_INIT_TIMEOUT_SECONDS)
+
+        try:
+            result: PhaseResult = run_phase_sync(
+                Phase.PLAN,
+                prompt,
+                cwd=repo_root,
+                system_prompt=system_prompt,
+                model="haiku",
+                budget_usd=0.50,
+                max_turns=3,
+                allowed_tools=["Read", "Glob", "Grep"],
+                permission_mode="default",
+            )
+        finally:
+            if _has_alarm:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+    except Exception as exc:
+        friendly = _friendly_init_error(exc)
+        click.echo(f"AI setup unavailable ({friendly}), falling back to manual wizard.\n")
+        return run_init(repo_root, defaults=repo_ctx)
+
+    if not result.success:
+        click.echo(
+            f"AI setup failed ({result.error or 'unknown error'}), "
+            "falling back to manual wizard.\n"
+        )
+        return run_init(repo_root, defaults=repo_ctx)
+
+    # Step 3: Display cost
+    cost = result.cost_usd or 0
+    click.echo(f"Analysis complete (cost: ${cost:.4f}).\n")
+
+    # Step 4: Parse response
+    raw_text = (result.artifacts or {}).get("result", "")
+    parsed = _parse_ai_config_response(raw_text)
+
+    if parsed is None:
+        click.echo(
+            "Could not parse AI recommendation, falling back to manual wizard.\n"
+        )
+        return run_init(repo_root, defaults=repo_ctx)
+
+    # Step 5: Build ColonyConfig from parsed response
+    pack = get_pack(parsed["pack_key"])
+    if pack is None:
+        click.echo("Invalid persona pack, falling back to manual wizard.\n")
+        return run_init(repo_root, defaults=repo_ctx)
+
+    preset = MODEL_PRESETS[parsed["preset_name"]]
+    existing = load_config(repo_root)
+
+    config = ColonyConfig(
+        project=ProjectInfo(
+            name=parsed["project_name"],
+            description=parsed["project_description"],
+            stack=parsed["project_stack"],
+        ),
+        personas=list(pack.personas),
+        model=preset["model"],
+        phase_models=dict(preset["phase_models"]),
+        budget=BudgetConfig(
+            per_phase=DEFAULTS["budget"]["per_phase"],
+            per_run=DEFAULTS["budget"]["per_run"],
+            max_duration_hours=DEFAULTS["budget"]["max_duration_hours"],
+            max_total_usd=DEFAULTS["budget"]["max_total_usd"],
+        ),
+        phases=PhasesConfig(),
+        branch_prefix=existing.branch_prefix,
+        prds_dir=existing.prds_dir,
+        tasks_dir=existing.tasks_dir,
+        reviews_dir=existing.reviews_dir,
+        proposals_dir=existing.proposals_dir,
+        vision=parsed.get("vision", ""),
+    )
+
+    # Step 6: Preview and confirm
+    render_config_preview(config, pack.name, parsed["preset_name"])
+
+    if not click.confirm("Save this configuration?", default=True):
+        click.echo("\nDropping to manual wizard with detected defaults...\n")
+        return run_init(repo_root, defaults=repo_ctx)
+
+    # Step 7: Save — reuse _finalize_init to avoid duplicating dir/gitignore logic
+    return _finalize_init(repo_root, config)
+
+
+# ---------------------------------------------------------------------------
+# Interactive init (manual wizard)
+# ---------------------------------------------------------------------------
+
+def collect_project_info(defaults: RepoContext | None = None) -> ProjectInfo:
+    """Collect project info interactively, optionally pre-filled from RepoContext."""
     _section("Project Info")
-    name = _prompt("Project name")
-    description = _prompt("Brief description (what does this project do?)")
-    stack = _prompt("Tech stack (e.g. Python/FastAPI, React, PostgreSQL)")
+    name = _prompt("Project name", default=defaults.name if defaults else "")
+    description = _prompt(
+        "Brief description (what does this project do?)",
+        default=defaults.description if defaults else "",
+    )
+    stack = _prompt(
+        "Tech stack (e.g. Python/FastAPI, React, PostgreSQL)",
+        default=defaults.stack if defaults else "",
+    )
     return ProjectInfo(name=name, description=description, stack=stack)
 
 
@@ -329,12 +847,16 @@ def run_init(
     project_description: str | None = None,
     project_stack: str | None = None,
     doctor_check: bool = False,
+    defaults: RepoContext | None = None,
 ) -> ColonyConfig:
     """Interactive init flow: collect project info + personas, save config.
 
     When ``quick=True``, skip all interactive prompts and use first persona
     pack with default config values.  ``project_name``, ``project_description``,
     and ``project_stack`` supply the required project info in quick mode.
+
+    When ``defaults`` is provided (from AI-assisted fallback), its values are
+    used as pre-filled defaults in the interactive prompts.
     """
     # --- Doctor pre-check ---
     if doctor_check:
@@ -365,7 +887,6 @@ def run_init(
         )
         personas = list(PACKS[0].personas)
 
-        from colonyos.config import DEFAULTS
         cost_preset = MODEL_PRESETS["Cost-optimized"]
         config = ColonyConfig(
             project=project,
@@ -403,7 +924,7 @@ def run_init(
             vision=existing.vision,
         )
     else:
-        project = collect_project_info()
+        project = collect_project_info(defaults=defaults)
         personas = _collect_personas_with_packs(
             existing.personas if existing.personas else None,
         )
@@ -459,6 +980,17 @@ def run_init(
             vision=vision,
         )
 
+    return _finalize_init(repo_root, config, personas_only=personas_only, quick=quick)
+
+
+def _finalize_init(
+    repo_root: Path,
+    config: ColonyConfig,
+    *,
+    personas_only: bool = False,
+    quick: bool = False,
+) -> ColonyConfig:
+    """Save config, create directories, update .gitignore, print summary."""
     config_path = save_config(repo_root, config)
 
     prds_dir = repo_root / config.prds_dir
