@@ -567,6 +567,7 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             resume_from=resume_state,
             verbose=verbose,
             quiet=quiet,
+            force=force,
         )
     else:
         source_issue: int | None = None
