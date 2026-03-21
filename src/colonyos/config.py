@@ -49,6 +49,13 @@ DEFAULTS = {
         "scan_max_lines": 500,
         "scan_max_functions": 20,
     },
+    "parallel_implement": {
+        "enabled": True,
+        "max_parallel_agents": 3,
+        "conflict_strategy": "auto",
+        "merge_timeout_seconds": 60,
+        "worktree_cleanup": True,
+    },
 }
 
 
@@ -90,6 +97,20 @@ class CleanupConfig:
     scan_max_functions: int = 20
 
 
+VALID_CONFLICT_STRATEGIES: frozenset[str] = frozenset({"auto", "fail", "manual"})
+
+
+@dataclass
+class ParallelImplementConfig:
+    """Configuration for parallel implement mode."""
+
+    enabled: bool = True
+    max_parallel_agents: int = 3
+    conflict_strategy: str = "auto"
+    merge_timeout_seconds: int = 60
+    worktree_cleanup: bool = True
+
+
 @dataclass
 class SlackConfig:
     enabled: bool = False
@@ -129,6 +150,7 @@ class ColonyConfig:
     ci_fix: CIFixConfig = field(default_factory=CIFixConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
+    parallel_implement: ParallelImplementConfig = field(default_factory=ParallelImplementConfig)
 
     def get_model(self, phase: Phase) -> str:
         """Return the model for a phase, falling back to the global default."""
@@ -295,6 +317,45 @@ def _parse_cleanup_config(raw: dict) -> CleanupConfig:
     )
 
 
+def _parse_parallel_implement_config(raw: dict) -> ParallelImplementConfig:
+    """Parse the ``parallel_implement`` section from config.yaml."""
+    if not raw:
+        return ParallelImplementConfig()
+
+    defaults = DEFAULTS["parallel_implement"]
+
+    enabled = bool(raw.get("enabled", defaults["enabled"]))
+
+    max_parallel_agents = int(raw.get("max_parallel_agents", defaults["max_parallel_agents"]))
+    if max_parallel_agents < 1:
+        raise ValueError(
+            f"parallel_implement.max_parallel_agents must be positive, got {max_parallel_agents}"
+        )
+
+    conflict_strategy = str(raw.get("conflict_strategy", defaults["conflict_strategy"]))
+    if conflict_strategy not in VALID_CONFLICT_STRATEGIES:
+        raise ValueError(
+            f"Invalid conflict_strategy '{conflict_strategy}'. "
+            f"Valid options: {sorted(VALID_CONFLICT_STRATEGIES)}"
+        )
+
+    merge_timeout_seconds = int(raw.get("merge_timeout_seconds", defaults["merge_timeout_seconds"]))
+    if merge_timeout_seconds < 1:
+        raise ValueError(
+            f"parallel_implement.merge_timeout_seconds must be positive, got {merge_timeout_seconds}"
+        )
+
+    worktree_cleanup = bool(raw.get("worktree_cleanup", defaults["worktree_cleanup"]))
+
+    return ParallelImplementConfig(
+        enabled=enabled,
+        max_parallel_agents=max_parallel_agents,
+        conflict_strategy=conflict_strategy,
+        merge_timeout_seconds=merge_timeout_seconds,
+        worktree_cleanup=worktree_cleanup,
+    )
+
+
 def load_config(repo_root: Path) -> ColonyConfig:
     config_path = repo_root / CONFIG_DIR / CONFIG_FILE
     if not config_path.exists():
@@ -375,6 +436,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         ci_fix=_parse_ci_fix_config(raw.get("ci_fix", {})),
         slack=_parse_slack_config(raw.get("slack", {})),
         cleanup=_parse_cleanup_config(raw.get("cleanup", {})),
+        parallel_implement=_parse_parallel_implement_config(raw.get("parallel_implement", {})),
     )
 
 
@@ -481,6 +543,23 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
 
     if config.vision:
         data["vision"] = config.vision
+
+    # Only serialize parallel_implement if values differ from defaults
+    pi_defaults = DEFAULTS["parallel_implement"]
+    if (
+        config.parallel_implement.enabled != pi_defaults["enabled"]
+        or config.parallel_implement.max_parallel_agents != pi_defaults["max_parallel_agents"]
+        or config.parallel_implement.conflict_strategy != pi_defaults["conflict_strategy"]
+        or config.parallel_implement.merge_timeout_seconds != pi_defaults["merge_timeout_seconds"]
+        or config.parallel_implement.worktree_cleanup != pi_defaults["worktree_cleanup"]
+    ):
+        data["parallel_implement"] = {
+            "enabled": config.parallel_implement.enabled,
+            "max_parallel_agents": config.parallel_implement.max_parallel_agents,
+            "conflict_strategy": config.parallel_implement.conflict_strategy,
+            "merge_timeout_seconds": config.parallel_implement.merge_timeout_seconds,
+            "worktree_cleanup": config.parallel_implement.worktree_cleanup,
+        }
 
     if not config.directions_auto_update:
         data["directions_auto_update"] = False

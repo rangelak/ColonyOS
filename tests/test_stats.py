@@ -723,3 +723,132 @@ class TestCIFixPhaseInStats:
         rows = compute_duration_stats(runs)
         labels = [r.label for r in rows]
         assert "ci_fix" in labels
+
+
+# ---------------------------------------------------------------------------
+# Task 9: Parallelism stats tests
+# ---------------------------------------------------------------------------
+
+
+def _make_parallel_run(
+    run_id: str = "run-001",
+    parallel_tasks: int = 3,
+    wall_time_ms: int = 120000,
+    agent_time_ms: int = 360000,
+) -> dict:
+    """Build a run log dict with parallel implement metadata."""
+    return {
+        "run_id": run_id,
+        "status": "completed",
+        "total_cost_usd": 3.0,
+        "started_at": "2026-03-17T12:00:00+00:00",
+        "finished_at": "2026-03-17T12:02:00+00:00",
+        "phases": [],
+        "parallel_tasks": parallel_tasks,
+        "wall_time_ms": wall_time_ms,
+        "agent_time_ms": agent_time_ms,
+    }
+
+
+class TestParallelismStatsRow:
+    def test_parallelism_stats_row_defaults(self):
+        from colonyos.stats import ParallelismStatsRow
+        r = ParallelismStatsRow()
+        assert r.run_id == ""
+        assert r.wall_time_ms == 0
+        assert r.agent_time_ms == 0
+        assert r.parallelism_ratio == 1.0
+        assert r.parallel_tasks == 0
+
+
+class TestComputeParallelismStats:
+    def test_empty(self):
+        from colonyos.stats import compute_parallelism_stats
+        rows = compute_parallelism_stats([])
+        assert rows == []
+
+    def test_sequential_run(self):
+        """Run without parallel metadata shows 1.0x parallelism."""
+        from colonyos.stats import compute_parallelism_stats
+        run = _make_run()  # No parallel metadata
+        rows = compute_parallelism_stats([run])
+        assert len(rows) == 1
+        assert rows[0].parallelism_ratio == 1.0
+        assert rows[0].parallel_tasks == 0
+
+    def test_parallel_run(self):
+        from colonyos.stats import compute_parallelism_stats
+        run = _make_parallel_run(
+            parallel_tasks=4,
+            wall_time_ms=100000,
+            agent_time_ms=300000,
+        )
+        rows = compute_parallelism_stats([run])
+        assert len(rows) == 1
+        assert rows[0].parallelism_ratio == pytest.approx(3.0)
+        assert rows[0].parallel_tasks == 4
+
+    def test_multiple_runs(self):
+        from colonyos.stats import compute_parallelism_stats
+        runs = [
+            _make_parallel_run(run_id="run-1", parallel_tasks=3, wall_time_ms=100000, agent_time_ms=200000),
+            _make_parallel_run(run_id="run-2", parallel_tasks=2, wall_time_ms=100000, agent_time_ms=180000),
+        ]
+        rows = compute_parallelism_stats(runs)
+        assert len(rows) == 2
+        assert rows[0].run_id == "run-1"
+        assert rows[0].parallelism_ratio == pytest.approx(2.0)
+        assert rows[1].parallelism_ratio == pytest.approx(1.8)
+
+
+class TestRenderParallelismStats:
+    def test_empty(self):
+        from colonyos.stats import render_parallelism_stats
+        console = _capture_console()
+        render_parallelism_stats(console, [])
+        assert _get_output(console) == ""
+
+    def test_with_data(self):
+        from colonyos.stats import ParallelismStatsRow, render_parallelism_stats
+        console = _capture_console()
+        rows = [
+            ParallelismStatsRow(
+                run_id="run-1",
+                wall_time_ms=120000,
+                agent_time_ms=360000,
+                parallelism_ratio=3.0,
+                parallel_tasks=4,
+            ),
+        ]
+        render_parallelism_stats(console, rows)
+        output = _get_output(console)
+        assert "Parallelism" in output
+        assert "3.0x" in output
+
+
+class TestStatsResultParallelism:
+    def test_includes_parallelism_stats(self):
+        run = _make_parallel_run()
+        result = compute_stats([run])
+        assert len(result.parallelism_stats) == 1
+        assert result.parallelism_stats[0].parallelism_ratio == pytest.approx(3.0)
+
+
+class TestDashboardIncludesParallelism:
+    def test_dashboard_renders_parallelism(self):
+        from colonyos.stats import ParallelismStatsRow
+        console = _capture_console()
+        result = StatsResult(
+            parallelism_stats=[
+                ParallelismStatsRow(
+                    run_id="run-1",
+                    wall_time_ms=100000,
+                    agent_time_ms=230000,
+                    parallelism_ratio=2.3,
+                    parallel_tasks=3,
+                ),
+            ],
+        )
+        render_dashboard(console, result)
+        output = _get_output(console)
+        assert "Parallelism" in output
