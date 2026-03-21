@@ -76,6 +76,26 @@ def _get_current_branch(repo_root: Path) -> str:
         )
 
 
+def _ensure_branch_exists(repo_root: Path, branch_name: str) -> None:
+    """Create the branch from HEAD if it doesn't already exist."""
+    check = subprocess.run(
+        ["git", "rev-parse", "--verify", branch_name],
+        capture_output=True, text=True, cwd=repo_root,
+    )
+    if check.returncode == 0:
+        return
+
+    result = subprocess.run(
+        ["git", "checkout", "-b", branch_name],
+        capture_output=True, text=True, cwd=repo_root,
+    )
+    if result.returncode != 0:
+        raise PreflightError(
+            f"Failed to create feature branch '{branch_name}': {result.stderr.strip()}"
+        )
+    logger.info("Created feature branch '%s' for parallel implement", branch_name)
+
+
 _COLONYOS_OUTPUT_PREFIXES = (
     "cOS_prds/",
     "cOS_tasks/",
@@ -632,6 +652,11 @@ def _run_parallel_implement(
         if not orchestrator.preflight():
             _log("Parallel preflight failed, falling back to sequential")
             return None
+
+        # Ensure the feature branch exists before creating worktrees.
+        # In sequential mode the LLM agent creates it, but parallel mode
+        # needs a valid git ref to base the task worktrees on.
+        _ensure_branch_exists(repo_root, branch_name)
 
         # Create worktrees
         _log(f"Creating {len(orchestrator.state.tasks)} worktrees...")
