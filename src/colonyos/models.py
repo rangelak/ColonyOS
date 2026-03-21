@@ -43,6 +43,17 @@ class Phase(str, Enum):
     VERIFY = "verify"
     DELIVER = "deliver"
     CI_FIX = "ci_fix"
+    CONFLICT_RESOLVE = "conflict_resolve"
+
+
+class TaskStatus(str, Enum):
+    """Status of a task in parallel implement mode."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
 
 
 class RunStatus(str, Enum):
@@ -148,6 +159,10 @@ class ResumeState:
     prd_rel: str
     task_rel: str
     last_successful_phase: str
+    # Parallel task resume information (FR-8)
+    failed_task_ids: list[str] = field(default_factory=list)
+    blocked_task_ids: list[str] = field(default_factory=list)
+    completed_task_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -169,12 +184,42 @@ class RunLog:
     preflight: PreflightResult | None = None
     pr_url: str | None = None
     post_fix_head_sha: str | None = None
+    # Parallel implement metadata
+    parallel_tasks: int | None = None
+    wall_time_ms: int | None = None
+    agent_time_ms: int | None = None
 
     def mark_finished(self) -> None:
         self.finished_at = datetime.now(timezone.utc).isoformat()
         self.total_cost_usd = sum(
             p.cost_usd for p in self.phases if p.cost_usd is not None
         )
+
+    def get_task_results(self, task_id: str) -> list[PhaseResult]:
+        """Return all PhaseResults for a specific task ID.
+
+        Args:
+            task_id: The task identifier to filter by.
+
+        Returns:
+            List of PhaseResults where artifacts["task_id"] matches.
+        """
+        return [
+            p for p in self.phases
+            if p.artifacts.get("task_id") == task_id
+        ]
+
+    def get_parallelism_ratio(self) -> float:
+        """Return the parallelism ratio (agent_time / wall_time).
+
+        Returns:
+            The ratio, or 1.0 if wall_time is not set (sequential run).
+        """
+        if not self.wall_time_ms or self.wall_time_ms == 0:
+            return 1.0
+        if not self.agent_time_ms:
+            return 1.0
+        return self.agent_time_ms / self.wall_time_ms
 
 
 @dataclass

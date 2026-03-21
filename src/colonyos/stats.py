@@ -106,6 +106,17 @@ class ModelUsageRow:
 
 
 @dataclass
+class ParallelismStatsRow:
+    """Per-run parallelism efficiency statistics (Task 9.0)."""
+
+    run_id: str = ""
+    wall_time_ms: int = 0
+    agent_time_ms: int = 0
+    parallelism_ratio: float = 1.0
+    parallel_tasks: int = 0
+
+
+@dataclass
 class StatsResult:
     """Top-level container for all computed stats sections."""
 
@@ -118,6 +129,7 @@ class StatsResult:
     phase_detail: list[PhaseDetailRow] = field(default_factory=list)
     phase_filter: str | None = None
     model_usage: list[ModelUsageRow] = field(default_factory=list)
+    parallelism_stats: list[ParallelismStatsRow] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +396,37 @@ def compute_model_usage(runs: list[dict]) -> list[ModelUsageRow]:
     return rows
 
 
+def compute_parallelism_stats(runs: list[dict]) -> list[ParallelismStatsRow]:
+    """Compute parallelism efficiency statistics from run logs (Task 9.0).
+
+    Returns one row per run, showing wall time, agent time, and parallelism ratio.
+    Sequential runs (without parallel metadata) show 1.0x parallelism.
+    """
+    rows = []
+    for run in runs:
+        run_id = run.get("run_id", "")
+        parallel_tasks = run.get("parallel_tasks") or 0
+        wall_time_ms = run.get("wall_time_ms") or 0
+        agent_time_ms = run.get("agent_time_ms") or 0
+
+        # Compute parallelism ratio
+        if wall_time_ms > 0 and agent_time_ms > 0:
+            ratio = agent_time_ms / wall_time_ms
+        else:
+            ratio = 1.0
+
+        rows.append(
+            ParallelismStatsRow(
+                run_id=run_id,
+                wall_time_ms=wall_time_ms,
+                agent_time_ms=agent_time_ms,
+                parallelism_ratio=ratio,
+                parallel_tasks=parallel_tasks,
+            )
+        )
+    return rows
+
+
 def compute_stats(
     runs: list[dict], phase_filter: str | None = None
 ) -> StatsResult:
@@ -398,6 +441,7 @@ def compute_stats(
         phase_detail=compute_phase_detail(runs, phase_filter) if phase_filter else [],
         phase_filter=phase_filter,
         model_usage=compute_model_usage(runs),
+        parallelism_stats=compute_parallelism_stats(runs),
     )
 
 
@@ -548,6 +592,34 @@ def render_model_usage(console: Console, rows: list[ModelUsageRow]) -> None:
     console.print(table)
 
 
+def render_parallelism_stats(console: Console, rows: list[ParallelismStatsRow]) -> None:
+    """Render parallelism efficiency statistics as a Rich Table (Task 9.0)."""
+    if not rows:
+        return
+
+    # Only show runs that have parallel data
+    parallel_rows = [r for r in rows if r.parallel_tasks > 0]
+    if not parallel_rows:
+        return
+
+    table = Table(title="Parallelism Efficiency")
+    table.add_column("Run ID", style="cyan")
+    table.add_column("Wall Time", justify="right")
+    table.add_column("Agent Time", justify="right")
+    table.add_column("Parallelism", justify="right")
+    table.add_column("Tasks", justify="right")
+
+    for row in parallel_rows:
+        table.add_row(
+            row.run_id[:12],  # Truncate long run IDs
+            _format_duration(row.wall_time_ms),
+            _format_duration(row.agent_time_ms),
+            f"{row.parallelism_ratio:.1f}x",
+            str(row.parallel_tasks),
+        )
+    console.print(table)
+
+
 def render_dashboard(console: Console, result: StatsResult) -> None:
     """Orchestrate rendering of all dashboard sections."""
     render_run_summary(console, result.summary)
@@ -570,6 +642,10 @@ def render_dashboard(console: Console, result: StatsResult) -> None:
     if result.model_usage:
         console.print()
         render_model_usage(console, result.model_usage)
+
+    if result.parallelism_stats:
+        console.print()
+        render_parallelism_stats(console, result.parallelism_stats)
 
     if result.phase_filter and result.phase_detail:
         console.print()

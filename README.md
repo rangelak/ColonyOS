@@ -398,6 +398,32 @@ cleanup:
   scan_max_functions: 20         # flag files with more functions than this
 ```
 
+### Parallel implement mode
+
+```yaml
+parallel_implement:
+  enabled: true                  # enable parallel task execution
+  max_parallel_agents: 3         # max concurrent agent sessions
+  conflict_strategy: auto        # auto | fail | manual
+  merge_timeout_seconds: 60      # timeout for merge lock acquisition
+  worktree_cleanup: true         # remove worktrees after completion
+```
+
+When enabled, the implement phase parses the task file for dependency annotations (`depends_on: [...]`) and executes independent tasks in parallel using isolated git worktrees. This can significantly speed up multi-task implementations.
+
+**Conflict strategies:**
+- `auto`: Spawn a conflict resolution agent when merge conflicts occur
+- `fail`: Abort on any merge conflict (useful for strict CI environments)
+- `manual`: Leave conflicts in place for human intervention
+
+**Budget allocation:** Each parallel agent receives `budget.per_phase / max_parallel_agents` to contain blast radius from runaway agents.
+
+**Graceful degradation:** Falls back to sequential mode if:
+- Only 1 task detected
+- Repository is a shallow clone
+- Git version < 2.5.0 (worktree support)
+- Disk space below threshold
+
 ### Branch & directory naming
 
 ```yaml
