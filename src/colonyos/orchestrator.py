@@ -2395,6 +2395,11 @@ def run_thread_fix(
         _log(f"Thread fix complete. Total cost: ${log.total_cost_usd:.4f}")
         return log
 
+    except KeyboardInterrupt:
+        _log("Interrupted — saving run state...")
+        _fail_run_log(repo_root, log, "Run interrupted by user (Ctrl+C)")
+        raise
+
     finally:
         # Restore original branch — raise BranchRestoreError on failure
         # to halt the queue executor.  Running subsequent items on the
@@ -2578,6 +2583,10 @@ def run(
             base_branch=base_branch,
             _make_ui=_make_ui,
         )
+    except KeyboardInterrupt:
+        _log("Interrupted — saving run state...")
+        _fail_run_log(repo_root, log, "Run interrupted by user (Ctrl+C)")
+        raise
     finally:
         if original_branch:
             try:
