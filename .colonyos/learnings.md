@@ -140,3 +140,11 @@ _Date: 2026-03-20 | Feature: add_a_parallel_implement_mode_that_spawns_multiple_
 - **[architecture]** Separate deterministic logic (git checks, validation) from LLM calls to avoid wasting compute on closed-form answers.
 - **[code-quality]** Use `removeprefix("* ")` not `lstrip("* ")` when stripping known prefixes; lstrip removes any matching chars.
 - **[security]** Fail-closed on external API errors (GitHub, network) is the correct default; fail-open creates silent security gaps.
+
+## Run: run-20260320_011056-33ff47e4ff
+_Date: 2026-03-20 | Feature: add_a_parallel_progress_tracker_that_provides_real_time_visi_
+
+- **[architecture]** Finally blocks that restore state (e.g., git checkout) must run after capturing post-operation values like HEAD SHA.
+- **[testing]** Auth token verification must hit an auth-required endpoint; testing against public endpoints always succeeds.
+- **[code-quality]** Defined-but-unused constants (e.g., blocklists) signal divergence between intent and implementation; delete or wire them in.
+- **[architecture]** LLM pipeline outputs require a structural verification gate (e.g., tests) before push; skipping creates unvalidated deployments.

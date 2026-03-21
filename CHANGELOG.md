@@ -35,6 +35,25 @@ Includes parallelism stats in `colonyos stats` output showing wall time vs agent
 **PRD:** `cOS_prds/20260320_041029_prd_add_a_parallel_implement_mode_that_spawns_multiple_agent_sessions_to_implement_i.md`
 **Tasks:** `cOS_tasks/20260320_041029_tasks_add_a_parallel_implement_mode_that_spawns_multiple_agent_sessions_to_implement_i.md`
 
+## 20260320_014500 — Parallel Progress Tracker for Real-Time Review Visibility
+
+Added a parallel progress tracker that provides real-time visibility into concurrent
+reviewer operations during the review phase. Shows a compact status line with per-reviewer
+completion status, elapsed times, and running cost totals. Auto-detects TTY mode and
+degrades gracefully to log-style output in CI environments.
+
+**Created / Modified:**
+- `src/colonyos/ui.py` — Added `ParallelProgressLine` class with TTY-aware rendering
+- `src/colonyos/agent.py` — Extended `run_phases_parallel()` with `on_complete` callback using `asyncio.as_completed()`
+- `src/colonyos/orchestrator.py` — Integrated progress tracker into review loop
+- `src/colonyos/sanitize.py` — Added `sanitize_display_text()` for ANSI/control character stripping
+- `tests/test_ui.py` — Tests for `ParallelProgressLine` rendering and TTY detection
+- `tests/test_sanitize.py` — Tests for display text sanitization
+- `tests/test_agent.py` — Tests for `on_complete` callback behavior
+
+**PRD:** `cOS_prds/20260320_011056_prd_add_a_parallel_progress_tracker_that_provides_real_time_visibility_into_concurre.md`
+**Tasks:** `cOS_tasks/20260320_011056_tasks_add_a_parallel_progress_tracker_that_provides_real_time_visibility_into_concurre.md`
+
 ## 20260319_152207 — Slack Thread Fix Requests — Conversational PR Iteration
 
 Enables conversational iteration on PRs via Slack threads. When ColonyOS completes a pipeline

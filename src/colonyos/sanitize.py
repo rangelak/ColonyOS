@@ -82,3 +82,40 @@ def sanitize_ci_logs(text: str) -> str:
     for pattern in SECRET_PATTERNS:
         text = pattern.sub(_REDACTED, text)
     return text
+
+
+# Regex to strip ANSI escape sequences (color codes, cursor movement, etc.)
+# Matches sequences like \x1b[31m, \x1b[0m, \x1b[38;5;196m
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+# Regex to strip control characters:
+# - \x00-\x1f: C0 control codes (null, bell, backspace, tab, newline, etc.)
+# - \x7f: DEL character
+# - \x80-\x9f: C1 control codes
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def sanitize_display_text(text: str) -> str:
+    """Sanitize text for safe terminal display.
+
+    Removes ANSI escape sequences and control characters that could:
+    - Corrupt terminal output via cursor manipulation
+    - Inject malicious escape sequences from user-provided persona names
+    - Cause rendering issues in non-TTY environments
+
+    Preserves:
+    - Normal printable ASCII
+    - Unicode characters (emoji, accented chars, box-drawing, etc.)
+
+    Args:
+        text: Raw text that may contain ANSI escapes or control characters.
+
+    Returns:
+        Sanitized text safe for terminal display, with leading/trailing
+        whitespace stripped.
+    """
+    # Strip ANSI escape sequences first
+    text = _ANSI_ESCAPE_RE.sub("", text)
+    # Strip control characters
+    text = _CONTROL_CHARS_RE.sub("", text)
+    return text.strip()
