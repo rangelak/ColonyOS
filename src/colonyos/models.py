@@ -183,6 +183,16 @@ class ResumeState:
 
 @dataclass
 class RunLog:
+    """Log of a single pipeline run.
+
+    The ``source_type`` field tracks the origin of the run for analytics:
+    - "prompt": Direct CLI prompt
+    - "issue": GitHub issue
+    - "slack": Slack message triggering full pipeline
+    - "slack_fix": Slack thread-fix request
+    - "pr_review_fix": PR review comment fix request
+    """
+
     run_id: str
     prompt: str
     status: RunStatus
@@ -200,6 +210,8 @@ class RunLog:
     preflight: PreflightResult | None = None
     pr_url: str | None = None
     post_fix_head_sha: str | None = None
+    source_type: str | None = None  # e.g. "prompt", "issue", "slack_fix", "pr_review_fix"
+    review_comment_id: str | None = None  # For pr_review_fix source_type (FR-16)
     # Parallel implement metadata
     parallel_tasks: int | None = None
     wall_time_ms: int | None = None
@@ -304,12 +316,19 @@ class QueueItem:
     Increment when adding or removing fields so that readers can distinguish
     "field missing because it didn't exist yet" from "field missing due to
     corruption".
+
+    Valid ``source_type`` values:
+    - "prompt": Direct prompt from CLI
+    - "issue": GitHub issue
+    - "slack": Slack message triggering full pipeline
+    - "slack_fix": Slack thread-fix request
+    - "pr_review_fix": PR review comment fix request
     """
 
-    SCHEMA_VERSION: ClassVar[int] = 2  # class-level constant; bump on structural changes
+    SCHEMA_VERSION: ClassVar[int] = 3  # class-level constant; bump on structural changes
 
     id: str
-    source_type: str  # "prompt", "issue", "slack", or "slack_fix"
+    source_type: str  # "prompt", "issue", "slack", "slack_fix", or "pr_review_fix"
     source_value: str  # prompt text or issue number
     status: QueueItemStatus
     added_at: str = field(
@@ -329,6 +348,7 @@ class QueueItem:
     parent_item_id: str | None = None
     head_sha: str | None = None
     raw_prompt: str | None = None
+    review_comment_id: str | None = None  # For pr_review_fix source_type
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -352,6 +372,7 @@ class QueueItem:
             "parent_item_id": self.parent_item_id,
             "head_sha": self.head_sha,
             "raw_prompt": self.raw_prompt,
+            "review_comment_id": self.review_comment_id,
         }
 
     @classmethod
@@ -392,6 +413,7 @@ class QueueItem:
             parent_item_id=data.get("parent_item_id"),
             head_sha=data.get("head_sha"),
             raw_prompt=data.get("raw_prompt"),
+            review_comment_id=data.get("review_comment_id"),
         )
 
 

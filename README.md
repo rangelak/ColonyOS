@@ -240,6 +240,15 @@ flowchart TD
 | `colonyos ci-fix PR --wait` | Fix, then wait for CI re-run to pass |
 | `colonyos ci-fix PR --max-retries N` | Retry the fix-push-wait cycle up to N times |
 
+### PR review auto-fix
+
+| Command | Description |
+|---|---|
+| `colonyos pr-review PR_NUMBER` | Process inline review comments and auto-fix actionable feedback |
+| `colonyos pr-review PR --watch` | Continuously poll for new review comments |
+| `colonyos pr-review PR --poll-interval N` | Poll interval in seconds (default: 60) |
+| `colonyos pr-review PR --max-cost USD` | Override per-PR budget cap (default: $5) |
+
 ### Analytics & inspection
 
 | Command | Description |
@@ -381,6 +390,17 @@ ci_fix:
   max_retries: 2             # retry fix-push-wait cycle
   wait_timeout: 600          # seconds to wait for CI re-run
   log_char_cap: 12000        # truncate CI logs sent to the fix agent
+```
+
+### PR review auto-fix
+
+```yaml
+pr_review:
+  budget_per_pr: 5.0                  # max USD spend per PR (default: $5)
+  max_fix_rounds_per_pr: 3            # max fix attempts per PR
+  poll_interval_seconds: 60           # watch mode poll interval
+  circuit_breaker_threshold: 3        # pause after N consecutive failures
+  circuit_breaker_cooldown_minutes: 15
 ```
 
 ### Cross-run learnings

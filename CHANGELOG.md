@@ -19,6 +19,29 @@ remains available via `--manual`. Falls back gracefully on any LLM failure.
 **PRD:** `cOS_prds/20260319_230625_prd_can_we_make_colonyos_setup_choice_one_where_an_assistant_sets_you_up_dynamically.md`
 **Tasks:** `cOS_tasks/20260319_230625_tasks_can_we_make_colonyos_setup_choice_one_where_an_assistant_sets_you_up_dynamically.md`
 
+## 20260320_035000 — `colonyos pr-review` GitHub PR Review Auto-Fix Command
+
+Added a new `colonyos pr-review <pr-number>` CLI command that monitors GitHub PR review
+comments and automatically runs lightweight fix pipelines in response. When a reviewer
+leaves actionable inline feedback on a PR, the bot triages the comment using the existing
+haiku-based triage agent, applies the fix via `run_thread_fix()` (Implement → Verify → Deliver),
+and replies on the original comment thread with what was fixed and a link to the commit.
+
+**Created:**
+- `src/colonyos/pr_review.py` — PR review comment fetching, filtering, state tracking, GitHub reply posting
+- `src/colonyos/instructions/thread_fix_pr_review.md` — Instruction template for PR review fix context
+- `tests/test_pr_review.py` — Comprehensive tests for PR review functionality
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `pr-review` command with `--watch`, `--poll-interval`, `--dry-run` options
+- `src/colonyos/config.py` — Added `PRReviewConfig` dataclass with `budget_per_pr`, `poll_interval_seconds`
+- `src/colonyos/models.py` — Added `source_type="pr_review_fix"` support in `QueueItem`
+- `src/colonyos/orchestrator.py` — Extended `run_thread_fix()` for PR review context
+- `README.md` — Updated CLI reference with pr-review command documentation
+
+**PRD:** `cOS_prds/20260320_025613_prd_add_a_colonyos_pr_review_pr_number_command_that_monitors_github_pr_review_commen.md`
+**Tasks:** `cOS_tasks/20260320_025613_tasks_add_a_colonyos_pr_review_pr_number_command_that_monitors_github_pr_review_commen.md`
+
 ## 20260320_051500 — Parallel Implement Mode
 
 Enables concurrent task execution during the Implement phase by spawning multiple agent

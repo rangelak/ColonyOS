@@ -112,6 +112,17 @@ class ParallelImplementConfig:
 
 
 @dataclass
+class PRReviewConfig:
+    """Configuration for PR review comment auto-fix feature."""
+
+    budget_per_pr: float = 5.0
+    max_fix_rounds_per_pr: int = 3
+    poll_interval_seconds: int = 60
+    circuit_breaker_threshold: int = 3
+    circuit_breaker_cooldown_minutes: int = 15
+
+
+@dataclass
 class SlackConfig:
     enabled: bool = False
     channels: list[str] = field(default_factory=list)
@@ -150,6 +161,7 @@ class ColonyConfig:
     ci_fix: CIFixConfig = field(default_factory=CIFixConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
+    pr_review: PRReviewConfig = field(default_factory=PRReviewConfig)
     parallel_implement: ParallelImplementConfig = field(default_factory=ParallelImplementConfig)
 
     def get_model(self, phase: Phase) -> str:
@@ -282,6 +294,44 @@ def _parse_ci_fix_config(raw: dict) -> CIFixConfig:
         max_retries=max_retries,
         wait_timeout=wait_timeout,
         log_char_cap=log_char_cap,
+    )
+
+
+def _parse_pr_review_config(raw: dict) -> PRReviewConfig:
+    """Parse the ``pr_review`` section from config.yaml."""
+    if not raw:
+        return PRReviewConfig()
+    budget_per_pr = float(raw.get("budget_per_pr", 5.0))
+    if budget_per_pr <= 0:
+        raise ValueError(
+            f"pr_review.budget_per_pr must be positive, got {budget_per_pr}"
+        )
+    max_fix_rounds_per_pr = int(raw.get("max_fix_rounds_per_pr", 3))
+    if max_fix_rounds_per_pr < 1:
+        raise ValueError(
+            f"pr_review.max_fix_rounds_per_pr must be positive, got {max_fix_rounds_per_pr}"
+        )
+    poll_interval_seconds = int(raw.get("poll_interval_seconds", 60))
+    if poll_interval_seconds < 1:
+        raise ValueError(
+            f"pr_review.poll_interval_seconds must be positive, got {poll_interval_seconds}"
+        )
+    circuit_breaker_threshold = int(raw.get("circuit_breaker_threshold", 3))
+    if circuit_breaker_threshold < 1:
+        raise ValueError(
+            f"pr_review.circuit_breaker_threshold must be positive, got {circuit_breaker_threshold}"
+        )
+    circuit_breaker_cooldown_minutes = int(raw.get("circuit_breaker_cooldown_minutes", 15))
+    if circuit_breaker_cooldown_minutes < 1:
+        raise ValueError(
+            f"pr_review.circuit_breaker_cooldown_minutes must be positive, got {circuit_breaker_cooldown_minutes}"
+        )
+    return PRReviewConfig(
+        budget_per_pr=budget_per_pr,
+        max_fix_rounds_per_pr=max_fix_rounds_per_pr,
+        poll_interval_seconds=poll_interval_seconds,
+        circuit_breaker_threshold=circuit_breaker_threshold,
+        circuit_breaker_cooldown_minutes=circuit_breaker_cooldown_minutes,
     )
 
 
@@ -436,6 +486,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         ci_fix=_parse_ci_fix_config(raw.get("ci_fix", {})),
         slack=_parse_slack_config(raw.get("slack", {})),
         cleanup=_parse_cleanup_config(raw.get("cleanup", {})),
+        pr_review=_parse_pr_review_config(raw.get("pr_review", {})),
         parallel_implement=_parse_parallel_implement_config(raw.get("parallel_implement", {})),
     )
 
@@ -532,6 +583,22 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "artifact_retention_days": config.cleanup.artifact_retention_days,
             "scan_max_lines": config.cleanup.scan_max_lines,
             "scan_max_functions": config.cleanup.scan_max_functions,
+        }
+
+    # Only persist pr_review if non-default values are set
+    if (
+        config.pr_review.budget_per_pr != 5.0
+        or config.pr_review.max_fix_rounds_per_pr != 3
+        or config.pr_review.poll_interval_seconds != 60
+        or config.pr_review.circuit_breaker_threshold != 3
+        or config.pr_review.circuit_breaker_cooldown_minutes != 15
+    ):
+        data["pr_review"] = {
+            "budget_per_pr": config.pr_review.budget_per_pr,
+            "max_fix_rounds_per_pr": config.pr_review.max_fix_rounds_per_pr,
+            "poll_interval_seconds": config.pr_review.poll_interval_seconds,
+            "circuit_breaker_threshold": config.pr_review.circuit_breaker_threshold,
+            "circuit_breaker_cooldown_minutes": config.pr_review.circuit_breaker_cooldown_minutes,
         }
 
     if config.ceo_persona:

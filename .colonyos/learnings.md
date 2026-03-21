@@ -140,6 +140,15 @@ _Date: 2026-03-19 | Feature: can_we_make_colonyos_setup_choice_one_where_an_assi
 - **[style]** Float equality/inequality comparisons for budget thresholds are fragile due to IEEE 754 rounding; use epsilon tolerance.
 - **[code-quality]** Placeholder values (SHA256 hashes, URLs) shipped in release artifacts cause install failures; gate releases on validation.
 
+## Run: run-20260320_025613-33b2772034
+_Date: 2026-03-20 | Feature: add_a_colonyos_pr_review_pr_number_command_that_monitors_git_
+
+- **[testing]** Verify phases must not be skipped; stochastic model outputs need structural validation before deployment.
+- **[code-quality]** State capture (e.g., HEAD SHA) must happen before branch restoration in finally blocks to avoid wrong values.
+- **[architecture]** IDs generated at API boundaries must be threaded through to internal components; don't let internals re-generate.
+- **[testing]** Token/auth verification must target endpoints that actually require authentication to catch invalid tokens.
+- **[architecture]** Implemented functions must be wired into call sites; untested integration paths are effectively dead code.
+
 ## Run: run-20260320_041029-963bfe43be
 _Date: 2026-03-20 | Feature: add_a_parallel_implement_mode_that_spawns_multiple_agent_ses_
 
