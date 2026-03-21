@@ -1254,6 +1254,8 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
                 "task_rel": log.task_rel,
                 "source_issue": log.source_issue,
                 "source_issue_url": log.source_issue_url,
+                "source_type": log.source_type,
+                "review_comment_id": log.review_comment_id,
                 "preflight": log.preflight.to_dict() if log.preflight else None,
                 "last_successful_phase": last_successful_phase,
                 "resume_events": resume_events,
@@ -1359,6 +1361,8 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
             source_issue=data.get("source_issue"),
             source_issue_url=data.get("source_issue_url"),
             preflight=PreflightResult.from_dict(data["preflight"]) if data.get("preflight") else None,
+            source_type=data.get("source_type"),
+            review_comment_id=data.get("review_comment_id"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise click.ClickException(
@@ -2064,6 +2068,7 @@ def _build_thread_fix_prompt(
     fix_request: str,
     original_prompt: str,
     repo_root: Path | None = None,
+    pr_review_context: dict[str, str | int] | None = None,
 ) -> tuple[str, str]:
     """Build the system/user prompts for a thread-fix pipeline run.
 
@@ -2071,30 +2076,59 @@ def _build_thread_fix_prompt(
     sanitized here at point of use, regardless of whether callers have
     already sanitized them.  This prevents injection if a future caller
     passes unsanitized content.
-    """
-    template = _load_instruction("thread_fix.md")
 
+    When ``pr_review_context`` is provided, uses the PR-review-specific
+    instruction template (thread_fix_pr_review.md) with rich context about
+    the reviewer, file, and line number.
+    """
     # Sanitize untrusted content at point of use (defense-in-depth).
     safe_fix_request = sanitize_untrusted_content(fix_request)
     safe_original_prompt = sanitize_untrusted_content(original_prompt)
 
-    system = _format_base(config) + "\n\n" + template.format(
-        branch_name=branch_name,
-        prd_path=prd_rel,
-        task_path=task_rel,
-        fix_request=safe_fix_request,
-        original_prompt=safe_original_prompt,
-    )
+    if pr_review_context is not None:
+        # Use PR review specific template with rich context
+        template = _load_instruction("thread_fix_pr_review.md")
+        # Sanitize all PR review context values
+        safe_context = {
+            k: sanitize_untrusted_content(str(v)) if isinstance(v, str) else v
+            for k, v in pr_review_context.items()
+        }
+        system = _format_base(config) + "\n\n" + template.format(
+            branch_name=branch_name,
+            prd_path=prd_rel,
+            task_path=task_rel,
+            file_path=safe_context.get("file_path", ""),
+            line_number=safe_context.get("line_number", 0),
+            reviewer_username=safe_context.get("reviewer_username", "unknown"),
+            comment_url=safe_context.get("comment_url", ""),
+            review_comment=safe_context.get("review_comment", safe_fix_request),
+            original_prompt=safe_original_prompt,
+        )
+        user = (
+            f"Address the PR review comment from @{safe_context.get('reviewer_username', 'reviewer')} "
+            f"on file `{safe_context.get('file_path', '')}` line {safe_context.get('line_number', 0)}. "
+            f"The review feedback is: {safe_fix_request}"
+        )
+    else:
+        # Use generic Slack thread-fix template
+        template = _load_instruction("thread_fix.md")
+        system = _format_base(config) + "\n\n" + template.format(
+            branch_name=branch_name,
+            prd_path=prd_rel,
+            task_path=task_rel,
+            fix_request=safe_fix_request,
+            original_prompt=safe_original_prompt,
+        )
+        user = (
+            f"Apply the requested fix on branch `{branch_name}`. "
+            f"The fix request is: {safe_fix_request}"
+        )
 
     if repo_root is not None:
         learnings = load_learnings_for_injection(repo_root)
         if learnings:
             system += f"\n\n## Learnings from Past Runs\n\n{learnings}"
 
-    user = (
-        f"Apply the requested fix on branch `{branch_name}`. "
-        f"The fix request is: {safe_fix_request}"
-    )
     return system, user
 
 
@@ -2112,8 +2146,11 @@ def run_thread_fix(
     quiet: bool = False,
     ui_factory: object | None = None,
     expected_head_sha: str | None = None,
+    source_type: str | None = None,
+    review_comment_id: str | None = None,
+    pr_review_context: dict[str, str | int] | None = None,
 ) -> RunLog:
-    """Execute a lightweight fix pipeline for a Slack thread-fix request.
+    """Execute a lightweight fix pipeline for a Slack thread-fix or PR review fix.
 
     Skips Plan and triage phases. Runs:
     1. Validate branch name, branch exists, and PR is open
@@ -2122,6 +2159,9 @@ def run_thread_fix(
     4. Implement phase with fix instructions
     5. Verify phase (test suite)
     6. Deliver phase (push to existing branch, skip PR creation)
+
+    When ``pr_review_context`` is provided (for PR review fixes), uses a
+    specialized instruction template with file/line context and reviewer info.
 
     Returns a RunLog with phase results and cost.
 
@@ -2149,6 +2189,8 @@ def run_thread_fix(
         prd_rel=prd_rel,
         task_rel=task_rel,
         pr_url=pr_url,
+        source_type=source_type,
+        review_comment_id=review_comment_id,
     )
 
     # --- Defense-in-depth: validate branch name at point of use ---
@@ -2243,6 +2285,7 @@ def run_thread_fix(
         system, user = _build_thread_fix_prompt(
             config, branch_name, prd_rel, task_rel,
             fix_prompt, original_prompt, repo_root=repo_root,
+            pr_review_context=pr_review_context,
         )
         impl_result = run_phase_sync(
             Phase.IMPLEMENT,
