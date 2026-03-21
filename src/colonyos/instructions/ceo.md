@@ -30,9 +30,12 @@ Read the project's README, key source files, and directory structure to understa
 - Its architecture and tech stack
 - Its current capabilities and limitations
 
-### Step 3: Review History
+### Step 3: Review History and In-Flight Work
 
-The user prompt includes the **full development changelog** listing every feature already built. Review it carefully before proposing anything new. Your proposal must not duplicate past work.
+The user prompt includes the **full development changelog** listing every feature already built, **plus any open pull requests** representing work currently in progress. Review both carefully before proposing anything new.
+
+- Your proposal **must not duplicate** any completed feature in the changelog.
+- Your proposal **must not overlap with** any open PR. Those features are already being developed — proposing the same thing wastes an entire pipeline run.
 
 If you need more detail on a specific past feature, you may read its PRD or task file in `{prds_dir}/` or `{tasks_dir}/`.
 

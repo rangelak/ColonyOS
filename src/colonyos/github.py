@@ -284,6 +284,71 @@ def check_open_pr(
     return None, None
 
 
+@dataclass(frozen=True)
+class GitHubPR:
+    """Represents an open pull request fetched via the ``gh`` CLI."""
+
+    number: int
+    title: str
+    branch: str
+    url: str = ""
+    labels: list[str] = field(default_factory=list)
+
+
+def fetch_open_prs(
+    repo_root: Path,
+    limit: int = 20,
+) -> list[GitHubPR]:
+    """Fetch open pull requests for CEO context.
+
+    Non-blocking — all errors are caught and logged, returning an empty
+    list on failure.  Mirrors :func:`fetch_open_issues` in style.
+    """
+    if not isinstance(limit, int) or limit < 1 or limit > 100:
+        raise ValueError(f"limit must be an integer between 1 and 100, got {limit!r}")
+    try:
+        result = subprocess.run(
+            [
+                "gh", "pr", "list",
+                "--json", "number,title,headRefName,url,labels",
+                "--limit", str(limit),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=repo_root,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Failed to fetch open PRs: %s", exc)
+        return []
+
+    if result.returncode != 0:
+        logger.warning("gh pr list failed: %s", result.stderr.strip())
+        return []
+
+    try:
+        items = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse gh pr list output")
+        return []
+
+    if not isinstance(items, list):
+        logger.warning("gh pr list returned non-array JSON")
+        return []
+
+    prs: list[GitHubPR] = []
+    for item in items:
+        labels = [lbl.get("name", "") for lbl in item.get("labels", [])]
+        prs.append(GitHubPR(
+            number=item.get("number", 0),
+            title=item.get("title", ""),
+            branch=item.get("headRefName", ""),
+            url=item.get("url", ""),
+            labels=labels,
+        ))
+    return prs
+
+
 def fetch_open_issues(
     repo_root: Path,
     limit: int = 20,
