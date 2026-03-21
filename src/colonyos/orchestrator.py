@@ -672,8 +672,23 @@ def _build_ceo_prompt(
     repo_root: Path,
 ) -> tuple[str, str]:
     """Build the system prompt and user prompt for the CEO phase."""
+    from colonyos.directions import load_directions
+
     ceo_template = _load_instruction("ceo.md")
     persona = config.ceo_persona or DEFAULT_CEO_PERSONA
+
+    directions = load_directions(repo_root)
+    if directions.strip():
+        directions_block = (
+            "**Landscape & inspiration document is loaded.** "
+            "Scan it for projects worth studying and patterns to draw from:\n\n"
+            f"{directions}"
+        )
+    else:
+        directions_block = (
+            "_No directions configured. "
+            "Run `colonyos directions --regenerate` to generate a landscape doc._"
+        )
 
     system = ceo_template.format(
         ceo_role=persona.role,
@@ -685,6 +700,7 @@ def _build_ceo_prompt(
         vision=config.vision or "No vision statement configured.",
         prds_dir=config.prds_dir,
         tasks_dir=config.tasks_dir,
+        directions_block=directions_block,
     )
 
     changelog = ""
@@ -772,6 +788,60 @@ def run_ceo(
     prompt = _extract_feature_prompt(proposal_text) if result.success else ""
 
     return prompt, result
+
+
+def update_directions_after_ceo(
+    repo_root: Path,
+    config: ColonyConfig,
+    proposal_text: str,
+    iteration: int,
+    *,
+    ui: "PhaseUI | NullUI | None" = None,
+) -> float:
+    """Refresh the landscape/inspiration directions document after a CEO proposal.
+
+    Uses a lightweight agent call to evolve the strategic directions based on
+    the latest CEO proposal. Fails silently on error so it never blocks the
+    main pipeline.
+
+    Returns the USD cost incurred by the update (0.0 on skip or failure).
+    """
+    from colonyos.directions import (
+        build_directions_update_prompt,
+        load_directions,
+        save_directions,
+    )
+
+    current = load_directions(repo_root)
+    if not current.strip():
+        return 0.0
+
+    system, user = build_directions_update_prompt(
+        config, current, proposal_text, iteration, repo_root,
+    )
+
+    try:
+        result = run_phase_sync(
+            Phase.CEO,
+            user,
+            cwd=repo_root,
+            system_prompt=system,
+            model=config.get_model(Phase.CEO),
+            budget_usd=min(config.budget.per_phase, 1.0),
+            allowed_tools=[],
+            ui=ui,
+        )
+        cost = result.cost_usd or 0.0
+        updated = result.artifacts.get("result", "")
+        if result.success and updated.strip() and "# Strategic Directions" in updated:
+            save_directions(repo_root, updated)
+            _log(f"Directions refreshed (iteration {iteration})")
+        else:
+            _log("Directions update skipped: agent output didn't match expected format")
+        return cost
+    except Exception:
+        _log(f"Failed to update directions after iteration {iteration}, continuing.")
+        return 0.0
 
 
 _FEATURE_REQUEST_RE = re.compile(
