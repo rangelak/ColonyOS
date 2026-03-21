@@ -12,6 +12,7 @@ from colonyos.router import (
     RouterResult,
     _build_router_prompt,
     _parse_router_response,
+    log_router_decision,
     route_query,
 )
 
@@ -715,3 +716,163 @@ class TestAnswerQuestionIntegration:
             )
             result = answer_question("where is the run function?", repo_root=tmp_repo)
             assert "cli.py" in result
+
+
+# ---------------------------------------------------------------------------
+# log_router_decision tests (Task 9.1, 9.2, 9.3)
+# ---------------------------------------------------------------------------
+
+
+class TestLogRouterDecision:
+    """Tests for the audit logging function."""
+
+    @pytest.fixture
+    def tmp_repo(self, tmp_path: Path) -> Path:
+        """Create a temporary repo directory."""
+        config_dir = tmp_path / ".colonyos"
+        config_dir.mkdir()
+        return tmp_path
+
+    def test_creates_log_file(self, tmp_repo: Path) -> None:
+        """log_router_decision should create a triage log file."""
+        result = RouterResult(
+            category=RouterCategory.CODE_CHANGE,
+            confidence=0.95,
+            summary="Add feature",
+            reasoning="User wants to add a feature",
+        )
+        log_path = log_router_decision(
+            repo_root=tmp_repo,
+            prompt="add a health check endpoint",
+            result=result,
+            source="cli",
+        )
+        assert log_path is not None
+        assert log_path.exists()
+        assert log_path.name.startswith("triage_")
+        assert log_path.suffix == ".json"
+
+    def test_log_file_contains_required_fields(self, tmp_repo: Path) -> None:
+        """Log file must contain prompt, category, confidence, reasoning, source, timestamp."""
+        result = RouterResult(
+            category=RouterCategory.QUESTION,
+            confidence=0.88,
+            summary="Asking about function",
+            reasoning="User is asking what something does",
+        )
+        log_path = log_router_decision(
+            repo_root=tmp_repo,
+            prompt="what does sanitize do?",
+            result=result,
+            source="repl",
+        )
+        assert log_path is not None
+        data = json.loads(log_path.read_text())
+        assert "timestamp" in data
+        assert data["source"] == "repl"
+        assert "prompt" in data
+        assert data["category"] == "question"
+        assert data["confidence"] == 0.88
+        assert data["reasoning"] == "User is asking what something does"
+        assert data["summary"] == "Asking about function"
+
+    def test_log_file_in_runs_directory(self, tmp_repo: Path) -> None:
+        """Log files should be written to .colonyos/runs/."""
+        result = RouterResult(
+            category=RouterCategory.STATUS,
+            confidence=0.9,
+            summary="Status query",
+            reasoning="Asking about status",
+            suggested_command="colonyos status",
+        )
+        log_path = log_router_decision(
+            repo_root=tmp_repo,
+            prompt="show queue status",
+            result=result,
+        )
+        assert log_path is not None
+        assert log_path.parent == tmp_repo / ".colonyos" / "runs"
+
+    def test_log_includes_suggested_command(self, tmp_repo: Path) -> None:
+        """Log should include suggested_command for status queries."""
+        result = RouterResult(
+            category=RouterCategory.STATUS,
+            confidence=0.9,
+            summary="Stats request",
+            reasoning="User wants stats",
+            suggested_command="colonyos stats",
+        )
+        log_path = log_router_decision(
+            repo_root=tmp_repo,
+            prompt="show stats",
+            result=result,
+        )
+        assert log_path is not None
+        data = json.loads(log_path.read_text())
+        assert data["suggested_command"] == "colonyos stats"
+
+    def test_log_sanitizes_prompt(self, tmp_repo: Path) -> None:
+        """Prompt should be sanitized before logging."""
+        result = RouterResult(
+            category=RouterCategory.CODE_CHANGE,
+            confidence=0.9,
+            summary="Test",
+            reasoning="Test",
+        )
+        log_path = log_router_decision(
+            repo_root=tmp_repo,
+            prompt="<script>alert('xss')</script> fix the bug",
+            result=result,
+        )
+        assert log_path is not None
+        data = json.loads(log_path.read_text())
+        assert "<script>" not in data["prompt"]
+
+    def test_creates_runs_dir_if_missing(self, tmp_path: Path) -> None:
+        """Should create the runs directory if it doesn't exist."""
+        result = RouterResult(
+            category=RouterCategory.CODE_CHANGE,
+            confidence=0.9,
+            summary="Test",
+            reasoning="Test",
+        )
+        log_path = log_router_decision(
+            repo_root=tmp_path,
+            prompt="fix bug",
+            result=result,
+        )
+        assert log_path is not None
+        assert (tmp_path / ".colonyos" / "runs").is_dir()
+
+    def test_returns_none_on_write_failure(self, tmp_repo: Path) -> None:
+        """Should return None if writing fails."""
+        result = RouterResult(
+            category=RouterCategory.CODE_CHANGE,
+            confidence=0.9,
+            summary="Test",
+            reasoning="Test",
+        )
+        with patch("pathlib.Path.write_text", side_effect=OSError("permission denied")):
+            log_path = log_router_decision(
+                repo_root=tmp_repo,
+                prompt="fix bug",
+                result=result,
+            )
+            assert log_path is None
+
+    def test_default_source_is_cli(self, tmp_repo: Path) -> None:
+        """Default source should be 'cli'."""
+        result = RouterResult(
+            category=RouterCategory.CODE_CHANGE,
+            confidence=0.9,
+            summary="Test",
+            reasoning="Test",
+        )
+        log_path = log_router_decision(
+            repo_root=tmp_repo,
+            prompt="fix bug",
+            result=result,
+        )
+        assert log_path is not None
+        data = json.loads(log_path.read_text())
+        assert data["source"] == "cli"

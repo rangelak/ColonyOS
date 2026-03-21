@@ -410,6 +410,76 @@ def _run_repl() -> None:
                     ))
                 continue
 
+            # --- intent routing for feature prompts ---
+            if config.router.enabled:
+                from colonyos.router import (
+                    RouterCategory,
+                    answer_question,
+                    log_router_decision,
+                    route_query,
+                )
+
+                click.echo(click.style("Classifying intent...", dim=True))
+
+                router_result = route_query(
+                    stripped,
+                    repo_root=repo_root,
+                    project_name=config.project.name if config.project else "",
+                    project_description=config.project.description if config.project else "",
+                    project_stack=config.project.stack if config.project else "",
+                    vision=config.vision,
+                    source="repl",
+                )
+
+                log_router_decision(
+                    repo_root=repo_root,
+                    prompt=stripped,
+                    result=router_result,
+                    source="repl",
+                )
+
+                if router_result.confidence < config.router.confidence_threshold:
+                    click.echo(click.style(
+                        f"Low confidence ({router_result.confidence:.0%}), treating as feature request...",
+                        dim=True,
+                    ))
+                elif router_result.category == RouterCategory.QUESTION:
+                    click.echo(click.style("Treating this as a question...", dim=True))
+                    try:
+                        answer = answer_question(
+                            stripped,
+                            repo_root=repo_root,
+                            project_name=config.project.name if config.project else "",
+                            project_description=config.project.description if config.project else "",
+                            project_stack=config.project.stack if config.project else "",
+                            model=config.router.qa_model,
+                            qa_budget=config.router.qa_budget,
+                        )
+                        click.echo()
+                        click.echo(answer)
+                    except KeyboardInterrupt:
+                        click.echo(click.style(
+                            "\nAnswer interrupted. Returning to prompt.",
+                            dim=True,
+                        ))
+                    continue
+                elif router_result.category == RouterCategory.STATUS:
+                    suggested = router_result.suggested_command or "colonyos status"
+                    click.echo(click.style(
+                        f"This looks like a status query. Try: {suggested}",
+                        fg="yellow",
+                    ))
+                    continue
+                elif router_result.category == RouterCategory.OUT_OF_SCOPE:
+                    click.echo(click.style(
+                        "This request doesn't seem related to coding or this project. "
+                        "For code changes, describe the feature you want to build.",
+                        fg="yellow",
+                    ))
+                    continue
+                else:
+                    click.echo(click.style("Treating this as a feature request...", dim=True))
+
             # --- feature prompt (default) ---
             per_run_cap = config.budget.per_run
             if not config.auto_approve:
@@ -609,8 +679,8 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             from colonyos.router import (
                 RouterCategory,
                 answer_question,
+                log_router_decision,
                 route_query,
-                _log_router_decision,
             )
 
             if not quiet:
@@ -627,7 +697,7 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             )
 
             # Log the routing decision for audit trail
-            _log_router_decision(
+            log_router_decision(
                 repo_root=repo_root,
                 prompt=effective_prompt,
                 result=router_result,
@@ -651,7 +721,7 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
                     project_name=config.project.name if config.project else "",
                     project_description=config.project.description if config.project else "",
                     project_stack=config.project.stack if config.project else "",
-                    model=config.router.model,
+                    model=config.router.qa_model,
                     qa_budget=config.router.qa_budget,
                 )
                 click.echo()

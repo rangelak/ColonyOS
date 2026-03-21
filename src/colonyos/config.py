@@ -59,6 +59,7 @@ DEFAULTS = {
     "router": {
         "enabled": True,
         "model": "haiku",
+        "qa_model": "sonnet",
         "confidence_threshold": 0.7,
         "qa_budget": 0.50,
     },
@@ -139,6 +140,7 @@ class RouterConfig:
 
     enabled: bool = True
     model: str = "haiku"
+    qa_model: str = "sonnet"
     confidence_threshold: float = 0.7
     qa_budget: float = 0.50
 
@@ -445,6 +447,13 @@ def _parse_router_config(raw: dict) -> RouterConfig:
             f"Note: use short names (e.g. 'haiku') not full model IDs."
         )
 
+    qa_model = str(raw.get("qa_model", defaults["qa_model"]))
+    if qa_model not in VALID_MODELS:
+        raise ValueError(
+            f"Invalid router qa_model '{qa_model}'. Valid options: {sorted(VALID_MODELS)}. "
+            f"Note: use short names (e.g. 'sonnet') not full model IDs."
+        )
+
     confidence_threshold = float(raw.get("confidence_threshold", defaults["confidence_threshold"]))
     if confidence_threshold < 0 or confidence_threshold > 1:
         raise ValueError(
@@ -460,6 +469,7 @@ def _parse_router_config(raw: dict) -> RouterConfig:
     return RouterConfig(
         enabled=enabled,
         model=model,
+        qa_model=qa_model,
         confidence_threshold=confidence_threshold,
         qa_budget=qa_budget,
     )
@@ -697,12 +707,14 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
     if (
         config.router.enabled != router_defaults["enabled"]
         or config.router.model != router_defaults["model"]
+        or config.router.qa_model != router_defaults["qa_model"]
         or config.router.confidence_threshold != router_defaults["confidence_threshold"]
         or config.router.qa_budget != router_defaults["qa_budget"]
     ):
         data["router"] = {
             "enabled": config.router.enabled,
             "model": config.router.model,
+            "qa_model": config.router.qa_model,
             "confidence_threshold": config.router.confidence_threshold,
             "qa_budget": config.router.qa_budget,
         }

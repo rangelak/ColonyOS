@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -369,3 +370,60 @@ def answer_question(
         return f"I was unable to answer your question due to an error: {result.error[:200]}"
 
     return "I was unable to find an answer to your question."
+
+
+def log_router_decision(
+    *,
+    repo_root: Path,
+    prompt: str,
+    result: RouterResult,
+    source: str = "cli",
+) -> Path | None:
+    """Log a routing decision to the audit trail.
+
+    Writes a JSON file to ``.colonyos/runs/triage_<timestamp>.json``
+    containing the prompt (sanitized), classification result, confidence,
+    reasoning, source, and timestamp.
+
+    Args:
+        repo_root: Repository root directory.
+        prompt: The original user prompt (will be sanitized before logging).
+        result: The RouterResult from classification.
+        source: Origin of the query (cli, repl, slack).
+
+    Returns:
+        Path to the written log file, or None if writing failed.
+    """
+    runs_dir = repo_root / ".colonyos" / "runs"
+    try:
+        runs_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.warning("Failed to create runs directory: %s", runs_dir)
+        return None
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    log_path = runs_dir / f"triage_{timestamp}.json"
+
+    safe_prompt = sanitize_untrusted_content(prompt)
+
+    log_data = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": source,
+        "prompt": safe_prompt,
+        "category": result.category.value,
+        "confidence": result.confidence,
+        "summary": result.summary,
+        "reasoning": result.reasoning,
+        "suggested_command": result.suggested_command,
+    }
+
+    try:
+        log_path.write_text(
+            json.dumps(log_data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        logger.debug("Router decision logged to %s", log_path)
+        return log_path
+    except OSError:
+        logger.warning("Failed to write router decision log: %s", log_path)
+        return None
