@@ -694,6 +694,8 @@ def _run_parallel_implement(
             if task.phase_result is not None:
                 log.phases.append(task.phase_result)
 
+        _save_run_log(repo_root, log)
+
         # Update log with parallel metadata (FR-11)
         summary = orchestrator.get_summary()
         log.parallel_tasks = summary["total_tasks"]
@@ -1940,6 +1942,7 @@ def _run_learn_phase(
             ui=learn_ui,
         )
         log.phases.append(learn_result)
+        _save_run_log(repo_root, log)
 
         if learn_result.success:
             result_text = learn_result.artifacts.get("result", "")
@@ -1971,6 +1974,7 @@ def _run_learn_phase(
                 error=str(exc),
             )
         )
+        _save_run_log(repo_root, log)
 
 
 def _extract_pr_number_from_log(log: RunLog) -> int | None:
@@ -2653,6 +2657,11 @@ def _run_pipeline(
 ) -> RunLog:
     """Execute the pipeline phases. Extracted from run() for try/finally branch rollback."""
 
+    def _append_phase(result: PhaseResult) -> None:
+        """Append a phase result and persist immediately so progress survives crashes."""
+        log.phases.append(result)
+        _save_run_log(repo_root, log)
+
     # --- Phase 1: Plan ---
     _touch_heartbeat(repo_root)
     if "plan" in skip_phases:
@@ -2693,7 +2702,7 @@ def _run_pipeline(
             agents=persona_agents,
             ui=plan_ui,
         )
-        log.phases.append(plan_result)
+        _append_phase(plan_result)
 
         if not plan_result.success:
             if plan_ui is None:
@@ -2749,7 +2758,7 @@ def _run_pipeline(
                 ui=impl_ui,
             )
 
-        log.phases.append(impl_result)
+        _append_phase(impl_result)
 
         if not impl_result.success:
             if impl_ui is None:
@@ -2843,7 +2852,7 @@ def _run_pipeline(
                         f"# Review by {persona.role} (Round {iteration + 1})\n\n{text}",
                         subdirectory=artifact.subdirectory,
                     )
-                    log.phases.append(result)
+                    _append_phase(result)
 
                 last_findings = _collect_review_findings(results, reviewers)
 
@@ -2887,7 +2896,7 @@ def _run_pipeline(
                         budget_usd=config.budget.per_phase,
                         ui=fix_ui,
                     )
-                    log.phases.append(fix_result)
+                    _append_phase(fix_result)
                     if not fix_result.success:
                         if fix_ui is None:
                             _log(f"  Fix phase failed: {fix_result.error}")
@@ -2910,7 +2919,7 @@ def _run_pipeline(
                 allowed_tools=["Read", "Glob", "Grep", "Bash"],
                 ui=decision_ui,
             )
-            log.phases.append(decision_result)
+            _append_phase(decision_result)
 
             verdict_text = decision_result.artifacts.get("result", "")
             verdict = _extract_verdict(verdict_text)
@@ -2959,7 +2968,7 @@ def _run_pipeline(
             budget_usd=config.budget.per_phase,
             ui=deliver_ui,
         )
-        log.phases.append(deliver_result)
+        _append_phase(deliver_result)
 
         # Extract PR URL from deliver artifacts
         pr_url = deliver_result.artifacts.get("pr_url", "")
