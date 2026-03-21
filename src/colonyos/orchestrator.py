@@ -2469,7 +2469,7 @@ def run(
 
         # Lightweight pre-flight for resume: only check clean working tree
         expected_sha = None
-        if log.preflight and log.preflight.head_sha:
+        if not force and log.preflight and log.preflight.head_sha:
             expected_sha = log.preflight.head_sha
         preflight = _resume_preflight(repo_root, branch_name, expected_head_sha=expected_sha)
         log.preflight = preflight
