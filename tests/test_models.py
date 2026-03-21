@@ -685,3 +685,56 @@ class TestTaskStatus:
         from colonyos.models import TaskStatus
         assert TaskStatus("pending") == TaskStatus.PENDING
         assert TaskStatus("blocked") == TaskStatus.BLOCKED
+
+
+class TestPhaseQA:
+    """Tests for Phase.QA enum value (Task 2.1 - Intent Router Agent)."""
+
+    def test_qa_enum_value(self) -> None:
+        """Phase.QA should have value 'qa'."""
+        assert Phase.QA.value == "qa"
+
+    def test_qa_serialization_roundtrip(self) -> None:
+        """Phase('qa') should reconstruct Phase.QA."""
+        assert Phase("qa") == Phase.QA
+
+    def test_qa_phase_result(self) -> None:
+        """PhaseResult can be created with Phase.QA."""
+        result = PhaseResult(
+            phase=Phase.QA,
+            success=True,
+            cost_usd=0.25,
+        )
+        assert result.phase == Phase.QA
+        assert result.success is True
+        assert result.cost_usd == 0.25
+
+    def test_qa_is_string_enum(self) -> None:
+        """Phase.QA should be usable as a string via inheritance from str."""
+        # Phase inherits from str, so comparison with string works
+        assert Phase.QA == "qa"
+        # The .value property returns the string value
+        assert Phase.QA.value == "qa"
+
+    def test_qa_in_phase_list(self) -> None:
+        """Phase.QA should be a member of the Phase enum."""
+        all_phases = list(Phase)
+        assert Phase.QA in all_phases
+
+    def test_backward_compat_runlog_without_qa(self) -> None:
+        """Existing RunLog JSON without QA phases loads fine."""
+        log = RunLog(
+            run_id="r-old",
+            prompt="old run",
+            status=RunStatus.COMPLETED,
+            phases=[
+                PhaseResult(phase=Phase.IMPLEMENT, success=True),
+                PhaseResult(phase=Phase.DELIVER, success=True),
+            ],
+        )
+        assert all(p.phase != Phase.QA for p in log.phases)
+
+    def test_qa_distinct_from_triage(self) -> None:
+        """Phase.QA and Phase.TRIAGE are distinct phases."""
+        assert Phase.QA != Phase.TRIAGE
+        assert Phase.QA.value != Phase.TRIAGE.value

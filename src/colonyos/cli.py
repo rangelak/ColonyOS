@@ -524,7 +524,8 @@ def init(
 @click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
 @click.option("--offline", is_flag=True, help="Skip network calls in pre-flight checks.")
 @click.option("--force", is_flag=True, help="Bypass pre-flight checks (for power users).")
-def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool, offline: bool, force: bool) -> None:
+@click.option("--no-triage", is_flag=True, help="Skip intent routing and run the full pipeline directly.")
+def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool, offline: bool, force: bool, no_triage: bool) -> None:
     """Run the autonomous agent loop for a feature prompt."""
     # Mutual exclusivity checks
     if resume_run_id:
@@ -569,6 +570,7 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             quiet=quiet,
             force=force,
         )
+        _print_run_summary(log)
     else:
         source_issue: int | None = None
         source_issue_url: str | None = None
@@ -593,6 +595,87 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
         else:
             effective_prompt = prompt or f"Implement the PRD at {from_prd}"
 
+        # Intent routing: classify the prompt before running the full pipeline
+        # Skip routing when: --no-triage flag, --from-prd, --issue, or router disabled
+        should_route = (
+            config.router.enabled
+            and not no_triage
+            and not from_prd
+            and not issue_ref
+            and prompt  # Only route freeform prompts
+        )
+
+        if should_route:
+            from colonyos.router import (
+                RouterCategory,
+                answer_question,
+                route_query,
+                _log_router_decision,
+            )
+
+            if not quiet:
+                click.echo(click.style("Classifying intent...", dim=True))
+
+            router_result = route_query(
+                effective_prompt,
+                repo_root=repo_root,
+                project_name=config.project.name if config.project else "",
+                project_description=config.project.description if config.project else "",
+                project_stack=config.project.stack if config.project else "",
+                vision=config.vision,
+                source="cli",
+            )
+
+            # Log the routing decision for audit trail
+            _log_router_decision(
+                repo_root=repo_root,
+                prompt=effective_prompt,
+                result=router_result,
+                source="cli",
+            )
+
+            # Check confidence threshold for fail-open behavior
+            if router_result.confidence < config.router.confidence_threshold:
+                if not quiet:
+                    click.echo(click.style(
+                        f"Low confidence ({router_result.confidence:.0%}), treating as feature request...",
+                        dim=True,
+                    ))
+                # Fall through to full pipeline
+            elif router_result.category == RouterCategory.QUESTION:
+                if not quiet:
+                    click.echo(click.style("Treating this as a question...", dim=True))
+                answer = answer_question(
+                    effective_prompt,
+                    repo_root=repo_root,
+                    project_name=config.project.name if config.project else "",
+                    project_description=config.project.description if config.project else "",
+                    project_stack=config.project.stack if config.project else "",
+                    model=config.router.model,
+                    qa_budget=config.router.qa_budget,
+                )
+                click.echo()
+                click.echo(answer)
+                return
+            elif router_result.category == RouterCategory.STATUS:
+                suggested = router_result.suggested_command or "colonyos status"
+                click.echo(click.style(
+                    f"This looks like a status query. Try: {suggested}",
+                    fg="yellow",
+                ))
+                return
+            elif router_result.category == RouterCategory.OUT_OF_SCOPE:
+                click.echo(click.style(
+                    "This request doesn't seem related to coding or this project. "
+                    "For code changes, describe the feature you want to build.",
+                    fg="yellow",
+                ))
+                return
+            else:
+                # CODE_CHANGE: proceed to full pipeline
+                if not quiet:
+                    click.echo(click.style("Treating this as a feature request...", dim=True))
+
         log = run_orchestrator(
             effective_prompt,
             repo_root=repo_root,
@@ -606,8 +689,7 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             offline=offline,
             force=force,
         )
-
-    _print_run_summary(log)
+        _print_run_summary(log)
 
     if log.status == RunStatus.FAILED:
         sys.exit(1)

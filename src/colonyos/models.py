@@ -44,6 +44,7 @@ class Phase(str, Enum):
     DELIVER = "deliver"
     CI_FIX = "ci_fix"
     CONFLICT_RESOLVE = "conflict_resolve"
+    QA = "qa"  # Intent Router: read-only Q&A agent for codebase questions
 
 
 class TaskStatus(str, Enum):
