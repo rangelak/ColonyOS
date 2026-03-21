@@ -22,7 +22,7 @@ VALID_MODELS: frozenset[str] = frozenset({"opus", "sonnet", "haiku"})
 _SAFETY_CRITICAL_PHASES: frozenset[str] = frozenset({"review", "decision", "fix"})
 
 DEFAULTS = {
-    "model": "sonnet",
+    "model": "opus",
     "budget": {
         "per_phase": 5.0,
         "per_run": 15.0,
@@ -143,7 +143,7 @@ class SlackConfig:
 class ColonyConfig:
     project: ProjectInfo | None = None
     personas: list[Persona] = field(default_factory=list)
-    model: str = "sonnet"
+    model: str = "opus"
     phase_models: dict[str, str] = field(default_factory=dict)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     phases: PhasesConfig = field(default_factory=PhasesConfig)
@@ -154,6 +154,7 @@ class ColonyConfig:
     proposals_dir: str = "cOS_proposals"
     ceo_persona: Persona | None = None
     vision: str = ""
+    user_directions: str = ""
     directions_auto_update: bool = True
     max_fix_iterations: int = 2
     auto_approve: bool = False
@@ -476,6 +477,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         proposals_dir=raw.get("proposals_dir", DEFAULTS["proposals_dir"]),
         ceo_persona=_parse_persona(raw.get("ceo_persona")) if raw.get("ceo_persona") else None,
         vision=raw.get("vision", ""),
+        user_directions=str(raw.get("user_directions", "")),
         directions_auto_update=bool(raw.get("directions_auto_update", True)),
         max_fix_iterations=int(raw.get("max_fix_iterations", DEFAULTS["max_fix_iterations"])),
         auto_approve=bool(raw.get("auto_approve", False)),
@@ -610,6 +612,9 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
 
     if config.vision:
         data["vision"] = config.vision
+
+    if config.user_directions:
+        data["user_directions"] = config.user_directions
 
     # Only serialize parallel_implement if values differ from defaults
     pi_defaults = DEFAULTS["parallel_implement"]

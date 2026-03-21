@@ -86,4 +86,10 @@ slack:
   max_consecutive_failures: 3
   circuit_breaker_cooldown_minutes: 30
   max_fix_rounds_per_thread: 3
+user_directions: |
+  Always prioritize simplicity and user experience over architectural purity.
+  When the user provides feedback, treat it as the highest-priority input —
+  the user is the ultimate authority on what this product should be.
+  Ship the smallest thing that works first, then iterate.
+  Default to opus for all phases — quality matters more than cost savings.
 directions_auto_update: false

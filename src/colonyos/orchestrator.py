@@ -327,12 +327,20 @@ def _load_instruction(name: str) -> str:
 def _format_base(config: ColonyConfig) -> str:
     """Format the base instruction template with all config directories."""
     base = _load_instruction("base.md")
-    return base.format(
+    result = base.format(
         prds_dir=config.prds_dir,
         tasks_dir=config.tasks_dir,
         reviews_dir=config.reviews_dir,
         branch_prefix=config.branch_prefix,
     )
+    if config.user_directions:
+        result += (
+            "\n\n## User Directions (HIGHEST PRIORITY)\n\n"
+            "The following directions come directly from the project owner. "
+            "Treat these as top-priority constraints that override default behavior.\n\n"
+            f"{config.user_directions}"
+        )
+    return result
 
 
 def _persona_slug(role: str) -> str:
