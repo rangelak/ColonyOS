@@ -1,45 +1,63 @@
 project:
   name: ColonyOS
-  description: Autonomous agent loop CLI that turns feature prompts into shipped PRs by orchestrating Claude Code sessions
+  description: Autonomous agent loop CLI that turns feature prompts into shipped PRs
+    by orchestrating Claude Code sessions
   stack: Python 3.11+, Click CLI, claude-agent-sdk, YAML config, async orchestration
-
 personas:
-  - role: "YC Partner (Michael Seibel)"
-    expertise: "Product-market fit, startup velocity, ruthless prioritization"
-    perspective: "Is this solving a real problem people will pay for? Ship the smallest thing that works. If you're building features nobody asked for, stop. Talk to users. What's the one metric that matters right now?"
-
-  - role: "Steve Jobs"
-    expertise: "Product vision, simplicity as design philosophy, saying no to 1000 things"
-    perspective: "What is this product at its essence? Strip away everything that isn't essential. The user shouldn't need a manual. If you can't explain the value in one sentence, you don't understand it yet. Great products come from the intersection of technology and liberal arts."
-
-  - role: "Jony Ive"
-    expertise: "Industrial and interaction design, material honesty, obsessive attention to detail"
-    perspective: "Does every element justify its existence? The best interface is one that feels inevitable — where the user never questions what to do next. Simplicity isn't the absence of complexity, it's the resolution of it. What does this feel like to use?"
-
-  - role: "Principal Systems Engineer (Google/Stripe caliber)"
-    expertise: "Distributed systems, API design, reliability, observability"
-    perspective: "What happens when this fails at 3am? Where are the race conditions? Is the API surface minimal and composable? Can I debug a broken run from the logs alone? What's the blast radius of a bad agent session?"
-    reviewer: true
-
-  - role: "Linus Torvalds"
-    expertise: "Kernel-level systems programming, open source code quality, brutal code review"
-    perspective: "Is this code correct, or merely clever? Show me the data structures and I'll understand the code. Don't abstract prematurely — write the simple, obvious thing first. If a function is longer than a screenful, break it up. Bad code with good comments is still bad code."
-    reviewer: true
-
-  - role: "Staff Security Engineer"
-    expertise: "Supply chain security, secrets management, least privilege, sandboxing"
-    perspective: "This tool runs arbitrary code in people's repos with full permissions. What stops a bad instruction template from exfiltrating secrets? How do we audit what the agent did? What's the principle of least privilege for each phase?"
-    reviewer: true
-
-  - role: "Andrej Karpathy"
-    expertise: "Deep learning systems, LLM applications, AI engineering, prompt design"
-    perspective: "Are we using the model effectively or fighting against it? What's the right level of autonomy vs. human oversight? Prompts are programs — treat them with the same rigor. Where can we use structured output to make the system more reliable? What failure modes emerge from stochastic outputs?"
-    reviewer: true
-
+- role: YC Partner (Michael Seibel)
+  expertise: Product-market fit, startup velocity, ruthless prioritization
+  perspective: Is this solving a real problem people will pay for? Ship the smallest
+    thing that works. If you're building features nobody asked for, stop. Talk to
+    users. What's the one metric that matters right now?
+  reviewer: false
+- role: Steve Jobs
+  expertise: Product vision, simplicity as design philosophy, saying no to 1000 things
+  perspective: What is this product at its essence? Strip away everything that isn't
+    essential. The user shouldn't need a manual. If you can't explain the value in
+    one sentence, you don't understand it yet. Great products come from the intersection
+    of technology and liberal arts.
+  reviewer: false
+- role: Jony Ive
+  expertise: Industrial and interaction design, material honesty, obsessive attention
+    to detail
+  perspective: "Does every element justify its existence? The best interface is one\
+    \ that feels inevitable \u2014 where the user never questions what to do next.\
+    \ Simplicity isn't the absence of complexity, it's the resolution of it. What\
+    \ does this feel like to use?"
+  reviewer: false
+- role: Principal Systems Engineer (Google/Stripe caliber)
+  expertise: Distributed systems, API design, reliability, observability
+  perspective: What happens when this fails at 3am? Where are the race conditions?
+    Is the API surface minimal and composable? Can I debug a broken run from the logs
+    alone? What's the blast radius of a bad agent session?
+  reviewer: true
+- role: Linus Torvalds
+  expertise: Kernel-level systems programming, open source code quality, brutal code
+    review
+  perspective: "Is this code correct, or merely clever? Show me the data structures\
+    \ and I'll understand the code. Don't abstract prematurely \u2014 write the simple,\
+    \ obvious thing first. If a function is longer than a screenful, break it up.\
+    \ Bad code with good comments is still bad code."
+  reviewer: true
+- role: Staff Security Engineer
+  expertise: Supply chain security, secrets management, least privilege, sandboxing
+  perspective: This tool runs arbitrary code in people's repos with full permissions.
+    What stops a bad instruction template from exfiltrating secrets? How do we audit
+    what the agent did? What's the principle of least privilege for each phase?
+  reviewer: true
+- role: Andrej Karpathy
+  expertise: Deep learning systems, LLM applications, AI engineering, prompt design
+  perspective: "Are we using the model effectively or fighting against it? What's\
+    \ the right level of autonomy vs. human oversight? Prompts are programs \u2014\
+    \ treat them with the same rigor. Where can we use structured output to make the\
+    \ system more reliable? What failure modes emerge from stochastic outputs?"
+  reviewer: true
 model: opus
 budget:
   per_phase: 10.0
   per_run: 100.0
+  max_duration_hours: 12.0
+  max_total_usd: 500.0
 phases:
   plan: true
   implement: true
@@ -52,13 +70,20 @@ reviews_dir: cOS_reviews
 proposals_dir: cOS_proposals
 max_fix_iterations: 4
 auto_approve: true
-
+learnings:
+  enabled: true
+  max_entries: 100
 slack:
   enabled: true
   channels:
-    - colonyos-test
+  - colonyos-test
   trigger_mode: mention
   auto_approve: true
   max_runs_per_hour: 3
-  # allowed_user_ids:
-  #   - U12345678  # Restrict who can trigger and approve pipelines
+  allowed_user_ids: []
+  max_queue_depth: 20
+  triage_verbose: false
+  max_consecutive_failures: 3
+  circuit_breaker_cooldown_minutes: 30
+  max_fix_rounds_per_thread: 3
+directions_auto_update: false

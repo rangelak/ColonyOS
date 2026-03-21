@@ -133,6 +133,7 @@ class ColonyConfig:
     proposals_dir: str = "cOS_proposals"
     ceo_persona: Persona | None = None
     vision: str = ""
+    directions_auto_update: bool = True
     max_fix_iterations: int = 2
     auto_approve: bool = False
     learnings: LearningsConfig = field(default_factory=LearningsConfig)
@@ -414,6 +415,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         proposals_dir=raw.get("proposals_dir", DEFAULTS["proposals_dir"]),
         ceo_persona=_parse_persona(raw.get("ceo_persona")) if raw.get("ceo_persona") else None,
         vision=raw.get("vision", ""),
+        directions_auto_update=bool(raw.get("directions_auto_update", True)),
         max_fix_iterations=int(raw.get("max_fix_iterations", DEFAULTS["max_fix_iterations"])),
         auto_approve=bool(raw.get("auto_approve", False)),
         learnings=LearningsConfig(
@@ -546,6 +548,9 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
 
     if config.vision:
         data["vision"] = config.vision
+
+    if not config.directions_auto_update:
+        data["directions_auto_update"] = False
 
     config_path = config_dir / CONFIG_FILE
     config_path.write_text(

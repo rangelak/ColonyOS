@@ -672,8 +672,23 @@ def _build_ceo_prompt(
     repo_root: Path,
 ) -> tuple[str, str]:
     """Build the system prompt and user prompt for the CEO phase."""
+    from colonyos.directions import load_directions
+
     ceo_template = _load_instruction("ceo.md")
     persona = config.ceo_persona or DEFAULT_CEO_PERSONA
+
+    directions = load_directions(repo_root)
+    if directions.strip():
+        directions_block = (
+            "**Landscape & inspiration document is loaded.** "
+            "Scan it for projects worth studying and patterns to draw from:\n\n"
+            f"{directions}"
+        )
+    else:
+        directions_block = (
+            "_No directions configured. "
+            "Run `colonyos directions --regenerate` to generate a landscape doc._"
+        )
 
     system = ceo_template.format(
         ceo_role=persona.role,
@@ -685,6 +700,7 @@ def _build_ceo_prompt(
         vision=config.vision or "No vision statement configured.",
         prds_dir=config.prds_dir,
         tasks_dir=config.tasks_dir,
+        directions_block=directions_block,
     )
 
     changelog = ""
@@ -706,10 +722,12 @@ def _build_ceo_prompt(
                 "or propose a novel feature if no open issue is high-impact enough.\n"
             )
             for iss in open_issues:
+                safe_title = sanitize_untrusted_content(iss.title)
+                safe_labels = [sanitize_untrusted_content(l) for l in iss.labels]
                 label_str = (
-                    " [" + ", ".join(iss.labels) + "]" if iss.labels else ""
+                    " [" + ", ".join(safe_labels) + "]" if safe_labels else ""
                 )
-                lines.append(f"- #{iss.number}: {iss.title}{label_str}")
+                lines.append(f"- #{iss.number}: {safe_title}{label_str}")
             issues_section = "\n".join(lines) + "\n\n"
     except Exception:
         import logging as _logging
@@ -718,12 +736,44 @@ def _build_ceo_prompt(
             "Failed to fetch open issues for CEO context, proceeding without."
         )
 
+    # Fetch open PRs so the CEO avoids duplicating in-flight work (non-blocking)
+    prs_section = ""
+    try:
+        from colonyos.github import fetch_open_prs
+
+        open_prs = fetch_open_prs(repo_root)
+        if open_prs:
+            lines = ["## Open Pull Requests (Work In Progress)\n"]
+            lines.append(
+                "These PRs represent features **currently being developed or awaiting review**. "
+                "Your proposal MUST NOT overlap with or duplicate any of these. "
+                "Treat them as work that is already underway.\n"
+            )
+            for pr in open_prs:
+                safe_title = sanitize_untrusted_content(pr.title)
+                safe_branch = sanitize_untrusted_content(pr.branch)
+                safe_labels = [sanitize_untrusted_content(l) for l in pr.labels]
+                label_str = (
+                    " [" + ", ".join(safe_labels) + "]" if safe_labels else ""
+                )
+                lines.append(
+                    f"- PR #{pr.number}: {safe_title} (branch: `{safe_branch}`){label_str}"
+                )
+            prs_section = "\n".join(lines) + "\n\n"
+    except Exception:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "Failed to fetch open PRs for CEO context, proceeding without."
+        )
+
     user = (
         "## Development History\n\n"
         "Below is the complete changelog of features already built. "
         "Your proposal MUST NOT duplicate any of these. "
         "Your proposal MUST build upon or complement existing work.\n\n"
         f"{changelog}\n\n---\n\n"
+        f"{prs_section}"
         f"{issues_section}"
         "Analyze this project and propose the single most impactful feature to build next. "
         "Output your proposal in the format described in the instructions."
@@ -772,6 +822,60 @@ def run_ceo(
     prompt = _extract_feature_prompt(proposal_text) if result.success else ""
 
     return prompt, result
+
+
+def update_directions_after_ceo(
+    repo_root: Path,
+    config: ColonyConfig,
+    proposal_text: str,
+    iteration: int,
+    *,
+    ui: "PhaseUI | NullUI | None" = None,
+) -> float:
+    """Refresh the landscape/inspiration directions document after a CEO proposal.
+
+    Uses a lightweight agent call to evolve the strategic directions based on
+    the latest CEO proposal. Fails silently on error so it never blocks the
+    main pipeline.
+
+    Returns the USD cost incurred by the update (0.0 on skip or failure).
+    """
+    from colonyos.directions import (
+        build_directions_update_prompt,
+        load_directions,
+        save_directions,
+    )
+
+    current = load_directions(repo_root)
+    if not current.strip():
+        return 0.0
+
+    system, user = build_directions_update_prompt(
+        config, current, proposal_text, iteration, repo_root,
+    )
+
+    try:
+        result = run_phase_sync(
+            Phase.CEO,
+            user,
+            cwd=repo_root,
+            system_prompt=system,
+            model=config.get_model(Phase.CEO),
+            budget_usd=min(config.budget.per_phase, 1.0),
+            allowed_tools=[],
+            ui=ui,
+        )
+        cost = result.cost_usd or 0.0
+        updated = result.artifacts.get("result", "")
+        if result.success and updated.strip() and "# Strategic Directions" in updated:
+            save_directions(repo_root, updated)
+            _log(f"Directions refreshed (iteration {iteration})")
+        else:
+            _log("Directions update skipped: agent output didn't match expected format")
+        return cost
+    except Exception:
+        _log(f"Failed to update directions after iteration {iteration}, continuing.")
+        return 0.0
 
 
 _FEATURE_REQUEST_RE = re.compile(
