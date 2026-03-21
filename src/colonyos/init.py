@@ -980,10 +980,16 @@ def run_init(
             vision=vision,
         )
 
-    return _finalize_init(repo_root, config)
+    return _finalize_init(repo_root, config, personas_only=personas_only, quick=quick)
 
 
-def _finalize_init(repo_root: Path, config: ColonyConfig) -> ColonyConfig:
+def _finalize_init(
+    repo_root: Path,
+    config: ColonyConfig,
+    *,
+    personas_only: bool = False,
+    quick: bool = False,
+) -> ColonyConfig:
     """Save config, create directories, update .gitignore, print summary."""
     config_path = save_config(repo_root, config)
 
