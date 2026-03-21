@@ -1,5 +1,28 @@
 # Changelog
 
+## 20260321_211500 — Intent Router Agent
+
+Adds a lightweight intent router that classifies user input before running the full pipeline.
+Questions get fast, cheap answers via a read-only Q&A agent; only actual code-change requests
+trigger the full Plan → Implement → Verify → Review → Deliver cycle. Reduces unnecessary
+pipeline runs and saves significant time and cost for information-seeking queries.
+
+**Created:**
+- `src/colonyos/router.py` — Core routing logic: intent classification, Q&A agent, audit logging
+- `src/colonyos/instructions/qa.md` — Instruction template for the read-only Q&A agent
+- `tests/test_router.py` — 1100+ lines of comprehensive router tests
+
+**Modified:**
+- `src/colonyos/models.py` — Added `Phase.QA` enum value
+- `src/colonyos/config.py` — Added `RouterConfig` dataclass with model, threshold, budget settings
+- `src/colonyos/cli.py` — Integrated router into `run()` and REPL; added `--no-triage` flag
+- `src/colonyos/slack.py` — Factored out shared triage logic, unified with router module
+- `tests/test_config.py` — Extended config tests for router settings
+- `tests/test_models.py` — Tests for new Phase.QA enum
+
+**PRD:** `cOS_prds/20260321_125008_prd_right_now_the_pipeline_always_runs_this_huge_planner_implementation_orchestratio.md`
+**Tasks:** `cOS_tasks/20260321_125008_tasks_right_now_the_pipeline_always_runs_this_huge_planner_implementation_orchestratio.md`
+
 ## 20260319_230625 — AI-Assisted Setup for ColonyOS Init
 
 Adds a new default init mode where Claude Haiku reads the repository, auto-detects project
