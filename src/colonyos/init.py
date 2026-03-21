@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 import click
+from rich.table import Table
+from rich.text import Text
 
 from colonyos.config import (
     DEFAULTS,
@@ -19,15 +21,12 @@ from colonyos.config import (
     load_config,
     save_config,
 )
-from colonyos.models import Persona, PhaseResult, ProjectInfo, RepoContext
+from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, RepoContext
 from colonyos.persona_packs import PACKS, get_pack, pack_keys, packs_summary
+from colonyos.ui import console
 
 logger = logging.getLogger(__name__)
 
-# Well-known manifest files to scan during repo auto-detection (FR-2).
-# Each entry maps a relative path (or glob) to the tech-stack signal it
-# indicates.  This single list is the source of truth — no duplicates
-# across modules.
 _MANIFEST_FILES: list[tuple[str, str]] = [
     ("README.md", ""),
     ("README.rst", ""),
@@ -60,8 +59,25 @@ MODEL_PRESETS: dict[str, dict[str, str | dict[str, str]]] = {
 }
 
 
+def _section(title: str, subtitle: str = "") -> None:
+    """Render a styled section header matching the pipeline UI."""
+    label = f" {title}"
+    if subtitle:
+        label += f"  [dim]{subtitle}[/dim]"
+    console.print()
+    console.rule(label, style="bold")
+
+
+_ARROW = click.style("›", fg="bright_cyan", bold=True)
+
+
 def _prompt(text: str, default: str = "") -> str:
-    return click.prompt(text, default=default, show_default=bool(default))
+    return click.prompt(
+        f"  {_ARROW} {text}",
+        default=default,
+        show_default=bool(default),
+        prompt_suffix=" ",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -554,7 +570,7 @@ def run_ai_init(
 
 def collect_project_info(defaults: RepoContext | None = None) -> ProjectInfo:
     """Collect project info interactively, optionally pre-filled from RepoContext."""
-    click.echo("\n--- Project Info ---\n")
+    _section("Project Info")
     name = _prompt("Project name", default=defaults.name if defaults else "")
     description = _prompt(
         "Brief description (what does this project do?)",
@@ -573,18 +589,26 @@ def select_persona_pack() -> list[Persona] | None:
     Returns the list of Persona instances from the chosen pack, or None if
     the user selects "Custom (define your own)".
     """
-    click.echo("\n--- Persona Packs ---")
-    click.echo("Choose a prebuilt persona pack or define your own.\n")
+    _section("Persona Packs", "choose a prebuilt team or define your own")
 
     for i, pack in enumerate(PACKS, 1):
-        click.echo(f"  {i}. {pack.name} — {pack.description}")
+        console.print(
+            f"  [bold bright_cyan]{i}[/bold bright_cyan]. "
+            f"[bold]{pack.name}[/bold] [dim]— {pack.description}[/dim]",
+            highlight=False,
+        )
     custom_index = len(PACKS) + 1
-    click.echo(f"  {custom_index}. Custom (define your own)")
+    console.print(
+        f"  [bold bright_cyan]{custom_index}[/bold bright_cyan]. "
+        f"[bold]Custom[/bold] [dim]— define your own[/dim]",
+        highlight=False,
+    )
 
     choice = click.prompt(
-        "\nSelect a pack",
+        f"\n  {_ARROW} Select a pack",
         type=click.IntRange(1, custom_index),
         default=1,
+        prompt_suffix=" ",
     )
 
     if choice == custom_index:
@@ -592,35 +616,55 @@ def select_persona_pack() -> list[Persona] | None:
 
     pack = PACKS[choice - 1]
 
-    click.echo(f"\n  {pack.name}:")
+    table = Table(
+        show_header=True, header_style="bold", box=None, padding=(0, 2),
+    )
+    table.add_column("#", style="bold bright_cyan", width=3)
+    table.add_column("Role", style="bold")
+    table.add_column("Expertise", style="dim")
     for i, persona in enumerate(pack.personas, 1):
-        click.echo(f"    {i}. {persona.role} — {persona.expertise}")
+        table.add_row(str(i), persona.role, persona.expertise)
 
-    if not click.confirm(f"\nUse these {len(pack.personas)} personas?", default=True):
+    console.print()
+    console.print(f"  [bold]{pack.name}[/bold]", highlight=False)
+    console.print(table)
+
+    if not click.confirm(
+        f"\n  {_ARROW} Use these {len(pack.personas)} personas?",
+        default=True,
+    ):
         return None
 
     return list(pack.personas)
 
 
 def collect_personas(existing: list[Persona] | None = None) -> list[Persona]:
-    click.echo("\n--- Agent Personas ---")
-    click.echo(
-        "Define the expert personas who will review feature PRDs.\n"
-        "Each persona has a role, area of expertise, and a perspective they bring.\n"
-        "You'll typically want 3-5 personas.\n"
+    _section("Agent Personas", "define the expert panel for reviews & planning")
+    console.print(
+        "  [dim]Each persona has a role, expertise, and a perspective they bring.\n"
+        "  You'll typically want 3–5 personas.[/dim]",
+        highlight=False,
     )
 
     personas: list[Persona] = []
 
     if existing:
-        click.echo("Current personas:")
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column("#", style="bold bright_cyan", width=3)
+        table.add_column("Role", style="bold")
+        table.add_column("Expertise", style="dim")
         for i, p in enumerate(existing, 1):
-            click.echo(f"  {i}. {p.role} — {p.expertise}")
-        if click.confirm("\nKeep existing personas and add more?", default=True):
+            table.add_row(str(i), p.role, p.expertise)
+        console.print()
+        console.print(table)
+        if click.confirm(
+            f"\n  {_ARROW} Keep existing personas and add more?",
+            default=True,
+        ):
             personas = list(existing)
 
     while True:
-        click.echo(f"\n--- Persona {len(personas) + 1} ---")
+        _section(f"Persona {len(personas) + 1}")
         role = _prompt("Role (e.g. Senior Backend Engineer, Product Lead)")
         expertise = _prompt("Expertise (e.g. API design, user research)")
         perspective = _prompt(
@@ -628,11 +672,15 @@ def collect_personas(existing: list[Persona] | None = None) -> list[Persona]:
             default="",
         )
         is_reviewer = click.confirm(
-            "Should this persona participate in code reviews?", default=True
+            f"  {_ARROW} Should this persona participate in code reviews?",
+            default=True,
         )
         personas.append(Persona(role=role, expertise=expertise, perspective=perspective, reviewer=is_reviewer))
 
-        if len(personas) >= 3 and not click.confirm("Add another persona?", default=len(personas) < 5):
+        if len(personas) >= 3 and not click.confirm(
+            f"  {_ARROW} Add another persona?",
+            default=len(personas) < 5,
+        ):
             break
 
     return personas
@@ -650,10 +698,144 @@ def _collect_personas_with_packs(existing: list[Persona] | None = None) -> list[
     if pack_personas is None:
         return collect_personas(existing)
 
-    if click.confirm("Add custom personas on top?", default=False):
+    if click.confirm(f"  {_ARROW} Add custom personas on top?", default=False):
         return collect_personas(existing=pack_personas)
 
     return pack_personas
+
+
+def _collect_strategic_goals() -> str:
+    """Prompt user for their north star that feeds into directions generation."""
+    _section("CEO Directions", "north star & landscape inspiration")
+    console.print(
+        "  [dim]What's your north star for this project? Where should it go?\n"
+        "  The system will research similar projects and build a landscape\n"
+        "  doc that gives the CEO agent taste and inspiration.\n\n"
+        "  Examples:[/dim] [italic]'become the best open-source CLI for X'[/italic][dim],\n"
+        "  [/dim][italic]'match feature parity with tool Y'[/italic][dim], "
+        "[/dim][italic]'developer experience first'[/italic]\n"
+        "  [dim]Press Enter twice to finish.[/dim]",
+        highlight=False,
+    )
+    console.print()
+    lines: list[str] = []
+    while True:
+        line = click.prompt(
+            f"  {_ARROW}",
+            default="", show_default=False,
+            prompt_suffix=" ",
+        )
+        if not line and lines:
+            break
+        if line:
+            lines.append(line)
+        elif not lines:
+            break
+    return "\n".join(lines)
+
+
+_MAX_DIRECTION_REGEN_ATTEMPTS = 5
+
+
+def generate_directions(
+    repo_root: Path,
+    config: ColonyConfig,
+    user_goals: str,
+    *,
+    verbose: bool = False,
+) -> str | None:
+    """Run the directions generation agent and return the generated document.
+
+    Returns None if the agent fails or produces no output.
+    Allows up to ``_MAX_DIRECTION_REGEN_ATTEMPTS`` regeneration cycles.
+    """
+    from colonyos.agent import run_phase_sync
+    from colonyos.directions import (
+        build_directions_gen_prompt,
+        display_directions,
+        load_directions,
+        save_directions,
+    )
+    from colonyos.ui import PhaseUI
+
+    goals = user_goals
+    previous = load_directions(repo_root)
+
+    for attempt in range(_MAX_DIRECTION_REGEN_ATTEMPTS):
+        console.print()
+        console.print(
+            "  [bold]Generating strategic directions…[/bold]\n"
+            "  [dim]researching similar projects and best practices[/dim]",
+            highlight=False,
+        )
+
+        system, user = build_directions_gen_prompt(
+            config, goals, repo_root, existing_directions=previous,
+        )
+
+        ui = PhaseUI(verbose=verbose)
+
+        ui.phase_header(
+            "Directions",
+            min(config.budget.per_phase, 2.0),
+            config.get_model(Phase.CEO),
+            extra="research & synthesis",
+        )
+
+        try:
+            result = run_phase_sync(
+                Phase.CEO,
+                user,
+                cwd=repo_root,
+                system_prompt=system,
+                model=config.get_model(Phase.CEO),
+                budget_usd=min(config.budget.per_phase, 2.0),
+                allowed_tools=["Read", "Glob", "Grep", "Bash"],
+                ui=ui,
+            )
+        except Exception as exc:
+            console.print(f"\n  [red]✗[/red] Directions generation failed: {exc}", highlight=False)
+            console.print("  [dim]You can generate directions later with[/dim] [green]colonyos directions[/green]", highlight=False)
+            return None
+
+        content = result.artifacts.get("result", "")
+        if not result.success or not content.strip():
+            console.print(
+                "\n  [red]✗[/red] Directions generation produced no output.\n"
+                "  [dim]You can try again with[/dim] [green]colonyos directions[/green]",
+                highlight=False,
+            )
+            return None
+
+        display_directions(content)
+
+        if click.confirm(
+            f"\n  {_ARROW} Approve these directions?",
+            default=True,
+        ):
+            save_directions(repo_root, content)
+            console.print("  [green]✓[/green] Directions saved to .colonyos/directions.md", highlight=False)
+            return content
+
+        if attempt < _MAX_DIRECTION_REGEN_ATTEMPTS - 1 and click.confirm(
+            f"  {_ARROW} Edit goals and regenerate?",
+            default=False,
+        ):
+            new_goals = _collect_strategic_goals()
+            if new_goals.strip():
+                goals = new_goals
+            else:
+                console.print("  [dim](no new goals entered — reusing previous goals)[/dim]", highlight=False)
+            continue
+
+        break
+
+    console.print(
+        "  [dim]Directions skipped. You can generate them later with[/dim] "
+        "[green]colonyos directions[/green]",
+        highlight=False,
+    )
+    return None
 
 
 def run_init(
@@ -747,32 +929,39 @@ def run_init(
             existing.personas if existing.personas else None,
         )
 
-        click.echo("\n--- Strategic Direction ---\n")
+        _section("Strategic Direction")
         vision = _prompt(
-            "Describe your project's vision and priorities (optional, press Enter to skip)",
+            "Project vision and priorities (optional, Enter to skip)",
             default="",
         )
 
-        click.echo("\n--- Configuration ---\n")
+        _section("Configuration", "model & budget")
 
-        click.echo("Model presets:")
         preset_names = list(MODEL_PRESETS.keys())
         for i, name in enumerate(preset_names, 1):
-            click.echo(f"  {i}. {name}")
+            console.print(
+                f"  [bold bright_cyan]{i}[/bold bright_cyan]. [bold]{name}[/bold]",
+                highlight=False,
+            )
         preset_choice = click.prompt(
-            "Select a model preset",
+            f"  {_ARROW} Select a model preset",
             type=click.IntRange(1, len(preset_names)),
             default=1,
+            prompt_suffix=" ",
         )
         chosen_preset = MODEL_PRESETS[preset_names[preset_choice - 1]]
         model = chosen_preset["model"]
         phase_models = dict(chosen_preset["phase_models"])
 
         budget_phase = click.prompt(
-            "Budget per phase (USD)", default=existing.budget.per_phase, type=float
+            f"  {_ARROW} Budget per phase (USD)",
+            default=existing.budget.per_phase, type=float,
+            prompt_suffix=" ",
         )
         budget_run = click.prompt(
-            "Budget per run (USD)", default=existing.budget.per_run, type=float
+            f"  {_ARROW} Budget per run (USD)",
+            default=existing.budget.per_run, type=float,
+            prompt_suffix=" ",
         )
 
         config = ColonyConfig(
@@ -818,10 +1007,10 @@ def _finalize_init(repo_root: Path, config: ColonyConfig) -> ColonyConfig:
     for old_name, new_name in [("prds", config.prds_dir), ("tasks", config.tasks_dir)]:
         old_dir = repo_root / old_name
         if old_dir.exists() and old_name != new_name:
-            click.echo(
-                f"Warning: old '{old_name}/' directory exists alongside '{new_name}/'. "
-                f"Consider migrating your files.",
-                err=True,
+            console.print(
+                f"  [yellow]⚠[/yellow] old [bold]{old_name}/[/bold] exists alongside "
+                f"[bold]{new_name}/[/bold] — consider migrating",
+                highlight=False,
             )
 
     gitignore = repo_root / ".gitignore"
@@ -837,9 +1026,55 @@ def _finalize_init(repo_root: Path, config: ColonyConfig) -> ColonyConfig:
     else:
         gitignore.write_text("\n".join(entries_needed) + "\n", encoding="utf-8")
 
-    click.echo(f"\nConfig saved to {config_path}")
-    click.echo(f"Created {prds_dir}/, {tasks_dir}/, {reviews_dir}/ (with decisions/ and reviews/ subdirs), and {proposals_dir}/ directories")
-    click.echo(f"Defined {len(config.personas)} personas")
-    click.echo('\nNext step:\n  colonyos run "Add a health check endpoint"')
+    _section("Setup Complete")
+    console.print(f"  [green]✓[/green] Config saved to [bold]{config_path}[/bold]", highlight=False)
+    console.print(
+        f"  [green]✓[/green] Created [bold]{config.prds_dir}/[/bold], "
+        f"[bold]{config.tasks_dir}/[/bold], [bold]{config.reviews_dir}/[/bold], "
+        f"[bold]{config.proposals_dir}/[/bold]",
+        highlight=False,
+    )
+    console.print(
+        f"  [green]✓[/green] Defined [bold]{len(config.personas)}[/bold] personas",
+        highlight=False,
+    )
+
+    # --- Strategic Directions generation ---
+    if not personas_only and not quick:
+        from colonyos.directions import directions_path
+
+        existing_directions = directions_path(repo_root)
+        generate = True
+        if existing_directions.exists():
+            if not click.confirm(
+                f"\n  {_ARROW} Existing directions found. Regenerate?",
+                default=False,
+            ):
+                generate = False
+
+        if generate:
+            goals = _collect_strategic_goals()
+            if goals.strip():
+                generate_directions(repo_root, config, goals)
+            else:
+                console.print(
+                    "\n  [dim]No goals provided — skipping directions generation.\n"
+                    "  Run[/dim] [green]colonyos directions[/green] [dim]later to create them.[/dim]",
+                    highlight=False,
+                )
+
+        if existing_directions.exists():
+            auto_update = click.confirm(
+                f"\n  {_ARROW} Auto-update directions after each CEO iteration?",
+                default=config.directions_auto_update,
+            )
+            if auto_update != config.directions_auto_update:
+                config.directions_auto_update = auto_update
+                save_config(repo_root, config)
+
+    console.print(
+        '\n  [dim]Next step:[/dim]  [green bold]colonyos run "Add a health check endpoint"[/green bold]\n',
+        highlight=False,
+    )
 
     return config

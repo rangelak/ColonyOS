@@ -260,7 +260,8 @@ class TestInitWithPacks:
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
              patch("colonyos.doctor.subprocess.run", return_value=MagicMock(returncode=0)), \
-             patch("colonyos.doctor.sys.version_info", type("V", (), {"major": 3, "minor": 12})()):
+             patch("colonyos.doctor.sys.version_info", type("V", (), {"major": 3, "minor": 12})()), \
+             patch("colonyos.init._collect_strategic_goals", return_value=""):
             result = runner.invoke(app, ["init", "--manual"], input=user_input)
 
         assert result.exit_code == 0, result.output

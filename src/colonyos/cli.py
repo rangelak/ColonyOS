@@ -16,7 +16,7 @@ from pathlib import Path
 import click
 
 from colonyos import __version__
-from colonyos.config import ColonyConfig, load_config, runs_dir_path
+from colonyos.config import ColonyConfig, load_config, save_config, runs_dir_path
 from colonyos.doctor import run_doctor_checks
 from colonyos.init import run_ai_init, run_init
 from colonyos.models import (
@@ -40,6 +40,7 @@ from colonyos.orchestrator import (
     run_ceo,
     run_standalone_review,
     prepare_resume,
+    update_directions_after_ceo,
 )
 
 logger = logging.getLogger(__name__)
@@ -1075,10 +1076,19 @@ def _run_single_iteration(
     orchestrator run, False otherwise (CEO failure, propose-only, or
     pipeline failure — all of which allow the loop to continue).
     """
+    from colonyos.directions import display_directions, load_directions
     from colonyos.ui import NullUI, PhaseUI
 
     _touch_heartbeat(repo_root)
     _ensure_on_main(repo_root)
+
+    if not quiet:
+        dirs_content = load_directions(repo_root)
+        if dirs_content.strip():
+            display_directions(
+                dirs_content,
+                title=f"Strategic Directions (iter {iteration})",
+            )
 
     ceo_ui: PhaseUI | NullUI | None = None
     if not quiet:
@@ -1118,6 +1128,15 @@ def _run_single_iteration(
             expand=True,
         )
     )
+
+    if config.directions_auto_update:
+        update_ui: PhaseUI | NullUI | None = None
+        if verbose and not quiet:
+            update_ui = PhaseUI(verbose=True)
+        directions_cost = update_directions_after_ceo(
+            repo_root, config, prompt, iteration, ui=update_ui,
+        )
+        aggregate_cost += directions_cost
 
     if propose_only:
         click.echo("\nPropose-only mode: proposal saved, pipeline not triggered.")
@@ -1839,6 +1858,86 @@ def show(run_id: str, as_json: bool, phase: str | None) -> None:
     console = RichConsole()
     result = compute_show_result(run_data, phase_filter=phase)
     render_show(console, result)
+
+
+# ---------------------------------------------------------------------------
+# Directions command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+@click.option("--regenerate", is_flag=True, help="Regenerate directions from scratch.")
+@click.option("--static", is_flag=True, help="Lock directions so they don't auto-update after CEO iterations.")
+@click.option("--auto-update", is_flag=True, help="Unlock directions to auto-update after CEO iterations.")
+@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output.")
+def directions(regenerate: bool, static: bool, auto_update: bool, verbose: bool) -> None:
+    """View, regenerate, or configure CEO strategic directions.
+
+    \b
+    Examples:
+      colonyos directions              # view current directions
+      colonyos directions --regenerate  # regenerate from scratch
+      colonyos directions --static      # keep directions read-only
+      colonyos directions --auto-update # let CEO evolve directions each iteration
+    """
+    from colonyos.directions import (
+        directions_path,
+        display_directions,
+        load_directions,
+    )
+    from colonyos.init import _collect_strategic_goals, generate_directions
+
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+
+    from colonyos.ui import console as ui_console
+
+    if not config.project:
+        ui_console.print(
+            "  [red]✗[/red] No ColonyOS config found. Run [green]colonyos init[/green] first.",
+            highlight=False,
+        )
+        sys.exit(1)
+
+    if static and auto_update:
+        ui_console.print("  [red]✗[/red] Cannot use --static and --auto-update together.", highlight=False)
+        sys.exit(1)
+
+    if static:
+        config.directions_auto_update = False
+        save_config(repo_root, config)
+        ui_console.print(
+            "  [green]✓[/green] Directions [bold]locked[/bold] — CEO reads but never rewrites.",
+            highlight=False,
+        )
+        return
+
+    if auto_update:
+        config.directions_auto_update = True
+        save_config(repo_root, config)
+        ui_console.print(
+            "  [green]✓[/green] Directions [bold]unlocked[/bold] — will evolve after each CEO iteration.",
+            highlight=False,
+        )
+        return
+
+    if regenerate or not directions_path(repo_root).exists():
+        goals = _collect_strategic_goals()
+        if goals.strip():
+            generate_directions(repo_root, config, goals, verbose=verbose)
+        else:
+            ui_console.print("  [dim]No goals provided. Aborting.[/dim]", highlight=False)
+        return
+
+    content = load_directions(repo_root)
+    if content.strip():
+        mode_label = "[green]auto-update[/green]" if config.directions_auto_update else "[yellow]static[/yellow]"
+        display_directions(content, title=f"Strategic Directions  [dim]mode:[/dim] {mode_label}")
+    else:
+        ui_console.print(
+            "  [dim]No directions found. Run[/dim] [green]colonyos directions --regenerate[/green] [dim]to create them.[/dim]",
+            highlight=False,
+        )
 
 
 # ---------------------------------------------------------------------------
