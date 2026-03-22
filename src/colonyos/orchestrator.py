@@ -2681,7 +2681,7 @@ def _run_pipeline(
     # --- Interactive input setup ---
     input_reader: InputReader | None = None
     if interactive:
-        input_reader = InputReader()
+        input_reader = InputReader(cost_fn=lambda: log.total_cost_usd)
         input_reader.start()
 
     _current_phase_name = "unknown"

@@ -594,11 +594,12 @@ class InputReader:
     ``input_queue`` (a thread-safe ``queue.Queue``) between turns.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, cost_fn: "Callable[[], float] | None" = None) -> None:
         self._input_queue: queue.Queue[str] = queue.Queue()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._active = False
+        self._cost_fn = cost_fn
 
     @property
     def is_active(self) -> bool:
@@ -616,19 +617,29 @@ class InputReader:
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()
         console.print(
-            "  [dim]Type a message and press Enter to send input to the running agent[/dim]",
+            "  [dim]Type a message below and press Enter to send input to the running agent[/dim]",
             highlight=False,
         )
+        import sys as _sys
+        _sys.stderr.write(self._build_prompt())
+        _sys.stderr.flush()
 
     def stop(self) -> None:
         """Signal the reader thread to stop."""
         self._stop_event.set()
         self._active = False
 
+    def _build_prompt(self) -> str:
+        cost = self._cost_fn() if self._cost_fn else 0.0
+        return f"\033[32m[${cost:.2f}]\033[0m \033[1;96m›\033[0m "
+
     def _read_loop(self) -> None:
         """Background thread: read lines from stdin until stopped."""
+        import sys as _sys
         while not self._stop_event.is_set():
             try:
+                _sys.stderr.write(self._build_prompt())
+                _sys.stderr.flush()
                 line = input()
             except EOFError:
                 break
