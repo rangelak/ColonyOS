@@ -447,8 +447,17 @@ class TestRateLimit:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def mock_doctor_subprocess() -> object:
+    """Avoid real claude/git/gh subprocess calls (slow and environment-dependent)."""
+    proc = MagicMock()
+    proc.returncode = 0
+    with patch("colonyos.doctor.subprocess.run", return_value=proc) as m:
+        yield m
+
+
 class TestDoctorSlackCheck:
-    def test_slack_tokens_present(self, tmp_repo: Path) -> None:
+    def test_slack_tokens_present(self, tmp_repo: Path, mock_doctor_subprocess: object) -> None:
         import yaml
         from colonyos.doctor import run_doctor_checks
 
@@ -467,7 +476,7 @@ class TestDoctorSlackCheck:
         assert len(slack_checks) == 1
         assert slack_checks[0][1] is True
 
-    def test_slack_tokens_missing(self, tmp_repo: Path) -> None:
+    def test_slack_tokens_missing(self, tmp_repo: Path, mock_doctor_subprocess: object) -> None:
         import yaml
         from colonyos.doctor import run_doctor_checks
 
@@ -493,7 +502,7 @@ class TestDoctorSlackCheck:
         assert slack_checks[0][1] is False
         assert "COLONYOS_SLACK_BOT_TOKEN" in slack_checks[0][2]
 
-    def test_slack_check_skipped_when_disabled(self, tmp_repo: Path) -> None:
+    def test_slack_check_skipped_when_disabled(self, tmp_repo: Path, mock_doctor_subprocess: object) -> None:
         from colonyos.doctor import run_doctor_checks
 
         results = run_doctor_checks(tmp_repo)
@@ -1198,10 +1207,10 @@ class TestCircuitBreakerCodeQuality:
 
     def test_no_placeholder_comment_in_is_paused(self) -> None:
         """The dead placeholder line must not exist in _is_paused."""
-        import inspect
         from colonyos import cli as cli_module
 
-        source = inspect.getsource(cli_module)
+        # Read file directly — inspect.getsource(cli_module) is very slow on large cli.py.
+        source = Path(cli_module.__file__).read_text(encoding="utf-8")
         # The old dead code line: cooldown_sec = self._watch_state.consecutive_failures  # placeholder
         assert "# placeholder" not in source, (
             "Dead placeholder comment still present in cli.py"
@@ -1209,10 +1218,9 @@ class TestCircuitBreakerCodeQuality:
 
     def test_is_paused_uses_instance_attribute(self) -> None:
         """_is_paused should reference self._circuit_breaker_cooldown_minutes, not outer config."""
-        import inspect
         from colonyos import cli as cli_module
 
-        source = inspect.getsource(cli_module)
+        source = Path(cli_module.__file__).read_text(encoding="utf-8")
         assert "self._circuit_breaker_cooldown_minutes * 60" in source
         # The old closure reference should be gone
         assert "config.slack.circuit_breaker_cooldown_minutes * 60" not in source
@@ -1556,7 +1564,7 @@ class TestWaitForApprovalAllowedApprovers:
         }
         result = wait_for_approval(
             client, "C123", "ts1", "ts2",
-            timeout_seconds=1, poll_interval=0.1,
+            timeout_seconds=0.2, poll_interval=0.02,
             allowed_approver_ids=["U_ADMIN"],
         )
         assert result is False

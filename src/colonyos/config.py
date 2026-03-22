@@ -56,6 +56,13 @@ DEFAULTS = {
         "merge_timeout_seconds": 60,
         "worktree_cleanup": True,
     },
+    "router": {
+        "enabled": True,
+        "model": "haiku",
+        "qa_model": "sonnet",
+        "confidence_threshold": 0.7,
+        "qa_budget": 0.50,
+    },
 }
 
 
@@ -123,6 +130,22 @@ class PRReviewConfig:
 
 
 @dataclass
+class RouterConfig:
+    """Configuration for the Intent Router Agent.
+
+    The router classifies user input before running the full pipeline,
+    enabling quick Q&A responses for questions and routing code changes
+    to the appropriate execution path.
+    """
+
+    enabled: bool = True
+    model: str = "haiku"
+    qa_model: str = "sonnet"
+    confidence_threshold: float = 0.7
+    qa_budget: float = 0.50
+
+
+@dataclass
 class SlackConfig:
     enabled: bool = False
     channels: list[str] = field(default_factory=list)
@@ -164,6 +187,7 @@ class ColonyConfig:
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     pr_review: PRReviewConfig = field(default_factory=PRReviewConfig)
     parallel_implement: ParallelImplementConfig = field(default_factory=ParallelImplementConfig)
+    router: RouterConfig = field(default_factory=RouterConfig)
 
     def get_model(self, phase: Phase) -> str:
         """Return the model for a phase, falling back to the global default."""
@@ -407,6 +431,50 @@ def _parse_parallel_implement_config(raw: dict) -> ParallelImplementConfig:
     )
 
 
+def _parse_router_config(raw: dict) -> RouterConfig:
+    """Parse the ``router`` section from config.yaml."""
+    if not raw:
+        return RouterConfig()
+
+    defaults = DEFAULTS["router"]
+
+    enabled = bool(raw.get("enabled", defaults["enabled"]))
+
+    model = str(raw.get("model", defaults["model"]))
+    if model not in VALID_MODELS:
+        raise ValueError(
+            f"Invalid router model '{model}'. Valid options: {sorted(VALID_MODELS)}. "
+            f"Note: use short names (e.g. 'haiku') not full model IDs."
+        )
+
+    qa_model = str(raw.get("qa_model", defaults["qa_model"]))
+    if qa_model not in VALID_MODELS:
+        raise ValueError(
+            f"Invalid router qa_model '{qa_model}'. Valid options: {sorted(VALID_MODELS)}. "
+            f"Note: use short names (e.g. 'sonnet') not full model IDs."
+        )
+
+    confidence_threshold = float(raw.get("confidence_threshold", defaults["confidence_threshold"]))
+    if confidence_threshold < 0 or confidence_threshold > 1:
+        raise ValueError(
+            f"router.confidence_threshold must be between 0 and 1, got {confidence_threshold}"
+        )
+
+    qa_budget = float(raw.get("qa_budget", defaults["qa_budget"]))
+    if qa_budget <= 0:
+        raise ValueError(
+            f"router.qa_budget must be positive, got {qa_budget}"
+        )
+
+    return RouterConfig(
+        enabled=enabled,
+        model=model,
+        qa_model=qa_model,
+        confidence_threshold=confidence_threshold,
+        qa_budget=qa_budget,
+    )
+
+
 def load_config(repo_root: Path) -> ColonyConfig:
     config_path = repo_root / CONFIG_DIR / CONFIG_FILE
     if not config_path.exists():
@@ -490,6 +558,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         cleanup=_parse_cleanup_config(raw.get("cleanup", {})),
         pr_review=_parse_pr_review_config(raw.get("pr_review", {})),
         parallel_implement=_parse_parallel_implement_config(raw.get("parallel_implement", {})),
+        router=_parse_router_config(raw.get("router", {})),
     )
 
 
@@ -631,6 +700,23 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "conflict_strategy": config.parallel_implement.conflict_strategy,
             "merge_timeout_seconds": config.parallel_implement.merge_timeout_seconds,
             "worktree_cleanup": config.parallel_implement.worktree_cleanup,
+        }
+
+    # Only serialize router if values differ from defaults
+    router_defaults = DEFAULTS["router"]
+    if (
+        config.router.enabled != router_defaults["enabled"]
+        or config.router.model != router_defaults["model"]
+        or config.router.qa_model != router_defaults["qa_model"]
+        or config.router.confidence_threshold != router_defaults["confidence_threshold"]
+        or config.router.qa_budget != router_defaults["qa_budget"]
+    ):
+        data["router"] = {
+            "enabled": config.router.enabled,
+            "model": config.router.model,
+            "qa_model": config.router.qa_model,
+            "confidence_threshold": config.router.confidence_threshold,
+            "qa_budget": config.router.qa_budget,
         }
 
     if not config.directions_auto_update:

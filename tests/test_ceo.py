@@ -1,5 +1,6 @@
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 import pytest
 
@@ -13,6 +14,40 @@ from colonyos.orchestrator import (
 )
 
 
+def _fake_git_subprocess_run(cmd, *args, **kwargs):
+    """Avoid real git in unit tests; return plausible ``CompletedProcess`` values."""
+    if not cmd or cmd[0] != "git":
+        return CompletedProcess(cmd or [], 0, stdout="", stderr="")
+    gc = cmd[1:]
+    if gc[:3] == ["rev-parse", "--abbrev-ref", "HEAD"]:
+        return CompletedProcess(cmd, 0, stdout="main\n", stderr="")
+    if gc[:2] == ["rev-parse", "HEAD"]:
+        return CompletedProcess(cmd, 0, stdout="deadbeef" * 5 + "\n", stderr="")
+    if gc[:2] == ["status", "--porcelain"]:
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+    if gc[:3] == ["branch", "--list", "--"]:
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+    if gc[:3] == ["fetch", "origin", "main"]:
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+    if len(gc) >= 4 and gc[0] == "rev-list" and gc[1] == "--count":
+        return CompletedProcess(cmd, 0, stdout="0\n", stderr="")
+    if gc[:2] == ["rev-parse", "--verify"]:
+        return CompletedProcess(cmd, 1, stdout="", stderr="fatal: Needed a single revision")
+    if gc[:3] == ["checkout", "-b"]:
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+    if gc[:2] == ["rev-parse", "--is-shallow-repository"]:
+        return CompletedProcess(cmd, 0, stdout="false\n", stderr="")
+    return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_github_cli() -> None:
+    """``fetch_open_*`` uses ``gh`` subprocess; stub it so tests never hit the CLI or network."""
+    with patch("colonyos.github.subprocess.run") as m:
+        m.return_value = CompletedProcess(["gh"], 1, stdout="", stderr="stub: no gh in unit tests")
+        yield
+
+
 @pytest.fixture
 def tmp_repo(tmp_path: Path) -> Path:
     (tmp_path / "cOS_prds").mkdir()
@@ -20,15 +55,10 @@ def tmp_repo(tmp_path: Path) -> Path:
     (tmp_path / "cOS_reviews").mkdir()
     (tmp_path / "cOS_proposals").mkdir()
     (tmp_path / ".colonyos").mkdir()
-    # Initialize a git repo so preflight checks can run
-    import subprocess
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
-    # Ignore colonyos working dirs so save_config doesn't dirty the tree
-    (tmp_path / ".gitignore").write_text(".colonyos/\ncOS_prds/\ncOS_tasks/\ncOS_reviews/\ncOS_proposals/\ncOS_runs/\n")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
+    # Layout only — unit tests must not invoke real git; integration-style tests patch subprocess.run.
+    (tmp_path / ".gitignore").write_text(
+        ".colonyos/\ncOS_prds/\ncOS_tasks/\ncOS_reviews/\ncOS_proposals/\ncOS_runs/\n"
+    )
     return tmp_path
 
 
@@ -241,9 +271,19 @@ class TestRunCeo:
 
 
 class TestCeoIntegration:
+    @patch("colonyos.parallel_preflight.subprocess.run", side_effect=_fake_git_subprocess_run)
+    @patch("colonyos.orchestrator.subprocess.run", side_effect=_fake_git_subprocess_run)
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_full_flow_ceo_to_pipeline(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_full_flow_ceo_to_pipeline(
+        self,
+        mock_run,
+        mock_parallel,
+        _mock_orch_git,
+        _mock_pp_git,
+        tmp_repo: Path,
+        config: ColonyConfig,
+    ):
         """CEO output feeds into the pipeline as a prompt string."""
         from colonyos.orchestrator import run as run_orchestrator
 

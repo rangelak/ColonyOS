@@ -12,6 +12,7 @@ from colonyos.config import (
     DEFAULTS,
     LearningsConfig,
     PhasesConfig,
+    RouterConfig,
     SlackConfig,
     VALID_MODELS,
     _SAFETY_CRITICAL_PHASES,
@@ -945,3 +946,216 @@ class TestSlackAutoApproveWarning:
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
             load_config(tmp_repo)
         assert not any("allowed_user_ids" in msg for msg in caplog.messages)
+
+
+class TestRouterConfig:
+    """Tests for RouterConfig dataclass and loading/saving."""
+
+    def test_default_values(self) -> None:
+        """RouterConfig has sensible defaults."""
+        config = RouterConfig()
+        assert config.enabled is True
+        assert config.model == "haiku"
+        assert config.confidence_threshold == 0.7
+        assert config.qa_budget == 0.50
+
+    def test_defaults_when_no_config(self, tmp_repo: Path) -> None:
+        """When no config file exists, router gets defaults."""
+        config = load_config(tmp_repo)
+        assert config.router.enabled is True
+        assert config.router.model == "haiku"
+        assert config.router.confidence_threshold == 0.7
+        assert config.router.qa_budget == 0.50
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        """RouterConfig is correctly parsed from YAML."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "router": {
+                    "enabled": False,
+                    "model": "sonnet",
+                    "confidence_threshold": 0.8,
+                    "qa_budget": 1.0,
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.router.enabled is False
+        assert config.router.model == "sonnet"
+        assert config.router.confidence_threshold == 0.8
+        assert config.router.qa_budget == 1.0
+
+    def test_missing_section_gets_defaults(self, tmp_repo: Path) -> None:
+        """Config without router section uses defaults."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "sonnet"}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.router.enabled is True
+        assert config.router.model == "haiku"
+        assert config.router.confidence_threshold == 0.7
+        assert config.router.qa_budget == 0.50
+
+    def test_partial_section_fills_missing_with_defaults(self, tmp_repo: Path) -> None:
+        """Partial router section uses defaults for missing fields."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "router": {
+                    "enabled": False,
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.router.enabled is False
+        assert config.router.model == "haiku"  # default
+        assert config.router.confidence_threshold == 0.7  # default
+        assert config.router.qa_budget == 0.50  # default
+
+    def test_invalid_model_raises(self, tmp_repo: Path) -> None:
+        """Invalid model in router section raises ValueError."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "router": {
+                    "model": "gpt4",
+                },
+            }),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Invalid router model 'gpt4'"):
+            load_config(tmp_repo)
+
+    def test_negative_confidence_threshold_raises(self, tmp_repo: Path) -> None:
+        """Negative confidence_threshold raises ValueError."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "router": {
+                    "confidence_threshold": -0.1,
+                },
+            }),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="confidence_threshold must be between 0 and 1"):
+            load_config(tmp_repo)
+
+    def test_confidence_threshold_above_one_raises(self, tmp_repo: Path) -> None:
+        """confidence_threshold > 1 raises ValueError."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "router": {
+                    "confidence_threshold": 1.5,
+                },
+            }),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="confidence_threshold must be between 0 and 1"):
+            load_config(tmp_repo)
+
+    def test_negative_qa_budget_raises(self, tmp_repo: Path) -> None:
+        """Negative qa_budget raises ValueError."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "router": {
+                    "qa_budget": -0.5,
+                },
+            }),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="qa_budget must be positive"):
+            load_config(tmp_repo)
+
+    def test_zero_qa_budget_raises(self, tmp_repo: Path) -> None:
+        """Zero qa_budget raises ValueError."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "router": {
+                    "qa_budget": 0,
+                },
+            }),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="qa_budget must be positive"):
+            load_config(tmp_repo)
+
+    def test_roundtrip(self, tmp_repo: Path) -> None:
+        """RouterConfig survives save/load roundtrip."""
+        original = ColonyConfig(
+            router=RouterConfig(
+                enabled=False,
+                model="sonnet",
+                confidence_threshold=0.85,
+                qa_budget=0.75,
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.router.enabled is False
+        assert loaded.router.model == "sonnet"
+        assert loaded.router.confidence_threshold == 0.85
+        assert loaded.router.qa_budget == 0.75
+
+    def test_roundtrip_with_defaults(self, tmp_repo: Path) -> None:
+        """RouterConfig with defaults survives roundtrip (may not be serialized)."""
+        original = ColonyConfig(router=RouterConfig())
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.router.enabled is True
+        assert loaded.router.model == "haiku"
+        assert loaded.router.confidence_threshold == 0.7
+        assert loaded.router.qa_budget == 0.50
+
+    def test_defaults_dict_has_router(self) -> None:
+        """DEFAULTS dict has router section."""
+        assert "router" in DEFAULTS
+        assert DEFAULTS["router"]["enabled"] is True
+        assert DEFAULTS["router"]["model"] == "haiku"
+        assert DEFAULTS["router"]["confidence_threshold"] == 0.7
+        assert DEFAULTS["router"]["qa_budget"] == 0.50
+
+    def test_serialization_omits_defaults(self, tmp_repo: Path) -> None:
+        """When RouterConfig has all defaults, it may not be serialized."""
+        original = ColonyConfig(router=RouterConfig())
+        save_config(tmp_repo, original)
+        raw = yaml.safe_load(
+            (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
+        )
+        # With default values, router section should not be serialized
+        assert "router" not in raw
+
+    def test_serialization_includes_non_defaults(self, tmp_repo: Path) -> None:
+        """When RouterConfig has non-default values, it is serialized."""
+        original = ColonyConfig(
+            router=RouterConfig(
+                enabled=False,
+                model="sonnet",
+                confidence_threshold=0.9,
+                qa_budget=1.0,
+            ),
+        )
+        save_config(tmp_repo, original)
+        raw = yaml.safe_load(
+            (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert "router" in raw
+        assert raw["router"]["enabled"] is False
+        assert raw["router"]["model"] == "sonnet"
+        assert raw["router"]["confidence_threshold"] == 0.9
+        assert raw["router"]["qa_budget"] == 1.0

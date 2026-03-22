@@ -1,7 +1,6 @@
 """Tests for parallel implement orchestration (Task 6.0)."""
 
 import asyncio
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -18,33 +17,14 @@ from colonyos.parallel_orchestrator import (
     should_use_parallel,
 )
 
+pytestmark = pytest.mark.usefixtures("mock_git_subprocess")
+
 
 @pytest.fixture
 def tmp_repo(tmp_path: Path) -> Path:
-    """Create a temporary git repository for testing."""
+    """Temporary repo root (no real git; subprocess git calls are mocked)."""
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, capture_output=True, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
-    (repo / "README.md").write_text("# Test\n")
-    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Initial"],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
+    repo.mkdir(parents=True)
     return repo
 
 

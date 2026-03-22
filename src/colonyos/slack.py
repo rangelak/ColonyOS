@@ -665,6 +665,7 @@ class TriageResult:
     summary: str
     base_branch: str | None
     reasoning: str
+    answer: str | None = None
 
 
 def _build_triage_prompt(
@@ -779,11 +780,114 @@ def triage_message(
 ) -> TriageResult:
     """Run the LLM-based triage agent on a Slack message.
 
+    Delegates to the shared ``colonyos.router.route_query()`` for intent
+    classification, then maps the ``RouterResult`` back to a
+    ``TriageResult`` for backward compatibility.  When ``triage_scope``
+    is provided or the router is unavailable, falls back to the original
+    Slack-specific triage prompt.
+
     Uses a single-turn haiku call with no tool access to minimize cost
     and prompt injection blast radius.
 
     Args:
         repo_root: Repository root directory. Falls back to cwd if not provided.
+    """
+    # When triage_scope is set, use the Slack-specific prompt path
+    # since the router does not support scope filtering.
+    if triage_scope:
+        return _triage_message_legacy(
+            message_text,
+            repo_root=repo_root,
+            project_name=project_name,
+            project_description=project_description,
+            project_stack=project_stack,
+            vision=vision,
+            triage_scope=triage_scope,
+        )
+
+    from colonyos.router import (
+        RouterCategory,
+        answer_question,
+        log_router_decision,
+        route_query,
+    )
+
+    router_result = route_query(
+        message_text,
+        repo_root=repo_root,
+        project_name=project_name,
+        project_description=project_description,
+        project_stack=project_stack,
+        vision=vision,
+        source="slack",
+    )
+
+    # Log for audit trail
+    effective_root = repo_root if repo_root is not None else Path.cwd()
+    log_router_decision(
+        repo_root=effective_root,
+        prompt=message_text,
+        result=router_result,
+        source="slack",
+    )
+
+    # Map RouterResult → TriageResult for backward compatibility
+    # CODE_CHANGE → actionable=True; everything else → actionable=False
+    actionable = router_result.category == RouterCategory.CODE_CHANGE
+
+    # Extract base_branch from message text using existing patterns
+    raw_branch = _extract_base_branch_from_text(message_text)
+
+    # For QUESTION category, invoke the Q&A agent so the caller can
+    # post the answer back to Slack instead of silently dropping it.
+    qa_answer: str | None = None
+    if router_result.category == RouterCategory.QUESTION:
+        try:
+            qa_answer = answer_question(
+                message_text,
+                repo_root=effective_root,
+                project_name=project_name,
+                project_description=project_description,
+                project_stack=project_stack,
+            )
+        except Exception:
+            logger.exception("Q&A agent failed for Slack question")
+            qa_answer = "I was unable to answer your question due to an error."
+
+    return TriageResult(
+        actionable=actionable,
+        confidence=router_result.confidence,
+        summary=router_result.summary,
+        base_branch=raw_branch,
+        reasoning=router_result.reasoning,
+        answer=qa_answer,
+    )
+
+
+def _extract_base_branch_from_text(text: str) -> str | None:
+    """Extract a base branch reference from message text using known patterns."""
+    for pattern in _BASE_BRANCH_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            branch = m.group(1)
+            if is_valid_git_ref(branch):
+                return branch
+    return None
+
+
+def _triage_message_legacy(
+    message_text: str,
+    *,
+    repo_root: Path | None = None,
+    project_name: str = "",
+    project_description: str = "",
+    project_stack: str = "",
+    vision: str = "",
+    triage_scope: str = "",
+) -> TriageResult:
+    """Original Slack-specific triage implementation.
+
+    Used as a fallback when triage_scope is set (router does not support scope).
     """
     from colonyos.agent import run_phase_sync
     from colonyos.models import Phase

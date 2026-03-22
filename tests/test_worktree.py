@@ -12,35 +12,14 @@ from colonyos.worktree import (
     WORKTREE_BASE_DIR,
 )
 
+pytestmark = pytest.mark.usefixtures("mock_git_subprocess")
+
 
 @pytest.fixture
 def tmp_repo(tmp_path: Path) -> Path:
-    """Create a temporary git repository for testing."""
+    """Temporary repo root (no real git; subprocess git calls are mocked)."""
     repo = tmp_path / "repo"
-    repo.mkdir()
-    # Initialize git repo
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, capture_output=True, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
-    # Create an initial commit (required for worktrees)
-    (repo / "README.md").write_text("# Test\n")
-    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Initial commit"],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
+    repo.mkdir(parents=True)
     return repo
 
 
