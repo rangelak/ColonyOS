@@ -46,30 +46,32 @@ class TestVersionConsistency:
 class TestDoctorVersionCheck:
     """Verify the doctor version check flags degraded state."""
 
-    def test_doctor_version_check_detects_dev_fallback(self):
-        """Doctor must flag 0.0.0.dev0 as degraded, not passed."""
-        from unittest.mock import patch
+    @staticmethod
+    def _run_doctor_checks_patched(version: str):
+        """Run doctor checks without real claude/git/gh subprocess calls."""
+        from unittest.mock import MagicMock, patch
 
         from colonyos.doctor import run_doctor_checks
 
-        with patch("colonyos.__version__", "0.0.0.dev0"):
-            results = run_doctor_checks(Path("."))
-            # First result is the version check
-            name, passed, hint = results[0]
-            assert "0.0.0.dev0" in name
-            assert passed is False, (
-                "Dev fallback version should be flagged as failed"
-            )
-            assert hint != "", "Dev fallback version should have a fix hint"
+        mock_ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("colonyos.__version__", version):
+            with patch("colonyos.doctor.subprocess.run", return_value=mock_ok):
+                return run_doctor_checks(Path("."))
+
+    def test_doctor_version_check_detects_dev_fallback(self):
+        """Doctor must flag 0.0.0.dev0 as degraded, not passed."""
+        results = self._run_doctor_checks_patched("0.0.0.dev0")
+        # First result is the version check
+        name, passed, hint = results[0]
+        assert "0.0.0.dev0" in name
+        assert passed is False, (
+            "Dev fallback version should be flagged as failed"
+        )
+        assert hint != "", "Dev fallback version should have a fix hint"
 
     def test_doctor_version_check_passes_for_release(self):
         """Doctor must pass for a real release version."""
-        from unittest.mock import patch
-
-        from colonyos.doctor import run_doctor_checks
-
-        with patch("colonyos.__version__", "1.2.3"):
-            results = run_doctor_checks(Path("."))
-            name, passed, _ = results[0]
-            assert "1.2.3" in name
-            assert passed is True
+        results = self._run_doctor_checks_patched("1.2.3")
+        name, passed, _ = results[0]
+        assert "1.2.3" in name
+        assert passed is True

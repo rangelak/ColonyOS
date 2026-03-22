@@ -19,6 +19,25 @@ from colonyos.models import (
 from colonyos.persona_packs import PACKS
 
 
+@pytest.fixture(autouse=True)
+def _mock_cli_subprocess():
+    """Prevent real git calls from _ensure_on_main and other CLI code paths."""
+    def _fake_git(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        m = MagicMock()
+        m.returncode = 0
+        m.stderr = ""
+        if isinstance(cmd, list) and "rev-parse" in cmd and "--abbrev-ref" in cmd:
+            m.stdout = "main"
+        elif isinstance(cmd, list) and "rev-list" in cmd:
+            m.stdout = "0"
+        else:
+            m.stdout = ""
+        return m
+    with patch("colonyos.cli.subprocess.run", side_effect=_fake_git):
+        yield
+
+
 @pytest.fixture
 def runner():
     return CliRunner()
@@ -1349,6 +1368,12 @@ class TestStatusSourceIssue:
 
 class TestRepl:
     """Tests for the interactive REPL mode."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_intent_router(self):
+        """Prevent _handle_routed_query from calling real LLM triage."""
+        with patch("colonyos.cli._handle_routed_query", return_value=None):
+            yield
 
     def test_quit_exits_cleanly(self, runner: CliRunner, tmp_path: Path):
         _make_config(tmp_path)
