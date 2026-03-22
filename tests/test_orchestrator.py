@@ -52,20 +52,27 @@ NON_REVIEWER_PERSONA = Persona(
 
 @pytest.fixture
 def tmp_repo(tmp_path: Path) -> Path:
+    """Lightweight fixture: directory structure only, NO git init."""
     (tmp_path / "cOS_prds").mkdir()
     (tmp_path / "cOS_tasks").mkdir()
     (tmp_path / "cOS_reviews").mkdir()
     (tmp_path / ".colonyos").mkdir()
-    # Initialize a git repo so preflight checks can run
-    import subprocess
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
-    # Ignore colonyos working dirs so save_config doesn't dirty the tree
-    (tmp_path / ".gitignore").write_text(".colonyos/\ncOS_prds/\ncOS_tasks/\ncOS_reviews/\ncOS_runs/\n")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
     return tmp_path
+
+
+@pytest.fixture
+def tmp_git_repo(tmp_path: Path) -> Path:
+    """Directory structure with subprocess.run mocked for git calls.
+
+    Tests that call run() / run_thread_fix() use this. No real git init —
+    subprocess.run is patched to return plausible defaults for all git commands.
+    """
+    (tmp_path / "cOS_prds").mkdir()
+    (tmp_path / "cOS_tasks").mkdir()
+    (tmp_path / "cOS_reviews").mkdir()
+    (tmp_path / ".colonyos").mkdir()
+    with patch("colonyos.orchestrator.subprocess.run", side_effect=_mock_git):
+        yield tmp_path
 
 
 @pytest.fixture
@@ -77,6 +84,32 @@ def config() -> ColonyConfig:
         budget=BudgetConfig(per_phase=1.0, per_run=10.0),
         phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True),
     )
+
+
+def _mock_git(*args, **kwargs):
+    """Stub for subprocess.run — returns plausible defaults for git commands."""
+    cmd = args[0] if args else kwargs.get("args", [])
+    m = MagicMock()
+    m.returncode = 0
+    m.stderr = ""
+    if "rev-parse" in cmd and "--abbrev-ref" in cmd:
+        m.stdout = "main"
+    elif "rev-parse" in cmd and "HEAD" in cmd:
+        m.stdout = "abc123"
+    elif "rev-parse" in cmd and "--verify" in cmd:
+        m.returncode = 1  # branch doesn't exist yet → create it
+        m.stdout = ""
+    elif "status" in cmd and "--porcelain" in cmd:
+        m.stdout = ""
+    elif "rev-list" in cmd:
+        m.stdout = "0"
+    elif "diff" in cmd:
+        m.stdout = ""
+    elif "branch" in cmd and "--list" in cmd:
+        m.stdout = ""
+    else:
+        m.stdout = ""
+    return m
 
 
 def _fake_phase_result(phase: Phase, success: bool = True) -> PhaseResult:
@@ -293,8 +326,8 @@ class TestBuildRunId:
 class TestRun:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_full_run_success_with_review(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
-        save_config(tmp_repo, config)
+    def test_full_run_success_with_review(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
+        save_config(tmp_git_repo, config)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
@@ -305,16 +338,16 @@ class TestRun:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        log = run("Add tests", repo_root=tmp_repo, config=config)
+        log = run("Add tests", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
         assert mock_run.call_count == 5
         assert mock_parallel.call_count == 1
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_review_phase_skipped_when_disabled(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+    def test_review_phase_skipped_when_disabled(self, mock_run, tmp_git_repo: Path, config: ColonyConfig):
         config.phases.review = False
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -322,7 +355,7 @@ class TestRun:
             _fake_phase_result(Phase.DELIVER),
         ]
 
-        log = run("Add tests", repo_root=tmp_repo, config=config)
+        log = run("Add tests", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
         assert len(log.phases) == 4
@@ -331,7 +364,7 @@ class TestRun:
         assert Phase.REVIEW not in phase_types
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_review_skipped_when_noreviewer_personas(self, mock_run, tmp_repo: Path):
+    def test_review_skipped_when_noreviewer_personas(self, mock_run, tmp_git_repo: Path):
         """No reviewer personas means review phase is skipped entirely."""
         config = ColonyConfig(
             project=ProjectInfo(name="Test", description="test", stack="Python"),
@@ -340,7 +373,7 @@ class TestRun:
             budget=BudgetConfig(per_phase=1.0, per_run=10.0),
             phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True),
         )
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -348,15 +381,15 @@ class TestRun:
             _fake_phase_result(Phase.DELIVER),
         ]
 
-        log = run("Add tests", repo_root=tmp_repo, config=config)
+        log = run("Add tests", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
         assert mock_run.call_count == 4
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_review_saves_artifacts(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
-        save_config(tmp_repo, config)
+    def test_review_saves_artifacts(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -366,18 +399,18 @@ class TestRun:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        run("Add tests", repo_root=tmp_repo, config=config)
+        run("Add tests", repo_root=tmp_git_repo, config=config)
 
-        reviews_dir = tmp_repo / config.reviews_dir
+        reviews_dir = tmp_git_repo / config.reviews_dir
         assert reviews_dir.exists()
         review_files = list(reviews_dir.glob("**/*.md"))
         assert len(review_files) >= 2  # 1 persona review + 1 decision
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_review_uses_parallel_runner(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_review_uses_parallel_runner(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Reviews use run_phases_parallel_sync, not run_phase_sync."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -387,7 +420,7 @@ class TestRun:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        run("Add tests", repo_root=tmp_repo, config=config)
+        run("Add tests", repo_root=tmp_git_repo, config=config)
 
         assert mock_parallel.call_count == 1
         calls = mock_parallel.call_args_list[0]
@@ -398,7 +431,7 @@ class TestRun:
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_multiplereviewer_personas(self, mock_run, mock_parallel, tmp_repo: Path):
+    def test_multiplereviewer_personas(self, mock_run, mock_parallel, tmp_git_repo: Path):
         """All reviewer personas get their own parallel session."""
         r1 = Persona(role="Systems Eng", expertise="Distributed", perspective="Reliability", reviewer=True)
         r2 = Persona(role="Security Eng", expertise="AppSec", perspective="Threats", reviewer=True)
@@ -409,7 +442,7 @@ class TestRun:
             budget=BudgetConfig(per_phase=1.0, per_run=10.0),
             phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True),
         )
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
@@ -420,40 +453,40 @@ class TestRun:
         ]
         mock_parallel.return_value = [_approve_review_result(), _approve_review_result()]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
         review_calls = mock_parallel.call_args_list[0][0][0]
         assert len(review_calls) == 2  # Only 2 reviewer personas (not the designer)
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_plan_passes_persona_agents(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        save_config(tmp_repo, config)
+    def test_plan_passes_persona_agents(self, mock_run, tmp_git_repo: Path, config: ColonyConfig):
+        save_config(tmp_git_repo, config)
         mock_run.return_value = _fake_phase_result(Phase.PLAN)
 
-        run("Add tests", repo_root=tmp_repo, config=config, plan_only=True)
+        run("Add tests", repo_root=tmp_git_repo, config=config, plan_only=True)
 
         call_kwargs = mock_run.call_args_list[0]
         assert call_kwargs.kwargs.get("agents") is not None
         assert "engineer" in call_kwargs.kwargs["agents"]
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_plan_only(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        save_config(tmp_repo, config)
+    def test_plan_only(self, mock_run, tmp_git_repo: Path, config: ColonyConfig):
+        save_config(tmp_git_repo, config)
         mock_run.return_value = _fake_phase_result(Phase.PLAN)
 
-        log = run("Add tests", repo_root=tmp_repo, config=config, plan_only=True)
+        log = run("Add tests", repo_root=tmp_git_repo, config=config, plan_only=True)
 
         assert log.status == RunStatus.COMPLETED
         assert len(log.phases) == 1
         assert mock_run.call_count == 1
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_plan_failure_stops_run(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        save_config(tmp_repo, config)
+    def test_plan_failure_stops_run(self, mock_run, tmp_git_repo: Path, config: ColonyConfig):
+        save_config(tmp_git_repo, config)
         mock_run.return_value = _fake_phase_result(Phase.PLAN, success=False)
 
-        log = run("Add tests", repo_root=tmp_repo, config=config)
+        log = run("Add tests", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.FAILED
         assert len(log.phases) == 1
@@ -461,9 +494,9 @@ class TestRun:
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_from_prd_skips_plan(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
-        save_config(tmp_repo, config)
-        prd = tmp_repo / "cOS_prds" / "20260316_120000_prd_test.md"
+    def test_from_prd_skips_plan(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
+        save_config(tmp_git_repo, config)
+        prd = tmp_git_repo / "cOS_prds" / "20260316_120000_prd_test.md"
         prd.write_text("# PRD", encoding="utf-8")
 
         mock_run.side_effect = [
@@ -476,7 +509,7 @@ class TestRun:
 
         log = run(
             "Implement test",
-            repo_root=tmp_repo,
+            repo_root=tmp_git_repo,
             config=config,
             from_prd=str(prd),
         )
@@ -485,8 +518,8 @@ class TestRun:
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_run_log_saved(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
-        save_config(tmp_repo, config)
+    def test_run_log_saved(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -496,19 +529,19 @@ class TestRun:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
-        runs_dir = tmp_repo / ".colonyos" / "runs"
+        runs_dir = tmp_git_repo / ".colonyos" / "runs"
         assert runs_dir.exists()
         log_files = list(runs_dir.glob("*.json"))
         assert len(log_files) == 1
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_decision_nogo_stops_pipeline(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_decision_nogo_stops_pipeline(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Decision gate NO-GO verdict prevents delivery."""
         config.max_fix_iterations = 0
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -517,7 +550,7 @@ class TestRun:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.FAILED
         phase_types = [p.phase for p in log.phases]
@@ -581,9 +614,9 @@ class TestBuildFixPrompt:
 class TestFixLoop:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_request_changes_triggers_fix(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_request_changes_triggers_fix(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """request-changes -> fix -> approve -> decision GO -> deliver."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -599,7 +632,7 @@ class TestFixLoop:
             [_approve_review_result()],           # round 2: approve
         ]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
         phase_types = [p.phase for p in log.phases]
@@ -608,10 +641,10 @@ class TestFixLoop:
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_max_iterations_exhausted(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_max_iterations_exhausted(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """request-changes every round -> decision NO-GO -> fail."""
         config.max_fix_iterations = 2
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -628,7 +661,7 @@ class TestFixLoop:
             [_request_changes_review_result()],  # round 3 (after fix 2, last round)
         ]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.FAILED
         phase_types = [p.phase for p in log.phases]
@@ -637,10 +670,10 @@ class TestFixLoop:
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_zero_max_iterations_no_fix(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_zero_max_iterations_no_fix(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """max_fix_iterations=0: only 1 review round, no fix, then decision."""
         config.max_fix_iterations = 0
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -651,7 +684,7 @@ class TestFixLoop:
         ]
         mock_parallel.return_value = [_request_changes_review_result()]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.FAILED
         phase_types = [p.phase for p in log.phases]
@@ -660,9 +693,9 @@ class TestFixLoop:
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_fix_phases_in_runlog(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_fix_phases_in_runlog(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Fix iterations appear as Phase.FIX in the run log."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -678,7 +711,7 @@ class TestFixLoop:
             [_approve_review_result()],
         ]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         fix_phases = [p for p in log.phases if p.phase == Phase.FIX]
         assert len(fix_phases) == 1
@@ -686,9 +719,9 @@ class TestFixLoop:
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_unknown_verdict_proceeds_to_deliver(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_unknown_verdict_proceeds_to_deliver(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """UNKNOWN decision verdict proceeds to deliver (with warning)."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -700,7 +733,7 @@ class TestFixLoop:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
         phase_types = [p.phase for p in log.phases]
@@ -709,9 +742,9 @@ class TestFixLoop:
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_fix_phase_failure_stops_loop(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_fix_phase_failure_stops_loop(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Fix phase failure breaks the loop and proceeds to decision."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -723,7 +756,7 @@ class TestFixLoop:
         ]
         mock_parallel.return_value = [_request_changes_review_result()]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.FAILED
         phase_types = [p.phase for p in log.phases]
@@ -731,10 +764,10 @@ class TestFixLoop:
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_budget_exhaustion_stops_review_loop(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_budget_exhaustion_stops_review_loop(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Review loop stops when remaining per-run budget is insufficient."""
         config.budget = BudgetConfig(per_phase=1.0, per_run=2.5)
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             PhaseResult(phase=Phase.PLAN, success=True, cost_usd=1.0,
                         duration_ms=50, session_id="s", artifacts={"result": "done"}),
@@ -749,16 +782,16 @@ class TestFixLoop:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         # Budget guard should have prevented at least some review rounds
         assert log.status == RunStatus.COMPLETED
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_review_artifacts_per_persona_per_round(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_review_artifacts_per_persona_per_round(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Each reviewer persona gets a separate artifact file per round."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -770,9 +803,9 @@ class TestFixLoop:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        run("Add feature", repo_root=tmp_repo, config=config)
+        run("Add feature", repo_root=tmp_git_repo, config=config)
 
-        reviews_dir = tmp_repo / config.reviews_dir
+        reviews_dir = tmp_git_repo / config.reviews_dir
         filenames = {f.name for f in reviews_dir.glob("**/*.md")}
         assert any("round1_" in f for f in filenames)
         # Verify persona subdirectory was created
@@ -967,10 +1000,10 @@ class TestResumeFromRun:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_resume_after_plan_runs_implement_review_deliver(
-        self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
     ):
         """When last_successful_phase is 'plan', skip plan and run implement+review+deliver."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         existing_log = RunLog(
             run_id="r-resume", prompt="Add feature", status=RunStatus.FAILED,
             branch_name="colonyos/add_feature", prd_rel="cOS_prds/prd.md",
@@ -997,7 +1030,7 @@ class TestResumeFromRun:
         )
 
         log = run(
-            "Add feature", repo_root=tmp_repo, config=config,
+            "Add feature", repo_root=tmp_git_repo, config=config,
             resume_from=resume_state,
         )
 
@@ -1011,10 +1044,10 @@ class TestResumeFromRun:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_resume_after_implement_skips_plan_and_implement(
-        self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
     ):
         """When last_successful_phase is 'implement', skip plan+implement, run review+deliver."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         existing_log = RunLog(
             run_id="r-resume2", prompt="Add feature", status=RunStatus.FAILED,
             branch_name="colonyos/add_feature", prd_rel="cOS_prds/prd.md",
@@ -1043,7 +1076,7 @@ class TestResumeFromRun:
         )
 
         log = run(
-            "Add feature", repo_root=tmp_repo, config=config,
+            "Add feature", repo_root=tmp_git_repo, config=config,
             resume_from=resume_state,
         )
 
@@ -1055,10 +1088,10 @@ class TestResumeFromRun:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_resume_after_review_failure_reruns_review_loop(
-        self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
     ):
         """When review/fix failed, re-enter the review loop from the top."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         existing_log = RunLog(
             run_id="r-resume3", prompt="Add feature", status=RunStatus.FAILED,
             branch_name="colonyos/add_feature", prd_rel="cOS_prds/prd.md",
@@ -1088,7 +1121,7 @@ class TestResumeFromRun:
         )
 
         log = run(
-            "Add feature", repo_root=tmp_repo, config=config,
+            "Add feature", repo_root=tmp_git_repo, config=config,
             resume_from=resume_state,
         )
 
@@ -1098,10 +1131,10 @@ class TestResumeFromRun:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_log_continuity_preserves_original_phases(
-        self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
     ):
         """Resumed log has both original and new phases, written to same file."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         original_plan = _fake_phase_result(Phase.PLAN)
         existing_log = RunLog(
             run_id="r-continuity", prompt="Add feature", status=RunStatus.FAILED,
@@ -1109,7 +1142,7 @@ class TestResumeFromRun:
             task_rel="cOS_tasks/tasks.md",
             phases=[original_plan],
         )
-        _save_run_log(tmp_repo, existing_log)
+        _save_run_log(tmp_git_repo, existing_log)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.IMPLEMENT),
@@ -1130,7 +1163,7 @@ class TestResumeFromRun:
         )
 
         log = run(
-            "Add feature", repo_root=tmp_repo, config=config,
+            "Add feature", repo_root=tmp_git_repo, config=config,
             resume_from=resume_state,
         )
 
@@ -1138,7 +1171,7 @@ class TestResumeFromRun:
         assert len(log.phases) > 1  # New phases appended
 
         # Verify the JSON file has all phases
-        log_path = tmp_repo / ".colonyos" / "runs" / "r-continuity.json"
+        log_path = tmp_git_repo / ".colonyos" / "runs" / "r-continuity.json"
         data = json.loads(log_path.read_text(encoding="utf-8"))
         assert len(data["phases"]) == len(log.phases)
         assert data["status"] == "completed"
@@ -1146,10 +1179,10 @@ class TestResumeFromRun:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_resume_after_decision_runs_only_deliver(
-        self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
     ):
         """When last_successful_phase is 'decision', only deliver runs."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         existing_log = RunLog(
             run_id="r-decision", prompt="Add feature", status=RunStatus.FAILED,
             branch_name="colonyos/add_feature", prd_rel="cOS_prds/prd.md",
@@ -1178,7 +1211,7 @@ class TestResumeFromRun:
         )
 
         log = run(
-            "Add feature", repo_root=tmp_repo, config=config,
+            "Add feature", repo_root=tmp_git_repo, config=config,
             resume_from=resume_state,
         )
 
@@ -1189,10 +1222,10 @@ class TestResumeFromRun:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_run_sets_resume_fields_in_log(
-        self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
     ):
         """Normal (non-resume) runs persist branch_name, prd_rel, task_rel."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -1204,14 +1237,14 @@ class TestResumeFromRun:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         assert log.branch_name is not None
         assert log.prd_rel is not None
         assert log.task_rel is not None
 
         # Verify persisted in JSON
-        runs_dir = tmp_repo / ".colonyos" / "runs"
+        runs_dir = tmp_git_repo / ".colonyos" / "runs"
         log_files = list(runs_dir.glob("*.json"))
         assert len(log_files) == 1
         data = json.loads(log_files[0].read_text(encoding="utf-8"))
@@ -1504,9 +1537,9 @@ class TestBuildLearnPrompt:
 class TestLearnPhaseWiring:
     """Tests for learn phase wiring in the orchestrator pipeline."""
 
-    def test_learn_phase_produces_phase_result(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_learn_phase_produces_phase_result(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Learn phase runs and produces a PhaseResult with Phase.LEARN."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -1518,15 +1551,15 @@ class TestLearnPhaseWiring:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         phase_types = [p.phase for p in log.phases]
         assert Phase.LEARN in phase_types
 
-    def test_learn_phase_runs_on_nogo(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_learn_phase_runs_on_nogo(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Learn phase runs even on NO-GO verdict."""
         config.max_fix_iterations = 0
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -1537,16 +1570,16 @@ class TestLearnPhaseWiring:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.FAILED
         phase_types = [p.phase for p in log.phases]
         assert Phase.LEARN in phase_types
 
-    def test_learn_phase_skipped_when_disabled(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_learn_phase_skipped_when_disabled(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Learn phase is skipped when config.learnings.enabled is False."""
         config.learnings = LearningsConfig(enabled=False)
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -1557,15 +1590,15 @@ class TestLearnPhaseWiring:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         phase_types = [p.phase for p in log.phases]
         assert Phase.LEARN not in phase_types
         assert log.status == RunStatus.COMPLETED
 
-    def test_learn_phase_failure_does_not_block_deliver(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_learn_phase_failure_does_not_block_deliver(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Learn phase failure does not prevent deliver from running."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
 
         def learn_side_effect(*args, **kwargs):
             # Determine which call this is by checking side_effect_calls
@@ -1583,16 +1616,16 @@ class TestLearnPhaseWiring:
         mock_run.side_effect = learn_side_effect
         mock_parallel.return_value = [_approve_review_result()]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
         phase_types = [p.phase for p in log.phases]
         assert Phase.LEARN in phase_types
         assert Phase.DELIVER in phase_types
 
-    def test_learn_phase_exception_does_not_block_deliver(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_learn_phase_exception_does_not_block_deliver(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Exception in learn phase does not prevent deliver from running."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
 
         call_count = [0]
         results = [
@@ -1615,7 +1648,7 @@ class TestLearnPhaseWiring:
         mock_run.side_effect = side_effect
         mock_parallel.return_value = [_approve_review_result()]
 
-        log = run("Add feature", repo_root=tmp_repo, config=config)
+        log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
         phase_types = [p.phase for p in log.phases]
@@ -1624,10 +1657,10 @@ class TestLearnPhaseWiring:
         learn_result = [p for p in log.phases if p.phase == Phase.LEARN][0]
         assert learn_result.success is False
 
-    def test_learn_phase_budget(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_learn_phase_budget(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Learn phase budget is min(0.50, config.budget.per_phase / 2)."""
         config.budget.per_phase = 1.0
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -1639,7 +1672,7 @@ class TestLearnPhaseWiring:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        run("Add feature", repo_root=tmp_repo, config=config)
+        run("Add feature", repo_root=tmp_git_repo, config=config)
 
         # Find the learn phase call
         for call in mock_run.call_args_list:
@@ -1648,9 +1681,9 @@ class TestLearnPhaseWiring:
                 assert call.kwargs["allowed_tools"] == ["Read", "Glob", "Grep"]
                 break
 
-    def test_learn_phase_uses_read_only_tools(self, mock_run, mock_parallel, tmp_repo: Path, config: ColonyConfig):
+    def test_learn_phase_uses_read_only_tools(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Learn phase uses read-only tools."""
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
@@ -1662,7 +1695,7 @@ class TestLearnPhaseWiring:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        run("Add feature", repo_root=tmp_repo, config=config)
+        run("Add feature", repo_root=tmp_git_repo, config=config)
 
         for call in mock_run.call_args_list:
             if call[0][0] == Phase.LEARN:
@@ -1788,7 +1821,7 @@ class TestPerPhaseModelRouting:
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_each_phase_receives_correct_model(self, mock_run, mock_parallel, tmp_repo: Path):
+    def test_each_phase_receives_correct_model(self, mock_run, mock_parallel, tmp_git_repo: Path):
         """With per-phase overrides, each run_phase_sync call gets the right model string."""
         config = ColonyConfig(
             project=ProjectInfo(name="Test", description="test", stack="Python"),
@@ -1798,7 +1831,7 @@ class TestPerPhaseModelRouting:
             budget=BudgetConfig(per_phase=1.0, per_run=10.0),
             phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True),
         )
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
@@ -1811,7 +1844,7 @@ class TestPerPhaseModelRouting:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        run("Test model routing", repo_root=tmp_repo, config=config)
+        run("Test model routing", repo_root=tmp_git_repo, config=config)
 
         # Collect model= kwarg from each run_phase_sync call
         calls = mock_run.call_args_list
@@ -1831,7 +1864,7 @@ class TestPerPhaseModelRouting:
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_review_parallel_receives_correct_model(self, mock_run, mock_parallel, tmp_repo: Path):
+    def test_review_parallel_receives_correct_model(self, mock_run, mock_parallel, tmp_git_repo: Path):
         """Review phase (via parallel runner) also receives the per-phase model."""
         config = ColonyConfig(
             project=ProjectInfo(name="Test", description="test", stack="Python"),
@@ -1841,7 +1874,7 @@ class TestPerPhaseModelRouting:
             budget=BudgetConfig(per_phase=1.0, per_run=10.0),
             phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True),
         )
-        save_config(tmp_repo, config)
+        save_config(tmp_git_repo, config)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
@@ -1854,7 +1887,7 @@ class TestPerPhaseModelRouting:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        run("Test review model", repo_root=tmp_repo, config=config)
+        run("Test review model", repo_root=tmp_git_repo, config=config)
 
         # The parallel call for review passes a list of dicts, each with model=
         parallel_call = mock_parallel.call_args
@@ -2373,10 +2406,10 @@ class TestRunThreadFix:
     """Tests for run_thread_fix orchestrator function."""
 
     @patch("colonyos.orchestrator.validate_branch_exists")
-    def test_branch_not_found(self, mock_validate: MagicMock, tmp_path: Path) -> None:
+    def test_branch_not_found(self, mock_validate: MagicMock, tmp_git_repo: Path) -> None:
         mock_validate.return_value = (False, "Branch 'colonyos/gone' not found")
         config = ColonyConfig()
-        save_config(tmp_path, config)
+        save_config(tmp_git_repo, config)
 
         log = run_thread_fix(
             "fix the test",
@@ -2385,7 +2418,7 @@ class TestRunThreadFix:
             original_prompt="original",
             prd_rel="prd.md",
             task_rel="tasks.md",
-            repo_root=tmp_path,
+            repo_root=tmp_git_repo,
             config=config,
             quiet=True,
         )
@@ -2394,12 +2427,12 @@ class TestRunThreadFix:
     @patch("colonyos.orchestrator.check_open_pr")
     @patch("colonyos.orchestrator.validate_branch_exists")
     def test_pr_merged_or_closed(
-        self, mock_validate: MagicMock, mock_check_pr: MagicMock, tmp_path: Path,
+        self, mock_validate: MagicMock, mock_check_pr: MagicMock, tmp_git_repo: Path,
     ) -> None:
         mock_validate.return_value = (True, "")
         mock_check_pr.return_value = (None, None)  # No open PR
         config = ColonyConfig()
-        save_config(tmp_path, config)
+        save_config(tmp_git_repo, config)
 
         log = run_thread_fix(
             "fix the test",
@@ -2408,7 +2441,7 @@ class TestRunThreadFix:
             original_prompt="original",
             prd_rel="prd.md",
             task_rel="tasks.md",
-            repo_root=tmp_path,
+            repo_root=tmp_git_repo,
             config=config,
             quiet=True,
         )
@@ -2424,7 +2457,7 @@ class TestRunThreadFix:
         mock_check_pr: MagicMock,
         mock_run_phase: MagicMock,
         mock_run: MagicMock,
-        tmp_path: Path,
+        tmp_git_repo: Path,
     ) -> None:
         mock_validate.return_value = (True, "")
         mock_check_pr.return_value = (42, "https://github.com/org/repo/pull/42")
@@ -2435,7 +2468,7 @@ class TestRunThreadFix:
         mock_run_phase.side_effect = _phase_result
 
         config = ColonyConfig()
-        save_config(tmp_path, config)
+        save_config(tmp_git_repo, config)
 
         log = run_thread_fix(
             "fix the test",
@@ -2444,7 +2477,7 @@ class TestRunThreadFix:
             original_prompt="original",
             prd_rel="prd.md",
             task_rel="tasks.md",
-            repo_root=tmp_path,
+            repo_root=tmp_git_repo,
             config=config,
             quiet=True,
         )
@@ -2455,7 +2488,7 @@ class TestRunThreadFix:
     @patch("colonyos.orchestrator.subprocess.run")
     @patch("colonyos.orchestrator.validate_branch_exists")
     def test_checkout_failure(
-        self, mock_validate: MagicMock, mock_run: MagicMock, tmp_path: Path,
+        self, mock_validate: MagicMock, mock_run: MagicMock, tmp_git_repo: Path,
     ) -> None:
         mock_validate.return_value = (True, "")
         # First call: _check_working_tree_clean (clean tree)
@@ -2466,7 +2499,7 @@ class TestRunThreadFix:
         ]
 
         config = ColonyConfig()
-        save_config(tmp_path, config)
+        save_config(tmp_git_repo, config)
 
         log = run_thread_fix(
             "fix the test",
@@ -2475,16 +2508,16 @@ class TestRunThreadFix:
             original_prompt="original",
             prd_rel="prd.md",
             task_rel="tasks.md",
-            repo_root=tmp_path,
+            repo_root=tmp_git_repo,
             config=config,
             quiet=True,
         )
         assert log.status == RunStatus.FAILED
 
-    def test_invalid_branch_name_rejected(self, tmp_path: Path) -> None:
+    def test_invalid_branch_name_rejected(self, tmp_git_repo: Path) -> None:
         """Defense-in-depth: run_thread_fix rejects invalid git refs."""
         config = ColonyConfig()
-        save_config(tmp_path, config)
+        save_config(tmp_git_repo, config)
 
         log = run_thread_fix(
             "fix the test",
@@ -2493,16 +2526,16 @@ class TestRunThreadFix:
             original_prompt="original",
             prd_rel="prd.md",
             task_rel="tasks.md",
-            repo_root=tmp_path,
+            repo_root=tmp_git_repo,
             config=config,
             quiet=True,
         )
         assert log.status == RunStatus.FAILED
 
-    def test_empty_branch_name_rejected(self, tmp_path: Path) -> None:
+    def test_empty_branch_name_rejected(self, tmp_git_repo: Path) -> None:
         """Defense-in-depth: run_thread_fix rejects empty branch name."""
         config = ColonyConfig()
-        save_config(tmp_path, config)
+        save_config(tmp_git_repo, config)
 
         log = run_thread_fix(
             "fix the test",
@@ -2511,7 +2544,7 @@ class TestRunThreadFix:
             original_prompt="original",
             prd_rel="prd.md",
             task_rel="tasks.md",
-            repo_root=tmp_path,
+            repo_root=tmp_git_repo,
             config=config,
             quiet=True,
         )
@@ -2525,7 +2558,7 @@ class TestRunThreadFix:
         mock_validate: MagicMock,
         mock_run: MagicMock,
         mock_get_sha: MagicMock,
-        tmp_path: Path,
+        tmp_git_repo: Path,
     ) -> None:
         """FR-7: HEAD SHA verification detects force-push tampering."""
         mock_validate.return_value = (True, "")
@@ -2533,7 +2566,7 @@ class TestRunThreadFix:
         mock_get_sha.return_value = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
         config = ColonyConfig()
-        save_config(tmp_path, config)
+        save_config(tmp_git_repo, config)
 
         log = run_thread_fix(
             "fix the test",
@@ -2542,7 +2575,7 @@ class TestRunThreadFix:
             original_prompt="original",
             prd_rel="prd.md",
             task_rel="tasks.md",
-            repo_root=tmp_path,
+            repo_root=tmp_git_repo,
             config=config,
             quiet=True,
             expected_head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2561,7 +2594,7 @@ class TestRunThreadFix:
         mock_run_phase: MagicMock,
         mock_run: MagicMock,
         mock_get_sha: MagicMock,
-        tmp_path: Path,
+        tmp_git_repo: Path,
     ) -> None:
         """FR-7: Matching HEAD SHA allows the fix to proceed."""
         mock_validate.return_value = (True, "")
@@ -2575,7 +2608,7 @@ class TestRunThreadFix:
         mock_get_sha.return_value = expected_sha
 
         config = ColonyConfig()
-        save_config(tmp_path, config)
+        save_config(tmp_git_repo, config)
 
         log = run_thread_fix(
             "fix the test",
@@ -2584,7 +2617,7 @@ class TestRunThreadFix:
             original_prompt="original",
             prd_rel="prd.md",
             task_rel="tasks.md",
-            repo_root=tmp_path,
+            repo_root=tmp_git_repo,
             config=config,
             quiet=True,
             expected_head_sha=expected_sha,
@@ -2601,7 +2634,7 @@ class TestRunThreadFix:
         mock_check_pr: MagicMock,
         mock_run_phase: MagicMock,
         mock_run: MagicMock,
-        tmp_path: Path,
+        tmp_git_repo: Path,
     ) -> None:
         """FR-7: Verify phase runs between Implement and Deliver."""
         mock_validate.return_value = (True, "")
@@ -2613,7 +2646,7 @@ class TestRunThreadFix:
         mock_run_phase.side_effect = _phase_result
 
         config = ColonyConfig()
-        save_config(tmp_path, config)
+        save_config(tmp_git_repo, config)
 
         log = run_thread_fix(
             "fix the test",
@@ -2622,7 +2655,7 @@ class TestRunThreadFix:
             original_prompt="original",
             prd_rel="prd.md",
             task_rel="tasks.md",
-            repo_root=tmp_path,
+            repo_root=tmp_git_repo,
             config=config,
             quiet=True,
         )
@@ -2645,7 +2678,7 @@ class TestRunThreadFix:
         mock_check_pr: MagicMock,
         mock_run_phase: MagicMock,
         mock_run: MagicMock,
-        tmp_path: Path,
+        tmp_git_repo: Path,
     ) -> None:
         """Verify phase failure prevents Deliver from running."""
         mock_validate.return_value = (True, "")
@@ -2659,7 +2692,7 @@ class TestRunThreadFix:
         mock_run_phase.side_effect = _phase_result
 
         config = ColonyConfig()
-        save_config(tmp_path, config)
+        save_config(tmp_git_repo, config)
 
         log = run_thread_fix(
             "fix the test",
@@ -2668,7 +2701,7 @@ class TestRunThreadFix:
             original_prompt="original",
             prd_rel="prd.md",
             task_rel="tasks.md",
-            repo_root=tmp_path,
+            repo_root=tmp_git_repo,
             config=config,
             quiet=True,
         )
@@ -2688,7 +2721,7 @@ class TestRunThreadFix:
         mock_check_pr: MagicMock,
         mock_run_phase: MagicMock,
         mock_run: MagicMock,
-        tmp_path: Path,
+        tmp_git_repo: Path,
     ) -> None:
         """Verify phase must use Phase.VERIFY model, not Phase.IMPLEMENT."""
         mock_validate.return_value = (True, "")
@@ -2710,7 +2743,7 @@ class TestRunThreadFix:
             "verify": "model-verify",
             "deliver": "model-deliver",
         }
-        save_config(tmp_path, config)
+        save_config(tmp_git_repo, config)
 
         log = run_thread_fix(
             "fix the test",
@@ -2719,7 +2752,7 @@ class TestRunThreadFix:
             original_prompt="original",
             prd_rel="prd.md",
             task_rel="tasks.md",
-            repo_root=tmp_path,
+            repo_root=tmp_git_repo,
             config=config,
             quiet=True,
         )
@@ -2739,7 +2772,7 @@ class TestRunThreadFix:
         mock_check_pr: MagicMock,
         mock_run_phase: MagicMock,
         mock_run: MagicMock,
-        tmp_path: Path,
+        tmp_git_repo: Path,
     ) -> None:
         """Verify phase must use read-only tools (no Write/Edit)."""
         mock_validate.return_value = (True, "")
@@ -2754,7 +2787,7 @@ class TestRunThreadFix:
         mock_run_phase.side_effect = _phase_result
 
         config = ColonyConfig()
-        save_config(tmp_path, config)
+        save_config(tmp_git_repo, config)
 
         run_thread_fix(
             "fix the test",
@@ -2763,7 +2796,7 @@ class TestRunThreadFix:
             original_prompt="original",
             prd_rel="prd.md",
             task_rel="tasks.md",
-            repo_root=tmp_path,
+            repo_root=tmp_git_repo,
             config=config,
             quiet=True,
         )
@@ -2781,7 +2814,7 @@ class TestRunThreadFix:
         self,
         mock_validate: MagicMock,
         mock_run: MagicMock,
-        tmp_path: Path,
+        tmp_git_repo: Path,
     ) -> None:
         """Dirty working tree triggers stash before checkout."""
         mock_validate.return_value = (True, "")
@@ -2795,7 +2828,7 @@ class TestRunThreadFix:
         ]
 
         config = ColonyConfig()
-        save_config(tmp_path, config)
+        save_config(tmp_git_repo, config)
 
         log = run_thread_fix(
             "fix the test",
@@ -2804,7 +2837,7 @@ class TestRunThreadFix:
             original_prompt="original",
             prd_rel="prd.md",
             task_rel="tasks.md",
-            repo_root=tmp_path,
+            repo_root=tmp_git_repo,
             config=config,
             quiet=True,
         )
