@@ -615,6 +615,10 @@ class InputReader:
         self._active = True
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()
+        console.print(
+            "  [dim]Type a message and press Enter to send input to the running agent[/dim]",
+            highlight=False,
+        )
 
     def stop(self) -> None:
         """Signal the reader thread to stop."""

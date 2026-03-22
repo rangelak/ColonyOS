@@ -529,6 +529,7 @@ def _run_repl() -> None:
                     repo_root=repo_root,
                     config=config,
                     verbose=True,
+                    interactive=False,
                 )
                 session_cost += log.total_cost_usd
                 _print_run_summary(log)
