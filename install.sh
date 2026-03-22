@@ -117,13 +117,17 @@ elif command -v pipx >/dev/null 2>&1; then
 else
   info "No virtualenv active and pipx not found."
   info "Installing directly with pip..."
-  if "$PYTHON" -m pip install --user colonyos 2>/dev/null; then
-    : # success
-  elif "$PYTHON" -m pip install colonyos 2>/dev/null; then
-    : # success (some systems don't support --user)
+  if [ "$DRY_RUN" = true ]; then
+    info "(dry-run) would run: $PYTHON -m pip install --user colonyos"
   else
-    info "pip install failed. Trying with --break-system-packages..."
-    "$PYTHON" -m pip install --user --break-system-packages colonyos
+    if "$PYTHON" -m pip install --user colonyos 2>/dev/null; then
+      : # success
+    elif "$PYTHON" -m pip install colonyos 2>/dev/null; then
+      : # success (some systems don't support --user)
+    else
+      info "pip install failed. Trying with --break-system-packages..."
+      "$PYTHON" -m pip install --user --break-system-packages colonyos
+    fi
   fi
 fi
 
