@@ -258,6 +258,7 @@ class TestRunAiInit:
              patch("colonyos.init.render_config_preview"):
             mock_click.echo = click.echo
             mock_click.confirm.return_value = True  # Save config
+            mock_click.prompt.return_value = ""
             config = run_ai_init(tmp_path)
 
         assert config.project is not None
@@ -349,6 +350,7 @@ class TestRunAiInit:
              patch("colonyos.init.render_config_preview"):
             mock_click.echo = click.echo
             mock_click.confirm.return_value = True
+            mock_click.prompt.return_value = ""
             run_ai_init(tmp_path)
 
         captured = capsys.readouterr()
@@ -449,7 +451,7 @@ class TestFallbackPreFill:
              patch("colonyos.init.click") as mock_click:
             mock_collect.return_value = ProjectInfo(name="myapp", description="cool", stack="Go")
             mock_personas.return_value = [Persona(role="E", expertise="B", perspective="P")]
-            mock_click.prompt.side_effect = ["", 1, 5.0, 15.0]
+            mock_click.prompt.side_effect = ["", 1, 5.0, 15.0, ""]
             mock_click.echo = click.echo
             mock_click.IntRange = click.IntRange
             run_init(tmp_path, defaults=defaults)
@@ -493,6 +495,7 @@ class TestErrorHandling:
              patch("colonyos.init.render_config_preview"):
             mock_click.echo = click.echo
             mock_click.confirm.return_value = True
+            mock_click.prompt.return_value = ""
             config = run_ai_init(tmp_path)
 
         assert config.project is not None
@@ -578,6 +581,7 @@ class TestErrorHandling:
              patch("colonyos.init.render_config_preview"):
             mock_click.echo = click.echo
             mock_click.confirm.return_value = True
+            mock_click.prompt.return_value = ""
             run_ai_init(tmp_path)
 
         mock_rps.assert_called_once()

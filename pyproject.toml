@@ -26,13 +26,14 @@ where = ["src"]
 colonyos = ["instructions/*.md", "web_dist/**"]
 
 [project.optional-dependencies]
-dev = ["pre-commit>=4.0", "pytest>=8.0", "colonyos[ui]"]
+dev = ["pre-commit>=4.0", "pytest>=8.0", "pytest-xdist>=3.0", "colonyos[ui]"]
 slack = ["slack-bolt[socket-mode]>=1.18"]
 ui = ["fastapi>=0.100", "uvicorn>=0.20"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "tests"]
 testpaths = ["tests"]
+addopts = "-n auto"
 
 [tool.setuptools_scm]
 version_scheme = "guess-next-dev"
