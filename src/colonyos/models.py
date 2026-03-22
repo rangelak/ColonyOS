@@ -110,6 +110,15 @@ class RepoContext:
     raw_signals: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class UserInput:
+    """A single user input submitted during a live agent run."""
+
+    timestamp: str
+    phase: str
+    message: str
+
+
 @dataclass
 class PhaseResult:
     phase: Phase
@@ -217,6 +226,8 @@ class RunLog:
     parallel_tasks: int | None = None
     wall_time_ms: int | None = None
     agent_time_ms: int | None = None
+    # Live user inputs submitted during the run
+    user_inputs: list[UserInput] = field(default_factory=list)
 
     def mark_finished(self) -> None:
         self.finished_at = datetime.now(timezone.utc).isoformat()

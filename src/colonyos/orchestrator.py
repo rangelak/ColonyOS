@@ -11,7 +11,7 @@ from pathlib import Path
 import click
 from claude_agent_sdk import AgentDefinition
 
-from colonyos.agent import run_phase_sync, run_phases_parallel_sync
+from colonyos.agent import run_phase_interactive_sync, run_phase_sync, run_phases_parallel_sync
 from colonyos.config import ColonyConfig, runs_dir_path
 from colonyos.dag import parse_task_file
 from colonyos.models import TaskStatus
@@ -27,7 +27,7 @@ from colonyos.learnings import (
     load_learnings_for_injection,
     parse_learnings,
 )
-from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightError, PreflightResult, ResumeState, RunLog, RunStatus
+from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightError, PreflightResult, ResumeState, RunLog, RunStatus, UserInput
 from colonyos.naming import (
     decision_artifact_path,
     generate_timestamp,
@@ -41,7 +41,7 @@ from colonyos.naming import (
 from colonyos.github import check_open_pr
 from colonyos.sanitize import sanitize_untrusted_content
 from colonyos.slack import is_valid_git_ref
-from colonyos.ui import NullUI, ParallelProgressLine, PhaseUI, make_reviewer_prefix, print_reviewer_legend
+from colonyos.ui import InputReader, NullUI, ParallelProgressLine, PhaseUI, make_reviewer_prefix, print_reviewer_legend
 
 
 def _touch_heartbeat(repo_root: Path) -> None:
@@ -1303,9 +1303,17 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
                         "session_id": p.session_id,
                         "model": p.model,
                         "error": p.error,
-                        "artifacts": p.artifacts,  # FR-10: Include artifacts for task_id tracking
+                        "artifacts": p.artifacts,
                     }
                     for p in log.phases
+                ],
+                "user_inputs": [
+                    {
+                        "timestamp": ui.timestamp,
+                        "phase": ui.phase,
+                        "message": ui.message,
+                    }
+                    for ui in log.user_inputs
                 ],
             },
             indent=2,
@@ -1382,6 +1390,15 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
                 artifacts=p.get("artifacts", {}),  # FR-10: Include artifacts for task_id tracking
             ))
 
+        user_inputs = [
+            UserInput(
+                timestamp=ui["timestamp"],
+                phase=ui["phase"],
+                message=ui["message"],
+            )
+            for ui in data.get("user_inputs", [])
+        ]
+
         log = RunLog(
             run_id=data["run_id"],
             prompt=data["prompt"],
@@ -1398,6 +1415,7 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
             preflight=PreflightResult.from_dict(data["preflight"]) if data.get("preflight") else None,
             source_type=data.get("source_type"),
             review_comment_id=data.get("review_comment_id"),
+            user_inputs=user_inputs,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise click.ClickException(
@@ -2451,6 +2469,7 @@ def run(
     offline: bool = False,
     force: bool = False,
     base_branch: str | None = None,
+    interactive: bool = True,
 ) -> RunLog:
     """Execute the full orchestration loop: plan -> implement -> review -> deliver.
 
@@ -2594,6 +2613,7 @@ def run(
             quiet=quiet,
             base_branch=base_branch,
             _make_ui=_make_ui,
+            interactive=interactive,
         )
     except KeyboardInterrupt:
         _log("Interrupted — saving run state...")
@@ -2654,8 +2674,38 @@ def _run_pipeline(
     quiet: bool,
     base_branch: str | None,
     _make_ui: Callable[..., PhaseUI | NullUI | None],
+    interactive: bool = True,
 ) -> RunLog:
     """Execute the pipeline phases. Extracted from run() for try/finally branch rollback."""
+
+    # --- Interactive input setup ---
+    input_reader: InputReader | None = None
+    if interactive:
+        input_reader = InputReader()
+        input_reader.start()
+
+    _current_phase_name = "unknown"
+
+    def _on_user_input(message: str) -> None:
+        from datetime import datetime, timezone
+        log.user_inputs.append(UserInput(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            phase=_current_phase_name,
+            message=message,
+        ))
+        _save_run_log(repo_root, log)
+
+    def _run_phase(phase: Phase, prompt: str, **kwargs: object) -> PhaseResult:
+        nonlocal _current_phase_name
+        _current_phase_name = phase.value
+        if input_reader is not None and input_reader.is_active:
+            return run_phase_interactive_sync(
+                phase, prompt,
+                **kwargs,  # type: ignore[arg-type]
+                input_queue=input_reader.input_queue,
+                on_user_input=_on_user_input,
+            )
+        return run_phase_sync(phase, prompt, **kwargs)  # type: ignore[arg-type]
 
     def _append_phase(result: PhaseResult) -> None:
         """Append a phase result and persist immediately so progress survives crashes."""
@@ -2692,7 +2742,7 @@ def _run_pipeline(
             source_issue=log.source_issue,
             source_issue_url=log.source_issue_url,
         )
-        plan_result = run_phase_sync(
+        plan_result = _run_phase(
             Phase.PLAN,
             user,
             cwd=repo_root,
@@ -2748,7 +2798,7 @@ def _run_pipeline(
         if impl_result is None:
             _log("Using sequential implement mode")
             system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name, repo_root=repo_root)
-            impl_result = run_phase_sync(
+            impl_result = _run_phase(
                 Phase.IMPLEMENT,
                 user,
                 cwd=repo_root,
@@ -2887,7 +2937,7 @@ def _run_pipeline(
                         )
                     else:
                         _log(f"  Running fix agent (iteration {iteration + 1})...")
-                    fix_result = run_phase_sync(
+                    fix_result = _run_phase(
                         Phase.FIX,
                         fix_user,
                         cwd=repo_root,
@@ -2909,7 +2959,7 @@ def _run_pipeline(
             else:
                 _log("=== Decision Gate ===")
             system, user = _build_decision_prompt(config, prd_rel, branch_name)
-            decision_result = run_phase_sync(
+            decision_result = _run_phase(
                 Phase.DECISION,
                 user,
                 cwd=repo_root,
@@ -2959,7 +3009,7 @@ def _run_pipeline(
             source_issue=log.source_issue,
             base_branch=base_branch,
         )
-        deliver_result = run_phase_sync(
+        deliver_result = _run_phase(
             Phase.DELIVER,
             user,
             cwd=repo_root,
@@ -2993,4 +3043,6 @@ def _run_pipeline(
     log.mark_finished()
     _save_run_log(repo_root, log)
     _log(f"Run complete. Total cost: ${log.total_cost_usd:.4f}")
+    if input_reader is not None:
+        input_reader.stop()
     return log

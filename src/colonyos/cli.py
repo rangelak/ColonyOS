@@ -625,7 +625,8 @@ def init(
 @click.option("--offline", is_flag=True, help="Skip network calls in pre-flight checks.")
 @click.option("--force", is_flag=True, help="Bypass pre-flight checks (for power users).")
 @click.option("--no-triage", is_flag=True, help="Skip intent routing and run the full pipeline directly.")
-def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool, offline: bool, force: bool, no_triage: bool) -> None:
+@click.option("--no-interactive", "no_interactive", is_flag=True, help="Disable live user input during agent runs.")
+def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool, offline: bool, force: bool, no_triage: bool, no_interactive: bool) -> None:
     """Run the autonomous agent loop for a feature prompt."""
     # Mutual exclusivity checks
     if resume_run_id:
@@ -669,6 +670,7 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             verbose=verbose,
             quiet=quiet,
             force=force,
+            interactive=not no_interactive,
         )
         _print_run_summary(log)
     else:
@@ -730,6 +732,7 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             source_issue_url=source_issue_url,
             offline=offline,
             force=force,
+            interactive=not no_interactive,
         )
         _print_run_summary(log)
 

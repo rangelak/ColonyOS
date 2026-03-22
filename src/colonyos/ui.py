@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import queue
 import re
+import sys
+import threading
 import time
 from typing import TYPE_CHECKING, TypedDict
 
@@ -578,3 +581,59 @@ class ParallelProgressLine:
             f"\n  Review round {round_num}: {summary} — ${cost:.2f} total\n",
             highlight=False,
         )
+
+
+# -- Live Input Reader -------------------------------------------------------
+
+
+class InputReader:
+    """Non-blocking stdin reader using a background daemon thread.
+
+    Only activates when stdin is a TTY.  Call ``start()`` to begin reading and
+    ``stop()`` to tear down the daemon thread.  The agent loop drains
+    ``input_queue`` (a thread-safe ``queue.Queue``) between turns.
+    """
+
+    def __init__(self) -> None:
+        self._input_queue: queue.Queue[str] = queue.Queue()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._active = False
+
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+    @property
+    def input_queue(self) -> queue.Queue[str]:
+        return self._input_queue
+
+    def start(self) -> None:
+        """Start the background stdin reader if stdin is a TTY."""
+        if not sys.stdin.isatty():
+            return
+        self._active = True
+        self._thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Signal the reader thread to stop."""
+        self._stop_event.set()
+        self._active = False
+
+    def _read_loop(self) -> None:
+        """Background thread: read lines from stdin until stopped."""
+        while not self._stop_event.is_set():
+            try:
+                line = input()
+            except EOFError:
+                break
+            except KeyboardInterrupt:
+                break
+            stripped = line.strip()
+            if stripped:
+                self._input_queue.put(stripped)
+                console.print(
+                    f"  [dim][you][/dim] {_truncate(stripped, 120)}",
+                    highlight=False,
+                )
