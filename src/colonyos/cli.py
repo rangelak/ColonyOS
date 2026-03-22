@@ -338,6 +338,7 @@ def _handle_routed_query(
         project_stack=config.project.stack if config.project else "",
         vision=config.vision,
         source=source,
+        model=config.router.model,
     )
 
     log_router_decision(
@@ -530,7 +531,7 @@ def _run_repl() -> None:
                     repo_root=repo_root,
                     config=config,
                     verbose=True,
-                    interactive=False,
+                    interactive=True,
                 )
                 session_cost += log.total_cost_usd
                 _print_run_summary(log)

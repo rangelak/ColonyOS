@@ -786,8 +786,7 @@ def triage_message(
     is provided or the router is unavailable, falls back to the original
     Slack-specific triage prompt.
 
-    Uses a single-turn haiku call with no tool access to minimize cost
-    and prompt injection blast radius.
+    Uses a single-turn call with no tool access to classify intent.
 
     Args:
         repo_root: Repository root directory. Falls back to cwd if not provided.
@@ -908,7 +907,7 @@ def _triage_message_legacy(
         user,
         cwd=cwd,
         system_prompt=system,
-        model="haiku",
+        model="opus",
         budget_usd=0.05,  # tiny budget for triage
         allowed_tools=[],  # no tool access
     )

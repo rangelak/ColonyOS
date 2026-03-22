@@ -484,7 +484,7 @@ def run_ai_init(
                 prompt,
                 cwd=repo_root,
                 system_prompt=system_prompt,
-                model="haiku",
+                model="opus",
                 budget_usd=0.50,
                 max_turns=3,
                 allowed_tools=["Read", "Glob", "Grep"],

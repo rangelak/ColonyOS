@@ -337,8 +337,8 @@ class TestRouteQuery:
             assert isinstance(result, RouterResult)
             assert result.category == RouterCategory.QUESTION
 
-    def test_uses_haiku_model(self, tmp_repo: Path) -> None:
-        """route_query should use haiku model for classification."""
+    def test_uses_opus_model_by_default(self, tmp_repo: Path) -> None:
+        """route_query should use opus model for classification by default."""
         with patch("colonyos.agent.run_phase_sync") as mock_run:
             mock_run.return_value = MagicMock(
                 artifacts={"result": '{"category": "code_change", "confidence": 0.9, "summary": "x", "reasoning": "y"}'},
@@ -347,7 +347,7 @@ class TestRouteQuery:
             route_query("add a feature", repo_root=tmp_repo)
             mock_run.assert_called_once()
             call_kwargs = mock_run.call_args[1]
-            assert call_kwargs["model"] == "haiku"
+            assert call_kwargs["model"] == "opus"
 
     def test_uses_no_tools(self, tmp_repo: Path) -> None:
         """route_query should use no tools (read-only classification)."""
@@ -581,8 +581,8 @@ class TestAnswerQuestion:
             call_args = mock_run.call_args[0]
             assert call_args[0] == Phase.QA
 
-    def test_uses_sonnet_model_by_default(self, tmp_repo: Path) -> None:
-        """answer_question should use sonnet model by default (matching RouterConfig.qa_model)."""
+    def test_uses_opus_model_by_default(self, tmp_repo: Path) -> None:
+        """answer_question should use opus model by default."""
         from colonyos.router import answer_question
         with patch("colonyos.agent.run_phase_sync") as mock_run:
             mock_run.return_value = MagicMock(
@@ -592,7 +592,7 @@ class TestAnswerQuestion:
             )
             answer_question("test question", repo_root=tmp_repo)
             call_kwargs = mock_run.call_args[1]
-            assert call_kwargs["model"] == "sonnet"
+            assert call_kwargs["model"] == "opus"
 
     def test_uses_read_only_tools(self, tmp_repo: Path) -> None:
         """answer_question should only have read-only tools (Read, Glob, Grep)."""
@@ -677,8 +677,7 @@ class TestAnswerQuestion:
         sig = inspect.signature(answer_question)
         assert "model" in sig.parameters
         param = sig.parameters["model"]
-        # Default should match RouterConfig.qa_model default (sonnet)
-        assert param.default == "sonnet"
+        assert param.default == "opus"
 
 
 class TestAnswerQuestionIntegration:

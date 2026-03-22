@@ -635,15 +635,24 @@ class InputReader:
 
     def _read_loop(self) -> None:
         """Background thread: read lines from stdin until stopped."""
+        import select
         import sys as _sys
+
+        fd = _sys.stdin.fileno()
+        prompt_shown = False
         while not self._stop_event.is_set():
-            try:
+            if not prompt_shown:
                 _sys.stderr.write(self._build_prompt())
                 _sys.stderr.flush()
-                line = input()
-            except EOFError:
+                prompt_shown = True
+            ready, _, _ = select.select([fd], [], [], 0.5)
+            if not ready:
+                continue
+            try:
+                line = _sys.stdin.readline()
+            except (EOFError, KeyboardInterrupt):
                 break
-            except KeyboardInterrupt:
+            if not line:
                 break
             stripped = line.strip()
             if stripped:
@@ -652,3 +661,4 @@ class InputReader:
                     f"  [dim][you][/dim] {_truncate(stripped, 120)}",
                     highlight=False,
                 )
+            prompt_shown = False

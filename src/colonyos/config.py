@@ -58,8 +58,8 @@ DEFAULTS = {
     },
     "router": {
         "enabled": True,
-        "model": "haiku",
-        "qa_model": "sonnet",
+        "model": "opus",
+        "qa_model": "opus",
         "confidence_threshold": 0.7,
         "qa_budget": 0.50,
     },
@@ -139,8 +139,8 @@ class RouterConfig:
     """
 
     enabled: bool = True
-    model: str = "haiku"
-    qa_model: str = "sonnet"
+    model: str = "opus"
+    qa_model: str = "opus"
     confidence_threshold: float = 0.7
     qa_budget: float = 0.50
 
@@ -444,14 +444,14 @@ def _parse_router_config(raw: dict) -> RouterConfig:
     if model not in VALID_MODELS:
         raise ValueError(
             f"Invalid router model '{model}'. Valid options: {sorted(VALID_MODELS)}. "
-            f"Note: use short names (e.g. 'haiku') not full model IDs."
+            f"Note: use short names (e.g. 'opus') not full model IDs."
         )
 
     qa_model = str(raw.get("qa_model", defaults["qa_model"]))
     if qa_model not in VALID_MODELS:
         raise ValueError(
             f"Invalid router qa_model '{qa_model}'. Valid options: {sorted(VALID_MODELS)}. "
-            f"Note: use short names (e.g. 'sonnet') not full model IDs."
+            f"Note: use short names (e.g. 'opus') not full model IDs."
         )
 
     confidence_threshold = float(raw.get("confidence_threshold", defaults["confidence_threshold"]))
@@ -517,7 +517,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
             logger.warning(
                 "Phase '%s' is assigned model 'haiku'. This phase serves as a "
                 "safety gate in the pipeline — using a lightweight model may "
-                "reduce review quality. Consider using 'sonnet' or 'opus'.",
+                "reduce review quality. Consider using 'opus'.",
                 phase_key,
             )
 

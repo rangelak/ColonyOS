@@ -963,7 +963,7 @@ class TestRouterConfig:
         """When no config file exists, router gets defaults."""
         config = load_config(tmp_repo)
         assert config.router.enabled is True
-        assert config.router.model == "haiku"
+        assert config.router.model == "opus"
         assert config.router.confidence_threshold == 0.7
         assert config.router.qa_budget == 0.50
 
@@ -998,7 +998,7 @@ class TestRouterConfig:
         )
         config = load_config(tmp_repo)
         assert config.router.enabled is True
-        assert config.router.model == "haiku"
+        assert config.router.model == "opus"
         assert config.router.confidence_threshold == 0.7
         assert config.router.qa_budget == 0.50
 
@@ -1016,7 +1016,7 @@ class TestRouterConfig:
         )
         config = load_config(tmp_repo)
         assert config.router.enabled is False
-        assert config.router.model == "haiku"  # default
+        assert config.router.model == "opus"  # default
         assert config.router.confidence_threshold == 0.7  # default
         assert config.router.qa_budget == 0.50  # default
 
@@ -1126,7 +1126,7 @@ class TestRouterConfig:
         """DEFAULTS dict has router section."""
         assert "router" in DEFAULTS
         assert DEFAULTS["router"]["enabled"] is True
-        assert DEFAULTS["router"]["model"] == "haiku"
+        assert DEFAULTS["router"]["model"] == "opus"
         assert DEFAULTS["router"]["confidence_threshold"] == 0.7
         assert DEFAULTS["router"]["qa_budget"] == 0.50
 

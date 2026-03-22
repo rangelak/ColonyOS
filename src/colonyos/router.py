@@ -8,8 +8,7 @@ handler:
 - STATUS: Redirect to existing CLI commands
 - OUT_OF_SCOPE: Polite rejection with suggestion
 
-The router uses a single-turn haiku call with no tool access to minimize cost
-and latency.
+The router uses a single-turn call with no tool access to classify intent.
 """
 from __future__ import annotations
 
@@ -200,11 +199,11 @@ def route_query(
     project_stack: str = "",
     vision: str = "",
     source: str = "cli",
+    model: str = "opus",
 ) -> RouterResult:
     """Run the LLM-based intent router on a user query.
 
-    Uses a single-turn haiku call with no tool access to minimize cost
-    and prompt injection blast radius.
+    Uses a single-turn call with no tool access to classify intent.
 
     Args:
         query: The user's input query to classify.
@@ -236,7 +235,7 @@ def route_query(
         user,
         cwd=cwd,
         system_prompt=system,
-        model="haiku",
+        model=model,
         budget_usd=0.05,  # tiny budget for routing
         allowed_tools=[],  # no tool access
     )
@@ -317,7 +316,7 @@ def answer_question(
     project_name: str = "",
     project_description: str = "",
     project_stack: str = "",
-    model: str = "sonnet",
+    model: str = "opus",
     qa_budget: float = DEFAULT_QA_BUDGET,
 ) -> str:
     """Answer a question about the codebase using a read-only Q&A agent.
@@ -331,7 +330,7 @@ def answer_question(
         project_name: Name of the project for context.
         project_description: Brief description of the project.
         project_stack: Technology stack of the project.
-        model: Model to use for answering (default: haiku).
+        model: Model to use for answering (default: opus).
         qa_budget: Budget cap for the Q&A call (default: $0.50).
 
     Returns:
