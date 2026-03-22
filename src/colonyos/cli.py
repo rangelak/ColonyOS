@@ -455,7 +455,8 @@ def _run_repl() -> None:
         while True:
             try:
                 click.echo(click.style(f"[${session_cost:.2f}]", fg="green"), nl=False)
-                user_input = input(" > ")
+                click.echo(click.style(" › ", fg="bright_cyan", bold=True), nl=False)
+                user_input = input()
             except EOFError:
                 click.echo()
                 break
