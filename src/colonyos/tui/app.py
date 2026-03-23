@@ -13,7 +13,6 @@ from typing import Callable
 import janus
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.worker import Worker
 
 from colonyos.tui.adapter import (
     PhaseCompleteMsg,
@@ -51,6 +50,8 @@ class AssistantApp(App):
     """
 
     CSS = APP_CSS
+
+    _current_instance: AssistantApp | None = None
 
     BINDINGS = [
         Binding("ctrl+l", "clear_transcript", "Clear transcript", show=False),
