@@ -64,10 +64,14 @@ Composer:focus-within {
     border-top: solid $accent;
 }
 
-Composer TextArea {
+Composer TextArea, Composer _ComposerTextArea {
     height: auto;
     min-height: 3;
     max-height: 8;
+}
+
+Composer:focus-within _ComposerTextArea {
+    border: tall $accent;
 }
 
 HintBar {

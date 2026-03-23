@@ -52,6 +52,7 @@ class AssistantApp(App):
     CSS = APP_CSS
 
     BINDINGS = [
+        Binding("ctrl+c", "cancel_run", "Cancel current run", show=False),
         Binding("ctrl+l", "clear_transcript", "Clear transcript", show=False),
         Binding("escape", "focus_composer", "Focus composer", show=False),
     ]
@@ -177,6 +178,14 @@ class AssistantApp(App):
     # -----------------------------------------------------------------
     # Keybinding actions
     # -----------------------------------------------------------------
+
+    def action_cancel_run(self) -> None:
+        """Cancel the current orchestrator run (Ctrl+C)."""
+        self.workers.cancel_all()
+        status_bar = self.query_one(StatusBar)
+        status_bar.set_error("Cancelled by user")
+        transcript = self.query_one(TranscriptView)
+        transcript.append_phase_error("Run cancelled by user")
 
     def action_clear_transcript(self) -> None:
         """Clear all entries from the transcript."""

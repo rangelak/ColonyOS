@@ -54,24 +54,7 @@ class Composer(Vertical):
         Binding("escape", "focus_self", "Focus composer", show=False),
     ]
 
-    DEFAULT_CSS = """
-    Composer {
-        height: auto;
-        min-height: 3;
-        max-height: 8;
-        padding: 0 1;
-    }
-
-    Composer _ComposerTextArea {
-        height: auto;
-        min-height: 3;
-        max-height: 8;
-    }
-
-    Composer:focus-within _ComposerTextArea {
-        border: tall $accent;
-    }
-    """
+    # Layout CSS is defined in APP_CSS (styles.py) — no DEFAULT_CSS needed.
 
     class Submitted(Message):
         """Emitted when the user presses Enter to submit input."""

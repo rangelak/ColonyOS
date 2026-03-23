@@ -23,7 +23,7 @@ class HintBar(Static):
     """
 
     HINT_TEXT = (
-        "Enter send · Shift+Enter newline · Ctrl+C cancel · Ctrl+L clear"
+        "Enter send · Shift+Enter newline · Ctrl+C stop run · Ctrl+L clear"
     )
 
     def on_mount(self) -> None:

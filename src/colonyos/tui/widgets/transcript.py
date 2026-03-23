@@ -13,6 +13,7 @@ from rich.markdown import Markdown
 from rich.text import Text
 from textual.widgets import RichLog
 
+from colonyos.sanitize import sanitize_display_text
 from colonyos.tui.styles import (
     COLOR_DIM,
     COLOR_ERROR,
@@ -31,12 +32,7 @@ class TranscriptView(RichLog):
     is near the end; stops auto-scrolling when the user has scrolled up.
     """
 
-    DEFAULT_CSS = """
-    TranscriptView {
-        height: 1fr;
-        min-height: 10;
-    }
-    """
+    # Layout CSS is defined in APP_CSS (styles.py) — no DEFAULT_CSS needed.
 
     # Number of lines from the bottom within which auto-scroll stays active.
     _AUTO_SCROLL_THRESHOLD = 3
@@ -140,7 +136,7 @@ class TranscriptView(RichLog):
 
     def append_user_message(self, text: str) -> None:
         """Render a user-submitted message in the transcript."""
-        text = text.strip()
+        text = sanitize_display_text(text)
         if not text:
             return
         line = Text()

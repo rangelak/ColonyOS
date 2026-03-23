@@ -4229,14 +4229,18 @@ def _launch_tui(
     Raises:
         ImportError: If textual or janus is not installed.
     """
-    from colonyos.tui import _check_dependencies  # noqa: F401 — triggers check
+    import colonyos.tui  # noqa: F401 — triggers dependency check
     from colonyos.tui.app import AssistantApp
     from colonyos.tui.adapter import TextualUI
 
-    app_instance = AssistantApp(run_callback=None, initial_prompt=prompt)
-
     def _run_callback(text: str) -> None:
-        """Run the orchestrator in a worker thread when the user submits input."""
+        """Run the orchestrator in a worker thread when the user submits input.
+
+        Each submission creates a fresh TextualUI adapter so that turn counts
+        and tool state are isolated per-run.  The status bar accumulates cost
+        across runs independently — this is intentional so users see lifetime
+        session cost while each run's turn count starts at zero.
+        """
         queue = app_instance.event_queue
         adapter = TextualUI(queue.sync_q)
 
@@ -4251,7 +4255,7 @@ def _launch_tui(
             ui_factory=_ui_factory,
         )
 
-    app_instance._run_callback = _run_callback
+    app_instance = AssistantApp(run_callback=_run_callback, initial_prompt=prompt)
     app_instance.run()
 
 

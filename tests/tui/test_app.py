@@ -212,3 +212,19 @@ class TestKeybindings:
             composer = app.query_one(Composer)
             ta = composer.query_one("TextArea")
             assert ta.has_focus
+
+    @pytest.mark.asyncio
+    async def test_ctrl_c_cancels_run(self) -> None:
+        """Ctrl+C should cancel workers and show cancelled message."""
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            # Trigger cancel action directly (Ctrl+C binding may be intercepted by test harness)
+            app.action_cancel_run()
+            await pilot.pause()
+            status = app.query_one(StatusBar)
+            transcript = app.query_one(TranscriptView)
+            # Status bar should show error state
+            assert "cancel" in status.error_msg.lower()
+            # Transcript should have the cancel message
+            assert len(transcript.lines) > 0

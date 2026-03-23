@@ -257,10 +257,41 @@ class TestSanitizeDisplayText:
         # Tabs must be preserved for code block indentation
         assert sanitize_display_text("col1\tcol2") == "col1\tcol2"
 
-    def test_carriage_return_preserved(self) -> None:
+    def test_crlf_normalized_to_lf(self) -> None:
         from colonyos.sanitize import sanitize_display_text
-        # Carriage return preserved (common in CRLF line endings)
-        assert sanitize_display_text("line1\r\nline2") == "line1\r\nline2"
+        # CRLF normalized to LF for safe display
+        assert sanitize_display_text("line1\r\nline2") == "line1\nline2"
+
+    def test_bare_carriage_return_stripped(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # Bare \r stripped to prevent content-overwrite attacks
+        assert sanitize_display_text("safe text\rmalicious") == "safe textmalicious"
+
+    def test_cr_overwrite_attack_neutralized(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # Verify a CR-based overwrite attack is neutralized
+        result = sanitize_display_text("visible command\revil")
+        assert "\r" not in result
+
+    def test_strips_osc_window_title(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # OSC sequence to set window title: \x1b]0;title\x07
+        assert sanitize_display_text("\x1b]0;pwned\x07safe") == "safe"
+
+    def test_strips_osc_clipboard_write(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # OSC 52 clipboard write: \x1b]52;c;BASE64\x07
+        assert sanitize_display_text("\x1b]52;c;SGVsbG8=\x07text") == "text"
+
+    def test_strips_dcs_sequence(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # DCS sequence
+        assert sanitize_display_text("\x1bPdevice\x1b\\rest") == "rest"
+
+    def test_strips_single_char_escape(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # Single-char escapes like \x1b7 (cursor save) and \x1b8 (cursor restore)
+        assert sanitize_display_text("\x1b7text\x1b8") == "text"
 
     def test_multiline_markdown_preserved(self) -> None:
         from colonyos.sanitize import sanitize_display_text

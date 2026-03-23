@@ -109,7 +109,7 @@ async def test_hint_bar_renders_keybinding_text():
         # In Textual 8.x, use render() to get the renderable
         rendered = str(hint.render())
         assert "Enter send" in rendered
-        assert "Ctrl+C cancel" in rendered
+        assert "Ctrl+C stop run" in rendered
         assert "Ctrl+L clear" in rendered
 
 

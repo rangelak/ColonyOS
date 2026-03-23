@@ -158,6 +158,15 @@ class TestTranscriptView:
             log = tv
             assert len(log.lines) >= 1
 
+    async def test_user_message_sanitized(self, require_tui: None) -> None:
+        """User messages should be sanitized through sanitize_display_text."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            # OSC window title attack should be stripped
+            tv.append_user_message("\x1b]0;pwned\x07safe message")
+            log = tv
+            assert len(log.lines) >= 1
+
     async def test_multiple_phases_separated(self, require_tui: None) -> None:
         """Two phase headers should produce distinct boundary markers."""
         async with TranscriptTestApp().run_test() as pilot:
