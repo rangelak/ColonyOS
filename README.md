@@ -23,7 +23,7 @@
 
 ColonyOS is an autonomous software engineering pipeline. Give it a feature description — or let its built-in CEO agent decide what to build — and it writes a PRD, implements the code with tests, runs parallel multi-persona code reviews, fixes issues, and opens a pull request. No human in the loop.
 
-Under the hood it orchestrates [Claude](https://www.anthropic.com/claude) agent sessions via the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agent-sdk) with full codebase awareness. Point it at any repo and let it work.
+Under the hood it orchestrates [Claude](https://www.anthropic.com/claude) agent sessions via the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agent-sdk) with full codebase awareness. An LLM-based intent router automatically classifies prompts — questions get instant answers, workflow actions (git, shell) execute directly, and feature requests run the full pipeline. The interactive REPL lets you steer running agents with live mid-run input. Point it at any repo and let it work.
 
 **ColonyOS builds itself.** Every feature, fix, and review in this repo was proposed, implemented, and shipped by ColonyOS agents running on their own codebase.
 
@@ -35,7 +35,7 @@ Under the hood it orchestrates [Claude](https://www.anthropic.com/claude) agent 
 
 | Dependency | Why | Check |
 |---|---|---|
-| **Python 3.11+** | Runtime | `python3 --version` |
+| **Python 3.11+** | Runtime (includes `prompt_toolkit` for the REPL) | `python3 --version` |
 | **Claude Code CLI** | Agent execution engine | `claude --version` |
 | **Git** | Branch/commit operations | `git --version` |
 | **GitHub CLI** | PR creation, issue fetching | `gh auth status` |
@@ -187,6 +187,23 @@ flowchart TD
 | `colonyos directions --static` | Lock directions (CEO reads but never rewrites) |
 | `colonyos directions --auto-update` | Unlock directions to evolve each CEO iteration |
 
+### Interactive REPL
+
+```bash
+colonyos repl
+```
+
+The REPL provides a persistent session powered by `prompt_toolkit` with:
+
+- **Fixed input window** at the bottom of the terminal with styled prompt
+- **Streaming output** above the input — agent activity never overwrites your prompt
+- **Live mid-run input** — type messages while an agent is running to steer it in real-time
+- **Intent routing** — prompts are automatically classified as code changes, questions, workflow actions, or status queries
+- **Session cost tracking** — cumulative spend displayed after each run
+- **Tab completion** for CLI subcommands and persistent command history across sessions
+
+Inside the REPL, type any prompt directly (no need to prefix with `run`). Special commands: `help`, `quit`/`exit`, or any `colonyos` subcommand (e.g. `status`, `review BRANCH`).
+
 ### Running the pipeline
 
 | Command | Description |
@@ -198,6 +215,8 @@ flowchart TD
 | `colonyos run --resume RUN_ID` | Resume a failed run from the last successful phase |
 | `colonyos run --offline` | Skip remote git checks (preflight) |
 | `colonyos run --force` | Bypass preflight warnings |
+| `colonyos run --no-triage` | Skip intent routing, run full pipeline directly |
+| `colonyos run --no-interactive` | Disable live user input during agent runs |
 
 ### Autonomous mode
 
@@ -291,6 +310,8 @@ flowchart TD
 |---|---|---|
 | `-v` / `--verbose` | `run`, `auto` | Stream agent text alongside tool activity |
 | `-q` / `--quiet` | `run`, `auto` | Suppress the streaming UI |
+| `--no-interactive` | `run` | Disable live user input during agent runs |
+| `--no-triage` | `run` | Skip intent routing, run full pipeline directly |
 
 ---
 
@@ -402,6 +423,31 @@ pr_review:
   circuit_breaker_threshold: 3        # pause after N consecutive failures
   circuit_breaker_cooldown_minutes: 15
 ```
+
+### Intent router
+
+```yaml
+router:
+  enabled: true
+  model: haiku                      # model for intent classification
+  confidence_threshold: 0.7         # below this, fall through to full pipeline
+  qa_model: opus                    # model for answering questions
+  qa_budget: 0.50                   # USD cap per Q&A call
+  workflow_model: sonnet            # model for workflow actions (git, shell)
+  workflow_budget: 1.00             # USD cap per workflow action
+```
+
+The intent router classifies every prompt into one of five categories before deciding how to handle it:
+
+| Category | What happens |
+|---|---|
+| **CODE_CHANGE** | Full pipeline (plan → implement → review → deliver) |
+| **QUESTION** | Read-only Q&A agent explores the codebase and answers |
+| **WORKFLOW** | Full-power agent executes git/shell commands directly |
+| **STATUS** | Suggests the appropriate `colonyos` CLI command |
+| **OUT_OF_SCOPE** | Politely declines non-coding requests |
+
+Questions and workflow actions bypass the pipeline entirely, saving time and cost. The router uses a lightweight LLM call (default: `haiku`) to classify intent, then dispatches to the appropriate handler.
 
 ### Cross-run learnings
 
@@ -600,16 +646,17 @@ The CEO reads `CHANGELOG.md` and `directions.md` before proposing new features �
 
 ```
 src/colonyos/
-├── cli.py              # Click CLI — all commands, REPL mode, welcome banner
+├── cli.py              # Click CLI — all commands, prompt_toolkit REPL, welcome banner
 ├── init.py             # Interactive setup wizard, persona packs, --quick mode
 ├── orchestrator.py     # Phase chaining: CEO → Plan → Implement → Verify → Review → Deliver → Learn
-├── agent.py            # Claude Agent SDK wrapper, parallel execution support
+├── agent.py            # Claude Agent SDK wrapper, parallel execution, live input support
 ├── config.py           # .colonyos/config.yaml loader + validation
+├── router.py           # LLM-based intent router (Q&A, WORKFLOW, STATUS, CODE_CHANGE, OUT_OF_SCOPE)
 ├── directions.py       # CEO strategic directions — generation, updates, display
-├── models.py           # Persona, PhaseResult, RunLog, LoopState, QueueItem
+├── models.py           # Persona, PhaseResult, RunLog, LoopState, QueueItem, Phase
 ├── naming.py           # Deterministic timestamped filenames, slug generation
 ├── persona_packs.py    # Prebuilt persona packs (startup, backend, fullstack, opensource)
-├── ui.py               # Rich streaming terminal UI, phase progress display
+├── ui.py               # Rich streaming terminal UI, thread-safe console proxy
 ├── stats.py            # Aggregate analytics computation + Rich rendering
 ├── show.py             # Single-run inspector (data layer + render layer)
 ├── doctor.py           # Prerequisite validation (Python, Claude, Git, GitHub CLI)
@@ -633,6 +680,8 @@ src/colonyos/
 │   ├── ci_fix.md       # CI failure fix instructions
 │   ├── learn.md        # Learning extraction
 │   ├── cleanup_scan.md # Structural analysis
+│   ├── qa.md           # Read-only Q&A agent
+│   ├── workflow.md     # Developer workflow agent (git, shell)
 │   ├── review_standalone.md
 │   ├── fix_standalone.md
 │   └── decision_standalone.md
