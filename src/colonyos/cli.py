@@ -237,9 +237,10 @@ def app(ctx: click.Context) -> None:
     """ColonyOS — autonomous agent loop that turns prompts into shipped PRs."""
     _load_dotenv()
     if ctx.invoked_subcommand is None:
-        _show_welcome()
         if sys.stdin.isatty():
             _run_repl()
+        else:
+            _show_welcome()
 
 
 def _repl_command_names() -> set[str]:
@@ -270,40 +271,6 @@ def _invoke_cli_command(tokens: list[str]) -> None:
         click.echo()
     except Exception as exc:
         click.echo(f"Error: {exc}", err=True)
-
-
-def _print_repl_help(command_name: str | None = None) -> None:
-    """Print help for a specific command, or list all commands."""
-    from rich.console import Console
-    from rich.table import Table
-
-    con = Console()
-
-    if command_name:
-        cmd = app.commands.get(command_name)
-        if cmd is None:
-            click.echo(f"Unknown command: {command_name}")
-            return
-        try:
-            app.main(args=[command_name, "--help"], standalone_mode=False)
-        except SystemExit:
-            pass
-        return
-
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column(style="bold green", min_width=16)
-    table.add_column(style="dim")
-
-    for name in sorted(app.commands):
-        cmd = app.commands[name]
-        summary = (cmd.get_short_help_str(limit=60) or "").strip()
-        table.add_row(name, summary)
-
-    con.print()
-    con.print(table)
-    con.print()
-    con.print("[dim]Type a command with args, or type a feature description to build it.[/dim]")
-    con.print()
 
 
 def _handle_routed_query(
@@ -413,24 +380,16 @@ def _run_repl() -> None:
     registered CLI command, it invokes that command. Otherwise the entire
     line is treated as a feature prompt and sent to the orchestrator.
 
-    Uses prompt_toolkit for a fixed-bottom input with output scrolling above,
-    styled prompt, history, and tab completion.
+    Uses a full-screen prompt_toolkit Application with a persistent input bar
+    pinned at the bottom and a scrollable output pane on top.
     """
     import asyncio
     asyncio.run(_async_repl())
 
 
 async def _async_repl() -> None:
-    """Async REPL loop powered by prompt_toolkit."""
-    import asyncio
-    import queue as _queue_mod
-    import shlex
-
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.completion import WordCompleter
-    from prompt_toolkit.formatted_text import HTML
-    from prompt_toolkit.history import FileHistory
-    from prompt_toolkit.patch_stdout import patch_stdout
+    """Async REPL loop powered by prompt_toolkit full-screen Application."""
+    from colonyos.repl import ReplApp
 
     repo_root = _find_repo_root()
     config_path = repo_root / ".colonyos" / "config.yaml"
@@ -444,206 +403,14 @@ async def _async_repl() -> None:
         return
 
     command_names = _repl_top_level_names()
-    all_completions = sorted(command_names | {"help", "exit", "quit"})
 
-    session: PromptSession[str] = PromptSession(
-        history=FileHistory(str(REPL_HISTORY_PATH)),
-        completer=WordCompleter(all_completions, sentence=True),
+    repl = ReplApp(
+        config=config,
+        repo_root=repo_root,
+        command_names=command_names,
+        history_path=REPL_HISTORY_PATH,
     )
-
-    session_cost = 0.0
-    is_running = False
-
-    def _idle_prompt() -> HTML:
-        cost = f"${session_cost:.2f}"
-        return HTML(f'<ansigreen>[{cost}]</ansigreen><ansibrightcyan><b> › </b></ansibrightcyan>')
-
-    def _run_prompt() -> HTML:
-        cost = f"${session_cost:.2f}"
-        return HTML(f'<ansigreen>[{cost}]</ansigreen><ansiyellow><b> agent running › </b></ansiyellow>')
-
-    def _bottom_toolbar() -> HTML:
-        if is_running:
-            return HTML(
-                '<b>Enter</b> send message to agent  |  '
-                '<b>Ctrl+C</b> interrupt'
-            )
-        return HTML(
-            'Type a command, feature, or <b>help</b>  |  '
-            '<b>↑↓</b> history  |  '
-            '<b>Tab</b> complete'
-        )
-
-    click.echo(click.style(
-        'Type a command, a feature to build, or "help" for available commands.',
-        dim=True,
-    ))
-
-    with patch_stdout(raw=True):
-        while True:
-            try:
-                user_input = await session.prompt_async(
-                    _idle_prompt,
-                    bottom_toolbar=_bottom_toolbar,
-                )
-            except (EOFError, KeyboardInterrupt):
-                break
-
-            stripped = user_input.strip()
-            if not stripped:
-                continue
-            if stripped.lower() in ("quit", "exit"):
-                break
-
-            # --- help ---
-            if stripped.lower() == "help":
-                _print_repl_help()
-                continue
-            if stripped.lower().startswith("help "):
-                _print_repl_help(stripped.split(None, 1)[1].strip())
-                continue
-
-            # --- command routing ---
-            try:
-                tokens = shlex.split(stripped)
-            except ValueError:
-                tokens = stripped.split()
-
-            if tokens and tokens[0] in command_names:
-                if tokens[0] in ("run", "r"):
-                    click.echo(click.style(
-                        "Tip: just type your prompt directly — "
-                        "the REPL handles routing automatically.",
-                        fg="yellow",
-                    ))
-                    if len(tokens) > 1:
-                        stripped = " ".join(tokens[1:])
-                    else:
-                        continue
-                else:
-                    try:
-                        await asyncio.to_thread(_invoke_cli_command, tokens)
-                    except KeyboardInterrupt:
-                        click.echo(click.style(
-                            "\nCommand interrupted. Returning to prompt.",
-                            dim=True,
-                        ))
-                    continue
-
-            # --- intent routing for feature prompts ---
-            if config.router.enabled:
-                try:
-                    handled = await asyncio.to_thread(
-                        _handle_routed_query,
-                        stripped, config, repo_root, source="repl",
-                    )
-                except KeyboardInterrupt:
-                    click.echo(click.style(
-                        "\nInterrupted. Returning to prompt.",
-                        dim=True,
-                    ))
-                    continue
-                if handled is not None:
-                    text, cost = handled
-                    session_cost += cost
-                    click.echo()
-                    click.echo(text)
-                    continue
-
-            # --- feature prompt (default) ---
-            per_run_cap = config.budget.per_run
-            if not config.auto_approve:
-                try:
-                    confirm = await session.prompt_async(
-                        HTML(
-                            f'Max cost: <ansigreen>${per_run_cap:.2f}</ansigreen>'
-                            f' (per_run cap). Proceed? [Y/n] '
-                        ),
-                    )
-                except (EOFError, KeyboardInterrupt):
-                    break
-                if confirm.strip().lower() in ("n", "no"):
-                    continue
-
-            # --- run orchestrator in background thread, keep prompt active ---
-            is_running = True
-            input_queue: _queue_mod.Queue[str] = _queue_mod.Queue()
-
-            async def _run_agent(
-                _prompt: str = stripped,
-                _queue: _queue_mod.Queue[str] = input_queue,
-            ) -> RunLog:
-                return await asyncio.to_thread(
-                    run_orchestrator,
-                    _prompt,
-                    repo_root=repo_root,
-                    config=config,
-                    verbose=True,
-                    interactive=True,
-                    external_input_queue=_queue,
-                )
-
-            run_task = asyncio.create_task(_run_agent())
-
-            # Accept mid-run messages while agent is working.
-            # We keep a prompt visible; asyncio.wait lets us react to
-            # whichever finishes first (user input or agent completion)
-            # without flickering the prompt on a timer.
-            try:
-                while not run_task.done():
-                    prompt_task = asyncio.create_task(
-                        session.prompt_async(
-                            _run_prompt,
-                            bottom_toolbar=_bottom_toolbar,
-                        )
-                    )
-                    done, _pending = await asyncio.wait(
-                        {prompt_task, run_task},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-
-                    if prompt_task in done:
-                        try:
-                            msg = prompt_task.result()
-                        except (KeyboardInterrupt, EOFError):
-                            run_task.cancel()
-                            try:
-                                await run_task
-                            except (asyncio.CancelledError, Exception):
-                                pass
-                            click.echo(click.style(
-                                "\nRun interrupted. Returning to prompt.",
-                                dim=True,
-                            ))
-                            break
-                        msg_stripped = msg.strip()
-                        if msg_stripped:
-                            input_queue.put(msg_stripped)
-                            click.echo(click.style(f"  [you] {msg_stripped}", dim=True))
-                    else:
-                        prompt_task.cancel()
-                        try:
-                            await prompt_task
-                        except (asyncio.CancelledError, EOFError):
-                            pass
-            finally:
-                is_running = False
-
-            if run_task.done() and not run_task.cancelled():
-                try:
-                    log = run_task.result()
-                    session_cost += log.total_cost_usd
-                    _print_run_summary(log)
-                except KeyboardInterrupt:
-                    click.echo(click.style(
-                        "\nRun interrupted. Returning to prompt.",
-                        dim=True,
-                    ))
-                except Exception as exc:
-                    click.echo(click.style(
-                        f"\nRun failed: {exc}",
-                        fg="red",
-                    ))
+    await repl.run()
 
 
 @app.command()

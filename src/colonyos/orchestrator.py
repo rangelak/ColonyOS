@@ -5,6 +5,7 @@ import queue
 import re
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from hashlib import sha1
 from pathlib import Path
@@ -2472,6 +2473,7 @@ def run(
     base_branch: str | None = None,
     interactive: bool = True,
     external_input_queue: "queue.Queue[str] | None" = None,
+    cancel_event: "threading.Event | None" = None,
 ) -> RunLog:
     """Execute the full orchestration loop: plan -> implement -> review -> deliver.
 
@@ -2617,6 +2619,7 @@ def run(
             _make_ui=_make_ui,
             interactive=interactive,
             external_input_queue=external_input_queue,
+            cancel_event=cancel_event,
         )
     except KeyboardInterrupt:
         _log("Interrupted — saving run state...")
@@ -2679,8 +2682,13 @@ def _run_pipeline(
     _make_ui: Callable[..., PhaseUI | NullUI | None],
     interactive: bool = True,
     external_input_queue: queue.Queue[str] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> RunLog:
     """Execute the pipeline phases. Extracted from run() for try/finally branch rollback."""
+
+    def _check_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise KeyboardInterrupt("Pipeline cancelled by user")
 
     # --- Interactive input setup ---
     input_reader: InputReader | None = None
@@ -2716,8 +2724,9 @@ def _run_pipeline(
                 **kwargs,  # type: ignore[arg-type]
                 input_queue=_active_queue,
                 on_user_input=_on_user_input,
+                cancel_event=cancel_event,
             )
-        return run_phase_sync(phase, prompt, **kwargs)  # type: ignore[arg-type]
+        return run_phase_sync(phase, prompt, **kwargs, cancel_event=cancel_event)  # type: ignore[arg-type]
 
     def _append_phase(result: PhaseResult) -> None:
         """Append a phase result and persist immediately so progress survives crashes."""
@@ -2726,6 +2735,7 @@ def _run_pipeline(
 
     # --- Phase 1: Plan ---
     _touch_heartbeat(repo_root)
+    _check_cancelled()
     if "plan" in skip_phases:
         _log("Skipping plan phase (already completed in previous run)")
     elif from_prd:
@@ -2782,6 +2792,7 @@ def _run_pipeline(
 
     # --- Phase 2: Implement ---
     _touch_heartbeat(repo_root)
+    _check_cancelled()
     if "implement" in skip_phases:
         _log("Skipping implement phase (already completed in previous run)")
     else:
@@ -2831,6 +2842,7 @@ def _run_pipeline(
 
     # --- Phase 3: Review/Fix Loop ---
     _touch_heartbeat(repo_root)
+    _check_cancelled()
     if "review" in skip_phases:
         _log("Skipping review phase (already completed in previous run)")
     elif config.phases.review:
@@ -3009,6 +3021,7 @@ def _run_pipeline(
 
     # --- Deliver Phase ---
     _touch_heartbeat(repo_root)
+    _check_cancelled()
     if config.phases.deliver:
         deliver_ui = _make_ui()
         if deliver_ui is not None:

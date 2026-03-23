@@ -5,6 +5,7 @@ import logging
 import os
 import queue as _queue_mod
 import sys
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -79,6 +80,7 @@ async def run_phase(
     allowed_tools: list[str] | None = None,
     permission_mode: str = "bypassPermissions",
     ui: PhaseUI | NullUI | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> PhaseResult:
     """Run a single phase by invoking Claude Code with the given prompt and instructions."""
     if allowed_tools is None:
@@ -140,12 +142,17 @@ async def run_phase(
                         ui.on_tool_done()
                         current_tool = None
 
-            elif isinstance(message, AssistantMessage) and ui is not None:
-                ui.on_turn_complete()
+            elif isinstance(message, AssistantMessage):
+                if ui is not None:
+                    ui.on_turn_complete()
+                if cancel_event is not None and cancel_event.is_set():
+                    raise KeyboardInterrupt("Cancelled by user")
 
             elif isinstance(message, ResultMessage):
                 result_msg = message
 
+    except KeyboardInterrupt:
+        raise
     except Exception as exc:
         friendly = _friendly_error(exc)
         error_msg = f"Phase {phase.value} failed: {friendly}"
@@ -215,6 +222,7 @@ def run_phase_sync(
     allowed_tools: list[str] | None = None,
     permission_mode: str = "bypassPermissions",
     ui: PhaseUI | NullUI | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> PhaseResult:
     """Synchronous wrapper around run_phase for use in non-async contexts."""
     return asyncio.run(
@@ -230,6 +238,7 @@ def run_phase_sync(
             allowed_tools=allowed_tools,
             permission_mode=permission_mode,
             ui=ui,
+            cancel_event=cancel_event,
         )
     )
 
@@ -249,6 +258,7 @@ async def run_phase_interactive(
     ui: "PhaseUI | NullUI | None" = None,
     input_queue: _queue_mod.Queue[str] | None = None,
     on_user_input: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> PhaseResult:
     """Run a phase using ClaudeSDKClient for bidirectional multi-turn interaction.
 
@@ -261,6 +271,7 @@ async def run_phase_interactive(
             phase, prompt, cwd=cwd, system_prompt=system_prompt, model=model,
             budget_usd=budget_usd, max_turns=max_turns, agents=agents,
             allowed_tools=allowed_tools, permission_mode=permission_mode, ui=ui,
+            cancel_event=cancel_event,
         )
 
     if allowed_tools is None:
@@ -323,14 +334,20 @@ async def run_phase_interactive(
                                 ui.on_tool_done()
                                 current_tool = None
 
-                    elif isinstance(message, AssistantMessage) and ui is not None:
-                        ui.on_turn_complete()
+                    elif isinstance(message, AssistantMessage):
+                        if ui is not None:
+                            ui.on_turn_complete()
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise KeyboardInterrupt("Cancelled by user")
 
                     elif isinstance(message, ResultMessage):
                         result_msg = message
 
                 if result_msg is None:
                     break
+
+                if cancel_event is not None and cancel_event.is_set():
+                    raise KeyboardInterrupt("Cancelled by user")
 
                 # Agent finished a full response. Check for queued user input
                 # before declaring the phase complete.
@@ -349,6 +366,8 @@ async def run_phase_interactive(
                 else:
                     break
 
+    except KeyboardInterrupt:
+        raise
     except Exception as exc:
         friendly = _friendly_error(exc)
         error_msg = f"Phase {phase.value} failed: {friendly}"
@@ -421,6 +440,7 @@ def run_phase_interactive_sync(
     ui: "PhaseUI | NullUI | None" = None,
     input_queue: _queue_mod.Queue[str] | None = None,
     on_user_input: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> PhaseResult:
     """Synchronous wrapper around run_phase_interactive."""
     return asyncio.run(
@@ -429,6 +449,7 @@ def run_phase_interactive_sync(
             budget_usd=budget_usd, max_turns=max_turns, agents=agents,
             allowed_tools=allowed_tools, permission_mode=permission_mode,
             ui=ui, input_queue=input_queue, on_user_input=on_user_input,
+            cancel_event=cancel_event,
         )
     )
 
