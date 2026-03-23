@@ -248,14 +248,25 @@ class TestSanitizeDisplayText:
 
     def test_newlines_preserved(self) -> None:
         from colonyos.sanitize import sanitize_display_text
-        # Newlines and tabs are typically useful - they're above \x1f
-        # Actually \n is \x0a which is in control char range, but let's
-        # explicitly test and see behavior
+        # Newlines must be preserved so multi-line markdown renders correctly
         result = sanitize_display_text("line1\nline2")
-        # Newlines ARE control characters, so they get stripped
-        assert result == "line1line2"
+        assert result == "line1\nline2"
 
-    def test_tabs_stripped(self) -> None:
+    def test_tabs_preserved(self) -> None:
         from colonyos.sanitize import sanitize_display_text
-        # Tab is \x09, a control character
-        assert sanitize_display_text("col1\tcol2") == "col1col2"
+        # Tabs must be preserved for code block indentation
+        assert sanitize_display_text("col1\tcol2") == "col1\tcol2"
+
+    def test_carriage_return_preserved(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # Carriage return preserved (common in CRLF line endings)
+        assert sanitize_display_text("line1\r\nline2") == "line1\r\nline2"
+
+    def test_multiline_markdown_preserved(self) -> None:
+        from colonyos.sanitize import sanitize_display_text
+        # Multi-line agent text with markdown structure must not collapse
+        text = "# Heading\n\n- item 1\n- item 2\n\n```python\ndef foo():\n\tpass\n```"
+        result = sanitize_display_text(text)
+        assert "# Heading" in result
+        assert "- item 1" in result
+        assert result.count("\n") == text.count("\n")

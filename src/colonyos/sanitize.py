@@ -89,10 +89,13 @@ def sanitize_ci_logs(text: str) -> str:
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 # Regex to strip control characters:
-# - \x00-\x1f: C0 control codes (null, bell, backspace, tab, newline, etc.)
+# - \x00-\x08: C0 control codes before tab (null, bell, backspace, etc.)
+# - \x0b-\x0c: vertical tab, form feed (between \n and \r)
+# - \x0e-\x1f: C0 control codes after carriage return
 # - \x7f: DEL character
 # - \x80-\x9f: C1 control codes
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# Preserves \t (\x09), \n (\x0a), and \r (\x0d) for display formatting.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
 
 def sanitize_display_text(text: str) -> str:

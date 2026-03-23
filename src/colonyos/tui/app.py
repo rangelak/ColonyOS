@@ -98,7 +98,7 @@ class AssistantApp(App):
             self.run_worker(
                 lambda: callback(prompt),
                 thread=True,
-                exclusive=False,
+                exclusive=True,
             )
 
     async def on_unmount(self) -> None:
@@ -171,7 +171,7 @@ class AssistantApp(App):
             self.run_worker(
                 lambda: self._run_callback(text),  # type: ignore[arg-type]
                 thread=True,
-                exclusive=False,
+                exclusive=True,
             )
 
     # -----------------------------------------------------------------
