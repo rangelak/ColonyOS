@@ -1708,6 +1708,18 @@ class TestTuiCommandHandling:
         assert should_exit is False
         assert output == "status output"
 
+    def test_unsupported_command_is_rejected(self) -> None:
+        from colonyos.cli import _handle_tui_command
+
+        handled, output, should_exit = _handle_tui_command(
+            "init --quick",
+            config=ColonyConfig(),
+        )
+
+        assert handled is True
+        assert should_exit is False
+        assert "not supported inside the TUI" in (output or "")
+
 
 class TestCIFixCommand:
     def test_help_shows_options(self, runner: CliRunner):

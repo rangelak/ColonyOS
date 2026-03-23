@@ -41,6 +41,17 @@ async def test_status_bar_set_phase():
 
 
 @pytest.mark.asyncio
+async def test_status_bar_set_phase_renders_extra():
+    """set_phase should render any extra phase metadata."""
+    async with StatusBarApp().run_test() as pilot:
+        bar = pilot.app.query_one(StatusBar)
+        bar.set_phase("Planning", budget=1.0, model="opus", extra="branch: feat/tui")
+        await pilot.pause()
+
+        assert "branch: feat/tui" in bar._last_rendered
+
+
+@pytest.mark.asyncio
 async def test_status_bar_set_complete_accumulates_cost():
     """set_complete should accumulate cost and stop the running state."""
     async with StatusBarApp().run_test() as pilot:
@@ -102,6 +113,7 @@ async def test_status_bar_set_error():
         assert bar.is_running is False
         assert bar.error_msg == "Budget exceeded"
         assert "Budget exceeded" in bar._last_rendered
+        assert bar.phase_name == ""
 
 
 @pytest.mark.asyncio
@@ -114,6 +126,23 @@ async def test_status_bar_shows_cost_when_idle():
         await pilot.pause()
 
         assert "$0.75" in bar._last_rendered
+        assert "Planning" not in bar._last_rendered
+
+
+@pytest.mark.asyncio
+async def test_status_bar_returns_to_idle_animation_after_complete():
+    """Completing a phase should restore the idle colony banner state."""
+    async with StatusBarApp().run_test() as pilot:
+        bar = pilot.app.query_one(StatusBar)
+        bar.set_phase("Planning", model="opus", extra="branch: feat/tui")
+        bar.set_complete(cost=0.25, turns=1, duration=2.0)
+        await pilot.pause()
+
+        assert not bar.is_running
+        assert bar.phase_name == ""
+        assert bar.phase_model == ""
+        assert bar.phase_extra == ""
+        assert "colony" in bar._last_rendered.lower()
 
 
 @pytest.mark.asyncio

@@ -137,8 +137,13 @@ class AssistantApp(App):
                 break
 
             if isinstance(msg, PhaseHeaderMsg):
-                status_bar.set_phase(msg.phase_name, msg.budget, msg.model)
-                transcript.append_phase_header(msg.phase_name, msg.budget, msg.model)
+                status_bar.set_phase(msg.phase_name, msg.budget, msg.model, msg.extra)
+                transcript.append_phase_header(
+                    msg.phase_name,
+                    msg.budget,
+                    msg.model,
+                    msg.extra,
+                )
 
             elif isinstance(msg, ToolLineMsg):
                 transcript.append_tool_line(msg.tool_name, msg.arg, msg.style)
@@ -158,7 +163,7 @@ class AssistantApp(App):
                 transcript.append_phase_error(msg.error)
 
             elif isinstance(msg, TurnCompleteMsg):
-                status_bar.increment_turn()
+                status_bar.set_turn_count(msg.turn_number)
 
             elif isinstance(msg, UserInjectionMsg):
                 transcript.append_injected_message(msg.text)
@@ -179,6 +184,12 @@ class AssistantApp(App):
             self._inject_callback(text)
             return
 
+        if self._run_active:
+            self.query_one(TranscriptView).append_notice(
+                "A run is already active; wait for it to finish before starting another.",
+            )
+            return
+
         self.query_one(TranscriptView).append_user_message(text)
         self._start_run(text)
 
@@ -197,7 +208,7 @@ class AssistantApp(App):
         status_bar = self.query_one(StatusBar)
         status_bar.set_error("Cancelled by user")
         transcript = self.query_one(TranscriptView)
-        transcript.append_phase_error("Run cancelled by user")
+        transcript.append_notice("Run cancelled by user")
         self._run_active = False
         if self._cancel_callback is not None:
             self._cancel_callback()

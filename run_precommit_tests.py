@@ -40,6 +40,36 @@ def _tui_suite() -> list[str]:
     )
 
 
+def _python_candidates() -> list[str]:
+    """Return likely Python executables in preference order."""
+    candidates: list[str] = []
+    repo_python = REPO_ROOT / ".venv" / "bin" / "python"
+    if repo_python.exists():
+        candidates.append(str(repo_python))
+    candidates.append(sys.executable)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for candidate in candidates:
+        if candidate not in seen:
+            unique.append(candidate)
+            seen.add(candidate)
+    return unique
+
+
+def _select_python() -> str | None:
+    """Pick a Python interpreter that can import pytest."""
+    for candidate in _python_candidates():
+        result = subprocess.run(
+            [candidate, "-c", "import pytest"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return candidate
+    return None
+
+
 def _targets_for_path(path: Path) -> set[str]:
     """Infer the most relevant pytest targets for a staged path."""
     targets: set[str] = set()
@@ -47,6 +77,11 @@ def _targets_for_path(path: Path) -> set[str]:
 
     if path_str.startswith("tests/") and path.suffix == ".py":
         targets.add(path_str)
+        return targets
+
+    if path_str == "run_precommit_tests.py":
+        if target := _existing("tests/test_precommit_hook.py"):
+            targets.add(target)
         return targets
 
     if path_str.startswith("src/colonyos/tui/"):
@@ -118,7 +153,16 @@ def main() -> int:
     for target in targets:
         print(f"  - {target}")
 
-    cmd = [".venv/bin/python", "-m", "pytest", "--tb=short", "-q", *targets]
+    python = _select_python()
+    if python is None:
+        print(
+            "pre-commit pytest: could not find a Python interpreter with pytest installed. "
+            "Install dev dependencies (for example `pip install -e \".[dev]\"`).",
+            file=sys.stderr,
+        )
+        return 1
+
+    cmd = [python, "-m", "pytest", "--tb=short", "-q", *targets]
     completed = subprocess.run(cmd, cwd=REPO_ROOT)
     return completed.returncode
 

@@ -3,7 +3,7 @@ repos:
     hooks:
       - id: pytest
         name: pytest-targeted
-        entry: .venv/bin/python run_precommit_tests.py
+        entry: python3 run_precommit_tests.py
         language: system
         pass_filenames: false
         always_run: true

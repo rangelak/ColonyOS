@@ -676,7 +676,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The `[dev]` extra installs `pytest`, `pre-commit`, and the dashboard dependencies. A pre-commit hook runs `pytest` before every commit to prevent regressions.
+The `[dev]` extra installs `pytest`, `pre-commit`, and the dashboard dependencies. The pre-commit hook runs a targeted pytest selection based on staged files so local commits stay fast, while CI still runs the full suite.
 
 ### Releasing
 

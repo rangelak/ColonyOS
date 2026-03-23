@@ -47,6 +47,14 @@ class TestTranscriptView:
             # _lines is the internal list of renderables in RichLog
             assert len(log.lines) >= 2  # noqa: SLF001
 
+    async def test_append_phase_header_with_extra(self, require_tui: None) -> None:
+        """Phase header extra metadata should render without error."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv.append_phase_header("implement", 5.0, "opus", "branch: feat/tui")
+            log = tv
+            assert len(log.lines) >= 2  # noqa: SLF001
+
     async def test_append_tool_line(self, require_tui: None) -> None:
         """Tool line should appear with the right content."""
         async with TranscriptTestApp().run_test() as pilot:
@@ -120,6 +128,14 @@ class TestTranscriptView:
             tv.append_user_message("  ")
             log = tv
             assert len(log.lines) == 0  # noqa: SLF001
+
+    async def test_append_notice(self, require_tui: None) -> None:
+        """System notices should render distinctly."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv.append_notice("wait for the run to finish")
+            log = tv
+            assert len(log.lines) >= 3  # noqa: SLF001
 
     async def test_clear_transcript(self, require_tui: None) -> None:
         """clear_transcript should remove all entries."""

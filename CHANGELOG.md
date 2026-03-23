@@ -515,11 +515,11 @@ auto-close on merge, and `colonyos status` displays source issue URLs.
 
 ## 20260317_215200 — Pre-commit hook for test suite
 
-Added a `pre-commit` hook that runs `pytest` before every commit to prevent
+Added a `pre-commit` hook to run project tests before commits and prevent
 regressions from being committed.
 
 **Created:**
-- `.pre-commit-config.yaml` — Local hook running `pytest --tb=short -q`
+- `.pre-commit-config.yaml` — Local hook entry for the pre-commit pytest runner
 
 **Modified:**
 - `pyproject.toml` — Added `[project.optional-dependencies] dev` with `pre-commit` and `pytest`

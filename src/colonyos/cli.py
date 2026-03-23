@@ -319,6 +319,17 @@ def _capture_click_output(callback, *args, **kwargs) -> str:  # noqa: ANN001, AN
     return "\n".join(part for part in (output, error) if part)
 
 
+_SAFE_TUI_COMMANDS = {
+    "auto",
+    "doctor",
+    "help",
+    "queue",
+    "show",
+    "stats",
+    "status",
+}
+
+
 def _handle_tui_command(text: str, *, config: ColonyConfig) -> tuple[bool, str | None, bool]:
     """Handle REPL-style commands from the Textual TUI.
 
@@ -369,6 +380,13 @@ def _handle_tui_command(text: str, *, config: ColonyConfig) -> tuple[bool, str |
         return (
             True,
             "`auto` inside the TUI needs `--no-confirm` unless `auto_approve` is enabled.",
+            False,
+        )
+    if command_name not in _SAFE_TUI_COMMANDS:
+        return (
+            True,
+            f"`{command_name}` is not supported inside the TUI. Run "
+            f"`colonyos {command_name}` from a normal shell.",
             False,
         )
 

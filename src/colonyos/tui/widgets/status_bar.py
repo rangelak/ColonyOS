@@ -37,19 +37,10 @@ class StatusBar(Static):
         increment_turn() — bump the turn counter for the active phase
     """
 
-    DEFAULT_CSS = """
-    StatusBar {
-        dock: top;
-        height: 1;
-        background: #12161d;
-        color: #7c8896;
-        padding: 0 1;
-    }
-    """
-
     # Reactive attributes drive automatic re-render
     phase_name: reactive[str] = reactive("")
     phase_model: reactive[str] = reactive("")
+    phase_extra: reactive[str] = reactive("")
     total_cost: reactive[float] = reactive(0.0)
     turn_count: reactive[int] = reactive(0)
     is_running: reactive[bool] = reactive(False)
@@ -109,10 +100,17 @@ class StatusBar(Static):
             self._idle_timer.stop()
             self._idle_timer = None
 
-    def set_phase(self, name: str, budget: float | None = None, model: str = "") -> None:
+    def set_phase(
+        self,
+        name: str,
+        budget: float | None = None,
+        model: str = "",
+        extra: str = "",
+    ) -> None:
         """Begin tracking a new phase."""
         self.phase_name = name
         self.phase_model = model
+        self.phase_extra = extra
         self.turn_count = 0
         self.is_running = True
         self.error_msg = ""
@@ -127,6 +125,9 @@ class StatusBar(Static):
         self.total_cost += cost
         self.turn_count = turns
         self.is_running = False
+        self.phase_name = ""
+        self.phase_model = ""
+        self.phase_extra = ""
         self._last_duration = duration
         self._phase_start = None
         self._start_idle_animation()
@@ -136,6 +137,9 @@ class StatusBar(Static):
         """Display an error state on the status bar."""
         self._stop_spinner()
         self.is_running = False
+        self.phase_name = ""
+        self.phase_model = ""
+        self.phase_extra = ""
         self.error_msg = msg
         self._phase_start = None
         self._stop_idle_animation()
@@ -144,6 +148,11 @@ class StatusBar(Static):
     def increment_turn(self) -> None:
         """Bump the turn counter for the active phase."""
         self.turn_count += 1
+        self._render_bar()
+
+    def set_turn_count(self, turn_number: int) -> None:
+        """Set the turn counter to the value reported by the adapter."""
+        self.turn_count = turn_number
         self._render_bar()
 
     # -----------------------------------------------------------------
@@ -200,6 +209,9 @@ class StatusBar(Static):
         # Model
         if self.phase_model:
             text.append(f"  ·  {self.phase_model}", style=COLOR_DIM)
+
+        if self.phase_extra:
+            text.append(f"  ·  {self.phase_extra}", style=COLOR_DIM)
 
         # Cost
         text.append(f"  ·  ${self.total_cost:.2f}", style=COLOR_DIM)

@@ -83,6 +83,7 @@ class TestAppMounts:
             await pilot.pause()
             hint = app.query_one(HintBar)
             rendered = str(hint.render())
+            assert "Ctrl+L clear" in rendered
             assert "auto --no-confirm" in rendered
             assert "status" in rendered
             assert "help" in rendered
@@ -105,6 +106,25 @@ class TestQueueToTranscript:
             transcript = app.query_one(TranscriptView)
             log = transcript
             assert len(log.lines) > 0
+
+    @pytest.mark.asyncio
+    async def test_phase_header_extra_renders(self) -> None:
+        """PhaseHeaderMsg.extra should be preserved in the transcript and status bar."""
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            app.event_queue.sync_q.put(
+                PhaseHeaderMsg(
+                    phase_name="implement",
+                    budget=2.0,
+                    model="opus",
+                    extra="branch: feat/tui",
+                )
+            )
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+            status = app.query_one(StatusBar)
+            assert "branch: feat/tui" in status._last_rendered
 
     @pytest.mark.asyncio
     async def test_tool_line_renders(self) -> None:
@@ -222,6 +242,26 @@ class TestComposerSubmission:
             await pilot.press("enter")
             await pilot.pause()
             assert received == ["hi"]
+
+    @pytest.mark.asyncio
+    async def test_submit_during_active_run_without_injection_is_blocked(self) -> None:
+        """Submitting while active without injection support should not start a second run."""
+        received: list[str] = []
+
+        def on_submit(text: str) -> None:
+            received.append(text)
+
+        app = AssistantApp(run_callback=on_submit)
+        app._run_active = True
+        async with app.run_test() as pilot:
+            composer = app.query_one(Composer)
+            ta = composer.query_one("TextArea")
+            ta.focus()
+            await pilot.pause()
+            await pilot.press("h", "i")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert received == []
 
 
 class TestKeybindings:

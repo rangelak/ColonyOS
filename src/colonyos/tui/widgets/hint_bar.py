@@ -11,21 +11,7 @@ from colonyos.tui.styles import COLOR_ACCENT, COLOR_DIM
 
 
 class HintBar(Static):
-    """Single-line bar showing keyboard shortcut hints.
-
-    Renders dim text so it stays out of the way while remaining
-    discoverable for new users.
-    """
-
-    DEFAULT_CSS = """
-    HintBar {
-        height: 2;
-        dock: bottom;
-        background: #12161d;
-        color: #7c8896;
-        padding: 0 2;
-    }
-    """
+    """Two-line footer showing command examples and keyboard shortcuts."""
 
     def __init__(self, **kwargs) -> None:  # noqa: ANN003
         super().__init__(**kwargs)

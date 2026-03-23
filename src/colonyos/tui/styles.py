@@ -95,7 +95,7 @@ Composer:focus-within _ComposerTextArea {
 
 HintBar {
     dock: bottom;
-    height: 1;
+    height: 2;
     background: #12161d;
     color: #7c8896;
     padding: 0 1;

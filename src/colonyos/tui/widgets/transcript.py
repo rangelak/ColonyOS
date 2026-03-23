@@ -71,6 +71,7 @@ class TranscriptView(RichLog):
         name: str,
         budget: float,
         model: str,
+        extra: str = "",
     ) -> None:
         """Render a phase boundary with name, budget, and model."""
         rule = Text()
@@ -80,6 +81,8 @@ class TranscriptView(RichLog):
         header.append("  Phase: ", style=COLOR_COLONY)
         header.append(name, style="bold")
         header.append(f"  ·  ${budget:.2f} budget · {model}", style=COLOR_DIM)
+        if extra:
+            header.append(f" · {extra}", style=COLOR_DIM)
         self.write(header)
         self._scroll_to_end()
 
@@ -161,6 +164,19 @@ class TranscriptView(RichLog):
         line.append("  You (mid-run): ", style=f"bold {COLOR_ACCENT}")
         line.append(text, style=COLOR_USER_MESSAGE)
         self.write(line)
+        self._scroll_to_end()
+
+    def append_notice(self, text: str) -> None:
+        """Render a neutral system notice for non-error feedback."""
+        text = sanitize_display_text(text)
+        if not text:
+            return
+        line = Text()
+        line.append("  ! ", style=f"bold {COLOR_ACCENT}")
+        line.append(text, style=COLOR_DIM)
+        self.write(Text())
+        self.write(line)
+        self.write(Text())
         self._scroll_to_end()
 
     def append_welcome_banner(self) -> None:
