@@ -625,7 +625,8 @@ def init(
 @click.option("--offline", is_flag=True, help="Skip network calls in pre-flight checks.")
 @click.option("--force", is_flag=True, help="Bypass pre-flight checks (for power users).")
 @click.option("--no-triage", is_flag=True, help="Skip intent routing and run the full pipeline directly.")
-def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool, offline: bool, force: bool, no_triage: bool) -> None:
+@click.option("--tui", "use_tui", is_flag=True, help="Launch interactive terminal UI instead of streaming output.")
+def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool, offline: bool, force: bool, no_triage: bool, use_tui: bool = False) -> None:
     """Run the autonomous agent loop for a feature prompt."""
     # Mutual exclusivity checks
     if resume_run_id:
@@ -657,6 +658,18 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             err=True,
         )
         sys.exit(1)
+
+    # If --tui flag is set, delegate to the TUI launcher
+    if use_tui:
+        try:
+            _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
+        except ImportError as exc:
+            click.echo(
+                f"Error: {exc}\n\nInstall the TUI extra: pip install colonyos[tui]",
+                err=True,
+            )
+            sys.exit(1)
+        return
 
     if resume_run_id:
         resume_state = prepare_resume(repo_root, resume_run_id)
@@ -4195,3 +4208,104 @@ def _get_latest_commit_sha(repo_root: Path) -> str:
         return result.stdout.strip()
     except Exception:
         return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# TUI (Textual) interactive terminal UI
+# ---------------------------------------------------------------------------
+
+
+def _launch_tui(
+    repo_root: Path,
+    config: ColonyConfig,
+    prompt: str | None = None,
+    verbose: bool = False,
+) -> None:
+    """Launch the interactive Textual TUI.
+
+    Imports the ``colonyos.tui`` package lazily so that the ``textual``
+    dependency is only required when the TUI is actually used.
+
+    Raises:
+        ImportError: If textual or janus is not installed.
+    """
+    from colonyos.tui import _check_dependencies  # noqa: F401 — triggers check
+    from colonyos.tui.app import AssistantApp
+    from colonyos.tui.adapter import TextualUI
+
+    def _run_callback(text: str) -> None:
+        """Run the orchestrator in a worker thread when the user submits input."""
+        import janus
+
+        app_instance = AssistantApp._current_instance
+        if app_instance is None:
+            return
+        queue = app_instance.event_queue
+        adapter = TextualUI(queue.sync_q)
+
+        def _ui_factory(prefix: str = "") -> TextualUI:
+            return adapter
+
+        run_orchestrator(
+            text,
+            repo_root=repo_root,
+            config=config,
+            verbose=verbose,
+            ui_factory=_ui_factory,
+        )
+
+    app_instance = AssistantApp(run_callback=_run_callback)
+    AssistantApp._current_instance = app_instance  # type: ignore[attr-defined]
+
+    if prompt:
+        # If a prompt was given, schedule it to run after mount
+        original_on_mount = app_instance.on_mount
+
+        async def _on_mount_with_prompt() -> None:
+            await original_on_mount()
+            # Submit the prompt as if the user typed it
+            from colonyos.tui.widgets.transcript import TranscriptView
+
+            transcript = app_instance.query_one(TranscriptView)
+            transcript.append_user_message(prompt)
+
+            app_instance.run_worker(
+                lambda: _run_callback(prompt),
+                thread=True,
+                exclusive=False,
+            )
+
+        app_instance.on_mount = _on_mount_with_prompt  # type: ignore[assignment]
+
+    app_instance.run()
+
+
+@app.command()
+@click.argument("prompt", required=False)
+@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
+def tui(prompt: str | None, verbose: bool) -> None:
+    """Launch the interactive terminal UI (Textual TUI).
+
+    Provides a scrollable transcript, multi-line composer, and status bar
+    for real-time pipeline interaction. Requires the ``tui`` extra::
+
+        pip install colonyos[tui]
+    """
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+
+    if not config.project:
+        click.echo(
+            "No ColonyOS config found. Run `colonyos init` first.",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
+    except ImportError as exc:
+        click.echo(
+            f"Error: {exc}\n\nInstall the TUI extra: pip install colonyos[tui]",
+            err=True,
+        )
+        sys.exit(1)
