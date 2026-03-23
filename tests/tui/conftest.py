@@ -27,33 +27,3 @@ def require_tui(tui_available: bool) -> None:
     """Skip the test if tui extras are not installed."""
     if not tui_available:
         pytest.skip("TUI extras not installed (pip install colonyos[tui])")
-
-
-@pytest.fixture()
-def sync_queue():
-    """Create a janus queue and return its sync side for adapter tests."""
-    import asyncio
-    import threading
-
-    import janus
-
-    result = {}
-
-    def _create():
-        asyncio.set_event_loop(asyncio.new_event_loop())
-        _loop = asyncio.get_event_loop()
-        _q = janus.Queue()
-        result["queue"] = _q
-        result["loop"] = _loop
-        _loop.run_forever()
-
-    t = threading.Thread(target=_create, daemon=True)
-    t.start()
-
-    import time
-    time.sleep(0.05)
-
-    yield result.get("queue")
-
-    if result.get("loop"):
-        result["loop"].call_soon_threadsafe(result["loop"].stop)

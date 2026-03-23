@@ -61,7 +61,8 @@ class TestTuiCommand:
         """Should error if colonyos is not initialised."""
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
             result = runner.invoke(app, ["tui"])
-            assert result.exit_code != 0 or "init" in result.output.lower()
+            assert result.exit_code != 0
+            assert "init" in result.output.lower()
 
 
 class TestTuiFlag:

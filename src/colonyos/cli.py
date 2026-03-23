@@ -4235,9 +4235,7 @@ def _launch_tui(
 
     def _run_callback(text: str) -> None:
         """Run the orchestrator in a worker thread when the user submits input."""
-        import janus
-
-        app_instance = AssistantApp._current_instance
+        app_instance = AssistantApp._current_instance  # type: ignore[attr-defined]
         if app_instance is None:
             return
         queue = app_instance.event_queue

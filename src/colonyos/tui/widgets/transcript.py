@@ -7,12 +7,13 @@ renderables for color-coded, structured output.
 
 from __future__ import annotations
 
+import re
+
 from rich.markdown import Markdown
 from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import RichLog
 
-from colonyos.sanitize import sanitize_display_text
 from colonyos.tui.styles import (
     COLOR_DIM,
     COLOR_ERROR,
@@ -85,14 +86,12 @@ class TranscriptView(VerticalScroll):
         """Render a phase boundary with name, budget, and model."""
         if self._rich_log is None:
             return
-        safe_name = sanitize_display_text(name)
-        safe_model = sanitize_display_text(model)
         rule = Text()
         rule.append("─" * 40, style="dim")
         self._rich_log.write(rule)
         header = Text()
-        header.append(f"  Phase: {safe_name}", style="bold")
-        header.append(f"  ${budget:.2f} budget · {safe_model}", style="dim")
+        header.append(f"  Phase: {name}", style="bold")
+        header.append(f"  ${budget:.2f} budget · {model}", style="dim")
         self._rich_log.write(header)
         self._scroll_to_end()
 
@@ -105,13 +104,11 @@ class TranscriptView(VerticalScroll):
         """Render a single tool-call line with a colored dot."""
         if self._rich_log is None:
             return
-        safe_name = sanitize_display_text(name)
-        safe_arg = sanitize_display_text(arg) if arg else ""
         color = style or TOOL_COLORS.get(name, DEFAULT_TOOL_COLOR)
         line = Text()
         line.append("  ")
         line.append("● ", style=color)
-        label = f"{safe_name} {safe_arg}".rstrip() if safe_arg else safe_name
+        label = f"{name} {arg}".rstrip() if arg else name
         line.append(label)
         self._rich_log.write(line)
         self._scroll_to_end()
@@ -120,13 +117,13 @@ class TranscriptView(VerticalScroll):
         """Render a block of agent text, using Markdown if appropriate."""
         if self._rich_log is None:
             return
-        safe = sanitize_display_text(text).strip()
-        if not safe:
+        text = text.strip()
+        if not text:
             return
-        if _looks_like_markdown(safe):
-            self._rich_log.write(Markdown(safe))
+        if _looks_like_markdown(text):
+            self._rich_log.write(Markdown(text))
         else:
-            for raw_line in safe.splitlines():
+            for raw_line in text.splitlines():
                 stripped = raw_line.strip()
                 if stripped:
                     line = Text()
@@ -143,10 +140,9 @@ class TranscriptView(VerticalScroll):
         """Render a phase-completion summary."""
         if self._rich_log is None:
             return
-        safe_duration = sanitize_display_text(duration)
         line = Text()
         line.append("  ✓ ", style=COLOR_SUCCESS)
-        line.append(f"Phase completed  ${cost:.2f} · {turns} turns · {safe_duration}")
+        line.append(f"Phase completed  ${cost:.2f} · {turns} turns · {duration}")
         self._rich_log.write(Text())  # blank separator
         self._rich_log.write(line)
         self._rich_log.write(Text())  # blank separator
@@ -156,10 +152,9 @@ class TranscriptView(VerticalScroll):
         """Render a phase-failure message."""
         if self._rich_log is None:
             return
-        safe = sanitize_display_text(error)
         line = Text()
         line.append("  ✗ ", style=COLOR_ERROR)
-        line.append(f"Phase failed: {safe}")
+        line.append(f"Phase failed: {error}")
         self._rich_log.write(Text())  # blank separator
         self._rich_log.write(line)
         self._rich_log.write(Text())  # blank separator
@@ -169,12 +164,12 @@ class TranscriptView(VerticalScroll):
         """Render a user-submitted message in the transcript."""
         if self._rich_log is None:
             return
-        safe = sanitize_display_text(text).strip()
-        if not safe:
+        text = text.strip()
+        if not text:
             return
         line = Text()
         line.append("  You: ", style=COLOR_USER_MESSAGE)
-        line.append(safe)
+        line.append(text)
         self._rich_log.write(line)
         self._scroll_to_end()
 
@@ -187,8 +182,6 @@ class TranscriptView(VerticalScroll):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-import re  # noqa: E402 — keep at end for readability
 
 _MD_PATTERN = re.compile(
     r"(^#{1,4}\s)|(\*\*.*\*\*)|(\n\d+\.\s)|(\n[-*]\s)|(`[^`]+`)",
