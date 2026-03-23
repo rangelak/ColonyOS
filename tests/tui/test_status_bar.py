@@ -132,17 +132,36 @@ async def test_status_bar_spinner_cycles():
 
 
 @pytest.mark.asyncio
-async def test_status_bar_spinner_does_not_cycle_when_idle():
-    """The spinner should not advance when not running."""
+async def test_status_bar_spinner_timer_not_running_when_idle():
+    """The spinner timer should not be active when no phase is running."""
     async with StatusBarApp().run_test() as pilot:
         bar = pilot.app.query_one(StatusBar)
         assert bar.is_running is False
+        assert bar._spinner_timer is None
 
-        initial_index = bar._spinner_index
-        bar._advance_spinner()
-        bar._advance_spinner()
 
-        assert bar._spinner_index == initial_index
+@pytest.mark.asyncio
+async def test_status_bar_spinner_timer_stops_on_complete():
+    """The spinner timer should stop when a phase completes."""
+    async with StatusBarApp().run_test() as pilot:
+        bar = pilot.app.query_one(StatusBar)
+        bar.set_phase("Planning")
+        assert bar._spinner_timer is not None
+
+        bar.set_complete(cost=0.10, turns=1, duration=5.0)
+        assert bar._spinner_timer is None
+
+
+@pytest.mark.asyncio
+async def test_status_bar_spinner_timer_stops_on_error():
+    """The spinner timer should stop when a phase errors."""
+    async with StatusBarApp().run_test() as pilot:
+        bar = pilot.app.query_one(StatusBar)
+        bar.set_phase("Planning")
+        assert bar._spinner_timer is not None
+
+        bar.set_error("something broke")
+        assert bar._spinner_timer is None
 
 
 @pytest.mark.asyncio

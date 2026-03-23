@@ -51,8 +51,6 @@ class AssistantApp(App):
 
     CSS = APP_CSS
 
-    _current_instance: AssistantApp | None = None
-
     BINDINGS = [
         Binding("ctrl+l", "clear_transcript", "Clear transcript", show=False),
         Binding("escape", "focus_composer", "Focus composer", show=False),
@@ -61,10 +59,12 @@ class AssistantApp(App):
     def __init__(
         self,
         run_callback: Callable[[str], None] | None = None,
+        initial_prompt: str | None = None,
         **kwargs: object,
     ) -> None:
         super().__init__(**kwargs)
         self._run_callback = run_callback
+        self._initial_prompt = initial_prompt
         self._event_queue: janus.Queue[object] | None = None
         self._consumer_task: asyncio.Task[None] | None = None
 
@@ -86,9 +86,20 @@ class AssistantApp(App):
         yield HintBar()
 
     async def on_mount(self) -> None:
-        """Create the event queue and start the consumer loop."""
+        """Create the event queue, start the consumer, and auto-submit initial prompt."""
         self._event_queue = janus.Queue()
         self._consumer_task = asyncio.create_task(self._consume_queue())
+
+        if self._initial_prompt and self._run_callback is not None:
+            transcript = self.query_one(TranscriptView)
+            transcript.append_user_message(self._initial_prompt)
+            prompt = self._initial_prompt
+            callback = self._run_callback
+            self.run_worker(
+                lambda: callback(prompt),
+                thread=True,
+                exclusive=False,
+            )
 
     async def on_unmount(self) -> None:
         """Clean up the consumer task and queue on exit."""

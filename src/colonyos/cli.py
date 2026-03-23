@@ -4233,11 +4233,10 @@ def _launch_tui(
     from colonyos.tui.app import AssistantApp
     from colonyos.tui.adapter import TextualUI
 
+    app_instance = AssistantApp(run_callback=None, initial_prompt=prompt)
+
     def _run_callback(text: str) -> None:
         """Run the orchestrator in a worker thread when the user submits input."""
-        app_instance = AssistantApp._current_instance  # type: ignore[attr-defined]
-        if app_instance is None:
-            return
         queue = app_instance.event_queue
         adapter = TextualUI(queue.sync_q)
 
@@ -4252,29 +4251,7 @@ def _launch_tui(
             ui_factory=_ui_factory,
         )
 
-    app_instance = AssistantApp(run_callback=_run_callback)
-    AssistantApp._current_instance = app_instance  # type: ignore[attr-defined]
-
-    if prompt:
-        # If a prompt was given, schedule it to run after mount
-        original_on_mount = app_instance.on_mount
-
-        async def _on_mount_with_prompt() -> None:
-            await original_on_mount()
-            # Submit the prompt as if the user typed it
-            from colonyos.tui.widgets.transcript import TranscriptView
-
-            transcript = app_instance.query_one(TranscriptView)
-            transcript.append_user_message(prompt)
-
-            app_instance.run_worker(
-                lambda: _run_callback(prompt),
-                thread=True,
-                exclusive=False,
-            )
-
-        app_instance.on_mount = _on_mount_with_prompt  # type: ignore[assignment]
-
+    app_instance._run_callback = _run_callback
     app_instance.run()
 
 

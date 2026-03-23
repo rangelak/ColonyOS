@@ -81,7 +81,7 @@ class TestQueueToTranscript:
             await asyncio.sleep(0.15)
             await pilot.pause()
             transcript = app.query_one(TranscriptView)
-            log = transcript.query_one("#transcript-log")
+            log = transcript
             assert len(log.lines) > 0
 
     @pytest.mark.asyncio
@@ -96,7 +96,7 @@ class TestQueueToTranscript:
             await asyncio.sleep(0.15)
             await pilot.pause()
             transcript = app.query_one(TranscriptView)
-            log = transcript.query_one("#transcript-log")
+            log = transcript
             assert len(log.lines) > 0
 
     @pytest.mark.asyncio
@@ -109,7 +109,7 @@ class TestQueueToTranscript:
             await asyncio.sleep(0.15)
             await pilot.pause()
             transcript = app.query_one(TranscriptView)
-            log = transcript.query_one("#transcript-log")
+            log = transcript
             assert len(log.lines) > 0
 
     @pytest.mark.asyncio
@@ -124,7 +124,7 @@ class TestQueueToTranscript:
             await asyncio.sleep(0.15)
             await pilot.pause()
             transcript = app.query_one(TranscriptView)
-            log = transcript.query_one("#transcript-log")
+            log = transcript
             assert len(log.lines) > 0
 
     @pytest.mark.asyncio
@@ -137,7 +137,7 @@ class TestQueueToTranscript:
             await asyncio.sleep(0.15)
             await pilot.pause()
             transcript = app.query_one(TranscriptView)
-            log = transcript.query_one("#transcript-log")
+            log = transcript
             assert len(log.lines) > 0
 
     @pytest.mark.asyncio
@@ -178,7 +178,7 @@ class TestComposerSubmission:
             await asyncio.sleep(0.15)
             await pilot.pause()
             transcript = app.query_one(TranscriptView)
-            log = transcript.query_one("#transcript-log")
+            log = transcript
             assert len(log.lines) > 0
 
 
@@ -195,7 +195,7 @@ class TestKeybindings:
             await pilot.pause()
             await asyncio.sleep(0.15)
             await pilot.pause()
-            log = transcript.query_one("#transcript-log")
+            log = transcript
             assert len(log.lines) > 0
             await pilot.press("ctrl+l")
             await pilot.pause()

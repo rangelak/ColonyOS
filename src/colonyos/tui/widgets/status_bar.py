@@ -59,19 +59,28 @@ class StatusBar(Static):
         self._last_rendered: str = ""
 
     def on_mount(self) -> None:
-        """Start the spinner timer when the widget mounts."""
-        self._spinner_timer = self.set_interval(0.1, self._advance_spinner)
+        """Render initial idle state on mount."""
+        self._render_bar()
 
     def _advance_spinner(self) -> None:
-        """Cycle through spinner frames while a phase is running."""
-        if not self.is_running:
-            return
+        """Cycle through spinner frames (only called while timer is active)."""
         self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
         self._render_bar()
 
     # -----------------------------------------------------------------
     # Public API
     # -----------------------------------------------------------------
+
+    def _start_spinner(self) -> None:
+        """Start the spinner timer (idempotent)."""
+        if self._spinner_timer is None:
+            self._spinner_timer = self.set_interval(0.1, self._advance_spinner)
+
+    def _stop_spinner(self) -> None:
+        """Stop the spinner timer (idempotent)."""
+        if self._spinner_timer is not None:
+            self._spinner_timer.stop()
+            self._spinner_timer = None
 
     def set_phase(self, name: str, budget: float | None = None, model: str = "") -> None:
         """Begin tracking a new phase."""
@@ -82,10 +91,12 @@ class StatusBar(Static):
         self.error_msg = ""
         self._phase_start = time.monotonic()
         self._spinner_index = 0
+        self._start_spinner()
         self._render_bar()
 
     def set_complete(self, cost: float, turns: int, duration: float) -> None:
         """Mark the current phase as complete."""
+        self._stop_spinner()
         self.total_cost += cost
         self.turn_count = turns
         self.is_running = False
@@ -95,6 +106,7 @@ class StatusBar(Static):
 
     def set_error(self, msg: str) -> None:
         """Display an error state on the status bar."""
+        self._stop_spinner()
         self.is_running = False
         self.error_msg = msg
         self._phase_start = None
@@ -173,18 +185,3 @@ class StatusBar(Static):
         self._last_rendered = text.plain
         self.update(text)
 
-    # Reactive watchers — trigger re-render on any change
-    def watch_phase_name(self) -> None:
-        self._render_bar()
-
-    def watch_is_running(self) -> None:
-        self._render_bar()
-
-    def watch_total_cost(self) -> None:
-        self._render_bar()
-
-    def watch_turn_count(self) -> None:
-        self._render_bar()
-
-    def watch_error_msg(self) -> None:
-        self._render_bar()
