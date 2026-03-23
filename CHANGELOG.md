@@ -1,5 +1,32 @@
 # Changelog
 
+## 20260323_201500 — Interactive Terminal UI (Textual TUI)
+
+Adds a full interactive terminal UI built on Textual, giving users a mission-control
+experience for ColonyOS pipeline runs. Features a scrollable execution transcript,
+multi-line composer for mid-run input, live status bar with phase/cost/turns/elapsed
+display, and color-coded event rendering. Launched via `colonyos tui` or `colonyos run --tui`.
+
+**Created:**
+- `src/colonyos/tui/__init__.py` — Package init with optional-dependency guard
+- `src/colonyos/tui/app.py` — AssistantApp main Textual application shell
+- `src/colonyos/tui/adapter.py` — Bridge between PhaseUI callbacks and TUI widgets
+- `src/colonyos/tui/styles.py` — TCSS stylesheet for the TUI layout
+- `src/colonyos/tui/widgets/composer.py` — Multi-line input with auto-grow
+- `src/colonyos/tui/widgets/hint_bar.py` — Keyboard shortcut hints
+- `src/colonyos/tui/widgets/status_bar.py` — Persistent phase/cost/turns/elapsed bar
+- `src/colonyos/tui/widgets/transcript.py` — Scrollable event display with auto-scroll
+- `tests/tui/` — Full test suite for all TUI components
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `colonyos tui` command and `--tui` flag
+- `src/colonyos/sanitize.py` — Fixed newline stripping bug
+- `pyproject.toml` — Added `[tui]` optional dependency group
+- `README.md` — Updated with TUI documentation
+
+**PRD:** `cOS_prds/20260323_190105_prd_give_me_fucking_awesome_ux_that_is_a_fucking_amazing_experience_and_it_gets_peop.md`
+**Tasks:** `cOS_tasks/20260323_190105_tasks_give_me_fucking_awesome_ux_that_is_a_fucking_amazing_experience_and_it_gets_peop.md`
+
 ## 20260321_211500 — Intent Router Agent
 
 Adds a lightweight intent router that classifies user input before running the full pipeline.
