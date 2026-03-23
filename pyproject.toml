@@ -26,8 +26,9 @@ where = ["src"]
 colonyos = ["instructions/*.md", "web_dist/**"]
 
 [project.optional-dependencies]
-dev = ["pre-commit>=4.0", "pytest>=8.0", "pytest-xdist>=3.0", "colonyos[ui]"]
+dev = ["pre-commit>=4.0", "pytest>=8.0", "pytest-xdist>=3.0", "colonyos[ui]", "colonyos[tui]"]
 slack = ["slack-bolt[socket-mode]>=1.18"]
+tui = ["textual>=0.40", "janus>=1.0"]
 ui = ["fastapi>=0.100", "uvicorn>=0.20"]
 
 [tool.pytest.ini_options]
