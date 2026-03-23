@@ -1,8 +1,6 @@
 """Interactive Terminal UI for ColonyOS (Textual TUI).
 
-This package requires the ``tui`` extra::
-
-    pip install colonyos[tui]
+This package is optional — install with ``pip install colonyos[tui]``.
 
 If Textual is not installed, importing this package raises a clear error.
 """

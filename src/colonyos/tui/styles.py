@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-# ---------------------------------------------------------------------------
-# Color constants — match TOOL_STYLE from ui.py
-# ---------------------------------------------------------------------------
-
+# Matches the TOOL_STYLE map from colonyos.ui
 TOOL_COLORS: dict[str, str] = {
     "Read": "cyan",
     "Write": "green",
@@ -31,10 +28,7 @@ COLOR_USER_MESSAGE = "bright_white"
 # Spinner frames for active-phase indicator
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
-# ---------------------------------------------------------------------------
-# Textual CSS for the app layout
-# ---------------------------------------------------------------------------
-
+# Main app CSS — transcript ~85%, composer at bottom, status bar between.
 APP_CSS = """
 Screen {
     layout: vertical;
