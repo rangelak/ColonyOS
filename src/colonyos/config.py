@@ -60,8 +60,10 @@ DEFAULTS = {
         "enabled": True,
         "model": "opus",
         "qa_model": "opus",
+        "workflow_model": "opus",
         "confidence_threshold": 0.7,
         "qa_budget": 0.50,
+        "workflow_budget": 1.00,
     },
 }
 
@@ -134,15 +136,17 @@ class RouterConfig:
     """Configuration for the Intent Router Agent.
 
     The router classifies user input before running the full pipeline,
-    enabling quick Q&A responses for questions and routing code changes
-    to the appropriate execution path.
+    enabling quick Q&A responses for questions, workflow actions via a
+    full-power agent, and routing code changes to the appropriate path.
     """
 
     enabled: bool = True
     model: str = "opus"
     qa_model: str = "opus"
+    workflow_model: str = "opus"
     confidence_threshold: float = 0.7
     qa_budget: float = 0.50
+    workflow_budget: float = 1.00
 
 
 @dataclass
@@ -454,6 +458,13 @@ def _parse_router_config(raw: dict) -> RouterConfig:
             f"Note: use short names (e.g. 'opus') not full model IDs."
         )
 
+    workflow_model = str(raw.get("workflow_model", defaults["workflow_model"]))
+    if workflow_model not in VALID_MODELS:
+        raise ValueError(
+            f"Invalid router workflow_model '{workflow_model}'. Valid options: {sorted(VALID_MODELS)}. "
+            f"Note: use short names (e.g. 'opus') not full model IDs."
+        )
+
     confidence_threshold = float(raw.get("confidence_threshold", defaults["confidence_threshold"]))
     if confidence_threshold < 0 or confidence_threshold > 1:
         raise ValueError(
@@ -466,12 +477,20 @@ def _parse_router_config(raw: dict) -> RouterConfig:
             f"router.qa_budget must be positive, got {qa_budget}"
         )
 
+    workflow_budget = float(raw.get("workflow_budget", defaults["workflow_budget"]))
+    if workflow_budget <= 0:
+        raise ValueError(
+            f"router.workflow_budget must be positive, got {workflow_budget}"
+        )
+
     return RouterConfig(
         enabled=enabled,
         model=model,
         qa_model=qa_model,
+        workflow_model=workflow_model,
         confidence_threshold=confidence_threshold,
         qa_budget=qa_budget,
+        workflow_budget=workflow_budget,
     )
 
 
@@ -543,7 +562,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         tasks_dir=raw.get("tasks_dir", DEFAULTS["tasks_dir"]),
         reviews_dir=raw.get("reviews_dir", DEFAULTS["reviews_dir"]),
         proposals_dir=raw.get("proposals_dir", DEFAULTS["proposals_dir"]),
-        ceo_persona=_parse_persona(raw.get("ceo_persona")) if raw.get("ceo_persona") else None,
+        ceo_persona=_parse_persona(ceo_raw) if (ceo_raw := raw.get("ceo_persona")) else None,
         vision=raw.get("vision", ""),
         user_directions=str(raw.get("user_directions", "")),
         directions_auto_update=bool(raw.get("directions_auto_update", True)),
@@ -708,15 +727,19 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         config.router.enabled != router_defaults["enabled"]
         or config.router.model != router_defaults["model"]
         or config.router.qa_model != router_defaults["qa_model"]
+        or config.router.workflow_model != router_defaults["workflow_model"]
         or config.router.confidence_threshold != router_defaults["confidence_threshold"]
         or config.router.qa_budget != router_defaults["qa_budget"]
+        or config.router.workflow_budget != router_defaults["workflow_budget"]
     ):
         data["router"] = {
             "enabled": config.router.enabled,
             "model": config.router.model,
             "qa_model": config.router.qa_model,
+            "workflow_model": config.router.workflow_model,
             "confidence_threshold": config.router.confidence_threshold,
             "qa_budget": config.router.qa_budget,
+            "workflow_budget": config.router.workflow_budget,
         }
 
     if not config.directions_auto_update:

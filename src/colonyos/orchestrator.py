@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import re
 import subprocess
 import sys
@@ -2470,6 +2471,7 @@ def run(
     force: bool = False,
     base_branch: str | None = None,
     interactive: bool = True,
+    external_input_queue: "queue.Queue[str] | None" = None,
 ) -> RunLog:
     """Execute the full orchestration loop: plan -> implement -> review -> deliver.
 
@@ -2614,6 +2616,7 @@ def run(
             base_branch=base_branch,
             _make_ui=_make_ui,
             interactive=interactive,
+            external_input_queue=external_input_queue,
         )
     except KeyboardInterrupt:
         _log("Interrupted — saving run state...")
@@ -2675,14 +2678,19 @@ def _run_pipeline(
     base_branch: str | None,
     _make_ui: Callable[..., PhaseUI | NullUI | None],
     interactive: bool = True,
+    external_input_queue: queue.Queue[str] | None = None,
 ) -> RunLog:
     """Execute the pipeline phases. Extracted from run() for try/finally branch rollback."""
 
     # --- Interactive input setup ---
     input_reader: InputReader | None = None
-    if interactive:
+    _active_queue: queue.Queue[str] | None = None
+    if external_input_queue is not None:
+        _active_queue = external_input_queue
+    elif interactive:
         input_reader = InputReader(cost_fn=lambda: log.total_cost_usd)
         input_reader.start()
+        _active_queue = input_reader.input_queue
 
     _current_phase_name = "unknown"
 
@@ -2698,11 +2706,15 @@ def _run_pipeline(
     def _run_phase(phase: Phase, prompt: str, **kwargs: object) -> PhaseResult:
         nonlocal _current_phase_name
         _current_phase_name = phase.value
-        if input_reader is not None and input_reader.is_active:
+        has_input = (
+            external_input_queue is not None
+            or (input_reader is not None and input_reader.is_active)
+        )
+        if has_input and _active_queue is not None:
             return run_phase_interactive_sync(
                 phase, prompt,
                 **kwargs,  # type: ignore[arg-type]
-                input_queue=input_reader.input_queue,
+                input_queue=_active_queue,
                 on_user_input=_on_user_input,
             )
         return run_phase_sync(phase, prompt, **kwargs)  # type: ignore[arg-type]

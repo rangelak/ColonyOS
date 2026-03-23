@@ -312,19 +312,20 @@ def _handle_routed_query(
     repo_root: Path,
     source: str,
     quiet: bool = False,
-) -> str | None:
+) -> tuple[str, float] | None:
     """Classify a user prompt via the intent router and handle non-pipeline categories.
 
     Returns ``None`` if the prompt should proceed to the full pipeline
-    (CODE_CHANGE or low-confidence fallback).  Returns a user-visible
-    string for QUESTION (the answer), STATUS, and OUT_OF_SCOPE so the
-    caller can display it and skip the pipeline.
+    (CODE_CHANGE or low-confidence fallback).  Returns ``(text, cost_usd)``
+    for QUESTION, WORKFLOW, STATUS, and OUT_OF_SCOPE so the caller can
+    display the text and track the cost.
     """
     from colonyos.router import (
         RouterCategory,
         answer_question,
         log_router_decision,
         route_query,
+        run_workflow,
     )
 
     if not quiet:
@@ -359,7 +360,7 @@ def _handle_routed_query(
     if router_result.category == RouterCategory.QUESTION:
         if not quiet:
             click.echo(click.style("Treating this as a question...", dim=True))
-        answer = answer_question(
+        answer, cost = answer_question(
             prompt,
             repo_root=repo_root,
             project_name=config.project.name if config.project else "",
@@ -368,21 +369,35 @@ def _handle_routed_query(
             model=config.router.qa_model,
             qa_budget=config.router.qa_budget,
         )
-        return answer
+        return answer, cost
+
+    if router_result.category == RouterCategory.WORKFLOW:
+        if not quiet:
+            click.echo(click.style("Running workflow action...", dim=True))
+        answer, cost = run_workflow(
+            prompt,
+            repo_root=repo_root,
+            project_name=config.project.name if config.project else "",
+            project_description=config.project.description if config.project else "",
+            project_stack=config.project.stack if config.project else "",
+            model=config.router.workflow_model,
+            workflow_budget=config.router.workflow_budget,
+        )
+        return answer, cost
 
     if router_result.category == RouterCategory.STATUS:
         suggested = router_result.suggested_command or "colonyos status"
         return click.style(
             f"This looks like a status query. Try: {suggested}",
             fg="yellow",
-        )
+        ), 0.0
 
     if router_result.category == RouterCategory.OUT_OF_SCOPE:
         return click.style(
             "This request doesn't seem related to coding or this project. "
             "For code changes, describe the feature you want to build.",
             fg="yellow",
-        )
+        ), 0.0
 
     # CODE_CHANGE: proceed to pipeline
     if not quiet:
@@ -397,13 +412,25 @@ def _run_repl() -> None:
     terminal, this loop shows a prompt. If the first token matches a
     registered CLI command, it invokes that command. Otherwise the entire
     line is treated as a feature prompt and sent to the orchestrator.
+
+    Uses prompt_toolkit for a fixed-bottom input with output scrolling above,
+    styled prompt, history, and tab completion.
     """
+    import asyncio
+    asyncio.run(_async_repl())
+
+
+async def _async_repl() -> None:
+    """Async REPL loop powered by prompt_toolkit."""
+    import asyncio
+    import queue as _queue_mod
     import shlex
 
-    try:
-        import readline as _readline
-    except ImportError:
-        _readline = None  # type: ignore[assignment]
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import WordCompleter
+    from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.patch_stdout import patch_stdout
 
     repo_root = _find_repo_root()
     config_path = repo_root / ".colonyos" / "config.yaml"
@@ -417,52 +444,49 @@ def _run_repl() -> None:
         return
 
     command_names = _repl_top_level_names()
+    all_completions = sorted(command_names | {"help", "exit", "quit"})
 
-    # --- Readline: history + tab completion ---
-    if _readline is not None:
-        _readline.set_history_length(REPL_HISTORY_LENGTH)
-        try:
-            _readline.read_history_file(str(REPL_HISTORY_PATH))
-        except (FileNotFoundError, OSError):
-            pass
-
-        all_completions = sorted(command_names | {"help", "exit", "quit"})
-
-        def _completer(text: str, state: int) -> str | None:
-            buf = _readline.get_line_buffer().lstrip()
-            # Only complete the first token
-            if " " not in buf:
-                matches = [c + " " for c in all_completions if c.startswith(text)]
-            else:
-                matches = []
-            return matches[state] if state < len(matches) else None
-
-        _readline.set_completer(_completer)
-        _readline.set_completer_delims(" \t")
-        # macOS uses libedit which needs a different parse command
-        if "libedit" in (_readline.__doc__ or ""):
-            _readline.parse_and_bind("bind ^I rl_complete")
-        else:
-            _readline.parse_and_bind("tab: complete")
+    session: PromptSession[str] = PromptSession(
+        history=FileHistory(str(REPL_HISTORY_PATH)),
+        completer=WordCompleter(all_completions, sentence=True),
+    )
 
     session_cost = 0.0
+    is_running = False
+
+    def _idle_prompt() -> HTML:
+        cost = f"${session_cost:.2f}"
+        return HTML(f'<ansigreen>[{cost}]</ansigreen><ansibrightcyan><b> › </b></ansibrightcyan>')
+
+    def _run_prompt() -> HTML:
+        cost = f"${session_cost:.2f}"
+        return HTML(f'<ansigreen>[{cost}]</ansigreen><ansiyellow><b> agent running › </b></ansiyellow>')
+
+    def _bottom_toolbar() -> HTML:
+        if is_running:
+            return HTML(
+                '<b>Enter</b> send message to agent  |  '
+                '<b>Ctrl+C</b> interrupt'
+            )
+        return HTML(
+            'Type a command, feature, or <b>help</b>  |  '
+            '<b>↑↓</b> history  |  '
+            '<b>Tab</b> complete'
+        )
 
     click.echo(click.style(
         'Type a command, a feature to build, or "help" for available commands.',
         dim=True,
     ))
 
-    try:
+    with patch_stdout(raw=True):
         while True:
             try:
-                click.echo(click.style(f"[${session_cost:.2f}]", fg="green"), nl=False)
-                click.echo(click.style(" › ", fg="bright_cyan", bold=True), nl=False)
-                user_input = input()
-            except EOFError:
-                click.echo()
-                break
-            except KeyboardInterrupt:
-                click.echo()
+                user_input = await session.prompt_async(
+                    _idle_prompt,
+                    bottom_toolbar=_bottom_toolbar,
+                )
+            except (EOFError, KeyboardInterrupt):
                 break
 
             stripped = user_input.strip()
@@ -486,19 +510,31 @@ def _run_repl() -> None:
                 tokens = stripped.split()
 
             if tokens and tokens[0] in command_names:
-                try:
-                    _invoke_cli_command(tokens)
-                except KeyboardInterrupt:
+                if tokens[0] in ("run", "r"):
                     click.echo(click.style(
-                        "\nCommand interrupted. Returning to prompt.",
-                        dim=True,
+                        "Tip: just type your prompt directly — "
+                        "the REPL handles routing automatically.",
+                        fg="yellow",
                     ))
-                continue
+                    if len(tokens) > 1:
+                        stripped = " ".join(tokens[1:])
+                    else:
+                        continue
+                else:
+                    try:
+                        await asyncio.to_thread(_invoke_cli_command, tokens)
+                    except KeyboardInterrupt:
+                        click.echo(click.style(
+                            "\nCommand interrupted. Returning to prompt.",
+                            dim=True,
+                        ))
+                    continue
 
             # --- intent routing for feature prompts ---
             if config.router.enabled:
                 try:
-                    handled = _handle_routed_query(
+                    handled = await asyncio.to_thread(
+                        _handle_routed_query,
                         stripped, config, repo_root, source="repl",
                     )
                 except KeyboardInterrupt:
@@ -508,45 +544,106 @@ def _run_repl() -> None:
                     ))
                     continue
                 if handled is not None:
+                    text, cost = handled
+                    session_cost += cost
                     click.echo()
-                    click.echo(handled)
+                    click.echo(text)
                     continue
 
             # --- feature prompt (default) ---
             per_run_cap = config.budget.per_run
             if not config.auto_approve:
                 try:
-                    confirm = input(
-                        f"Max cost: ${per_run_cap:.2f} (per_run cap). Proceed? [Y/n] "
+                    confirm = await session.prompt_async(
+                        HTML(
+                            f'Max cost: <ansigreen>${per_run_cap:.2f}</ansigreen>'
+                            f' (per_run cap). Proceed? [Y/n] '
+                        ),
                     )
                 except (EOFError, KeyboardInterrupt):
-                    click.echo()
                     break
                 if confirm.strip().lower() in ("n", "no"):
                     continue
 
-            try:
-                log = run_orchestrator(
-                    stripped,
+            # --- run orchestrator in background thread, keep prompt active ---
+            is_running = True
+            input_queue: _queue_mod.Queue[str] = _queue_mod.Queue()
+
+            async def _run_agent(
+                _prompt: str = stripped,
+                _queue: _queue_mod.Queue[str] = input_queue,
+            ) -> RunLog:
+                return await asyncio.to_thread(
+                    run_orchestrator,
+                    _prompt,
                     repo_root=repo_root,
                     config=config,
                     verbose=True,
                     interactive=True,
+                    external_input_queue=_queue,
                 )
-                session_cost += log.total_cost_usd
-                _print_run_summary(log)
-            except KeyboardInterrupt:
-                click.echo(click.style(
-                    "\nRun interrupted. Returning to prompt.",
-                    dim=True,
-                ))
-                continue
-    finally:
-        if _readline is not None:
+
+            run_task = asyncio.create_task(_run_agent())
+
+            # Accept mid-run messages while agent is working.
+            # We keep a prompt visible; asyncio.wait lets us react to
+            # whichever finishes first (user input or agent completion)
+            # without flickering the prompt on a timer.
             try:
-                _readline.write_history_file(str(REPL_HISTORY_PATH))
-            except OSError:
-                pass
+                while not run_task.done():
+                    prompt_task = asyncio.create_task(
+                        session.prompt_async(
+                            _run_prompt,
+                            bottom_toolbar=_bottom_toolbar,
+                        )
+                    )
+                    done, _pending = await asyncio.wait(
+                        {prompt_task, run_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+
+                    if prompt_task in done:
+                        try:
+                            msg = prompt_task.result()
+                        except (KeyboardInterrupt, EOFError):
+                            run_task.cancel()
+                            try:
+                                await run_task
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                            click.echo(click.style(
+                                "\nRun interrupted. Returning to prompt.",
+                                dim=True,
+                            ))
+                            break
+                        msg_stripped = msg.strip()
+                        if msg_stripped:
+                            input_queue.put(msg_stripped)
+                            click.echo(click.style(f"  [you] {msg_stripped}", dim=True))
+                    else:
+                        prompt_task.cancel()
+                        try:
+                            await prompt_task
+                        except (asyncio.CancelledError, EOFError):
+                            pass
+            finally:
+                is_running = False
+
+            if run_task.done() and not run_task.cancelled():
+                try:
+                    log = run_task.result()
+                    session_cost += log.total_cost_usd
+                    _print_run_summary(log)
+                except KeyboardInterrupt:
+                    click.echo(click.style(
+                        "\nRun interrupted. Returning to prompt.",
+                        dim=True,
+                    ))
+                except Exception as exc:
+                    click.echo(click.style(
+                        f"\nRun failed: {exc}",
+                        fg="red",
+                    ))
 
 
 @app.command()
@@ -719,8 +816,9 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
                 click.echo(click.style("\nInterrupted.", dim=True))
                 return
             if handled is not None:
+                text, _cost = handled
                 click.echo()
-                click.echo(handled)
+                click.echo(text)
                 return
 
         log = run_orchestrator(
@@ -3860,11 +3958,12 @@ def pr_review(
     click.echo(f"[colonyos] Monitoring PR #{pr_number} on branch {pr_state.head_ref}")
     click.echo(f"[colonyos] Budget: ${effective_budget:.2f}, Poll interval: {effective_poll_interval}s")
 
-    # Load or create state
-    state = load_pr_review_state(repo_root, pr_number)
-    if state is None:
-        state = PRReviewState(pr_number=pr_number)
-        save_pr_review_state(repo_root, state)
+    # Load or create state — always non-None after this block.
+    _loaded = load_pr_review_state(repo_root, pr_number)
+    if _loaded is None:
+        _loaded = PRReviewState(pr_number=pr_number)
+        save_pr_review_state(repo_root, _loaded)
+    state: PRReviewState = _loaded
 
     def process_comments() -> list[tuple[str, str]]:
         """Process new actionable comments. Returns list of (sha, summary) for fixes."""

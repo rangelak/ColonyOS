@@ -1366,6 +1366,65 @@ class TestStatusSourceIssue:
         assert "#" not in result.output or "run-no-issue" in result.output
 
 
+_BLOCK = object()
+"""Sentinel: when yielded by _MockPromptSession, prompt_async blocks forever
+(until cancelled).  Used to simulate an idle mid-run prompt while the
+orchestrator finishes in a background thread."""
+
+
+class _MockPromptSession:
+    """Mock PromptSession that returns responses from a list.
+
+    Each call to prompt_async consumes the next response.  Exception types
+    are raised.  When the list is exhausted, EOFError is raised.
+    ``_BLOCK`` makes the call await forever (until cancelled).
+    """
+
+    def __init__(self, responses, **_kwargs):
+        self._iter = iter(responses)
+
+    async def prompt_async(self, *_args, **_kwargs):
+        import asyncio
+        await asyncio.sleep(0)
+        try:
+            val = next(self._iter)
+        except StopIteration:
+            raise EOFError
+        if val is _BLOCK:
+            await asyncio.get_running_loop().create_future()
+        if isinstance(val, type) and issubclass(val, BaseException):
+            raise val()
+        if isinstance(val, BaseException):
+            raise val
+        return val
+
+
+def _repl_patches(tmp_path, responses, **extra):
+    """Context-manager stack for REPL tests.
+
+    Mocks prompt_toolkit's PromptSession, FileHistory, patch_stdout, and
+    pins _find_repo_root to *tmp_path*.
+
+    NOTE: We patch ``prompt_toolkit.PromptSession`` at the *module* level because
+    ``_async_repl`` uses a deferred ``from prompt_toolkit import PromptSession``
+    inside the function body.  The import reads from the already-patched module
+    dict.  If the import is ever moved to the top of cli.py, these patches will
+    silently stop working.
+    """
+    from contextlib import ExitStack, nullcontext
+
+    session_cls = lambda **kw: _MockPromptSession(responses, **kw)
+
+    stack = ExitStack()
+    stack.enter_context(patch("colonyos.cli._find_repo_root", return_value=tmp_path))
+    stack.enter_context(patch("prompt_toolkit.PromptSession", session_cls))
+    stack.enter_context(patch("prompt_toolkit.history.FileHistory", lambda *a, **k: None))
+    stack.enter_context(patch("prompt_toolkit.patch_stdout.patch_stdout", return_value=nullcontext()))
+    for target, value in extra.items():
+        stack.enter_context(patch(target, value))
+    return stack
+
+
 class TestRepl:
     """Tests for the interactive REPL mode."""
 
@@ -1375,68 +1434,42 @@ class TestRepl:
         with patch("colonyos.cli._handle_routed_query", return_value=None):
             yield
 
-    def test_quit_exits_cleanly(self, runner: CliRunner, tmp_path: Path):
-        _make_config(tmp_path)
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("sys.stdin") as mock_stdin, \
-             patch.dict("sys.modules", {"readline": MagicMock()}):
-            mock_stdin.isatty.return_value = True
-            # Simulate user typing "quit"
-            with patch("builtins.input", side_effect=["quit"]):
-                result = runner.invoke(app, [], input="quit")
-        # CliRunner doesn't use real stdin.isatty, so test _run_repl directly
-        pass
-
     def test_repl_quit_exits(self, tmp_path: Path):
         """Typing 'quit' exits the REPL with no error."""
         _make_config(tmp_path)
-        inputs = iter(["quit"])
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("builtins.input", side_effect=inputs), \
-             patch.dict("sys.modules", {"readline": MagicMock()}):
+        with _repl_patches(tmp_path, ["quit"]):
             from colonyos.cli import _run_repl
-            _run_repl()  # Should not raise
+            _run_repl()
 
     def test_repl_exit_keyword(self, tmp_path: Path):
         """Typing 'exit' exits the REPL."""
         _make_config(tmp_path)
-        inputs = iter(["exit"])
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("builtins.input", side_effect=inputs), \
-             patch.dict("sys.modules", {"readline": MagicMock()}):
+        with _repl_patches(tmp_path, ["exit"]):
             from colonyos.cli import _run_repl
             _run_repl()
 
     def test_repl_exit_case_insensitive(self, tmp_path: Path):
         """'EXIT' and 'Quit' are recognized."""
         _make_config(tmp_path)
-        inputs = iter(["EXIT"])
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("builtins.input", side_effect=inputs), \
-             patch.dict("sys.modules", {"readline": MagicMock()}):
+        with _repl_patches(tmp_path, ["EXIT"]):
             from colonyos.cli import _run_repl
             _run_repl()
 
     def test_repl_eof_exits(self, tmp_path: Path):
         """Ctrl+D (EOFError) exits the REPL gracefully."""
         _make_config(tmp_path)
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("builtins.input", side_effect=EOFError), \
-             patch.dict("sys.modules", {"readline": MagicMock()}):
+        with _repl_patches(tmp_path, [EOFError]):
             from colonyos.cli import _run_repl
             _run_repl()
 
     def test_repl_empty_input_ignored(self, tmp_path: Path):
         """Empty input does not trigger a run; prompt reappears."""
         _make_config(tmp_path)
-        inputs = iter(["", "   ", "quit"])
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("builtins.input", side_effect=inputs), \
-             patch("colonyos.cli.readline", create=True), \
-             patch("colonyos.cli.run_orchestrator") as mock_run:
-            from colonyos.cli import _run_repl
-            _run_repl()
-        mock_run.assert_not_called()
+        with _repl_patches(tmp_path, ["", "   ", "quit"]):
+            with patch("colonyos.cli.run_orchestrator") as mock_run:
+                from colonyos.cli import _run_repl
+                _run_repl()
+            mock_run.assert_not_called()
 
     def test_repl_routes_to_orchestrator(self, tmp_path: Path):
         """Non-exit input is routed to run_orchestrator."""
@@ -1445,67 +1478,18 @@ class TestRepl:
             run_id="run-repl", prompt="Add feature",
             status=RunStatus.COMPLETED, phases=[], total_cost_usd=0.50,
         )
-        # First input: prompt, second input: confirm (Enter = yes), third: quit
-        inputs = iter(["Add a health endpoint", "", "quit"])
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("builtins.input", side_effect=inputs), \
-             patch("colonyos.cli.readline", create=True), \
-             patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
-            from colonyos.cli import _run_repl
-            _run_repl()
-        mock_run.assert_called_once()
-        assert mock_run.call_args[0][0] == "Add a health endpoint"
-
-    def test_repl_accumulates_session_cost(self, tmp_path: Path):
-        """Session cost accumulates across runs."""
-        _make_config(tmp_path)
-        fake_log_1 = RunLog(
-            run_id="r1", prompt="f1",
-            status=RunStatus.COMPLETED, phases=[], total_cost_usd=1.50,
-        )
-        fake_log_2 = RunLog(
-            run_id="r2", prompt="f2",
-            status=RunStatus.COMPLETED, phases=[], total_cost_usd=2.00,
-        )
-        # Two prompts with confirmations, then quit
-        inputs = iter(["feat 1", "", "feat 2", "", "quit"])
-        prompt_values = []
-        original_input = input
-
-        def capture_input(prompt_str=""):
-            prompt_values.append(prompt_str)
-            return next(input_iter)
-
-        input_iter = iter(["feat 1", "", "feat 2", "", "quit"])
-
-        echo_calls: list[str] = []
-        original_echo = click.echo
-
-        def capture_echo(*args, **kwargs):
-            if args:
-                echo_calls.append(str(args[0]))
-            return original_echo(*args, **kwargs)
-
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("builtins.input", side_effect=capture_input), \
-             patch("colonyos.cli.readline", create=True), \
-             patch("colonyos.cli.click.echo", side_effect=capture_echo), \
-             patch("colonyos.cli.run_orchestrator", side_effect=[fake_log_1, fake_log_2]):
-            from colonyos.cli import _run_repl
-            _run_repl()
-
-        # After first run ($1.50), the cost prompt should show $1.50
-        cost_outputs = [c for c in echo_calls if "1.50" in c]
-        assert cost_outputs
+        with _repl_patches(tmp_path, ["Add a health endpoint", "", _BLOCK, "quit"]):
+            with patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+                from colonyos.cli import _run_repl
+                _run_repl()
+            mock_run.assert_called_once()
+            assert mock_run.call_args[0][0] == "Add a health endpoint"
 
     def test_repl_uninitialized_project(self, tmp_path: Path):
         """Uninitialized project prints error and does not enter REPL."""
-        # No config file
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("builtins.input", side_effect=AssertionError("Should not be called")), \
-             patch.dict("sys.modules", {"readline": MagicMock()}):
+        with _repl_patches(tmp_path, []):
             from colonyos.cli import _run_repl
-            _run_repl()  # Should return without calling input()
+            _run_repl()
 
     def test_repl_not_entered_when_non_tty(self, runner: CliRunner, tmp_path: Path):
         """When stdin is not a TTY, banner shows but REPL does not start."""
@@ -1515,46 +1499,23 @@ class TestRepl:
             mock_stdin.isatty.return_value = False
             with patch("colonyos.cli._run_repl") as mock_repl:
                 result = runner.invoke(app, [])
-        # CliRunner patches stdin, so _run_repl may or may not be called
-        # depending on the isatty mock. At minimum, it shouldn't crash.
         assert result.exit_code == 0
 
-    def test_repl_ctrl_c_prints_hint(self, tmp_path: Path):
-        """First Ctrl+C prints hint, second exits."""
+    def test_repl_ctrl_c_exits(self, tmp_path: Path):
+        """Ctrl+C (KeyboardInterrupt) exits the REPL."""
         _make_config(tmp_path)
-
-        call_count = 0
-
-        def mock_input(prompt=""):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise KeyboardInterrupt
-            if call_count == 2:
-                raise KeyboardInterrupt
-            return "quit"
-
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("builtins.input", side_effect=mock_input), \
-             patch("colonyos.cli.readline", create=True), \
-             patch("colonyos.cli.time") as mock_time:
-            # Make the two interrupts happen within 2 seconds
-            mock_time.time.side_effect = [0.0, 0.5]
+        with _repl_patches(tmp_path, [KeyboardInterrupt]):
             from colonyos.cli import _run_repl
-            _run_repl()  # Should exit after double Ctrl+C
+            _run_repl()
 
     def test_repl_budget_confirmation_decline(self, tmp_path: Path):
         """Declining budget confirmation returns to prompt without running."""
         _make_config(tmp_path)
-        # Input: prompt, then "n" for confirmation, then "quit"
-        inputs = iter(["Add feature", "n", "quit"])
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("builtins.input", side_effect=inputs), \
-             patch("colonyos.cli.readline", create=True), \
-             patch("colonyos.cli.run_orchestrator") as mock_run:
-            from colonyos.cli import _run_repl
-            _run_repl()
-        mock_run.assert_not_called()
+        with _repl_patches(tmp_path, ["Add feature", "n", "quit"]):
+            with patch("colonyos.cli.run_orchestrator") as mock_run:
+                from colonyos.cli import _run_repl
+                _run_repl()
+            mock_run.assert_not_called()
 
     def test_repl_auto_approve_skips_confirmation(self, tmp_path: Path):
         """When auto_approve is true, budget confirmation is skipped."""
@@ -1569,31 +1530,94 @@ class TestRepl:
             run_id="r-auto", prompt="Add feat",
             status=RunStatus.COMPLETED, phases=[], total_cost_usd=0.10,
         )
-        # No confirmation input needed
-        inputs = iter(["Add feature", "quit"])
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("builtins.input", side_effect=inputs), \
-             patch("colonyos.cli.readline", create=True), \
-             patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
-            from colonyos.cli import _run_repl
-            _run_repl()
-        mock_run.assert_called_once()
+        with _repl_patches(tmp_path, ["Add feature", _BLOCK, "quit"]):
+            with patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+                from colonyos.cli import _run_repl
+                _run_repl()
+            mock_run.assert_called_once()
 
-    def test_repl_readline_history_path(self):
-        """Readline history file path is correct."""
+    def test_repl_history_path(self):
+        """History file path is correct."""
         from colonyos.cli import REPL_HISTORY_PATH
         assert REPL_HISTORY_PATH == Path.home() / ".colonyos_history"
 
-    def test_repl_keyboard_interrupt_during_run(self, tmp_path: Path):
-        """KeyboardInterrupt during a run returns to prompt, doesn't exit REPL."""
+    def test_repl_accumulates_session_cost(self, tmp_path: Path):
+        """Session cost accumulates across multiple runs."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[Persona(role="Engineer", expertise="Backend", perspective="Scale")],
+            auto_approve=True,
+        )
+        save_config(tmp_path, config)
+
+        fake_log_1 = RunLog(
+            run_id="r1", prompt="f1",
+            status=RunStatus.COMPLETED, phases=[], total_cost_usd=1.50,
+        )
+        fake_log_2 = RunLog(
+            run_id="r2", prompt="f2",
+            status=RunStatus.COMPLETED, phases=[], total_cost_usd=2.00,
+        )
+        # _BLOCK holds the mid-run prompt open until the run task completes,
+        # preventing "feat 2" from being consumed as a mid-run message.
+        with _repl_patches(tmp_path, ["feat 1", _BLOCK, "feat 2", _BLOCK, "quit"]):
+            with patch("colonyos.cli.run_orchestrator", side_effect=[fake_log_1, fake_log_2]) as mock_run, \
+                 patch("colonyos.cli._print_run_summary") as mock_summary:
+                from colonyos.cli import _run_repl
+                _run_repl()
+            assert mock_run.call_count == 2
+            assert mock_summary.call_count == 2
+            assert mock_summary.call_args_list[0][0][0].total_cost_usd == 1.50
+            assert mock_summary.call_args_list[1][0][0].total_cost_usd == 2.00
+
+    def test_repl_run_error_returns_to_prompt(self, tmp_path: Path):
+        """Exception from orchestrator returns to prompt, doesn't exit REPL."""
         _make_config(tmp_path)
-        inputs = iter(["Build something", "", "quit"])
-        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("builtins.input", side_effect=inputs), \
-             patch("colonyos.cli.readline", create=True), \
-             patch("colonyos.cli.run_orchestrator", side_effect=KeyboardInterrupt):
-            from colonyos.cli import _run_repl
-            _run_repl()  # Should not raise; returns to prompt then quits
+        with _repl_patches(tmp_path, ["Build something", "", _BLOCK, "quit"]):
+            with patch("colonyos.cli.run_orchestrator", side_effect=RuntimeError("boom")):
+                from colonyos.cli import _run_repl
+                _run_repl()
+
+    def test_repl_mid_run_input(self, tmp_path: Path):
+        """User input during a run is forwarded to the orchestrator input queue."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[Persona(role="Engineer", expertise="Backend", perspective="Scale")],
+            auto_approve=True,
+        )
+        save_config(tmp_path, config)
+
+        fake_log = RunLog(
+            run_id="r-mid", prompt="Build",
+            status=RunStatus.COMPLETED, phases=[], total_cost_usd=0.10,
+        )
+        received: list[str] = []
+
+        def blocking_orchestrator(*args, **kwargs):
+            q = kwargs.get("external_input_queue")
+            if q is not None:
+                try:
+                    msg = q.get(timeout=5)
+                    received.append(msg)
+                except Exception:
+                    pass
+            return fake_log
+
+        with _repl_patches(tmp_path, ["Build it", "fix the tests", _BLOCK, "quit"]):
+            with patch("colonyos.cli.run_orchestrator", side_effect=blocking_orchestrator):
+                from colonyos.cli import _run_repl
+                _run_repl()
+
+        assert received == ["fix the tests"]
+
+    def test_repl_workflow_category_handled(self, tmp_path: Path):
+        """WORKFLOW-classified prompts call run_workflow and display result."""
+        _make_config(tmp_path)
+        workflow_response = ("Committed 3 files on branch main.", 0.05)
+        with _repl_patches(tmp_path, ["commit my changes", "quit"]):
+            with patch("colonyos.cli._handle_routed_query", return_value=workflow_response):
+                from colonyos.cli import _run_repl
+                _run_repl()
 
 
 class TestCIFixCommand:

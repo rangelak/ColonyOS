@@ -842,7 +842,7 @@ def triage_message(
     qa_answer: str | None = None
     if router_result.category == RouterCategory.QUESTION:
         try:
-            qa_answer = answer_question(
+            qa_answer, _qa_cost = answer_question(
                 message_text,
                 repo_root=effective_root,
                 project_name=project_name,

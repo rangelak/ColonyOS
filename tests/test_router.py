@@ -38,13 +38,16 @@ class TestRouterCategory:
     def test_out_of_scope_value(self) -> None:
         assert RouterCategory.OUT_OF_SCOPE.value == "out_of_scope"
 
+    def test_workflow_value(self) -> None:
+        assert RouterCategory.WORKFLOW.value == "workflow"
+
     def test_all_categories_are_strings(self) -> None:
         for cat in RouterCategory:
             assert isinstance(cat.value, str)
 
     def test_category_count(self) -> None:
-        """Ensure exactly 4 categories exist."""
-        assert len(RouterCategory) == 4
+        """Ensure exactly 5 categories exist."""
+        assert len(RouterCategory) == 5
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +131,7 @@ class TestBuildRouterPrompt:
     def test_includes_category_definitions(self) -> None:
         system, user = _build_router_prompt("fix the login bug")
         assert "code_change" in system.lower()
+        assert "workflow" in system.lower()
         assert "question" in system.lower()
         assert "status" in system.lower()
         assert "out_of_scope" in system.lower()
@@ -225,6 +229,17 @@ class TestParseRouterResponse:
         })
         result = _parse_router_response(raw)
         assert result.category == RouterCategory.OUT_OF_SCOPE
+
+    def test_valid_workflow_json(self) -> None:
+        raw = json.dumps({
+            "category": "workflow",
+            "confidence": 0.95,
+            "summary": "Commit changes and push",
+            "reasoning": "Direct git operation",
+        })
+        result = _parse_router_response(raw)
+        assert result.category == RouterCategory.WORKFLOW
+        assert result.confidence == 0.95
 
     def test_json_with_markdown_fences(self) -> None:
         raw = '```json\n{"category": "code_change", "confidence": 0.9, "summary": "Fix it", "reasoning": "Bug fix"}\n```'
@@ -477,6 +492,22 @@ class TestRouterIntegration:
         assert result.category == RouterCategory.STATUS
         assert result.suggested_command == "colonyos status"
 
+    def test_full_workflow_flow(self) -> None:
+        """Test classification of a workflow/git action."""
+        system, user = _build_router_prompt("commit my changes and push to origin")
+        assert "workflow" in system.lower()
+        assert "commit" in user
+
+        raw = json.dumps({
+            "category": "workflow",
+            "confidence": 0.95,
+            "summary": "Commit and push changes",
+            "reasoning": "Direct git operation, not a feature to build",
+        })
+        result = _parse_router_response(raw)
+        assert result.category == RouterCategory.WORKFLOW
+        assert result.confidence == 0.95
+
 
 # ---------------------------------------------------------------------------
 # _build_qa_prompt tests (Task 5.3)
@@ -555,17 +586,19 @@ class TestAnswerQuestion:
         assert "repo_root" in params
 
     def test_returns_string_answer(self, tmp_repo: Path) -> None:
-        """answer_question should return a string answer."""
+        """answer_question should return (text, cost) tuple."""
         from colonyos.router import answer_question
         with patch("colonyos.agent.run_phase_sync") as mock_run:
             mock_run.return_value = MagicMock(
                 artifacts={"result": "The function sanitizes user input."},
                 error=None,
                 success=True,
+                cost_usd=0.03,
             )
-            result = answer_question("what does sanitize do?", repo_root=tmp_repo)
-            assert isinstance(result, str)
-            assert len(result) > 0
+            text, cost = answer_question("what does sanitize do?", repo_root=tmp_repo)
+            assert isinstance(text, str)
+            assert len(text) > 0
+            assert cost == 0.03
 
     def test_uses_qa_phase(self, tmp_repo: Path) -> None:
         """answer_question should use Phase.QA."""
@@ -576,6 +609,7 @@ class TestAnswerQuestion:
                 artifacts={"result": "Answer here"},
                 error=None,
                 success=True,
+                cost_usd=0.01,
             )
             answer_question("test question", repo_root=tmp_repo)
             call_args = mock_run.call_args[0]
@@ -589,6 +623,7 @@ class TestAnswerQuestion:
                 artifacts={"result": "Answer"},
                 error=None,
                 success=True,
+                cost_usd=0.01,
             )
             answer_question("test question", repo_root=tmp_repo)
             call_kwargs = mock_run.call_args[1]
@@ -602,6 +637,7 @@ class TestAnswerQuestion:
                 artifacts={"result": "Answer"},
                 error=None,
                 success=True,
+                cost_usd=0.01,
             )
             answer_question("test question", repo_root=tmp_repo)
             call_kwargs = mock_run.call_args[1]
@@ -609,7 +645,6 @@ class TestAnswerQuestion:
             assert "Read" in allowed_tools
             assert "Glob" in allowed_tools
             assert "Grep" in allowed_tools
-            # Should NOT have write tools
             assert "Write" not in allowed_tools
             assert "Edit" not in allowed_tools
             assert "Bash" not in allowed_tools
@@ -622,6 +657,7 @@ class TestAnswerQuestion:
                 artifacts={"result": "Answer"},
                 error=None,
                 success=True,
+                cost_usd=0.01,
             )
             answer_question("test question", repo_root=tmp_repo)
             call_kwargs = mock_run.call_args[1]
@@ -635,22 +671,25 @@ class TestAnswerQuestion:
                 artifacts={"result": "Answer"},
                 error=None,
                 success=True,
+                cost_usd=0.01,
             )
             answer_question("test question", repo_root=tmp_repo, qa_budget=1.0)
             call_kwargs = mock_run.call_args[1]
             assert call_kwargs["budget_usd"] == 1.0
 
     def test_handles_llm_error(self, tmp_repo: Path) -> None:
-        """When LLM call fails, should return error message."""
+        """When LLM call fails, should return error message with cost."""
         from colonyos.router import answer_question
         with patch("colonyos.agent.run_phase_sync") as mock_run:
             mock_run.return_value = MagicMock(
                 artifacts={},
                 error="API error occurred",
                 success=False,
+                cost_usd=0.02,
             )
-            result = answer_question("test question", repo_root=tmp_repo)
-            assert "error" in result.lower() or "failed" in result.lower() or "unable" in result.lower()
+            text, cost = answer_question("test question", repo_root=tmp_repo)
+            assert "error" in text.lower() or "failed" in text.lower() or "unable" in text.lower()
+            assert cost == 0.02
 
     def test_includes_project_context(self, tmp_repo: Path) -> None:
         """answer_question should include project context in prompt."""
@@ -660,6 +699,7 @@ class TestAnswerQuestion:
                 artifacts={"result": "Answer"},
                 error=None,
                 success=True,
+                cost_usd=0.01,
             )
             answer_question(
                 "how does auth work?",
@@ -713,9 +753,98 @@ class TestAnswerQuestionIntegration:
                 artifacts={"result": "The function is defined in `src/colonyos/cli.py:527`. It handles..."},
                 error=None,
                 success=True,
+                cost_usd=0.05,
             )
-            result = answer_question("where is the run function?", repo_root=tmp_repo)
-            assert "cli.py" in result
+            text, _cost = answer_question("where is the run function?", repo_root=tmp_repo)
+            assert "cli.py" in text
+
+
+# ---------------------------------------------------------------------------
+# run_workflow tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunWorkflow:
+    """Tests for the run_workflow function."""
+
+    @pytest.fixture
+    def tmp_repo(self, tmp_path: Path) -> Path:
+        config_dir = tmp_path / ".colonyos"
+        config_dir.mkdir()
+        return tmp_path
+
+    def test_returns_string_output(self, tmp_repo: Path) -> None:
+        from colonyos.router import run_workflow
+        with patch("colonyos.agent.run_phase_sync") as mock_run:
+            mock_run.return_value = MagicMock(
+                artifacts={"result": "Committed 3 files."},
+                error=None,
+                success=True,
+                cost_usd=0.04,
+            )
+            text, cost = run_workflow("commit my changes", repo_root=tmp_repo)
+            assert isinstance(text, str)
+            assert "Committed" in text
+            assert cost == 0.04
+
+    def test_uses_workflow_phase(self, tmp_repo: Path) -> None:
+        from colonyos.models import Phase
+        from colonyos.router import run_workflow
+        with patch("colonyos.agent.run_phase_sync") as mock_run:
+            mock_run.return_value = MagicMock(
+                artifacts={"result": "Done"},
+                error=None,
+                success=True,
+                cost_usd=0.01,
+            )
+            run_workflow("run tests", repo_root=tmp_repo)
+            call_args = mock_run.call_args[0]
+            assert call_args[0] == Phase.WORKFLOW
+
+    def test_uses_full_tool_set(self, tmp_repo: Path) -> None:
+        from colonyos.router import run_workflow
+        with patch("colonyos.agent.run_phase_sync") as mock_run:
+            mock_run.return_value = MagicMock(
+                artifacts={"result": "Done"},
+                error=None,
+                success=True,
+                cost_usd=0.01,
+            )
+            run_workflow("commit", repo_root=tmp_repo)
+            call_kwargs = mock_run.call_args[1]
+            tools = call_kwargs["allowed_tools"]
+            assert "Bash" in tools
+            assert "Read" in tools
+            assert "Write" in tools
+            assert "Edit" in tools
+            assert "Glob" in tools
+            assert "Grep" in tools
+
+    def test_uses_opus_model_by_default(self, tmp_repo: Path) -> None:
+        from colonyos.router import run_workflow
+        with patch("colonyos.agent.run_phase_sync") as mock_run:
+            mock_run.return_value = MagicMock(
+                artifacts={"result": "Done"},
+                error=None,
+                success=True,
+                cost_usd=0.01,
+            )
+            run_workflow("push", repo_root=tmp_repo)
+            call_kwargs = mock_run.call_args[1]
+            assert call_kwargs["model"] == "opus"
+
+    def test_handles_llm_error(self, tmp_repo: Path) -> None:
+        from colonyos.router import run_workflow
+        with patch("colonyos.agent.run_phase_sync") as mock_run:
+            mock_run.return_value = MagicMock(
+                artifacts={},
+                error="Connection timeout",
+                success=False,
+                cost_usd=0.01,
+            )
+            text, cost = run_workflow("commit", repo_root=tmp_repo)
+            assert "failed" in text.lower()
+            assert cost == 0.01
 
 
 # ---------------------------------------------------------------------------
@@ -948,7 +1077,7 @@ class TestHandleRoutedQuery:
         return load_config(tmp_repo)
 
     def test_question_returns_answer(self, tmp_repo: Path, config: ColonyConfig) -> None:
-        """QUESTION category should return the Q&A answer string."""
+        """QUESTION category should return (answer, cost) tuple."""
         from colonyos.cli import _handle_routed_query
 
         with patch("colonyos.router.route_query") as mock_route, \
@@ -960,11 +1089,14 @@ class TestHandleRoutedQuery:
                 summary="Asking about auth",
                 reasoning="User is asking a question",
             )
-            mock_answer.return_value = "Auth uses JWT tokens."
+            mock_answer.return_value = ("Auth uses JWT tokens.", 0.05)
             result = _handle_routed_query(
                 "how does auth work?", config, tmp_repo, source="cli",
             )
-            assert result == "Auth uses JWT tokens."
+            assert result is not None
+            text, cost = result
+            assert text == "Auth uses JWT tokens."
+            assert cost == 0.05
             mock_answer.assert_called_once()
 
     def test_code_change_returns_none(self, tmp_repo: Path, config: ColonyConfig) -> None:
@@ -985,7 +1117,7 @@ class TestHandleRoutedQuery:
             assert result is None
 
     def test_status_returns_suggestion(self, tmp_repo: Path, config: ColonyConfig) -> None:
-        """STATUS category should return a suggestion string."""
+        """STATUS category should return (suggestion, 0.0) tuple."""
         from colonyos.cli import _handle_routed_query
 
         with patch("colonyos.router.route_query") as mock_route, \
@@ -1001,10 +1133,12 @@ class TestHandleRoutedQuery:
                 "show queue status", config, tmp_repo, source="repl",
             )
             assert result is not None
-            assert "colonyos status" in result
+            text, cost = result
+            assert "colonyos status" in text
+            assert cost == 0.0
 
     def test_out_of_scope_returns_message(self, tmp_repo: Path, config: ColonyConfig) -> None:
-        """OUT_OF_SCOPE category should return a rejection message."""
+        """OUT_OF_SCOPE category should return (rejection, 0.0) tuple."""
         from colonyos.cli import _handle_routed_query
 
         with patch("colonyos.router.route_query") as mock_route, \
@@ -1019,7 +1153,32 @@ class TestHandleRoutedQuery:
                 "what is the weather?", config, tmp_repo, source="cli",
             )
             assert result is not None
-            assert "doesn't seem related" in result
+            text, cost = result
+            assert "doesn't seem related" in text
+            assert cost == 0.0
+
+    def test_workflow_returns_agent_output(self, tmp_repo: Path, config: ColonyConfig) -> None:
+        """WORKFLOW category should call run_workflow and return (text, cost)."""
+        from colonyos.cli import _handle_routed_query
+
+        with patch("colonyos.router.route_query") as mock_route, \
+             patch("colonyos.router.run_workflow") as mock_workflow, \
+             patch("colonyos.router.log_router_decision"):
+            mock_route.return_value = RouterResult(
+                category=RouterCategory.WORKFLOW,
+                confidence=0.95,
+                summary="Commit and push",
+                reasoning="Direct git operation",
+            )
+            mock_workflow.return_value = ("Committed 3 files on branch main.", 0.08)
+            result = _handle_routed_query(
+                "commit my changes and push", config, tmp_repo, source="repl",
+            )
+            assert result is not None
+            text, cost = result
+            assert text == "Committed 3 files on branch main."
+            assert cost == 0.08
+            mock_workflow.assert_called_once()
 
     def test_low_confidence_returns_none(self, tmp_repo: Path, config: ColonyConfig) -> None:
         """Low-confidence result should fail-open (return None for pipeline)."""
@@ -1086,7 +1245,7 @@ class TestSlackQuestionRouting:
                 summary="Asking about code",
                 reasoning="User question",
             )
-            mock_answer.return_value = "The function does X."
+            mock_answer.return_value = ("The function does X.", 0.03)
             result = triage_message(
                 "what does this function do?",
                 repo_root=tmp_repo,

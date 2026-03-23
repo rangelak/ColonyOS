@@ -955,7 +955,7 @@ class TestRouterConfig:
         """RouterConfig has sensible defaults."""
         config = RouterConfig()
         assert config.enabled is True
-        assert config.model == "haiku"
+        assert config.model == "opus"
         assert config.confidence_threshold == 0.7
         assert config.qa_budget == 0.50
 
@@ -1118,7 +1118,7 @@ class TestRouterConfig:
         save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.router.enabled is True
-        assert loaded.router.model == "haiku"
+        assert loaded.router.model == "opus"
         assert loaded.router.confidence_threshold == 0.7
         assert loaded.router.qa_budget == 0.50
 

@@ -23,7 +23,36 @@ _theme = Theme({
     "markdown.code_block": "dim",
 })
 
-console = Console(stderr=True, theme=_theme)
+
+class _LazyConsole:
+    """Console proxy that rebuilds only when sys.stderr changes.
+
+    prompt_toolkit's patch_stdout replaces sys.stderr with a proxy that redirects
+    output above the active prompt.  A Console created at import time caches the
+    original file descriptor, bypassing this.  This proxy caches a Console keyed
+    on ``id(sys.stderr)`` so it rebuilds when the fd is swapped but reuses the
+    instance otherwise (avoiding Console.__init__ overhead on every print).
+    """
+
+    def __init__(self) -> None:
+        self._console: Console | None = None
+        self._stderr_id: int = 0
+        self._lock = threading.Lock()
+
+    def _get(self) -> Console:
+        current_id = id(sys.stderr)
+        if self._stderr_id != current_id:
+            with self._lock:
+                if self._stderr_id != current_id:
+                    self._console = Console(file=sys.stderr, theme=_theme)
+                    self._stderr_id = current_id
+        return self._console  # type: ignore[return-value]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._get(), name)
+
+
+console: Console = _LazyConsole()  # type: ignore[assignment]
 
 TOOL_STYLE: dict[str, str] = {
     "Read": "cyan",

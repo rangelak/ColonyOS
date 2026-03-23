@@ -152,7 +152,7 @@ class TestPhaseReviewEnum:
 
     def test_phase_ordering(self):
         phases = list(Phase)
-        assert phases == [Phase.CEO, Phase.PLAN, Phase.TRIAGE, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.LEARN, Phase.VERIFY, Phase.DELIVER, Phase.CI_FIX, Phase.CONFLICT_RESOLVE, Phase.QA]
+        assert phases == [Phase.CEO, Phase.PLAN, Phase.TRIAGE, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.LEARN, Phase.VERIFY, Phase.DELIVER, Phase.CI_FIX, Phase.CONFLICT_RESOLVE, Phase.QA, Phase.WORKFLOW]
 
     def test_fix_phase_exists(self):
         assert Phase.FIX == "fix"
