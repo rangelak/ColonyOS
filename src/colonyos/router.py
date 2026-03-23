@@ -63,6 +63,7 @@ class RouterResult:
     summary: str
     reasoning: str
     suggested_command: str | None = None
+    complexity: str = "large"
 
 
 def _build_router_prompt(
@@ -85,7 +86,8 @@ def _build_router_prompt(
         "You must respond with ONLY a JSON object (no markdown fencing, no extra text) "
         "with these exact fields:",
         '  {"category": str, "confidence": float (0.0-1.0), '
-        '"summary": str, "reasoning": str, "suggested_command": str|null}',
+        '"summary": str, "reasoning": str, "suggested_command": str|null, '
+        '"complexity": str}',
         "",
         "Categories:",
         "",
@@ -114,12 +116,18 @@ def _build_router_prompt(
         '   - "Write me a poem"',
         '   - "Tell me a joke"',
         "",
+        "Complexity:",
+        '- "trivial" — tiny edits like copy fixes, renames, or single-file tweaks',
+        '- "small" — limited implementation work that should skip planning',
+        '- "large" — multi-file features, architecture changes, or unclear work',
+        "",
         "Rules:",
         "- When uncertain between code_change and question, lean toward code_change "
         "(fail-open behavior).",
         "- confidence should reflect how certain you are about the classification.",
         "- summary should be a concise (1-2 sentence) description of what the user wants.",
         "- suggested_command is only required for status category.",
+        '- complexity must always be one of "trivial", "small", or "large".',
     ]
 
     if project_name:
@@ -181,6 +189,9 @@ def _parse_router_response(raw_text: str) -> RouterResult:
 
     # Clamp confidence to [0.0, 1.0]
     confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
+    complexity = str(data.get("complexity", "large")).lower()
+    if complexity not in {"trivial", "small", "large"}:
+        complexity = "large"
 
     return RouterResult(
         category=category,
@@ -188,6 +199,7 @@ def _parse_router_response(raw_text: str) -> RouterResult:
         summary=str(data.get("summary", "")),
         reasoning=str(data.get("reasoning", "")),
         suggested_command=data.get("suggested_command") or None,
+        complexity=complexity,
     )
 
 
@@ -200,11 +212,13 @@ def route_query(
     project_stack: str = "",
     vision: str = "",
     source: str = "cli",
+    model: str | None = None,
 ) -> RouterResult:
     """Run the LLM-based intent router on a user query.
 
-    Uses a single-turn haiku call with no tool access to minimize cost
-    and prompt injection blast radius.
+    Uses a single-turn low-budget classification call with no tool access.
+    The model defaults to the configured router model and falls back to
+    ``opus`` when no config is available.
 
     Args:
         query: The user's input query to classify.
@@ -214,14 +228,22 @@ def route_query(
         project_stack: Technology stack of the project.
         vision: Project vision statement.
         source: Origin of the query (cli, repl, slack) for logging.
+        model: Optional override for the router model.
 
     Returns:
         RouterResult with the classification.
     """
     from colonyos.agent import run_phase_sync
+    from colonyos.config import RouterConfig, load_config
     from colonyos.models import Phase
 
     cwd = repo_root if repo_root is not None else Path.cwd()
+    resolved_model = model
+    if resolved_model is None:
+        if repo_root is not None:
+            resolved_model = load_config(repo_root).router.model
+        else:
+            resolved_model = RouterConfig().model
 
     system, user = _build_router_prompt(
         query,
@@ -236,7 +258,7 @@ def route_query(
         user,
         cwd=cwd,
         system_prompt=system,
-        model="haiku",
+        model=resolved_model,
         budget_usd=0.05,  # tiny budget for routing
         allowed_tools=[],  # no tool access
     )
@@ -317,7 +339,7 @@ def answer_question(
     project_name: str = "",
     project_description: str = "",
     project_stack: str = "",
-    model: str = "sonnet",
+    model: str = "opus",
     qa_budget: float = DEFAULT_QA_BUDGET,
 ) -> str:
     """Answer a question about the codebase using a read-only Q&A agent.
@@ -419,6 +441,7 @@ def log_router_decision(
         "summary": result.summary,
         "reasoning": result.reasoning,
         "suggested_command": result.suggested_command,
+        "complexity": result.complexity,
     }
 
     try:

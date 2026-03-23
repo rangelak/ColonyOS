@@ -5,11 +5,14 @@ import logging
 import os
 import re
 import signal
+import io
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -46,6 +49,14 @@ from colonyos.orchestrator import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class RouteOutcome:
+    """Structured result of intent routing before pipeline execution."""
+
+    display_text: str | None = None
+    skip_planning: bool = False
+
+
 def _find_repo_root() -> Path:
     """Walk up from cwd to find a .git directory, or use cwd."""
     cwd = Path.cwd()
@@ -53,6 +64,22 @@ def _find_repo_root() -> Path:
         if (parent / ".git").exists():
             return parent
     return cwd
+
+
+def _tui_available() -> bool:
+    """Return True when the optional TUI dependencies are importable."""
+    try:
+        import colonyos.tui  # noqa: F401
+        import janus  # noqa: F401
+        import textual  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _interactive_stdio() -> bool:
+    """Return True when both stdin and stdout are interactive terminals."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def _print_run_summary(log: RunLog) -> None:
@@ -237,6 +264,15 @@ def app(ctx: click.Context) -> None:
     """ColonyOS — autonomous agent loop that turns prompts into shipped PRs."""
     _load_dotenv()
     if ctx.invoked_subcommand is None:
+        repo_root = _find_repo_root()
+        config = load_config(repo_root)
+        if (
+            _interactive_stdio()
+            and _tui_available()
+            and config.project is not None
+        ):
+            _launch_tui(repo_root, config)
+            return
         _show_welcome()
         if sys.stdin.isatty():
             _run_repl()
@@ -270,6 +306,76 @@ def _invoke_cli_command(tokens: list[str]) -> None:
         click.echo()
     except Exception as exc:
         click.echo(f"Error: {exc}", err=True)
+
+
+def _capture_click_output(callback, *args, **kwargs) -> str:  # noqa: ANN001, ANN002, ANN003
+    """Capture stdout/stderr produced by a Click-oriented callback."""
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        callback(*args, **kwargs)
+    output = stdout.getvalue().strip()
+    error = stderr.getvalue().strip()
+    return "\n".join(part for part in (output, error) if part)
+
+
+def _handle_tui_command(text: str, *, config: ColonyConfig) -> tuple[bool, str | None, bool]:
+    """Handle REPL-style commands from the Textual TUI.
+
+    Returns ``(handled, output, should_exit)``. When ``handled`` is False,
+    the caller should treat the input as a normal feature prompt.
+    """
+    import shlex
+
+    stripped = text.strip()
+    if not stripped:
+        return False, None, False
+
+    lowered = stripped.lower()
+    if lowered in {"quit", "exit"}:
+        return True, "Exiting ColonyOS TUI.", True
+
+    if lowered == "help":
+        return True, _capture_click_output(_print_repl_help), False
+
+    if lowered.startswith("help "):
+        command_name = stripped.split(None, 1)[1].strip()
+        return True, _capture_click_output(_print_repl_help, command_name), False
+
+    try:
+        tokens = shlex.split(stripped)
+    except ValueError:
+        tokens = stripped.split()
+
+    if not tokens or tokens[0] not in _repl_top_level_names():
+        return False, None, False
+
+    command_name = tokens[0]
+    if command_name in {"run", "tui"}:
+        return (
+            True,
+            "Use the TUI directly: type a feature prompt instead of `run`, and "
+            "you are already inside `tui`.",
+            False,
+        )
+    if command_name in {"ui", "watch"}:
+        return (
+            True,
+            f"`{command_name}` is not launched inside the TUI. Run "
+            f"`colonyos {command_name}` from a normal shell.",
+            False,
+        )
+    if command_name == "auto" and not (config.auto_approve or "--no-confirm" in tokens):
+        return (
+            True,
+            "`auto` inside the TUI needs `--no-confirm` unless `auto_approve` is enabled.",
+            False,
+        )
+
+    output = _capture_click_output(_invoke_cli_command, tokens)
+    if not output:
+        output = f"`{' '.join(tokens)}` completed."
+    return True, output, False
 
 
 def _print_repl_help(command_name: str | None = None) -> None:
@@ -306,13 +412,13 @@ def _print_repl_help(command_name: str | None = None) -> None:
     con.print()
 
 
-def _handle_routed_query(
+def _route_prompt(
     prompt: str,
     config: ColonyConfig,
     repo_root: Path,
     source: str,
     quiet: bool = False,
-) -> str | None:
+) -> RouteOutcome:
     """Classify a user prompt via the intent router and handle non-pipeline categories.
 
     Returns ``None`` if the prompt should proceed to the full pipeline
@@ -353,7 +459,7 @@ def _handle_routed_query(
                 f"Low confidence ({router_result.confidence:.0%}), treating as feature request...",
                 dim=True,
             ))
-        return None  # proceed to pipeline
+        return RouteOutcome()  # proceed to pipeline
 
     if router_result.category == RouterCategory.QUESTION:
         if not quiet:
@@ -367,26 +473,58 @@ def _handle_routed_query(
             model=config.router.qa_model,
             qa_budget=config.router.qa_budget,
         )
-        return answer
+        return RouteOutcome(display_text=answer)
 
     if router_result.category == RouterCategory.STATUS:
         suggested = router_result.suggested_command or "colonyos status"
-        return click.style(
-            f"This looks like a status query. Try: {suggested}",
-            fg="yellow",
+        return RouteOutcome(
+            display_text=click.style(
+                f"This looks like a status query. Try: {suggested}",
+                fg="yellow",
+            )
         )
 
     if router_result.category == RouterCategory.OUT_OF_SCOPE:
-        return click.style(
-            "This request doesn't seem related to coding or this project. "
-            "For code changes, describe the feature you want to build.",
-            fg="yellow",
+        return RouteOutcome(
+            display_text=click.style(
+                "This request doesn't seem related to coding or this project. "
+                "For code changes, describe the feature you want to build.",
+                fg="yellow",
+            )
         )
 
     # CODE_CHANGE: proceed to pipeline
+    skip_planning = (
+        router_result.complexity in {"trivial", "small"}
+        and router_result.confidence >= config.router.small_fix_threshold
+    )
     if not quiet:
-        click.echo(click.style("Treating this as a feature request...", dim=True))
-    return None
+        label = "Treating this as a small fix..." if skip_planning else "Treating this as a feature request..."
+        click.echo(click.style(label, dim=True))
+    return RouteOutcome(skip_planning=skip_planning)
+
+
+def _handle_routed_query(
+    prompt: str,
+    config: ColonyConfig,
+    repo_root: Path,
+    source: str,
+    quiet: bool = False,
+) -> str | None:
+    """Compatibility wrapper that returns only displayable routed responses."""
+    return _route_prompt(prompt, config, repo_root, source, quiet=quiet).display_text
+
+
+def _tui_command_hints() -> list[str]:
+    """Return a short curated set of commands to advertise in the TUI."""
+    hints: list[str] = []
+    if "auto" in app.commands:
+        hints.append("auto --no-confirm")
+    for hint in ("status", "queue", "stats", "show <run_id>", "doctor", "help"):
+        top_level = hint.split()[0]
+        if top_level == "help" or top_level in app.commands:
+            hints.append(hint)
+    return hints
 
 
 def _run_repl() -> None:
@@ -494,9 +632,10 @@ def _run_repl() -> None:
                 continue
 
             # --- intent routing for feature prompts ---
+            skip_planning = False
             if config.router.enabled:
                 try:
-                    handled = _handle_routed_query(
+                    route_outcome = _route_prompt(
                         stripped, config, repo_root, source="repl",
                     )
                 except KeyboardInterrupt:
@@ -505,10 +644,11 @@ def _run_repl() -> None:
                         dim=True,
                     ))
                     continue
-                if handled is not None:
+                if route_outcome.display_text is not None:
                     click.echo()
-                    click.echo(handled)
+                    click.echo(route_outcome.display_text)
                     continue
+                skip_planning = route_outcome.skip_planning
 
             # --- feature prompt (default) ---
             per_run_cap = config.budget.per_run
@@ -528,6 +668,7 @@ def _run_repl() -> None:
                     stripped,
                     repo_root=repo_root,
                     config=config,
+                    skip_planning=skip_planning,
                     verbose=True,
                 )
                 session_cost += log.total_cost_usd
@@ -625,8 +766,8 @@ def init(
 @click.option("--offline", is_flag=True, help="Skip network calls in pre-flight checks.")
 @click.option("--force", is_flag=True, help="Bypass pre-flight checks (for power users).")
 @click.option("--no-triage", is_flag=True, help="Skip intent routing and run the full pipeline directly.")
-@click.option("--tui", "use_tui", is_flag=True, help="Launch interactive terminal UI instead of streaming output.")
-def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool, offline: bool, force: bool, no_triage: bool, use_tui: bool = False) -> None:
+@click.option("--no-tui", is_flag=True, help="Force plain streaming output even in interactive terminals.")
+def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool, offline: bool, force: bool, no_triage: bool, no_tui: bool = False) -> None:
     """Run the autonomous agent loop for a feature prompt."""
     # Mutual exclusivity checks
     if resume_run_id:
@@ -659,16 +800,18 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
         )
         sys.exit(1)
 
-    # If --tui flag is set, delegate to the TUI launcher
+    use_tui = (
+        not no_tui
+        and not quiet
+        and prompt is not None
+        and from_prd is None
+        and resume_run_id is None
+        and issue_ref is None
+        and _interactive_stdio()
+        and _tui_available()
+    )
     if use_tui:
-        try:
-            _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
-        except ImportError as exc:
-            click.echo(
-                f"Error: {exc}\n\nInstall the TUI extra: pip install colonyos[tui]",
-                err=True,
-            )
-            sys.exit(1)
+        _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
         return
 
     if resume_run_id:
@@ -718,24 +861,27 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             and prompt  # Only route freeform prompts
         )
 
+        skip_planning = False
         if should_route:
             try:
-                handled = _handle_routed_query(
+                route_outcome = _route_prompt(
                     effective_prompt, config, repo_root, source="cli", quiet=quiet,
                 )
             except KeyboardInterrupt:
                 click.echo(click.style("\nInterrupted.", dim=True))
                 return
-            if handled is not None:
+            if route_outcome.display_text is not None:
                 click.echo()
-                click.echo(handled)
+                click.echo(route_outcome.display_text)
                 return
+            skip_planning = route_outcome.skip_planning
 
         log = run_orchestrator(
             effective_prompt,
             repo_root=repo_root,
             config=config,
             plan_only=plan_only,
+            skip_planning=skip_planning,
             from_prd=from_prd,
             verbose=verbose,
             quiet=quiet,
@@ -3868,10 +4014,13 @@ def pr_review(
     click.echo(f"[colonyos] Budget: ${effective_budget:.2f}, Poll interval: {effective_poll_interval}s")
 
     # Load or create state
-    state = load_pr_review_state(repo_root, pr_number)
-    if state is None:
+    loaded_state = load_pr_review_state(repo_root, pr_number)
+    state: PRReviewState
+    if loaded_state is None:
         state = PRReviewState(pr_number=pr_number)
         save_pr_review_state(repo_root, state)
+    else:
+        state = loaded_state
 
     def process_comments() -> list[tuple[str, str]]:
         """Process new actionable comments. Returns list of (sha, summary) for fixes."""
@@ -4231,7 +4380,10 @@ def _launch_tui(
     """
     import colonyos.tui  # noqa: F401 — triggers dependency check
     from colonyos.tui.app import AssistantApp
-    from colonyos.tui.adapter import TextualUI
+    from colonyos.tui.adapter import TextBlockMsg, TextualUI
+
+    current_adapter: TextualUI | None = None
+    command_hints = _tui_command_hints()
 
     def _run_callback(text: str) -> None:
         """Run the orchestrator in a worker thread when the user submits input.
@@ -4241,22 +4393,70 @@ def _launch_tui(
         across runs independently — this is intentional so users see lifetime
         session cost while each run's turn count starts at zero.
         """
+        nonlocal current_adapter
         queue = app_instance.event_queue
+
+        handled, command_output, should_exit = _handle_tui_command(text, config=config)
+        if handled:
+            if command_output:
+                queue.sync_q.put(TextBlockMsg(text=command_output))
+            current_adapter = None
+            if should_exit:
+                app_instance.call_from_thread(app_instance.exit)
+            return
+
         adapter = TextualUI(queue.sync_q)
+        current_adapter = adapter
 
         def _ui_factory(prefix: str = "") -> TextualUI:
             return adapter
 
-        run_orchestrator(
+        route_outcome = _route_prompt(
             text,
-            repo_root=repo_root,
-            config=config,
-            verbose=verbose,
-            ui_factory=_ui_factory,
+            config,
+            repo_root,
+            source="tui",
+            quiet=True,
         )
+        if route_outcome.display_text is not None:
+            queue.sync_q.put(TextBlockMsg(text=route_outcome.display_text))
+            current_adapter = None
+            return
 
-    app_instance = AssistantApp(run_callback=_run_callback, initial_prompt=prompt)
-    app_instance.run()
+        try:
+            run_orchestrator(
+                text,
+                repo_root=repo_root,
+                config=config,
+                verbose=verbose,
+                ui_factory=_ui_factory,
+                skip_planning=route_outcome.skip_planning,
+                user_injection_provider=adapter.drain_user_injections,
+            )
+        finally:
+            current_adapter = None
+
+    def _inject_callback(text: str) -> None:
+        if current_adapter is not None:
+            current_adapter.enqueue_user_injection(text)
+
+    app_instance = AssistantApp(
+        run_callback=_run_callback,
+        inject_callback=_inject_callback,
+        initial_prompt=prompt,
+        command_hints=command_hints,
+    )
+
+    previous_handler = signal.getsignal(signal.SIGINT)
+
+    def _sigint_handler(signum, frame) -> None:  # noqa: ANN001
+        app_instance.call_from_thread(app_instance.action_cancel_run)
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+    try:
+        app_instance.run()
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
 
 
 @app.command()
@@ -4280,6 +4480,7 @@ def tui(prompt: str | None, verbose: bool) -> None:
         )
         sys.exit(1)
 
+    click.echo(click.style("`colonyos tui` is deprecated; use `colonyos run` instead.", dim=True))
     try:
         _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
     except ImportError as exc:

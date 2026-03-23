@@ -10,7 +10,7 @@ import yaml
 import click
 from click.testing import CliRunner
 
-from colonyos.cli import app, _save_loop_state, _load_latest_loop_state, _compute_elapsed_hours
+from colonyos.cli import RouteOutcome, app, _save_loop_state, _load_latest_loop_state, _compute_elapsed_hours
 from colonyos.config import ColonyConfig, BudgetConfig, save_config
 from colonyos.models import (
     LoopState, LoopStatus, Persona, Phase, PhaseResult,
@@ -51,6 +51,30 @@ class TestVersion:
         assert result.exit_code == 0
         assert "colonyos" in result.output
         assert __version__ in result.output
+
+
+class TestRootCommand:
+    def test_bare_colonyos_defaults_to_tui(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=True), \
+             patch("colonyos.cli._interactive_stdio", return_value=True), \
+             patch("colonyos.cli._show_welcome") as mock_welcome, \
+             patch("colonyos.cli._run_repl") as mock_repl, \
+             patch("colonyos.cli._launch_tui") as mock_launch:
+            result = runner.invoke(app, [])
+        assert result.exit_code == 0
+        mock_launch.assert_called_once()
+        mock_welcome.assert_not_called()
+        mock_repl.assert_not_called()
+
+    def test_bare_colonyos_falls_back_without_tui(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=False):
+            result = runner.invoke(app, [], input="exit\n")
+        assert result.exit_code == 0
+        assert "ColonyOS" in result.output
 
 
 class TestStatus:
@@ -98,6 +122,50 @@ class TestRun:
             result = runner.invoke(app, ["run", "Add feature"])
         assert result.exit_code != 0
         assert "colonyos init" in result.output
+
+    def test_interactive_run_defaults_to_tui(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=True), \
+             patch("colonyos.cli._interactive_stdio", return_value=True), \
+             patch("colonyos.cli._launch_tui") as mock_launch:
+            result = runner.invoke(app, ["run", "Add feature"])
+        assert result.exit_code == 0
+        mock_launch.assert_called_once()
+
+    def test_no_tui_forces_streaming(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        fake_log = RunLog(
+            run_id="run-test",
+            prompt="Add feature",
+            status=RunStatus.COMPLETED,
+            phases=[],
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=True), \
+             patch("colonyos.cli._interactive_stdio", return_value=True), \
+             patch("colonyos.cli._launch_tui") as mock_launch, \
+             patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            result = runner.invoke(app, ["run", "--no-tui", "Add feature"])
+        assert result.exit_code == 0
+        mock_launch.assert_not_called()
+        mock_run.assert_called_once()
+
+    def test_small_fix_route_passes_skip_planning(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        fake_log = RunLog(
+            run_id="run-test",
+            prompt="Fix typo",
+            status=RunStatus.COMPLETED,
+            phases=[],
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=False), \
+             patch("colonyos.cli._route_prompt", return_value=RouteOutcome(skip_planning=True)), \
+             patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            result = runner.invoke(app, ["run", "Fix typo"])
+        assert result.exit_code == 0
+        assert mock_run.call_args.kwargs["skip_planning"] is True
 
 
 def _make_config(tmp_path: Path) -> ColonyConfig:
@@ -1594,6 +1662,51 @@ class TestRepl:
              patch("colonyos.cli.run_orchestrator", side_effect=KeyboardInterrupt):
             from colonyos.cli import _run_repl
             _run_repl()  # Should not raise; returns to prompt then quits
+
+
+class TestTuiCommandHandling:
+    def test_exit_command_requests_tui_exit(self) -> None:
+        from colonyos.cli import _handle_tui_command
+
+        handled, output, should_exit = _handle_tui_command("exit", config=ColonyConfig())
+
+        assert handled is True
+        assert should_exit is True
+        assert "Exiting" in (output or "")
+
+    def test_run_command_redirects_to_prompt_mode(self) -> None:
+        from colonyos.cli import _handle_tui_command
+
+        handled, output, should_exit = _handle_tui_command(
+            "run build a dashboard",
+            config=ColonyConfig(),
+        )
+
+        assert handled is True
+        assert should_exit is False
+        assert "type a feature prompt" in (output or "").lower()
+
+    def test_auto_requires_no_confirm_when_not_auto_approved(self) -> None:
+        from colonyos.cli import _handle_tui_command
+
+        handled, output, should_exit = _handle_tui_command("auto", config=ColonyConfig())
+
+        assert handled is True
+        assert should_exit is False
+        assert "--no-confirm" in (output or "")
+
+    def test_status_command_is_captured(self) -> None:
+        from colonyos.cli import _handle_tui_command
+
+        with patch("colonyos.cli._capture_click_output", return_value="status output"):
+            handled, output, should_exit = _handle_tui_command(
+                "status",
+                config=ColonyConfig(),
+            )
+
+        assert handled is True
+        assert should_exit is False
+        assert output == "status output"
 
 
 class TestCIFixCommand:

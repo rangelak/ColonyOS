@@ -8,7 +8,8 @@ that dispatches adapter messages to the appropriate widgets.
 from __future__ import annotations
 
 import asyncio
-from typing import Callable
+import time
+from typing import Any, Callable, Sequence
 
 import janus
 from textual.app import App, ComposeResult
@@ -21,6 +22,7 @@ from colonyos.tui.adapter import (
     TextBlockMsg,
     ToolLineMsg,
     TurnCompleteMsg,
+    UserInjectionMsg,
 )
 from colonyos.tui.styles import APP_CSS
 from colonyos.tui.widgets.composer import Composer
@@ -60,14 +62,22 @@ class AssistantApp(App):
     def __init__(
         self,
         run_callback: Callable[[str], None] | None = None,
+        inject_callback: Callable[[str], None] | None = None,
+        cancel_callback: Callable[[], None] | None = None,
         initial_prompt: str | None = None,
-        **kwargs: object,
+        command_hints: Sequence[str] | None = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._run_callback = run_callback
+        self._inject_callback = inject_callback
+        self._cancel_callback = cancel_callback
         self._initial_prompt = initial_prompt
+        self._command_hints = list(command_hints or [])
         self._event_queue: janus.Queue[object] | None = None
         self._consumer_task: asyncio.Task[None] | None = None
+        self._run_active = False
+        self._last_cancel_at = 0.0
 
     @property
     def event_queue(self) -> janus.Queue[object]:
@@ -90,17 +100,14 @@ class AssistantApp(App):
         """Create the event queue, start the consumer, and auto-submit initial prompt."""
         self._event_queue = janus.Queue()
         self._consumer_task = asyncio.create_task(self._consume_queue())
+        self.query_one(HintBar).set_command_hints(self._command_hints)
 
         if self._initial_prompt and self._run_callback is not None:
             transcript = self.query_one(TranscriptView)
             transcript.append_user_message(self._initial_prompt)
-            prompt = self._initial_prompt
-            callback = self._run_callback
-            self.run_worker(
-                lambda: callback(prompt),
-                thread=True,
-                exclusive=True,
-            )
+            self._start_run(self._initial_prompt)
+        else:
+            self.query_one(TranscriptView).append_welcome_banner()
 
     async def on_unmount(self) -> None:
         """Clean up the consumer task and queue on exit."""
@@ -153,6 +160,9 @@ class AssistantApp(App):
             elif isinstance(msg, TurnCompleteMsg):
                 status_bar.increment_turn()
 
+            elif isinstance(msg, UserInjectionMsg):
+                transcript.append_injected_message(msg.text)
+
             queue.task_done()
 
     # -----------------------------------------------------------------
@@ -165,15 +175,12 @@ class AssistantApp(App):
         if not text:
             return
 
-        transcript = self.query_one(TranscriptView)
-        transcript.append_user_message(text)
+        if self._run_active and self._inject_callback is not None:
+            self._inject_callback(text)
+            return
 
-        if self._run_callback is not None:
-            self.run_worker(
-                lambda: self._run_callback(text),  # type: ignore[arg-type]
-                thread=True,
-                exclusive=True,
-            )
+        self.query_one(TranscriptView).append_user_message(text)
+        self._start_run(text)
 
     # -----------------------------------------------------------------
     # Keybinding actions
@@ -181,11 +188,20 @@ class AssistantApp(App):
 
     def action_cancel_run(self) -> None:
         """Cancel the current orchestrator run (Ctrl+C)."""
+        now = time.monotonic()
+        if now - self._last_cancel_at <= 2.0:
+            raise SystemExit(1)
+        self._last_cancel_at = now
+
         self.workers.cancel_all()
         status_bar = self.query_one(StatusBar)
         status_bar.set_error("Cancelled by user")
         transcript = self.query_one(TranscriptView)
         transcript.append_phase_error("Run cancelled by user")
+        self._run_active = False
+        if self._cancel_callback is not None:
+            self._cancel_callback()
+        self.exit()
 
     def action_clear_transcript(self) -> None:
         """Clear all entries from the transcript."""
@@ -196,3 +212,26 @@ class AssistantApp(App):
         composer = self.query_one(Composer)
         ta = composer.query_one("TextArea")
         ta.focus()
+
+    def _start_run(self, text: str) -> None:
+        """Start a new worker-backed run if the callback is available."""
+        if self._run_callback is None:
+            return
+        self._run_active = True
+        self.run_worker(
+            lambda: self._run_with_lifecycle(text),
+            thread=True,
+            exclusive=False,
+        )
+
+    def _run_with_lifecycle(self, text: str) -> None:
+        """Run the callback and reset app state when it finishes."""
+        try:
+            if self._run_callback is not None:
+                self._run_callback(text)
+        finally:
+            self.call_from_thread(self._mark_run_finished)
+
+    def _mark_run_finished(self) -> None:
+        """Mark the app as no longer running once the worker finishes."""
+        self._run_active = False

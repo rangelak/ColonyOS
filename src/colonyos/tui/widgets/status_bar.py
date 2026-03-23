@@ -15,9 +15,14 @@ from textual.timer import Timer
 from textual.widgets import Static
 
 from colonyos.tui.styles import (
+    COLOR_ACCENT,
+    COLOR_COLONY,
     COLOR_DIM,
     COLOR_ERROR,
     COLOR_SUCCESS,
+    COLOR_TEXT,
+    IDLE_GLYPHS,
+    IDLE_PHRASES,
     SPINNER_FRAMES,
 )
 
@@ -36,8 +41,8 @@ class StatusBar(Static):
     StatusBar {
         dock: top;
         height: 1;
-        background: $surface;
-        color: $text-muted;
+        background: #12161d;
+        color: #7c8896;
         padding: 0 1;
     }
     """
@@ -55,16 +60,26 @@ class StatusBar(Static):
         self._phase_start: float | None = None
         self._spinner_index: int = 0
         self._spinner_timer: Timer | None = None
+        self._idle_index: int = 0
+        self._idle_timer: Timer | None = None
         self._last_duration: float = 0.0
         self._last_rendered: str = ""
 
     def on_mount(self) -> None:
         """Render initial idle state on mount."""
+        self._start_idle_animation()
         self._render_bar()
 
     def _advance_spinner(self) -> None:
         """Cycle through spinner frames (only called while timer is active)."""
         self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
+        self._render_bar()
+
+    def _advance_idle(self) -> None:
+        """Advance the idle animation when no phase is active."""
+        if self.is_running or self.error_msg:
+            return
+        self._idle_index = (self._idle_index + 1) % max(len(IDLE_GLYPHS), len(IDLE_PHRASES))
         self._render_bar()
 
     # -----------------------------------------------------------------
@@ -73,6 +88,7 @@ class StatusBar(Static):
 
     def _start_spinner(self) -> None:
         """Start the spinner timer (idempotent)."""
+        self._stop_idle_animation()
         if self._spinner_timer is None:
             self._spinner_timer = self.set_interval(0.1, self._advance_spinner)
 
@@ -81,6 +97,17 @@ class StatusBar(Static):
         if self._spinner_timer is not None:
             self._spinner_timer.stop()
             self._spinner_timer = None
+
+    def _start_idle_animation(self) -> None:
+        """Animate the idle colony status when no phase is active."""
+        if self._idle_timer is None:
+            self._idle_timer = self.set_interval(0.6, self._advance_idle)
+
+    def _stop_idle_animation(self) -> None:
+        """Stop the idle animation timer."""
+        if self._idle_timer is not None:
+            self._idle_timer.stop()
+            self._idle_timer = None
 
     def set_phase(self, name: str, budget: float | None = None, model: str = "") -> None:
         """Begin tracking a new phase."""
@@ -102,6 +129,7 @@ class StatusBar(Static):
         self.is_running = False
         self._last_duration = duration
         self._phase_start = None
+        self._start_idle_animation()
         self._render_bar()
 
     def set_error(self, msg: str) -> None:
@@ -110,6 +138,7 @@ class StatusBar(Static):
         self.is_running = False
         self.error_msg = msg
         self._phase_start = None
+        self._stop_idle_animation()
         self._render_bar()
 
     def increment_turn(self) -> None:
@@ -146,7 +175,10 @@ class StatusBar(Static):
 
         if not self.phase_name and not self.is_running:
             text = Text()
-            text.append("idle", style=COLOR_DIM)
+            glyph = IDLE_GLYPHS[self._idle_index % len(IDLE_GLYPHS)]
+            phrase = IDLE_PHRASES[self._idle_index % len(IDLE_PHRASES)]
+            text.append(f"{glyph} ", style=COLOR_COLONY)
+            text.append(phrase, style=COLOR_DIM)
             if self.total_cost > 0:
                 text.append(f"  ·  ${self.total_cost:.2f}", style=COLOR_DIM)
             self._last_rendered = text.plain
@@ -158,12 +190,12 @@ class StatusBar(Static):
         # Spinner or check mark
         if self.is_running:
             spinner = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)]
-            text.append(f"{spinner} ", style="bold bright_cyan")
+            text.append(f"{spinner} ", style=f"bold {COLOR_ACCENT}")
         else:
             text.append("✓ ", style=COLOR_SUCCESS)
 
         # Phase name
-        text.append(self.phase_name, style="bold")
+        text.append(self.phase_name, style=f"bold {COLOR_TEXT}")
 
         # Model
         if self.phase_model:

@@ -17,12 +17,12 @@ class StatusBarApp(App):
 
 @pytest.mark.asyncio
 async def test_status_bar_mounts_idle():
-    """StatusBar should display 'idle' when no phase is active."""
+    """StatusBar should display the animated colony idle state when inactive."""
     async with StatusBarApp().run_test() as pilot:
         bar = pilot.app.query_one(StatusBar)
         assert not bar.is_running
         assert bar.phase_name == ""
-        assert "idle" in bar._last_rendered
+        assert "colony" in bar._last_rendered.lower()
 
 
 @pytest.mark.asyncio
@@ -138,6 +138,7 @@ async def test_status_bar_spinner_timer_not_running_when_idle():
         bar = pilot.app.query_one(StatusBar)
         assert bar.is_running is False
         assert bar._spinner_timer is None
+        assert bar._idle_timer is not None
 
 
 @pytest.mark.asyncio
@@ -176,3 +177,14 @@ async def test_status_bar_set_phase_resets_turns():
 
         bar.set_phase("Review")
         assert bar.turn_count == 0
+
+
+@pytest.mark.asyncio
+async def test_status_bar_idle_animation_cycles():
+    """Idle animation should advance through multiple colony phrases."""
+    async with StatusBarApp().run_test() as pilot:
+        bar = pilot.app.query_one(StatusBar)
+        first = bar._last_rendered
+        bar._advance_idle()
+        second = bar._last_rendered
+        assert first != second

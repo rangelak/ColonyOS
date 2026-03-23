@@ -66,16 +66,16 @@ class TestTuiCommand:
 
 
 class TestTuiFlag:
-    """Tests for the ``--tui`` flag on the ``run`` command."""
+    """Tests for the TUI-related flags on the ``run`` command."""
 
-    def test_run_tui_flag_in_help(self, runner: CliRunner):
-        """The ``--tui`` flag should appear in ``run --help``."""
+    def test_run_no_tui_flag_in_help(self, runner: CliRunner):
+        """The ``--no-tui`` flag should appear in ``run --help``."""
         result = runner.invoke(app, ["run", "--help"])
         assert result.exit_code == 0
-        assert "--tui" in result.output
+        assert "--no-tui" in result.output
 
-    def test_run_tui_flag_launches_tui(self, runner: CliRunner, tmp_path: Path):
-        """``colonyos run --tui 'test prompt'`` should invoke the TUI launcher."""
+    def test_run_interactive_launches_tui_by_default(self, runner: CliRunner, tmp_path: Path):
+        """Interactive ``colonyos run 'prompt'`` should invoke the TUI launcher."""
         config_dir = tmp_path / ".colonyos"
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text(
@@ -83,13 +83,16 @@ class TestTuiFlag:
         )
         with (
             patch("colonyos.cli._find_repo_root", return_value=tmp_path),
+            patch("colonyos.cli._interactive_stdio", return_value=True),
+            patch("colonyos.cli._tui_available", return_value=True),
             patch("colonyos.cli.load_config") as mock_config,
             patch("colonyos.cli._launch_tui") as mock_launch,
         ):
             mock_cfg = MagicMock()
             mock_cfg.project = MagicMock()
             mock_config.return_value = mock_cfg
-            result = runner.invoke(app, ["run", "--tui", "test prompt"])
+            result = runner.invoke(app, ["run", "test prompt"])
+            assert result.exit_code == 0
             mock_launch.assert_called_once()
             call_kwargs = mock_launch.call_args
             assert call_kwargs is not None

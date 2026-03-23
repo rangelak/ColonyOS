@@ -9,12 +9,17 @@ from __future__ import annotations
 
 import re
 
+from rich import box
+from rich.console import Group
 from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.text import Text
 from textual.widgets import RichLog
 
 from colonyos.sanitize import sanitize_display_text
 from colonyos.tui.styles import (
+    COLOR_ACCENT,
+    COLOR_COLONY,
     COLOR_DIM,
     COLOR_ERROR,
     COLOR_SUCCESS,
@@ -69,11 +74,12 @@ class TranscriptView(RichLog):
     ) -> None:
         """Render a phase boundary with name, budget, and model."""
         rule = Text()
-        rule.append("─" * 40, style="dim")
+        rule.append("─" * 40, style=COLOR_DIM)
         self.write(rule)
         header = Text()
-        header.append(f"  Phase: {name}", style="bold")
-        header.append(f"  ${budget:.2f} budget · {model}", style="dim")
+        header.append("  Phase: ", style=COLOR_COLONY)
+        header.append(name, style="bold")
+        header.append(f"  ·  ${budget:.2f} budget · {model}", style=COLOR_DIM)
         self.write(header)
         self._scroll_to_end()
 
@@ -88,8 +94,9 @@ class TranscriptView(RichLog):
         line = Text()
         line.append("  ")
         line.append("● ", style=color)
-        label = f"{name} {arg}".rstrip() if arg else name
-        line.append(label)
+        line.append(name, style=f"bold {color}")
+        if arg:
+            line.append(f" {arg}", style=COLOR_DIM)
         self.write(line)
         self._scroll_to_end()
 
@@ -143,6 +150,65 @@ class TranscriptView(RichLog):
         line.append("  You: ", style=COLOR_USER_MESSAGE)
         line.append(text)
         self.write(line)
+        self._scroll_to_end()
+
+    def append_injected_message(self, text: str) -> None:
+        """Render a mid-run user message distinctly from a new run."""
+        text = sanitize_display_text(text)
+        if not text:
+            return
+        line = Text()
+        line.append("  You (mid-run): ", style=f"bold {COLOR_ACCENT}")
+        line.append(text, style=COLOR_USER_MESSAGE)
+        self.write(line)
+        self._scroll_to_end()
+
+    def append_welcome_banner(self) -> None:
+        """Render the initial welcome card on first launch."""
+        self.write(Text())
+        logo_lines_raw = [
+            " ██████╗  ██████╗  ██╗      ██████╗  ███╗   ██╗ ██╗   ██╗  ██████╗  ███████╗",
+            "██╔════╝ ██╔═══██╗ ██║     ██╔═══██╗ ████╗  ██║ ╚██╗ ██╔╝ ██╔═══██╗ ██╔════╝",
+            "██║      ██║   ██║ ██║     ██║   ██║ ██╔██╗ ██║  ╚████╔╝  ██║   ██║ ███████╗",
+            "██║      ██║   ██║ ██║     ██║   ██║ ██║╚██╗██║   ╚██╔╝   ██║   ██║ ╚════██║",
+            "╚██████╗ ╚██████╔╝ ███████╗╚██████╔╝ ██║ ╚████║    ██║    ╚██████╔╝ ███████║",
+            " ╚═════╝  ╚═════╝  ╚══════╝ ╚═════╝  ╚═╝  ╚═══╝    ╚═╝     ╚═════╝  ╚══════╝",
+        ]
+        logo_lines: list[Text] = []
+        split_at = 58
+        for raw_line in logo_lines_raw:
+            line = Text(justify="center")
+            for index, char in enumerate(raw_line):
+                if char == " ":
+                    line.append(char)
+                elif index < split_at:
+                    line.append(char, style="bold #c8d1dc")
+                else:
+                    line.append(char, style="bold #f0a030")
+            logo_lines.append(line)
+
+        logo_group = Group(*logo_lines, Text(""))
+        prompt = Text(
+            "Enter a prompt below to dispatch work",
+            style=COLOR_DIM,
+            justify="center",
+        )
+        shortcuts = Text(
+            "Shift+Enter / Ctrl+J newline   Ctrl+C cancel   Ctrl+L clear",
+            style=COLOR_DIM,
+            justify="center",
+        )
+        panel = Panel(
+            Group(logo_group, prompt, shortcuts),
+            border_style=COLOR_COLONY,
+            box=box.ROUNDED,
+            padding=(1, 2),
+            title="Ready",
+            subtitle="workers standing by",
+            expand=True,
+        )
+        self.write(panel, expand=True)
+        self.write(Text())
         self._scroll_to_end()
 
     def clear_transcript(self) -> None:

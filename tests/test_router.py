@@ -137,6 +137,7 @@ class TestBuildRouterPrompt:
         assert "json" in system.lower()
         assert "category" in system.lower()
         assert "confidence" in system.lower()
+        assert "complexity" in system.lower()
 
     def test_includes_user_query(self) -> None:
         system, user = _build_router_prompt("what does the sanitize function do?")
@@ -186,12 +187,14 @@ class TestParseRouterResponse:
             "confidence": 0.95,
             "summary": "Add health check endpoint",
             "reasoning": "User wants to add a new feature",
+            "complexity": "small",
         })
         result = _parse_router_response(raw)
         assert result.category == RouterCategory.CODE_CHANGE
         assert result.confidence == 0.95
         assert result.summary == "Add health check endpoint"
         assert result.reasoning == "User wants to add a new feature"
+        assert result.complexity == "small"
 
     def test_valid_question_json(self) -> None:
         raw = json.dumps({
@@ -243,6 +246,17 @@ class TestParseRouterResponse:
         assert result.category == RouterCategory.QUESTION
         assert result.confidence == 0.0
         assert result.summary == ""
+        assert result.complexity == "large"
+
+    def test_invalid_complexity_defaults_to_large(self) -> None:
+        result = _parse_router_response(json.dumps({
+            "category": "code_change",
+            "confidence": 0.9,
+            "summary": "Fix typo",
+            "reasoning": "Small edit",
+            "complexity": "odd",
+        }))
+        assert result.complexity == "large"
 
     def test_invalid_category_returns_code_change_fallback(self) -> None:
         """Unknown category should fail-open to CODE_CHANGE."""
@@ -337,8 +351,8 @@ class TestRouteQuery:
             assert isinstance(result, RouterResult)
             assert result.category == RouterCategory.QUESTION
 
-    def test_uses_haiku_model(self, tmp_repo: Path) -> None:
-        """route_query should use haiku model for classification."""
+    def test_uses_opus_model_by_default(self, tmp_repo: Path) -> None:
+        """route_query should use the default configured router model."""
         with patch("colonyos.agent.run_phase_sync") as mock_run:
             mock_run.return_value = MagicMock(
                 artifacts={"result": '{"category": "code_change", "confidence": 0.9, "summary": "x", "reasoning": "y"}'},
@@ -347,7 +361,18 @@ class TestRouteQuery:
             route_query("add a feature", repo_root=tmp_repo)
             mock_run.assert_called_once()
             call_kwargs = mock_run.call_args[1]
-            assert call_kwargs["model"] == "haiku"
+            assert call_kwargs["model"] == "opus"
+
+    def test_respects_explicit_model_override(self, tmp_repo: Path) -> None:
+        """route_query should honor an explicit model override."""
+        with patch("colonyos.agent.run_phase_sync") as mock_run:
+            mock_run.return_value = MagicMock(
+                artifacts={"result": '{"category": "code_change", "confidence": 0.9, "summary": "x", "reasoning": "y"}'},
+                error=None,
+            )
+            route_query("add a feature", repo_root=tmp_repo, model="sonnet")
+            call_kwargs = mock_run.call_args[1]
+            assert call_kwargs["model"] == "sonnet"
 
     def test_uses_no_tools(self, tmp_repo: Path) -> None:
         """route_query should use no tools (read-only classification)."""
@@ -581,8 +606,8 @@ class TestAnswerQuestion:
             call_args = mock_run.call_args[0]
             assert call_args[0] == Phase.QA
 
-    def test_uses_sonnet_model_by_default(self, tmp_repo: Path) -> None:
-        """answer_question should use sonnet model by default (matching RouterConfig.qa_model)."""
+    def test_uses_opus_model_by_default(self, tmp_repo: Path) -> None:
+        """answer_question should use opus model by default (matching RouterConfig.qa_model)."""
         from colonyos.router import answer_question
         with patch("colonyos.agent.run_phase_sync") as mock_run:
             mock_run.return_value = MagicMock(
@@ -592,7 +617,7 @@ class TestAnswerQuestion:
             )
             answer_question("test question", repo_root=tmp_repo)
             call_kwargs = mock_run.call_args[1]
-            assert call_kwargs["model"] == "sonnet"
+            assert call_kwargs["model"] == "opus"
 
     def test_uses_read_only_tools(self, tmp_repo: Path) -> None:
         """answer_question should only have read-only tools (Read, Glob, Grep)."""
@@ -677,8 +702,8 @@ class TestAnswerQuestion:
         sig = inspect.signature(answer_question)
         assert "model" in sig.parameters
         param = sig.parameters["model"]
-        # Default should match RouterConfig.qa_model default (sonnet)
-        assert param.default == "sonnet"
+        # Default should match RouterConfig.qa_model default (opus)
+        assert param.default == "opus"
 
 
 class TestAnswerQuestionIntegration:
@@ -1095,6 +1120,8 @@ class TestSlackQuestionRouting:
             assert result.actionable is False
             assert result.answer == "The function does X."
             mock_answer.assert_called_once()
+            assert mock_route.call_args.kwargs["model"] == "opus"
+            assert mock_answer.call_args.kwargs["model"] == "opus"
 
     def test_code_change_no_answer(self, tmp_repo: Path) -> None:
         """CODE_CHANGE triage should not populate answer."""
@@ -1114,6 +1141,7 @@ class TestSlackQuestionRouting:
             )
             assert result.actionable is True
             assert result.answer is None
+            assert mock_route.call_args.kwargs["model"] == "opus"
 
     def test_question_answer_error_fallback(self, tmp_repo: Path) -> None:
         """If answer_question fails, triage_message should still return with error answer."""

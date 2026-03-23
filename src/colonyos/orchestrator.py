@@ -943,6 +943,70 @@ def _build_learn_prompt(
     return system, user
 
 
+def _write_fast_path_artifacts(
+    repo_root: Path,
+    config: ColonyConfig,
+    prd_rel: str,
+    task_rel: str,
+    prompt: str,
+) -> None:
+    """Create lightweight PRD/task files for skip-planning runs."""
+    safe_prompt = sanitize_untrusted_content(prompt).strip()
+    prd_path = repo_root / prd_rel
+    task_path = repo_root / task_rel
+    prd_path.parent.mkdir(parents=True, exist_ok=True)
+    task_path.parent.mkdir(parents=True, exist_ok=True)
+
+    prd_path.write_text(
+        "\n".join([
+            "# PRD: Fast-Path Small Fix",
+            "",
+            "## Request",
+            "",
+            safe_prompt,
+            "",
+            "## Notes",
+            "",
+            "This PRD was generated automatically because the router classified",
+            "the request as a small fix that can skip the planning phase.",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    task_path.write_text(
+        "\n".join([
+            "# Tasks: Fast-Path Small Fix",
+            "",
+            "## Tasks",
+            "",
+            "- [ ] 1.0 Implement the requested fix",
+            "  - [ ] 1.1 Update or add the relevant tests",
+            "  - [ ] 1.2 Verify the change before review",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+
+def _drain_injected_context(
+    user_injection_provider: Callable[[], list[str]] | None,
+) -> str:
+    """Drain queued mid-run user notes and format them for later phases."""
+    if user_injection_provider is None:
+        return ""
+    messages = [sanitize_untrusted_content(msg).strip() for msg in user_injection_provider()]
+    messages = [msg for msg in messages if msg]
+    if not messages:
+        return ""
+    bullet_lines = "\n".join(f"- {msg}" for msg in messages)
+    return (
+        "\n\n## Additional User Context\n\n"
+        "The user added these notes while the run was active. "
+        "Treat them as clarifications for the remaining work.\n"
+        f"{bullet_lines}"
+    )
+
+
 _LEARNING_ENTRY_RE = re.compile(r"^- \*\*\[([a-z-]+)\]\*\*\s+(.+)$", re.MULTILINE)
 
 VALID_CATEGORIES = {"code-quality", "testing", "architecture", "security", "style"}
@@ -2441,6 +2505,7 @@ def run(
     repo_root: Path,
     config: ColonyConfig,
     plan_only: bool = False,
+    skip_planning: bool = False,
     from_prd: str | None = None,
     resume_from: ResumeState | None = None,
     verbose: bool = False,
@@ -2448,6 +2513,7 @@ def run(
     source_issue: int | None = None,
     source_issue_url: str | None = None,
     ui_factory: object | None = None,
+    user_injection_provider: Callable[[], list[str]] | None = None,
     offline: bool = False,
     force: bool = False,
     base_branch: str | None = None,
@@ -2572,6 +2638,8 @@ def run(
 
         prd_rel = f"{config.prds_dir}/{names.prd_filename}"
         task_rel = f"{config.tasks_dir}/{names.task_filename}"
+        if skip_planning:
+            _write_fast_path_artifacts(repo_root, config, prd_rel, task_rel, prompt)
 
     log.branch_name = branch_name
     log.prd_rel = prd_rel
@@ -2587,12 +2655,14 @@ def run(
             task_rel=task_rel,
             skip_phases=skip_phases,
             plan_only=plan_only,
+            skip_planning=skip_planning,
             from_prd=from_prd,
             is_resume=is_resume,
             prompt=prompt,
             offline=offline,
             quiet=quiet,
             base_branch=base_branch,
+            user_injection_provider=user_injection_provider,
             _make_ui=_make_ui,
         )
     except KeyboardInterrupt:
@@ -2647,12 +2717,14 @@ def _run_pipeline(
     task_rel: str,
     skip_phases: set[str],
     plan_only: bool,
+    skip_planning: bool,
     from_prd: str | None,
     is_resume: bool,
     prompt: str,
     offline: bool,
     quiet: bool,
     base_branch: str | None,
+    user_injection_provider: Callable[[], list[str]] | None,
     _make_ui: Callable[..., PhaseUI | NullUI | None],
 ) -> RunLog:
     """Execute the pipeline phases. Extracted from run() for try/finally branch rollback."""
@@ -2666,6 +2738,8 @@ def _run_pipeline(
     _touch_heartbeat(repo_root)
     if "plan" in skip_phases:
         _log("Skipping plan phase (already completed in previous run)")
+    elif skip_planning and not from_prd:
+        _log("Skipping plan phase for small-fix fast path")
     elif from_prd:
         _log(f"Skipping plan phase, using existing PRD: {from_prd}")
         prd_rel = from_prd
@@ -2748,6 +2822,7 @@ def _run_pipeline(
         if impl_result is None:
             _log("Using sequential implement mode")
             system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name, repo_root=repo_root)
+            user += _drain_injected_context(user_injection_provider)
             impl_result = run_phase_sync(
                 Phase.IMPLEMENT,
                 user,
@@ -2810,6 +2885,7 @@ def _run_pipeline(
                     sys_prompt, usr_prompt = _build_persona_review_prompt(
                         persona, config, prd_rel, branch_name
                     )
+                    usr_prompt += _drain_injected_context(user_injection_provider)
                     persona_ui = _make_ui(prefix=make_reviewer_prefix(i))
                     review_calls.append(dict(
                         phase=Phase.REVIEW,
@@ -2878,6 +2954,7 @@ def _run_pipeline(
                         iteration + 1,
                         repo_root=repo_root,
                     )
+                    fix_user += _drain_injected_context(user_injection_provider)
                     fix_ui = _make_ui()
                     if fix_ui is not None:
                         fix_ui.phase_header(
@@ -2909,6 +2986,7 @@ def _run_pipeline(
             else:
                 _log("=== Decision Gate ===")
             system, user = _build_decision_prompt(config, prd_rel, branch_name)
+            user += _drain_injected_context(user_injection_provider)
             decision_result = run_phase_sync(
                 Phase.DECISION,
                 user,
@@ -2959,6 +3037,7 @@ def _run_pipeline(
             source_issue=log.source_issue,
             base_branch=base_branch,
         )
+        user += _drain_injected_context(user_injection_provider)
         deliver_result = run_phase_sync(
             Phase.DELIVER,
             user,

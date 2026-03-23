@@ -24,7 +24,15 @@ class _ComposerTextArea(TextArea):
 
         Shift+Enter and Ctrl+J insert a newline instead.
         """
-        if event.key == "shift+enter" or event.key == "ctrl+j":
+        # Terminal emulators do not agree on how modified Enter is reported.
+        newline_keys = {
+            "shift+enter",
+            "shift+return",
+            "ctrl+j",
+            "ctrl+enter",
+            "ctrl+return",
+        }
+        if event.key in newline_keys:
             event.prevent_default()
             event.stop()
             self.insert("\n")
@@ -43,12 +51,13 @@ class _ComposerTextArea(TextArea):
 class Composer(Vertical):
     """Multi-line input composer that grows with content.
 
-    Wraps a ``TextArea`` with auto-grow from 3 to 8 lines.
+    Wraps a ``TextArea`` with auto-grow from 5 to 8 lines.
     Enter submits, Shift+Enter inserts a newline.
     """
 
-    MIN_HEIGHT = 3
-    MAX_HEIGHT = 8
+    TEXTAREA_MIN_HEIGHT = 5
+    TEXTAREA_MAX_HEIGHT = 8
+    CONTAINER_CHROME_HEIGHT = 1
 
     BINDINGS = [
         Binding("escape", "focus_self", "Focus composer", show=False),
@@ -71,15 +80,13 @@ class Composer(Vertical):
         """Focus the text area on mount."""
         ta = self.query_one(TextArea)
         ta.focus()
+        self._sync_heights(ta.document.line_count)
 
     @on(TextArea.Changed)
     def _on_text_changed(self, event: TextArea.Changed) -> None:
         """Recalculate height when content changes."""
         ta = event.text_area
-        line_count = ta.document.line_count
-        desired = max(self.MIN_HEIGHT, min(line_count + 1, self.MAX_HEIGHT))
-        ta.styles.height = desired
-        self.styles.height = desired
+        self._sync_heights(ta.document.line_count)
 
     @on(_ComposerTextArea.SubmitRequest)
     def _on_submit_request(self, event: _ComposerTextArea.SubmitRequest) -> None:
@@ -89,3 +96,12 @@ class Composer(Vertical):
     def action_focus_self(self) -> None:
         """Return focus to the composer text area."""
         self.query_one(TextArea).focus()
+
+    def _sync_heights(self, line_count: int) -> None:
+        """Keep the container one row taller than the bordered text area."""
+        textarea_height = max(
+            self.TEXTAREA_MIN_HEIGHT,
+            min(line_count + 1, self.TEXTAREA_MAX_HEIGHT),
+        )
+        self.query_one(TextArea).styles.height = textarea_height
+        self.styles.height = textarea_height + self.CONTAINER_CHROME_HEIGHT

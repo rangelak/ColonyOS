@@ -58,9 +58,10 @@ DEFAULTS = {
     },
     "router": {
         "enabled": True,
-        "model": "haiku",
-        "qa_model": "sonnet",
+        "model": "opus",
+        "qa_model": "opus",
         "confidence_threshold": 0.7,
+        "small_fix_threshold": 0.85,
         "qa_budget": 0.50,
     },
 }
@@ -139,9 +140,10 @@ class RouterConfig:
     """
 
     enabled: bool = True
-    model: str = "haiku"
-    qa_model: str = "sonnet"
+    model: str = "opus"
+    qa_model: str = "opus"
     confidence_threshold: float = 0.7
+    small_fix_threshold: float = 0.85
     qa_budget: float = 0.50
 
 
@@ -460,6 +462,12 @@ def _parse_router_config(raw: dict) -> RouterConfig:
             f"router.confidence_threshold must be between 0 and 1, got {confidence_threshold}"
         )
 
+    small_fix_threshold = float(raw.get("small_fix_threshold", defaults["small_fix_threshold"]))
+    if small_fix_threshold < 0 or small_fix_threshold > 1:
+        raise ValueError(
+            f"router.small_fix_threshold must be between 0 and 1, got {small_fix_threshold}"
+        )
+
     qa_budget = float(raw.get("qa_budget", defaults["qa_budget"]))
     if qa_budget <= 0:
         raise ValueError(
@@ -471,6 +479,7 @@ def _parse_router_config(raw: dict) -> RouterConfig:
         model=model,
         qa_model=qa_model,
         confidence_threshold=confidence_threshold,
+        small_fix_threshold=small_fix_threshold,
         qa_budget=qa_budget,
     )
 
@@ -521,6 +530,9 @@ def load_config(repo_root: Path) -> ColonyConfig:
                 phase_key,
             )
 
+    ceo_persona_raw = raw.get("ceo_persona")
+    ceo_persona = _parse_persona(ceo_persona_raw) if isinstance(ceo_persona_raw, dict) else None
+
     return ColonyConfig(
         project=_parse_project(raw.get("project", {})),
         personas=_parse_personas(raw.get("personas", [])),
@@ -543,7 +555,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         tasks_dir=raw.get("tasks_dir", DEFAULTS["tasks_dir"]),
         reviews_dir=raw.get("reviews_dir", DEFAULTS["reviews_dir"]),
         proposals_dir=raw.get("proposals_dir", DEFAULTS["proposals_dir"]),
-        ceo_persona=_parse_persona(raw.get("ceo_persona")) if raw.get("ceo_persona") else None,
+        ceo_persona=ceo_persona,
         vision=raw.get("vision", ""),
         user_directions=str(raw.get("user_directions", "")),
         directions_auto_update=bool(raw.get("directions_auto_update", True)),
@@ -709,6 +721,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         or config.router.model != router_defaults["model"]
         or config.router.qa_model != router_defaults["qa_model"]
         or config.router.confidence_threshold != router_defaults["confidence_threshold"]
+        or config.router.small_fix_threshold != router_defaults["small_fix_threshold"]
         or config.router.qa_budget != router_defaults["qa_budget"]
     ):
         data["router"] = {
@@ -716,6 +729,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "model": config.router.model,
             "qa_model": config.router.qa_model,
             "confidence_threshold": config.router.confidence_threshold,
+            "small_fix_threshold": config.router.small_fix_threshold,
             "qa_budget": config.router.qa_budget,
         }
 

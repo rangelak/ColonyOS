@@ -34,6 +34,7 @@ if _tui_available():
         TextBlockMsg,
         ToolLineMsg,
         TurnCompleteMsg,
+        UserInjectionMsg,
     )
     from colonyos.tui.app import AssistantApp
     from colonyos.tui.widgets.composer import Composer
@@ -64,6 +65,27 @@ class TestAppMounts:
             composer = app.query_one(Composer)
             ta = composer.query_one("TextArea")
             assert ta.has_focus
+
+    @pytest.mark.asyncio
+    async def test_idle_mount_shows_welcome_banner(self) -> None:
+        """Launching without an initial prompt should show the welcome banner."""
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            transcript = app.query_one(TranscriptView)
+            assert len(transcript.lines) > 0
+
+    @pytest.mark.asyncio
+    async def test_idle_mount_shows_command_hints(self) -> None:
+        """Hint bar should show the configured TUI command examples."""
+        app = AssistantApp(command_hints=["auto --no-confirm", "status", "help"])
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            hint = app.query_one(HintBar)
+            rendered = str(hint.render())
+            assert "auto --no-confirm" in rendered
+            assert "status" in rendered
+            assert "help" in rendered
 
 
 class TestQueueToTranscript:
@@ -181,6 +203,26 @@ class TestComposerSubmission:
             log = transcript
             assert len(log.lines) > 0
 
+    @pytest.mark.asyncio
+    async def test_submit_during_active_run_becomes_injection(self) -> None:
+        """Submitting while active should queue an injection instead of a new run."""
+        received: list[str] = []
+
+        def on_inject(text: str) -> None:
+            received.append(text)
+
+        app = AssistantApp(inject_callback=on_inject)
+        app._run_active = True
+        async with app.run_test() as pilot:
+            composer = app.query_one(Composer)
+            ta = composer.query_one("TextArea")
+            ta.focus()
+            await pilot.pause()
+            await pilot.press("h", "i")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert received == ["hi"]
+
 
 class TestKeybindings:
     """Verify app-level keybindings."""
@@ -227,4 +269,17 @@ class TestKeybindings:
             # Status bar should show error state
             assert "cancel" in status.error_msg.lower()
             # Transcript should have the cancel message
+            assert len(transcript.lines) > 0
+
+    @pytest.mark.asyncio
+    async def test_queue_user_injection_renders(self) -> None:
+        """UserInjectionMsg should render as a distinct transcript line."""
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.event_queue.sync_q.put(UserInjectionMsg(text="follow this note"))
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+            transcript = app.query_one(TranscriptView)
             assert len(transcript.lines) > 0

@@ -344,6 +344,32 @@ class TestRun:
         assert mock_run.call_count == 5
         assert mock_parallel.call_count == 1
 
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_small_fix_skip_planning_still_reviews(
+        self,
+        mock_run,
+        mock_parallel,
+        tmp_git_repo: Path,
+        config: ColonyConfig,
+    ):
+        save_config(tmp_git_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Fix typo", repo_root=tmp_git_repo, config=config, skip_planning=True)
+
+        phase_types = [phase.phase for phase in log.phases]
+        assert Phase.PLAN not in phase_types
+        assert Phase.IMPLEMENT in phase_types
+        assert any(phase.phase == Phase.REVIEW for phase in log.phases)
+        assert mock_parallel.call_count == 1
+
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_review_phase_skipped_when_disabled(self, mock_run, tmp_git_repo: Path, config: ColonyConfig):
         config.phases.review = False
