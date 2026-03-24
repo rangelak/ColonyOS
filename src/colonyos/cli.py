@@ -4398,7 +4398,7 @@ def _launch_tui(
     """
     import colonyos.tui  # noqa: F401 — triggers dependency check
     from colonyos.tui.app import AssistantApp
-    from colonyos.tui.adapter import TextBlockMsg, TextualUI
+    from colonyos.tui.adapter import CommandOutputMsg, TextBlockMsg, TextualUI
 
     current_adapter: TextualUI | None = None
     command_hints = _tui_command_hints()
@@ -4417,7 +4417,7 @@ def _launch_tui(
         handled, command_output, should_exit = _handle_tui_command(text, config=config)
         if handled:
             if command_output:
-                queue.sync_q.put(TextBlockMsg(text=command_output))
+                queue.sync_q.put(CommandOutputMsg(text=command_output))
             current_adapter = None
             if should_exit:
                 app_instance.call_from_thread(app_instance.exit)

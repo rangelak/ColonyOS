@@ -16,6 +16,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 
 from colonyos.tui.adapter import (
+    CommandOutputMsg,
     PhaseCompleteMsg,
     PhaseErrorMsg,
     PhaseHeaderMsg,
@@ -127,8 +128,8 @@ class AssistantApp(App):
     async def _consume_queue(self) -> None:
         """Drain the async side of the janus queue and dispatch messages."""
         queue = self.event_queue.async_q
-        transcript = self.query_one(TranscriptView)
-        status_bar = self.query_one(StatusBar)
+        transcript: TranscriptView = self.query_one(TranscriptView)
+        status_bar: StatusBar = self.query_one(StatusBar)
 
         while True:
             try:
@@ -150,6 +151,9 @@ class AssistantApp(App):
 
             elif isinstance(msg, TextBlockMsg):
                 transcript.append_text_block(msg.text)
+
+            elif isinstance(msg, CommandOutputMsg):
+                transcript.append_command_output(msg.text)
 
             elif isinstance(msg, PhaseCompleteMsg):
                 duration_s = msg.duration_ms / 1000.0

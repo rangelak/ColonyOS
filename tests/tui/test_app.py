@@ -28,6 +28,7 @@ pytestmark = pytest.mark.skipif(
 
 if _tui_available():
     from colonyos.tui.adapter import (
+        CommandOutputMsg,
         PhaseCompleteMsg,
         PhaseErrorMsg,
         PhaseHeaderMsg,
@@ -153,6 +154,18 @@ class TestQueueToTranscript:
             transcript = app.query_one(TranscriptView)
             log = transcript
             assert len(log.lines) > 0
+
+    @pytest.mark.asyncio
+    async def test_command_output_renders(self) -> None:
+        """CommandOutputMsg should render as a preserved preformatted block."""
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            app.event_queue.sync_q.put(CommandOutputMsg(text="  one\n\n    two"))
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+            transcript = app.query_one(TranscriptView)
+            assert len(transcript.lines) >= 5
 
     @pytest.mark.asyncio
     async def test_phase_complete_renders(self) -> None:

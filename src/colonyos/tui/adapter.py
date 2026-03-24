@@ -71,6 +71,13 @@ class TextBlockMsg:
 
 
 @dataclass(frozen=True)
+class CommandOutputMsg:
+    """Preformatted CLI command output captured inside the TUI."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class TurnCompleteMsg:
     """A turn has completed (for status bar turn counting)."""
 

@@ -96,6 +96,14 @@ class TestTranscriptView:
             log = tv
             assert len(log.lines) == 0  # noqa: SLF001
 
+    async def test_append_command_output_preserves_indentation(self, require_tui: None) -> None:
+        """Preformatted command output should keep leading spaces and blank lines."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv.append_command_output("  aligned\n\n    deeper")
+            log = tv
+            assert len(log.lines) >= 5  # noqa: SLF001
+
     async def test_append_phase_complete(self, require_tui: None) -> None:
         """Phase complete summary should appear."""
         async with TranscriptTestApp().run_test() as pilot:

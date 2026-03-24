@@ -119,6 +119,17 @@ class TranscriptView(RichLog):
                     self.write(line)
         self._scroll_to_end()
 
+    def append_command_output(self, text: str) -> None:
+        """Render captured CLI output as a preformatted block."""
+        text = sanitize_display_text(text).rstrip("\n")
+        if not text.strip():
+            return
+        self.write(Text())
+        for raw_line in text.splitlines():
+            self.write(Text(raw_line, style=COLOR_DIM, no_wrap=True, overflow="ignore"))
+        self.write(Text())
+        self._scroll_to_end()
+
     def append_phase_complete(
         self,
         cost: float,
