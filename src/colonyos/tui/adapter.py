@@ -127,6 +127,7 @@ class TextualUI:
         model: str,
         extra: str = "",
     ) -> None:
+        self._turn_count = 0
         self._queue.put(PhaseHeaderMsg(
             phase_name=sanitize_display_text(phase_name),
             budget=budget,

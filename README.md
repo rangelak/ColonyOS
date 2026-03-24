@@ -198,14 +198,15 @@ flowchart TD
 | `colonyos run --resume RUN_ID` | Resume a failed run from the last successful phase |
 | `colonyos run --offline` | Skip remote git checks (preflight) |
 | `colonyos run --force` | Bypass preflight warnings |
-| `colonyos run --tui "prompt"` | Launch interactive terminal UI for the run |
+| `colonyos run "prompt"` | Run the pipeline; interactive terminals default to the Textual TUI |
+| `colonyos run "prompt" --no-tui` | Force plain streaming output instead of the TUI |
 
 ### Interactive TUI
 
 | Command | Description |
 |---|---|
-| `colonyos tui` | Launch the interactive terminal UI (requires `pip install colonyos[tui]`) |
-| `colonyos tui "prompt"` | Launch TUI and immediately run a prompt |
+| `colonyos tui` | Deprecated alias for the interactive terminal UI (requires `pip install colonyos[tui]`) |
+| `colonyos tui "prompt"` | Deprecated alias that launches the TUI and immediately runs a prompt |
 
 ### Autonomous mode
 

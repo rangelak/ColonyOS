@@ -232,7 +232,7 @@ class AssistantApp(App):
         self.run_worker(
             lambda: self._run_with_lifecycle(text),
             thread=True,
-            exclusive=False,
+            exclusive=True,
         )
 
     def _run_with_lifecycle(self, text: str) -> None:

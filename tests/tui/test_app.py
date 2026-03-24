@@ -196,6 +196,23 @@ class TestQueueToTranscript:
             await pilot.pause()
             assert status.turn_count >= 1
 
+    @pytest.mark.asyncio
+    async def test_phase_turn_count_resets_between_phases(self) -> None:
+        """A new phase should start counting turns from one again."""
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            status = app.query_one(StatusBar)
+            app.event_queue.sync_q.put(PhaseHeaderMsg(phase_name="plan", budget=1.0, model="opus"))
+            app.event_queue.sync_q.put(TurnCompleteMsg(turn_number=1))
+            app.event_queue.sync_q.put(TurnCompleteMsg(turn_number=2))
+            app.event_queue.sync_q.put(PhaseHeaderMsg(phase_name="implement", budget=2.0, model="opus"))
+            app.event_queue.sync_q.put(TurnCompleteMsg(turn_number=1))
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+            assert status.phase_name == "implement"
+            assert status.turn_count == 1
+
 
 class TestComposerSubmission:
     """Verify that submitting from the composer creates a user message."""
@@ -262,6 +279,31 @@ class TestComposerSubmission:
             await pilot.press("enter")
             await pilot.pause()
             assert received == []
+
+    def test_start_run_uses_exclusive_worker(self) -> None:
+        """Assistant runs should always use an exclusive worker slot."""
+        app = AssistantApp(run_callback=lambda _: None)
+        calls: list[dict[str, object]] = []
+
+        def fake_run_worker(
+            worker: object,
+            *,
+            thread: bool,
+            exclusive: bool,
+        ) -> None:
+            calls.append({
+                "worker": worker,
+                "thread": thread,
+                "exclusive": exclusive,
+            })
+
+        app.run_worker = fake_run_worker  # type: ignore[method-assign]
+        app._start_run("hello")
+
+        assert app._run_active is True
+        assert len(calls) == 1
+        assert calls[0]["thread"] is True
+        assert calls[0]["exclusive"] is True
 
 
 class TestKeybindings:

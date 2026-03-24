@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from run_precommit_tests import (
     _collect_targets,
     _python_candidates,
     _select_python,
+    _staged_files,
     _targets_for_path,
     main,
 )
@@ -87,3 +91,28 @@ def test_select_python_returns_none_when_pytest_missing() -> None:
         python = _select_python()
 
     assert python is None
+
+
+def test_staged_files_raises_runtime_error_with_git_context() -> None:
+    error = subprocess.CalledProcessError(
+        1,
+        ["git", "diff"],
+        stderr="fatal: not a git repository",
+    )
+    with patch("run_precommit_tests.subprocess.run", side_effect=error):
+        with patch("run_precommit_tests.REPO_ROOT", Path("/repo")):
+            with pytest.raises(RuntimeError, match="failed to inspect staged files"):
+                _staged_files()
+
+
+def test_main_returns_error_when_staged_file_lookup_fails(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        "run_precommit_tests._staged_files",
+        lambda: (_ for _ in ()).throw(RuntimeError("pre-commit pytest: boom")),
+    )
+
+    exit_code = main()
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "pre-commit pytest: boom" in captured.err

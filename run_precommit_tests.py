@@ -16,13 +16,17 @@ REPO_ROOT = Path(__file__).resolve().parent
 
 def _staged_files() -> list[Path]:
     """Return staged paths relative to the repo root."""
-    result = subprocess.run(
-        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() or exc.stdout.strip() or str(exc)
+        raise RuntimeError(f"pre-commit pytest: failed to inspect staged files: {stderr}") from exc
     return [Path(line.strip()) for line in result.stdout.splitlines() if line.strip()]
 
 
@@ -139,7 +143,11 @@ def _collect_targets(paths: list[Path]) -> list[str]:
 
 def main() -> int:
     """Run targeted tests for staged files, or skip if nothing relevant changed."""
-    staged = _staged_files()
+    try:
+        staged = _staged_files()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     if not staged:
         print("pre-commit pytest: no staged files, skipping")
         return 0

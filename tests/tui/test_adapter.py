@@ -297,6 +297,16 @@ class TestTurnComplete:
         turn_msgs = [m for m in msgs if isinstance(m, TurnCompleteMsg)]
         assert [m.turn_number for m in turn_msgs] == [1, 2, 3]
 
+    def test_turn_number_resets_on_new_phase(self, ui: TextualUI, fake_queue: FakeSyncQueue) -> None:
+        ui.phase_header("plan", budget=1.0, model="opus")
+        ui.on_turn_complete()
+        ui.on_turn_complete()
+        ui.phase_header("implement", budget=2.0, model="opus")
+        ui.on_turn_complete()
+        msgs = fake_queue.drain()
+        turn_msgs = [m for m in msgs if isinstance(m, TurnCompleteMsg)]
+        assert [m.turn_number for m in turn_msgs] == [1, 2, 1]
+
 
 class TestUserInjection:
     def test_enqueue_user_injection_emits_message(self, ui: TextualUI, fake_queue: FakeSyncQueue) -> None:

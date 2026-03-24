@@ -5,7 +5,8 @@
 Adds a full interactive terminal UI built on Textual, giving users a mission-control
 experience for ColonyOS pipeline runs. Features a scrollable execution transcript,
 multi-line composer for mid-run input, live status bar with phase/cost/turns/elapsed
-display, and color-coded event rendering. Launched via `colonyos tui` or `colonyos run --tui`.
+display, and color-coded event rendering. Interactive terminals now default to the TUI
+via `colonyos run`, with `--no-tui` available to force plain streaming output.
 
 **Created:**
 - `src/colonyos/tui/__init__.py` — Package init with optional-dependency guard
@@ -19,7 +20,7 @@ display, and color-coded event rendering. Launched via `colonyos tui` or `colony
 - `tests/tui/` — Full test suite for all TUI components
 
 **Modified:**
-- `src/colonyos/cli.py` — Added `colonyos tui` command and `--tui` flag
+- `src/colonyos/cli.py` — Added the Textual TUI, the deprecated `colonyos tui` alias, and the `--no-tui` escape hatch on `colonyos run`
 - `src/colonyos/sanitize.py` — Fixed newline stripping bug
 - `pyproject.toml` — Added `[tui]` optional dependency group
 - `README.md` — Updated with TUI documentation

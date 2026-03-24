@@ -3,8 +3,8 @@ repos:
     hooks:
       - id: pytest
         name: pytest-targeted
-        entry: python3 run_precommit_tests.py
-        language: system
+        entry: python run_precommit_tests.py
+        language: python
         pass_filenames: false
         always_run: true
         stages: [pre-commit]
