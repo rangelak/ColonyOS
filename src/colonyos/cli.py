@@ -15,6 +15,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 
 import click
 
@@ -40,6 +41,7 @@ from colonyos.orchestrator import (
     validate_branch_exists,
     extract_review_verdict,
     run as run_orchestrator,
+    run_preflight_recovery,
     run_ceo,
     run_standalone_review,
     prepare_resume,
@@ -317,6 +319,15 @@ def _capture_click_output(callback, *args, **kwargs) -> str:  # noqa: ANN001, AN
     output = stdout.getvalue().strip()
     error = stderr.getvalue().strip()
     return "\n".join(part for part in (output, error) if part)
+
+
+def _dirty_recovery_help() -> str:
+    """Return the in-TUI help text for dirty-worktree recovery mode."""
+    return (
+        "Dirty-worktree recovery is pending.\n"
+        "Submit `commit` to let ColonyOS prepare a recovery commit and retry the saved prompt,\n"
+        "or submit `cancel` to restore the saved prompt to the composer."
+    )
 
 
 _SAFE_TUI_COMMANDS = {
@@ -4402,6 +4413,62 @@ def _launch_tui(
 
     current_adapter: TextualUI | None = None
     command_hints = _tui_command_hints()
+    def _recovery_callback(text: str) -> None:
+        nonlocal current_adapter
+        queue = app_instance.event_queue
+
+        recovery_state = app_instance.get_dirty_worktree_recovery()
+        if recovery_state is None:
+            queue.sync_q.put(CommandOutputMsg(text="No dirty-worktree recovery is pending."))
+            app_instance.call_from_thread(app_instance.clear_dirty_worktree_recovery)
+            return
+        saved_prompt, recovery_error = recovery_state
+
+        command = text.strip().lower()
+        if command == "cancel":
+            app_instance.call_from_thread(app_instance.cancel_dirty_worktree_recovery)
+            return
+
+        if command != "commit":
+            queue.sync_q.put(CommandOutputMsg(text=_dirty_recovery_help()))
+            return
+
+        queue.sync_q.put(CommandOutputMsg(text="Starting dirty-worktree recovery agent..."))
+        adapter = TextualUI(queue.sync_q)
+        current_adapter = adapter
+        try:
+            branch_name = recovery_error.details.get("current_branch")
+            dirty_output = str(recovery_error.details.get("dirty_output", "")).strip()
+            result = run_preflight_recovery(
+                repo_root,
+                config,
+                blocked_prompt=saved_prompt,
+                dirty_output=dirty_output or recovery_error.format_message(),
+                branch_name=branch_name if isinstance(branch_name, str) else None,
+                ui=cast(Any, adapter),
+            )
+        except Exception as exc:
+            logger.exception("Dirty-worktree recovery failed")
+            app_instance.call_from_thread(
+                app_instance.show_run_blocked,
+                saved_prompt,
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+        finally:
+            current_adapter = None
+
+        if not result.success:
+            app_instance.call_from_thread(
+                app_instance.show_run_blocked,
+                saved_prompt,
+                result.error or "Preflight recovery failed.",
+            )
+            return
+
+        app_instance.call_from_thread(app_instance.clear_dirty_worktree_recovery)
+        queue.sync_q.put(CommandOutputMsg(text="Recovery commit completed. Retrying saved prompt..."))
+        _run_callback(saved_prompt)
 
     def _run_callback(text: str) -> None:
         """Run the orchestrator in a worker thread when the user submits input.
@@ -4451,6 +4518,19 @@ def _launch_tui(
                 skip_planning=route_outcome.skip_planning,
                 user_injection_provider=adapter.drain_user_injections,
             )
+        except PreflightError as exc:
+            logger.info("TUI run blocked by preflight: %s", exc)
+            if exc.code == "dirty_worktree":
+                app_instance.call_from_thread(app_instance.begin_dirty_worktree_recovery, text, exc)
+            else:
+                app_instance.call_from_thread(app_instance.show_run_blocked, text, str(exc))
+        except Exception as exc:
+            logger.exception("Unhandled TUI run failure")
+            app_instance.call_from_thread(
+                app_instance.show_run_blocked,
+                text,
+                f"{type(exc).__name__}: {exc}",
+            )
         finally:
             current_adapter = None
 
@@ -4460,6 +4540,7 @@ def _launch_tui(
 
     app_instance = AssistantApp(
         run_callback=_run_callback,
+        recovery_callback=_recovery_callback,
         inject_callback=_inject_callback,
         initial_prompt=prompt,
         command_hints=command_hints,

@@ -11,6 +11,8 @@ import asyncio
 
 import pytest
 
+from colonyos.models import PreflightError
+
 
 def _tui_available() -> bool:
     try:
@@ -292,6 +294,97 @@ class TestComposerSubmission:
             await pilot.press("enter")
             await pilot.pause()
             assert received == []
+
+    @pytest.mark.asyncio
+    async def test_preflight_failure_restores_prompt_to_composer(self) -> None:
+        """Recoverable run failures should restore the submitted prompt."""
+        def on_submit(text: str) -> None:
+            raise PreflightError("Uncommitted changes detected")
+
+        app = AssistantApp(run_callback=on_submit)
+        async with app.run_test() as pilot:
+            composer = app.query_one(Composer)
+            ta = composer.query_one("TextArea")
+            ta.focus()
+            await pilot.pause()
+            await pilot.press("h", "i")
+            await pilot.press("enter")
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+            assert ta.text == "hi"
+
+    @pytest.mark.asyncio
+    async def test_dirty_recovery_submission_routes_to_recovery_callback(self) -> None:
+        """Once recovery is pending, submissions should route to the recovery callback."""
+        run_calls: list[str] = []
+        recovery_calls: list[str] = []
+        error = PreflightError("Uncommitted changes detected", code="dirty_worktree")
+
+        app = AssistantApp(
+            run_callback=run_calls.append,
+            recovery_callback=recovery_calls.append,
+        )
+        async with app.run_test() as pilot:
+            composer = app.query_one(Composer)
+            ta = composer.query_one("TextArea")
+            ta.focus()
+            app.begin_dirty_worktree_recovery("saved prompt", error)
+            await pilot.pause()
+            await pilot.press("c", "o", "m", "m", "i", "t")
+            await pilot.press("enter")
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+            assert recovery_calls == ["commit"]
+            assert run_calls == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_dirty_worktree_recovery_restores_saved_prompt(self) -> None:
+        """Cancelling dirty-worktree recovery should restore the saved prompt."""
+        error = PreflightError("Uncommitted changes detected", code="dirty_worktree")
+        app = AssistantApp(recovery_callback=lambda _: None)
+        async with app.run_test() as pilot:
+            composer = app.query_one(Composer)
+            ta = composer.query_one("TextArea")
+            ta.focus()
+            app.begin_dirty_worktree_recovery("saved prompt", error)
+            await pilot.pause()
+            app.cancel_dirty_worktree_recovery()
+            await pilot.pause()
+            assert ta.text == "saved prompt"
+            assert app.get_dirty_worktree_recovery() is None
+
+    @pytest.mark.asyncio
+    async def test_begin_dirty_worktree_recovery_stores_error_metadata(self) -> None:
+        """Recovery state should keep the original preflight error details."""
+        app = AssistantApp(recovery_callback=lambda _: None)
+        error = PreflightError(
+            "Uncommitted changes detected",
+            code="dirty_worktree",
+            details={"dirty_output": "M src/app.py"},
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.begin_dirty_worktree_recovery("saved prompt", error)
+            await pilot.pause()
+            pending = app.get_dirty_worktree_recovery()
+            assert pending is not None
+            assert pending[0] == "saved prompt"
+            assert pending[1].details["dirty_output"] == "M src/app.py"
+
+    @pytest.mark.asyncio
+    async def test_clear_dirty_worktree_recovery_clears_pending_state(self) -> None:
+        """Successful recovery should clear the pending recovery state."""
+        app = AssistantApp(recovery_callback=lambda _: None)
+        error = PreflightError("dirty", code="dirty_worktree")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.begin_dirty_worktree_recovery("saved prompt", error)
+            await pilot.pause()
+            app.clear_dirty_worktree_recovery()
+            await pilot.pause()
+            assert app.get_dirty_worktree_recovery() is None
 
     def test_start_run_uses_exclusive_worker(self) -> None:
         """Assistant runs should always use an exclusive worker slot."""

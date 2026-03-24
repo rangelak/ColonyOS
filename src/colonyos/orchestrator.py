@@ -192,7 +192,13 @@ def _preflight_check(
             file_list += f"\n  ... and {len(dirty_output.splitlines()) - 10} more"
         raise PreflightError(
             f"Uncommitted changes detected:\n  {file_list}\n\n"
-            "Please commit or stash your changes before running colonyos."
+            "Please commit or stash your changes before running colonyos.",
+            code="dirty_worktree",
+            details={
+                "current_branch": current_branch,
+                "dirty_files": dirty_files,
+                "dirty_output": dirty_output,
+            },
         )
 
     # Check if branch already exists locally
@@ -289,7 +295,13 @@ def _resume_preflight(
         file_list = "\n  ".join(dirty_files)
         raise PreflightError(
             f"Uncommitted changes detected:\n  {file_list}\n\n"
-            "Please commit or stash your changes before resuming."
+            "Please commit or stash your changes before resuming.",
+            code="dirty_worktree",
+            details={
+                "current_branch": current_branch,
+                "dirty_files": dirty_files,
+                "dirty_output": dirty_output,
+            },
         )
 
     head_sha = _get_head_sha(repo_root)
@@ -865,6 +877,221 @@ def _build_ci_fix_prompt(
         f"This is attempt {fix_attempt} of {max_retries}."
     )
     return system, user
+
+
+def _build_preflight_recovery_prompt(
+    config: ColonyConfig,
+    branch_name: str,
+    blocked_prompt: str,
+    dirty_output: str,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for dirty-worktree recovery."""
+    recovery_template = _load_instruction("preflight_recovery.md")
+
+    system = _format_base(config) + "\n\n" + recovery_template.format(
+        branch_name=branch_name,
+        dirty_output=dirty_output.strip() or "(git status returned no details)",
+    )
+
+    user = (
+        f"A TUI pipeline run was blocked before start because the working tree was dirty.\n\n"
+        f"Saved user prompt:\n{blocked_prompt}\n"
+    )
+    return system, user
+
+
+_SECRET_FILE_NAMES = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+    "credentials.json",
+    "secrets.json",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+}
+_SECRET_FILE_SUFFIXES = {
+    ".pem",
+    ".p12",
+    ".pfx",
+    ".key",
+    ".crt",
+    ".cer",
+    ".der",
+}
+
+
+def _dirty_paths_from_output(dirty_output: str) -> list[str]:
+    """Parse repo-relative paths from ``git status --porcelain`` output."""
+    paths: list[str] = []
+    for raw_line in dirty_output.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        match = re.match(r"^[ MADRCU?!]{1,2}\s+(.*)$", line)
+        candidate = match.group(1) if match else line
+        if " -> " in candidate:
+            candidate = candidate.split(" -> ", 1)[1]
+        path = candidate.strip()
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _is_secret_like_path(path: str) -> bool:
+    """Return True for obviously sensitive files that must never be auto-committed."""
+    pure_path = Path(path)
+    lower_name = pure_path.name.lower()
+    lower_parts = {part.lower() for part in pure_path.parts}
+    if lower_name in _SECRET_FILE_NAMES:
+        return True
+    if lower_name.startswith(".env"):
+        return True
+    if pure_path.suffix.lower() in _SECRET_FILE_SUFFIXES:
+        return True
+    if ".ssh" in lower_parts:
+        return True
+    return False
+
+
+def _recovery_scope_extras(
+    blocked_paths: set[str],
+    changed_paths: set[str],
+) -> list[str]:
+    """Return changed paths that exceed the allowed recovery scope."""
+    extras = sorted(
+        path for path in changed_paths
+        if path not in blocked_paths and not path.startswith("tests/")
+    )
+    return extras
+
+
+def _changed_paths_between(repo_root: Path, before_head: str, after_head: str) -> set[str]:
+    """Return files changed between two revisions."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"{before_head}..{after_head}"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise PreflightError(
+            f"Failed to inspect recovery commit scope: {exc}",
+        ) from exc
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def run_preflight_recovery(
+    repo_root: Path,
+    config: ColonyConfig,
+    *,
+    blocked_prompt: str,
+    dirty_output: str,
+    branch_name: str | None = None,
+    ui: PhaseUI | NullUI | None = None,
+) -> PhaseResult:
+    """Run a dedicated agent that commits dirty worktree changes before retrying."""
+    active_branch = branch_name or _get_current_branch(repo_root)
+    blocked_paths = _dirty_paths_from_output(dirty_output)
+    secret_paths = [path for path in blocked_paths if _is_secret_like_path(path)]
+    if secret_paths:
+        summary = "\n".join(secret_paths[:10])
+        return PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=False,
+            model=config.get_model(Phase.PREFLIGHT_RECOVERY),
+            error=(
+                "Preflight recovery refused to auto-commit sensitive-looking files:\n"
+                f"{summary}\n\nCommit or stash these changes manually."
+            ),
+        )
+
+    system_prompt, user_prompt = _build_preflight_recovery_prompt(
+        config,
+        active_branch,
+        blocked_prompt,
+        dirty_output,
+    )
+    model = config.get_model(Phase.PREFLIGHT_RECOVERY)
+
+    if ui is not None:
+        ui.phase_header(
+            "Preflight Recovery",
+            config.budget.per_phase,
+            model,
+            active_branch,
+        )
+
+    before_head = _get_head_sha(repo_root)
+    phase_result = run_phase_sync(
+        Phase.PREFLIGHT_RECOVERY,
+        user_prompt,
+        cwd=repo_root,
+        system_prompt=system_prompt,
+        model=model,
+        budget_usd=config.budget.per_phase,
+        ui=ui,
+    )
+
+    if not phase_result.success:
+        return phase_result
+
+    is_clean, remaining_dirty = _check_working_tree_clean(repo_root)
+    if not is_clean:
+        dirty_files = remaining_dirty.splitlines()[:10]
+        summary = "\n".join(dirty_files)
+        return PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=False,
+            model=model,
+            error=(
+                "Preflight recovery left uncommitted changes in the working tree:\n"
+                f"{summary}"
+            ),
+        )
+
+    after_head = _get_head_sha(repo_root)
+    if before_head and after_head == before_head:
+        return PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=False,
+            model=model,
+            error="Preflight recovery did not create a commit.",
+        )
+
+    if before_head and after_head:
+        changed_paths = _changed_paths_between(repo_root, before_head, after_head)
+        missing_paths = sorted(path for path in blocked_paths if path not in changed_paths)
+        if missing_paths:
+            summary = "\n".join(missing_paths[:10])
+            return PhaseResult(
+                phase=Phase.PREFLIGHT_RECOVERY,
+                success=False,
+                model=model,
+                error=(
+                    "Preflight recovery created a commit, but it did not cover all blocked files:\n"
+                    f"{summary}"
+                ),
+            )
+
+        extras = _recovery_scope_extras(set(blocked_paths), changed_paths)
+        if extras:
+            summary = "\n".join(extras[:10])
+            return PhaseResult(
+                phase=Phase.PREFLIGHT_RECOVERY,
+                success=False,
+                model=model,
+                error=(
+                    "Preflight recovery expanded scope beyond the blocked files and direct test updates:\n"
+                    f"{summary}"
+                ),
+            )
+
+    return phase_result
 
 
 # ---------------------------------------------------------------------------

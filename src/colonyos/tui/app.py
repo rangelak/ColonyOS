@@ -8,6 +8,7 @@ that dispatches adapter messages to the appropriate widgets.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Any, Callable, Sequence
 
@@ -15,6 +16,7 @@ import janus
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 
+from colonyos.models import PreflightError
 from colonyos.tui.adapter import (
     CommandOutputMsg,
     PhaseCompleteMsg,
@@ -30,6 +32,8 @@ from colonyos.tui.widgets.composer import Composer
 from colonyos.tui.widgets.hint_bar import HintBar
 from colonyos.tui.widgets.status_bar import StatusBar
 from colonyos.tui.widgets.transcript import TranscriptView
+
+logger = logging.getLogger(__name__)
 
 
 class AssistantApp(App):
@@ -63,6 +67,7 @@ class AssistantApp(App):
     def __init__(
         self,
         run_callback: Callable[[str], None] | None = None,
+        recovery_callback: Callable[[str], None] | None = None,
         inject_callback: Callable[[str], None] | None = None,
         cancel_callback: Callable[[], None] | None = None,
         initial_prompt: str | None = None,
@@ -71,6 +76,7 @@ class AssistantApp(App):
     ) -> None:
         super().__init__(**kwargs)
         self._run_callback = run_callback
+        self._recovery_callback = recovery_callback
         self._inject_callback = inject_callback
         self._cancel_callback = cancel_callback
         self._initial_prompt = initial_prompt
@@ -79,6 +85,8 @@ class AssistantApp(App):
         self._consumer_task: asyncio.Task[None] | None = None
         self._run_active = False
         self._last_cancel_at = 0.0
+        self._pending_recovery_error: PreflightError | None = None
+        self._pending_recovery_prompt: str | None = None
 
     @property
     def event_queue(self) -> janus.Queue[object]:
@@ -195,7 +203,8 @@ class AssistantApp(App):
             return
 
         self.query_one(TranscriptView).append_user_message(text)
-        self._start_run(text)
+        callback = self._recovery_callback if self._pending_recovery_prompt is not None else None
+        self._start_run(text, callback=callback)
 
     # -----------------------------------------------------------------
     # Keybinding actions
@@ -228,22 +237,91 @@ class AssistantApp(App):
         ta = composer.query_one("TextArea")
         ta.focus()
 
-    def _start_run(self, text: str) -> None:
+    def restore_composer_text(self, text: str) -> None:
+        """Put submitted text back into the composer after a blocked run."""
+        self.query_one(Composer).restore_text(text)
+
+    def begin_dirty_worktree_recovery(self, text: str, error: PreflightError) -> None:
+        """Enter a recovery mode for dirty-worktree preflight failures."""
+        self._pending_recovery_prompt = text
+        self._pending_recovery_error = error
+        self.query_one(StatusBar).set_error("Dirty worktree")
+        transcript = self.query_one(TranscriptView)
+        transcript.append_notice(
+            "Dirty worktree detected. Original prompt saved. Submit `commit` to let ColonyOS prepare a recovery commit and retry automatically, or `cancel` to restore the prompt."
+        )
+        transcript.append_command_output(str(error))
+
+    def get_dirty_worktree_recovery(self) -> tuple[str, PreflightError] | None:
+        """Return the saved prompt and error for a pending recovery flow."""
+        if self._pending_recovery_prompt is None or self._pending_recovery_error is None:
+            return None
+        return self._pending_recovery_prompt, self._pending_recovery_error
+
+    def cancel_dirty_worktree_recovery(self) -> None:
+        """Exit recovery mode and put the saved prompt back into the composer."""
+        if self._pending_recovery_prompt is None:
+            return
+        saved_prompt = self._pending_recovery_prompt
+        self._pending_recovery_prompt = None
+        self._pending_recovery_error = None
+        self.query_one(TranscriptView).append_notice(
+            "Recovery cancelled. Restored the saved prompt to the composer.",
+        )
+        self.restore_composer_text(saved_prompt)
+
+    def clear_dirty_worktree_recovery(self) -> None:
+        """Clear any saved recovery prompt once recovery has succeeded."""
+        self._pending_recovery_prompt = None
+        self._pending_recovery_error = None
+
+    def show_run_blocked(self, text: str, error: str) -> None:
+        """Render a recoverable run failure and restore the submitted prompt."""
+        self._pending_recovery_error = None
+        self._pending_recovery_prompt = None
+        self.query_one(StatusBar).set_error("Run blocked")
+        transcript = self.query_one(TranscriptView)
+        transcript.append_notice("Run blocked before start; your prompt was restored in the composer.")
+        transcript.append_command_output(error)
+        self.restore_composer_text(text)
+
+    def _start_run(
+        self,
+        text: str,
+        *,
+        callback: Callable[[str], None] | None = None,
+    ) -> None:
         """Start a new worker-backed run if the callback is available."""
-        if self._run_callback is None:
+        active_callback = callback or self._run_callback
+        if active_callback is None:
             return
         self._run_active = True
         self.run_worker(
-            lambda: self._run_with_lifecycle(text),
+            lambda: self._run_with_lifecycle(text, callback=active_callback),
             thread=True,
             exclusive=True,
         )
 
-    def _run_with_lifecycle(self, text: str) -> None:
+    def _run_with_lifecycle(
+        self,
+        text: str,
+        *,
+        callback: Callable[[str], None],
+    ) -> None:
         """Run the callback and reset app state when it finishes."""
         try:
-            if self._run_callback is not None:
-                self._run_callback(text)
+            try:
+                callback(text)
+            except PreflightError as exc:
+                logger.info("TUI run blocked by preflight: %s", exc)
+                self.call_from_thread(self.show_run_blocked, text, str(exc))
+            except Exception as exc:
+                logger.exception("Unhandled TUI run failure")
+                self.call_from_thread(
+                    self.show_run_blocked,
+                    text,
+                    f"{type(exc).__name__}: {exc}",
+                )
         finally:
             self.call_from_thread(self._mark_run_finished)
 

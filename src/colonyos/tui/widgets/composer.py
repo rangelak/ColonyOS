@@ -97,6 +97,13 @@ class Composer(Vertical):
         """Return focus to the composer text area."""
         self.query_one(TextArea).focus()
 
+    def restore_text(self, text: str) -> None:
+        """Restore previously submitted text into the composer."""
+        ta = self.query_one(TextArea)
+        ta.text = text
+        self._sync_heights(ta.document.line_count)
+        ta.focus()
+
     def _sync_heights(self, line_count: int) -> None:
         """Keep the container one row taller than the bordered text area."""
         textarea_height = max(

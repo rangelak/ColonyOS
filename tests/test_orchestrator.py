@@ -17,6 +17,7 @@ from colonyos.orchestrator import (
     _format_personas_block,
     _build_persona_agents,
     _build_ci_fix_prompt,
+    _build_preflight_recovery_prompt,
     _build_implement_prompt,
     _build_fix_prompt,
     _build_learn_prompt,
@@ -30,6 +31,7 @@ from colonyos.orchestrator import (
     _parse_parent_tasks,
     _persona_slug,
     _run_ci_fix_loop,
+    run_preflight_recovery,
     reviewer_personas,
     _build_persona_review_prompt,
     extract_review_verdict,
@@ -152,7 +154,22 @@ class TestPhaseReviewEnum:
 
     def test_phase_ordering(self):
         phases = list(Phase)
-        assert phases == [Phase.CEO, Phase.PLAN, Phase.TRIAGE, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.LEARN, Phase.VERIFY, Phase.DELIVER, Phase.CI_FIX, Phase.CONFLICT_RESOLVE, Phase.QA]
+        assert phases == [
+            Phase.CEO,
+            Phase.PLAN,
+            Phase.TRIAGE,
+            Phase.PREFLIGHT_RECOVERY,
+            Phase.IMPLEMENT,
+            Phase.REVIEW,
+            Phase.DECISION,
+            Phase.FIX,
+            Phase.LEARN,
+            Phase.VERIFY,
+            Phase.DELIVER,
+            Phase.CI_FIX,
+            Phase.CONFLICT_RESOLVE,
+            Phase.QA,
+        ]
 
     def test_fix_phase_exists(self):
         assert Phase.FIX == "fix"
@@ -2006,6 +2023,130 @@ class TestBuildCiFixPrompt:
             config, "feature/fix-tests", "", 2, 5,
         )
         assert "feature/fix-tests" in user
+
+
+class TestPreflightRecovery:
+    def test_build_prompt_includes_dirty_context(self) -> None:
+        config = ColonyConfig()
+        system, user = _build_preflight_recovery_prompt(
+            config,
+            "feature/recovery",
+            "ship this prompt",
+            "M src/app.py",
+        )
+        assert "feature/recovery" in system
+        assert "M src/app.py" in system
+        assert "ship this prompt" in user
+
+    def test_run_preflight_recovery_rejects_secret_like_paths(self, tmp_path: Path) -> None:
+        result = run_preflight_recovery(
+            tmp_path,
+            ColonyConfig(),
+            blocked_prompt="saved prompt",
+            dirty_output="M .env\nM src/app.py",
+            branch_name="feature/recovery",
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "sensitive-looking files" in result.error
+
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_head_sha", side_effect=["before", "after"])
+    @patch("colonyos.orchestrator._changed_paths_between", return_value={"src/app.py"})
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_run_preflight_recovery_requires_new_commit(
+        self,
+        mock_run_phase_sync,
+        mock_changed_paths,
+        mock_head_sha,
+        mock_check_clean,
+        tmp_path: Path,
+    ) -> None:
+        mock_run_phase_sync.return_value = PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=True,
+            cost_usd=0.01,
+            duration_ms=100,
+            session_id="recover",
+        )
+
+        result = run_preflight_recovery(
+            tmp_path,
+            ColonyConfig(),
+            blocked_prompt="saved prompt",
+            dirty_output="M src/app.py",
+            branch_name="feature/recovery",
+        )
+
+        assert result.success is True
+
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_head_sha", side_effect=["before", "after"])
+    @patch("colonyos.orchestrator._changed_paths_between", return_value={"tests/test_app.py"})
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_run_preflight_recovery_fails_when_blocked_files_not_committed(
+        self,
+        mock_run_phase_sync,
+        mock_changed_paths,
+        mock_head_sha,
+        mock_check_clean,
+        tmp_path: Path,
+    ) -> None:
+        mock_run_phase_sync.return_value = PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=True,
+            cost_usd=0.01,
+            duration_ms=100,
+            session_id="recover",
+        )
+
+        result = run_preflight_recovery(
+            tmp_path,
+            ColonyConfig(),
+            blocked_prompt="saved prompt",
+            dirty_output="M src/app.py",
+            branch_name="feature/recovery",
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "did not cover all blocked files" in result.error
+
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_head_sha", side_effect=["before", "after"])
+    @patch(
+        "colonyos.orchestrator._changed_paths_between",
+        return_value={"src/app.py", "docs/notes.md"},
+    )
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_run_preflight_recovery_fails_on_scope_expansion(
+        self,
+        mock_run_phase_sync,
+        mock_changed_paths,
+        mock_head_sha,
+        mock_check_clean,
+        tmp_path: Path,
+    ) -> None:
+        mock_run_phase_sync.return_value = PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=True,
+            cost_usd=0.01,
+            duration_ms=100,
+            session_id="recover",
+        )
+
+        result = run_preflight_recovery(
+            tmp_path,
+            ColonyConfig(),
+            blocked_prompt="saved prompt",
+            dirty_output="M src/app.py",
+            branch_name="feature/recovery",
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "expanded scope" in result.error
 
 
 class TestRunCiFixLoop:

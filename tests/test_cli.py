@@ -3,6 +3,7 @@ import os
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -10,11 +11,18 @@ import yaml
 import click
 from click.testing import CliRunner
 
-from colonyos.cli import RouteOutcome, app, _save_loop_state, _load_latest_loop_state, _compute_elapsed_hours
+from colonyos.cli import (
+    RouteOutcome,
+    _compute_elapsed_hours,
+    _launch_tui,
+    _load_latest_loop_state,
+    _save_loop_state,
+    app,
+)
 from colonyos.config import ColonyConfig, BudgetConfig, save_config
 from colonyos.models import (
     LoopState, LoopStatus, Persona, Phase, PhaseResult,
-    ProjectInfo, RunLog, RunStatus,
+    PreflightError, ProjectInfo, RunLog, RunStatus,
 )
 from colonyos.persona_packs import PACKS
 
@@ -166,6 +174,78 @@ class TestRun:
             result = runner.invoke(app, ["run", "Fix typo"])
         assert result.exit_code == 0
         assert mock_run.call_args.kwargs["skip_planning"] is True
+
+    def test_tui_recovery_success_retries_saved_prompt_once(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        dirty_error = PreflightError(
+            "Uncommitted changes detected",
+            code="dirty_worktree",
+            details={
+                "current_branch": "main",
+                "dirty_output": "M src/app.py",
+            },
+        )
+        fake_log = RunLog(
+            run_id="run-test",
+            prompt="Add feature",
+            status=RunStatus.COMPLETED,
+            phases=[],
+        )
+        recovery_result = PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=True,
+            cost_usd=0.01,
+            duration_ms=100,
+            session_id="recover",
+        )
+
+        class FakeApp:
+            def __init__(self, **kwargs):
+                self.run_callback = kwargs["run_callback"]
+                self.recovery_callback = kwargs["recovery_callback"]
+                self._pending_recovery = None
+                self.messages: list[object] = []
+                self.event_queue = SimpleNamespace(
+                    sync_q=SimpleNamespace(put=self.messages.append),
+                )
+
+            def call_from_thread(self, fn, *args):
+                return fn(*args)
+
+            def begin_dirty_worktree_recovery(self, text, error):
+                self._pending_recovery = (text, error)
+
+            def get_dirty_worktree_recovery(self):
+                return self._pending_recovery
+
+            def clear_dirty_worktree_recovery(self):
+                self._pending_recovery = None
+
+            def cancel_dirty_worktree_recovery(self):
+                self._pending_recovery = None
+
+            def show_run_blocked(self, *args):
+                self.blocked = args
+
+            def exit(self):
+                self.exited = True
+
+            def run(self):
+                self.run_callback("Add feature")
+                assert self._pending_recovery is not None
+                self.recovery_callback("commit")
+
+        with patch("colonyos.tui.app.AssistantApp", FakeApp), \
+             patch("colonyos.cli._route_prompt", return_value=RouteOutcome()), \
+             patch("colonyos.cli.run_orchestrator", side_effect=[dirty_error, fake_log]) as mock_run, \
+             patch("colonyos.cli.run_preflight_recovery", return_value=recovery_result) as mock_recovery, \
+             patch("colonyos.cli.signal.signal"):
+            _launch_tui(tmp_path, config)
+
+        assert mock_recovery.call_count == 1
+        assert mock_run.call_count == 2
+        assert mock_run.call_args_list[0].args[0] == "Add feature"
+        assert mock_run.call_args_list[1].args[0] == "Add feature"
 
 
 def _make_config(tmp_path: Path) -> ColonyConfig:

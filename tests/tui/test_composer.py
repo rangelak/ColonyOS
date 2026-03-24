@@ -101,6 +101,20 @@ async def test_composer_submitted_message_carries_text():
 
 
 @pytest.mark.asyncio
+async def test_composer_restore_text_restores_draft():
+    """Composer should be able to restore a cleared draft."""
+    async with ComposerApp().run_test() as pilot:
+        app = pilot.app
+        composer = app.query_one(Composer)
+        composer.restore_text("retry this prompt")
+        await pilot.pause()
+
+        ta = app.query_one(TextArea)
+        assert ta.text == "retry this prompt"
+        assert ta.has_focus
+
+
+@pytest.mark.asyncio
 async def test_hint_bar_renders_keybinding_text():
     """HintBar should display the keybinding hints."""
     async with ComposerApp().run_test() as pilot:
