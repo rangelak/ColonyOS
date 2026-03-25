@@ -122,7 +122,7 @@ async def test_hint_bar_renders_keybinding_text():
         hint = app.query_one(HintBar)
         # In Textual 8.x, use render() to get the renderable
         rendered = str(hint.render())
-        assert "Type a command or prompt" in rendered
+        assert "Ask for a change or explain what you need" in rendered
         assert "Enter send" in rendered
         assert "Ctrl+C cancel" in rendered
         assert "Ctrl+J newline" in rendered

@@ -16,6 +16,7 @@ from colonyos.cli import (
     _compute_elapsed_hours,
     _launch_tui,
     _load_latest_loop_state,
+    _resolve_latest_prd_path,
     _save_loop_state,
     app,
 )
@@ -175,6 +176,60 @@ class TestRun:
         assert result.exit_code == 0
         assert mock_run.call_args.kwargs["skip_planning"] is True
 
+    def test_direct_agent_route_bypasses_orchestrator(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=False), \
+             patch(
+                 "colonyos.cli._route_prompt",
+                 return_value=RouteOutcome(mode="direct_agent", announcement="Handling this directly."),
+             ), \
+             patch("colonyos.cli._run_direct_agent", return_value=True) as mock_direct, \
+             patch("colonyos.cli.run_orchestrator") as mock_run:
+            result = runner.invoke(app, ["run", "What does this do?"])
+        assert result.exit_code == 0
+        mock_direct.assert_called_once()
+        mock_run.assert_not_called()
+
+
+class TestResolveLatestPrdPath:
+    def test_returns_latest_matching_prd(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        prds_dir = tmp_path / config.prds_dir
+        tasks_dir = tmp_path / config.tasks_dir
+        prds_dir.mkdir(exist_ok=True)
+        tasks_dir.mkdir(exist_ok=True)
+
+        older_prd = prds_dir / "20260320_100000_prd_old_feature.md"
+        newer_prd = prds_dir / "20260324_120000_prd_new_feature.md"
+        older_prd.write_text("# old", encoding="utf-8")
+        newer_prd.write_text("# new", encoding="utf-8")
+        (tasks_dir / "20260320_100000_tasks_old_feature.md").write_text("# tasks", encoding="utf-8")
+        (tasks_dir / "20260324_120000_tasks_new_feature.md").write_text("# tasks", encoding="utf-8")
+
+        result = _resolve_latest_prd_path(tmp_path, config)
+        assert result == "cOS_prds/20260324_120000_prd_new_feature.md"
+
+    def test_implement_only_route_uses_latest_prd(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        fake_log = RunLog(
+            run_id="run-test",
+            prompt="continue the last plan",
+            status=RunStatus.COMPLETED,
+            phases=[],
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=False), \
+             patch(
+                 "colonyos.cli._route_prompt",
+                 return_value=RouteOutcome(mode="implement_only", announcement="Continuing the latest plan."),
+             ), \
+             patch("colonyos.cli._resolve_latest_prd_path", return_value="cOS_prds/latest_prd_test.md"), \
+             patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            result = runner.invoke(app, ["run", "continue the last plan"])
+        assert result.exit_code == 0
+        assert mock_run.call_args.kwargs["from_prd"] == "cOS_prds/latest_prd_test.md"
+
     def test_tui_recovery_success_retries_saved_prompt_once(self, tmp_path: Path):
         config = _make_config(tmp_path)
         dirty_error = PreflightError(
@@ -246,6 +301,39 @@ class TestRun:
         assert mock_run.call_count == 2
         assert mock_run.call_args_list[0].args[0] == "Add feature"
         assert mock_run.call_args_list[1].args[0] == "Add feature"
+
+    def test_tui_direct_agent_route_uses_direct_handler(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+
+        class FakeApp:
+            def __init__(self, **kwargs):
+                self.run_callback = kwargs["run_callback"]
+                self.messages: list[object] = []
+                self.event_queue = SimpleNamespace(
+                    sync_q=SimpleNamespace(put=self.messages.append),
+                )
+
+            def call_from_thread(self, fn, *args):
+                return fn(*args)
+
+            def exit(self):
+                self.exited = True
+
+            def run(self):
+                self.run_callback("What does this do?")
+
+        with patch("colonyos.tui.app.AssistantApp", FakeApp), \
+             patch(
+                 "colonyos.cli._route_prompt",
+                 return_value=RouteOutcome(mode="direct_agent", announcement="Handling this directly."),
+             ), \
+             patch("colonyos.cli._run_direct_agent", return_value=True) as mock_direct, \
+             patch("colonyos.cli.run_orchestrator") as mock_run, \
+             patch("colonyos.cli.signal.signal"):
+            _launch_tui(tmp_path, config)
+
+        mock_direct.assert_called_once()
+        mock_run.assert_not_called()
 
 
 def _make_config(tmp_path: Path) -> ColonyConfig:

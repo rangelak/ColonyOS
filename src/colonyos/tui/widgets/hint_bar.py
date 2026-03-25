@@ -30,11 +30,11 @@ class HintBar(Static):
         """Render command examples and keybinding hints."""
         text = Text()
         if self._command_hints:
-            text.append("Commands", style=f"bold {COLOR_ACCENT}")
+            text.append("Examples", style=f"bold {COLOR_ACCENT}")
             text.append(": ", style=COLOR_DIM)
             text.append("  ·  ".join(self._command_hints), style=COLOR_DIM)
         else:
-            text.append("Type a command or prompt", style=COLOR_DIM)
+            text.append("Ask for a change or explain what you need", style=COLOR_DIM)
         text.append("\n")
         text.append("Enter", style=f"bold {COLOR_ACCENT}")
         text.append(" send", style=COLOR_DIM)

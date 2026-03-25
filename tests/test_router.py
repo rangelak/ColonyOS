@@ -9,11 +9,18 @@ import pytest
 
 from colonyos.config import ColonyConfig, RouterConfig, load_config
 from colonyos.router import (
+    ModeAgentMode,
+    ModeAgentDecision,
     RouterCategory,
     RouterResult,
+    _build_mode_selection_prompt,
     _build_router_prompt,
+    _parse_mode_selection_response,
     _parse_router_response,
+    build_direct_agent_prompt,
+    choose_tui_mode,
     log_router_decision,
+    log_mode_selection,
     route_query,
 )
 
@@ -115,6 +122,112 @@ class TestRouterResult:
         )
         with pytest.raises(AttributeError):
             result.confidence = 0.5  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Mode-selection agent tests
+# ---------------------------------------------------------------------------
+
+
+class TestModeAgentDecision:
+    def test_basic_construction(self) -> None:
+        result = ModeAgentDecision(
+            mode=ModeAgentMode.DIRECT_AGENT,
+            confidence=0.9,
+            summary="Answer a question directly",
+            reasoning="This is small and focused",
+            announcement="Handling this directly.",
+        )
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+        assert result.announcement == "Handling this directly."
+
+
+class TestBuildModeSelectionPrompt:
+    def test_lists_supported_modes(self) -> None:
+        system, user = _build_mode_selection_prompt("continue the last plan")
+        assert "direct_agent" in system
+        assert "plan_implement_loop" in system
+        assert "implement_only" in system
+        assert "review_only" in system
+        assert "cleanup_loop" in system
+        assert "continue the last plan" in user
+
+
+class TestParseModeSelectionResponse:
+    def test_valid_direct_agent_json(self) -> None:
+        raw = json.dumps({
+            "mode": "direct_agent",
+            "confidence": 0.91,
+            "summary": "Small direct request",
+            "reasoning": "This should not enter the full pipeline",
+            "announcement": "Handling this directly.",
+        })
+        result = _parse_mode_selection_response(raw)
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+        assert result.confidence == 0.91
+        assert result.announcement == "Handling this directly."
+
+    def test_invalid_mode_falls_back_to_pipeline(self) -> None:
+        result = _parse_mode_selection_response('{"mode":"weird","confidence":1.0}')
+        assert result.mode == ModeAgentMode.PLAN_IMPLEMENT_LOOP
+        assert result.confidence == 0.0
+
+
+class TestChooseTUIMode:
+    @pytest.fixture
+    def tmp_repo(self, tmp_path: Path) -> Path:
+        config_dir = tmp_path / ".colonyos"
+        config_dir.mkdir()
+        return tmp_path
+
+    def test_uses_triage_phase(self, tmp_repo: Path) -> None:
+        with patch("colonyos.agent.run_phase_sync") as mock_run:
+            mock_run.return_value = MagicMock(
+                artifacts={
+                    "result": json.dumps({
+                        "mode": "direct_agent",
+                        "confidence": 0.9,
+                        "summary": "Question",
+                        "reasoning": "Small ask",
+                        "announcement": "Handling this directly.",
+                    })
+                },
+                error=None,
+            )
+            result = choose_tui_mode("please decide the right workflow", repo_root=tmp_repo)
+            assert result.mode == ModeAgentMode.DIRECT_AGENT
+            call_args = mock_run.call_args.args
+            from colonyos.models import Phase
+            assert call_args[0] == Phase.TRIAGE
+
+
+class TestBuildDirectAgentPrompt:
+    def test_mentions_direct_handling(self) -> None:
+        system, user = build_direct_agent_prompt("change this button to red")
+        assert "handling a request directly" in system.lower()
+        assert "change this button to red" in user
+
+
+class TestLogModeSelection:
+    def test_writes_mode_selection_log(self, tmp_path: Path) -> None:
+        result = ModeAgentDecision(
+            mode=ModeAgentMode.DIRECT_AGENT,
+            confidence=0.88,
+            summary="Direct answer",
+            reasoning="Small ask",
+            announcement="Handling this directly.",
+        )
+        log_path = log_mode_selection(
+            repo_root=tmp_path,
+            prompt="what does this do?",
+            result=result,
+            source="tui",
+        )
+        assert log_path is not None
+        assert log_path.exists()
+        data = json.loads(log_path.read_text(encoding="utf-8"))
+        assert data["mode"] == "direct_agent"
+        assert data["source"] == "tui"
 
 
 # ---------------------------------------------------------------------------
