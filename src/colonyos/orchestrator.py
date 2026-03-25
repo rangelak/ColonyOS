@@ -1491,6 +1491,184 @@ def _extract_feature_prompt(proposal_text: str) -> str:
     return proposal_text.strip() or "No proposal generated."
 
 
+def _build_sweep_prompt(
+    config: ColonyConfig,
+    *,
+    target_path: str | None = None,
+    max_tasks: int | None = None,
+    scan_context: str = "",
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the sweep analysis phase."""
+    sweep_template = _load_instruction("sweep.md")
+
+    effective_max_tasks = max_tasks if max_tasks is not None else config.sweep.max_tasks
+    categories_list = config.sweep.default_categories
+    categories_block = "\n".join(f"- {cat.replace('_', ' ').title()}" for cat in categories_list)
+
+    if target_path:
+        target_scope = f"Analyze only the following path: `{target_path}`"
+    else:
+        target_scope = "Analyze the **entire codebase**. Start with the most critical modules and work outward."
+
+    if scan_context:
+        scan_block = f"The following structural scan results are available as a starting point:\n\n{scan_context}"
+    else:
+        scan_block = "_No pre-computed scan data available. Perform your own analysis from scratch._"
+
+    system = sweep_template.format(
+        categories=categories_block,
+        target_scope=target_scope,
+        max_tasks=effective_max_tasks,
+        scan_context=scan_block,
+    )
+
+    user = (
+        "Analyze this codebase for code quality issues. "
+        "Produce a prioritized task file following the output format in your instructions. "
+        f"Limit your output to the top {effective_max_tasks} findings ranked by impact * risk."
+    )
+    return system, user
+
+
+def parse_sweep_findings(raw_output: str) -> list[dict]:
+    """Parse structured findings from sweep agent markdown output.
+
+    Each finding is extracted from parent task lines matching the pattern:
+    - [ ] N.0 [Category] Title — impact:N risk:N
+
+    Returns a sorted list of dicts with keys:
+    number, category, title, impact, risk, score, raw_line
+    """
+    findings: list[dict] = []
+    pattern = re.compile(
+        r"^- \[ \]\s+(\d+\.\d+)\s+\[([^\]]+)\]\s+(.+?)\s*—\s*impact:(\d+)\s+risk:(\d+)",
+        re.MULTILINE,
+    )
+    for m in pattern.finditer(raw_output):
+        impact = int(m.group(4))
+        risk = int(m.group(5))
+        findings.append({
+            "number": m.group(1),
+            "category": m.group(2),
+            "title": m.group(3).strip(),
+            "impact": impact,
+            "risk": risk,
+            "score": impact * risk,
+            "raw_line": m.group(0),
+        })
+    findings.sort(key=lambda f: f["score"], reverse=True)
+    return findings
+
+
+def run_sweep(
+    repo_root: Path,
+    config: ColonyConfig,
+    *,
+    target_path: str | None = None,
+    max_tasks: int | None = None,
+    execute: bool = False,
+    plan_only: bool = False,
+    verbose: bool = False,
+    quiet: bool = False,
+    force: bool = False,
+    ui: PhaseUI | NullUI | None = None,
+) -> tuple[str, PhaseResult]:
+    """Run the sweep analysis phase: analyze codebase for quality issues.
+
+    Returns a tuple of (findings_text, phase_result).
+    If execute=True, also delegates to run() with skip_planning=True.
+    """
+    effective_max_tasks = max_tasks if max_tasks is not None else config.sweep.max_tasks
+
+    # Optionally bootstrap with structural scan context
+    scan_context = ""
+    try:
+        from colonyos.cleanup import scan_directory
+        scan_results = scan_directory(
+            repo_root,
+            config.cleanup.scan_max_lines,
+            config.cleanup.scan_max_functions,
+        )
+        if scan_results:
+            scan_context = "\n".join(
+                f"- `{r.path}`: {r.line_count} lines, {r.function_count} functions ({r.category.value})"
+                for r in scan_results
+            )
+    except Exception:
+        pass  # Non-critical; sweep will do its own analysis
+
+    system, user_prompt = _build_sweep_prompt(
+        config,
+        target_path=target_path,
+        max_tasks=effective_max_tasks,
+        scan_context=scan_context,
+    )
+
+    if ui is not None:
+        ui.phase_header("Sweep Analysis", config.budget.per_phase, config.get_model(Phase.SWEEP))
+    else:
+        _log("=== Sweep Analysis Phase ===")
+
+    result = run_phase_sync(
+        Phase.SWEEP,
+        user_prompt,
+        cwd=repo_root,
+        system_prompt=system,
+        model=config.get_model(Phase.SWEEP),
+        budget_usd=config.budget.per_phase,
+        allowed_tools=["Read", "Glob", "Grep"],
+        ui=ui,
+    )
+
+    findings_text = result.artifacts.get("result", "")
+
+    if not result.success:
+        _log(f"Sweep analysis failed: {result.error}")
+        return findings_text, result
+
+    # Write the task file if we have findings
+    if findings_text.strip():
+        from colonyos.naming import generate_timestamp
+        timestamp = generate_timestamp()
+        task_filename = f"{timestamp}_tasks_sweep.md"
+        tasks_dir = repo_root / config.tasks_dir
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        task_path = tasks_dir / task_filename
+        task_path.write_text(findings_text, encoding="utf-8")
+        _log(f"Sweep task file written to: {task_path}")
+        result.artifacts["task_file"] = str(task_path)
+
+    # Dry-run mode: just return findings
+    if not execute:
+        return findings_text, result
+
+    # Plan-only mode: write task file but don't execute
+    if plan_only:
+        _log("Plan-only mode: task file written, stopping before implementation.")
+        return findings_text, result
+
+    # Execute mode: delegate to the main orchestrator
+    scope_desc = target_path or "codebase"
+    sweep_prompt = (
+        f"Implement the following code quality improvements identified by a sweep analysis "
+        f"of {scope_desc}. The task file has already been generated — follow it exactly.\n\n"
+        f"{findings_text}"
+    )
+
+    _log("Delegating sweep findings to implementation pipeline...")
+    run(
+        sweep_prompt,
+        repo_root=repo_root,
+        config=config,
+        skip_planning=True,
+        verbose=verbose,
+        quiet=quiet,
+        force=force,
+    )
+
+    return findings_text, result
+
+
 def _parse_parent_tasks(task_content: str) -> list[str]:
     """Extract parent task lines from a task file.
 

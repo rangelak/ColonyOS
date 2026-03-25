@@ -56,6 +56,7 @@ class Phase(str, Enum):
     CI_FIX = "ci_fix"
     CONFLICT_RESOLVE = "conflict_resolve"
     QA = "qa"  # Intent Router: read-only Q&A agent for codebase questions
+    SWEEP = "sweep"
 
 
 class TaskStatus(str, Enum):

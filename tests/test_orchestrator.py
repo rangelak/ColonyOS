@@ -169,6 +169,7 @@ class TestPhaseReviewEnum:
             Phase.CI_FIX,
             Phase.CONFLICT_RESOLVE,
             Phase.QA,
+            Phase.SWEEP,
         ]
 
     def test_fix_phase_exists(self):

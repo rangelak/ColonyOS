@@ -220,6 +220,16 @@ flowchart TD
 | `colonyos auto --propose-only` | CEO proposes but does not execute |
 | `colonyos auto --resume-loop` | Resume the most recent interrupted loop |
 
+### Codebase sweep
+
+| Command | Description |
+|---|---|
+| `colonyos sweep` | Analyze entire codebase for quality issues (dry-run report) |
+| `colonyos sweep PATH` | Scope analysis to a specific file or directory |
+| `colonyos sweep --execute` | Fix findings via the implement→review pipeline |
+| `colonyos sweep --execute --plan-only` | Generate task file but stop before implementation |
+| `colonyos sweep --max-tasks N` | Cap the number of findings (default: 5) |
+
 ### Code review
 
 | Command | Description |
