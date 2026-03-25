@@ -3059,6 +3059,17 @@ def _run_pipeline(
                 budget_usd=config.budget.per_phase,
                 ui=impl_ui,
             )
+        elif impl_ui is not None:
+            if impl_result.success:
+                completed_tasks = int(impl_result.artifacts.get("completed", "0"))
+                impl_ui.phase_complete(
+                    impl_result.cost_usd or 0.0,
+                    completed_tasks,
+                    impl_result.duration_ms,
+                )
+            else:
+                message = impl_result.error or "Parallel implement phase failed"
+                impl_ui.phase_error(message)
 
         _append_phase(impl_result)
 

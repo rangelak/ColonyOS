@@ -7,7 +7,7 @@ import pytest
 
 from colonyos.config import ColonyConfig, BudgetConfig, LearningsConfig, PhasesConfig, save_config
 from colonyos.learnings import learnings_path, LearningEntry, append_learnings
-from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, ProjectInfo, ResumeState, RunLog, RunStatus
+from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightResult, ProjectInfo, ResumeState, RunLog, RunStatus
 from colonyos.orchestrator import (
     run,
     run_thread_fix,
@@ -3284,3 +3284,51 @@ class TestParallelImplementIntegration:
 
         # Should return None when disabled
         assert result is None
+
+    @patch("colonyos.orchestrator._run_parallel_implement")
+    @patch("colonyos.orchestrator._preflight_check")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_parallel_implement_failure_surfaces_to_ui(
+        self,
+        mock_run_phase_sync,
+        mock_preflight,
+        mock_parallel_implement,
+        tmp_git_repo: Path,
+        config: ColonyConfig,
+    ) -> None:
+        class FakeUI:
+            def __init__(self) -> None:
+                self.errors: list[str] = []
+
+            def phase_header(self, *args, **kwargs) -> None:
+                pass
+
+            def phase_complete(self, *args, **kwargs) -> None:
+                pass
+
+            def phase_error(self, error: str) -> None:
+                self.errors.append(error)
+
+        ui = FakeUI()
+        mock_preflight.return_value = PreflightResult(
+            current_branch="main",
+            is_clean=True,
+            branch_exists=False,
+            action_taken="proceed",
+        )
+        mock_run_phase_sync.return_value = _fake_phase_result(Phase.PLAN)
+        mock_parallel_implement.return_value = PhaseResult(
+            phase=Phase.IMPLEMENT,
+            success=False,
+            error="parallel worktree creation failed",
+        )
+
+        log = run(
+            "Build cleanup agent",
+            repo_root=tmp_git_repo,
+            config=config,
+            ui_factory=lambda prefix="": ui,
+        )
+
+        assert log.status == RunStatus.FAILED
+        assert ui.errors == ["parallel worktree creation failed"]
