@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -107,7 +108,19 @@ def _heuristic_mode_decision(query: str) -> ModeAgentDecision | None:
             announcement="Handling this directly.",
         )
 
-    if any(word in lowered for word in ("change ", "make ", "rename ", "fix typo", "small fix", "tiny fix")):
+    # Use word-boundary matching to avoid false positives like "make sure"
+    # or "change my mind". The pattern requires the keyword to appear as the
+    # action verb at the start of a clause (beginning of string or after
+    # punctuation/whitespace), NOT followed by common non-action continuations.
+    _DIRECT_PATTERNS = (
+        r"\bchange\b(?!\s+(?:my|your|the subject|my mind))",
+        r"\bmake\b(?!\s+(?:sure|certain|sense|a note|it clear|up))",
+        r"\brename\b",
+        r"\bfix typo\b",
+        r"\bsmall fix\b",
+        r"\btiny fix\b",
+    )
+    if any(re.search(pat, lowered) for pat in _DIRECT_PATTERNS):
         return ModeAgentDecision(
             mode=ModeAgentMode.DIRECT_AGENT,
             confidence=0.9,
@@ -116,7 +129,16 @@ def _heuristic_mode_decision(query: str) -> ModeAgentDecision | None:
             announcement="Handling this directly.",
         )
 
-    if any(word in lowered for word in ("add ", "build ", "implement ", "feature", "refactor ", "introduce ", "create ")):
+    _PIPELINE_PATTERNS = (
+        r"\badd\b(?!\s+(?:a note|me to|more context))",
+        r"\bbuild\b",
+        r"\bimplement\b",
+        r"\bfeature\b",
+        r"\brefactor\b",
+        r"\bintroduce\b",
+        r"\bcreate\b",
+    )
+    if any(re.search(pat, lowered) for pat in _PIPELINE_PATTERNS):
         return ModeAgentDecision(
             mode=ModeAgentMode.PLAN_IMPLEMENT_LOOP,
             confidence=0.92,

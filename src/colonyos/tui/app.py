@@ -299,7 +299,7 @@ class AssistantApp(App):
         self.run_worker(
             lambda: self._run_with_lifecycle(text, callback=active_callback),
             thread=True,
-            exclusive=True,
+            exclusive=False,
         )
 
     def _run_with_lifecycle(

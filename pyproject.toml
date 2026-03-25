@@ -34,6 +34,8 @@ ui = ["fastapi>=0.100", "uvicorn>=0.20"]
 [tool.pytest.ini_options]
 pythonpath = ["src", "tests"]
 testpaths = ["tests"]
+addopts = "-n auto"
+markers = ["serial: run test sequentially (no xdist)"]
 
 [tool.setuptools_scm]
 version_scheme = "guess-next-dev"

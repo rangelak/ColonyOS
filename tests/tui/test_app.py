@@ -386,8 +386,8 @@ class TestComposerSubmission:
             await pilot.pause()
             assert app.get_dirty_worktree_recovery() is None
 
-    def test_start_run_uses_exclusive_worker(self) -> None:
-        """Assistant runs should always use an exclusive worker slot."""
+    def test_start_run_uses_non_exclusive_worker(self) -> None:
+        """Workers must NOT be exclusive to avoid canceling active runs (PRD requirement)."""
         app = AssistantApp(run_callback=lambda _: None)
         calls: list[dict[str, object]] = []
 
@@ -409,7 +409,7 @@ class TestComposerSubmission:
         assert app._run_active is True
         assert len(calls) == 1
         assert calls[0]["thread"] is True
-        assert calls[0]["exclusive"] is True
+        assert calls[0]["exclusive"] is False
 
 
 class TestKeybindings:

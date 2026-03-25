@@ -1218,7 +1218,13 @@ def _write_fast_path_artifacts(
 def _drain_injected_context(
     user_injection_provider: Callable[[], list[str]] | None,
 ) -> str:
-    """Drain queued mid-run user notes and format them for later phases."""
+    """Drain queued mid-run user notes and format them for the current phase.
+
+    **Destructive**: Each call consumes the queued messages. Subsequent calls
+    will only see messages injected *after* the previous drain.  This is
+    intentional — context is timely and should apply to the phase that is
+    active when the user submits it, not to all future phases.
+    """
     if user_injection_provider is None:
         return ""
     messages = [sanitize_untrusted_content(msg).strip() for msg in user_injection_provider()]

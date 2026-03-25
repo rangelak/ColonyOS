@@ -12,6 +12,7 @@ from colonyos.orchestrator import (
     run,
     run_thread_fix,
     prepare_resume,
+    _drain_injected_context,
     _extract_pr_number_from_log,
     _fail_run_log,
     _format_personas_block,
@@ -3333,3 +3334,66 @@ class TestParallelImplementIntegration:
 
         assert log.status == RunStatus.FAILED
         assert ui.errors == ["parallel worktree creation failed"]
+
+
+# ---------------------------------------------------------------------------
+# _drain_injected_context tests — destructive drain semantics
+# ---------------------------------------------------------------------------
+
+
+class TestDrainInjectedContext:
+    """Verify _drain_injected_context drains destructively and formats correctly."""
+
+    def test_none_provider_returns_empty(self) -> None:
+        assert _drain_injected_context(None) == ""
+
+    def test_empty_queue_returns_empty(self) -> None:
+        assert _drain_injected_context(lambda: []) == ""
+
+    def test_single_message_formatted(self) -> None:
+        result = _drain_injected_context(lambda: ["Please use pytest"])
+        assert "## Additional User Context" in result
+        assert "- Please use pytest" in result
+
+    def test_multiple_messages_all_included(self) -> None:
+        result = _drain_injected_context(lambda: ["note one", "note two"])
+        assert "- note one" in result
+        assert "- note two" in result
+
+    def test_whitespace_only_messages_stripped(self) -> None:
+        result = _drain_injected_context(lambda: ["  ", "\n", "real note"])
+        assert "- real note" in result
+        assert result.count("- ") == 1
+
+    def test_destructive_drain_semantics(self) -> None:
+        """Second call returns empty because the first call consumed the queue."""
+        queue: list[str] = ["first", "second"]
+
+        def provider() -> list[str]:
+            msgs = list(queue)
+            queue.clear()
+            return msgs
+
+        first = _drain_injected_context(provider)
+        assert "- first" in first
+        assert "- second" in first
+
+        second = _drain_injected_context(provider)
+        assert second == ""
+
+    def test_messages_injected_between_drains_are_visible(self) -> None:
+        """Messages added after a drain are visible on the next drain."""
+        queue: list[str] = ["phase-1 note"]
+
+        def provider() -> list[str]:
+            msgs = list(queue)
+            queue.clear()
+            return msgs
+
+        first = _drain_injected_context(provider)
+        assert "- phase-1 note" in first
+
+        queue.append("phase-2 note")
+        second = _drain_injected_context(provider)
+        assert "- phase-2 note" in second
+        assert "phase-1" not in second

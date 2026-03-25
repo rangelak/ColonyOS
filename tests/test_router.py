@@ -15,6 +15,7 @@ from colonyos.router import (
     RouterResult,
     _build_mode_selection_prompt,
     _build_router_prompt,
+    _heuristic_mode_decision,
     _parse_mode_selection_response,
     _parse_router_response,
     build_direct_agent_prompt,
@@ -171,6 +172,100 @@ class TestParseModeSelectionResponse:
         result = _parse_mode_selection_response('{"mode":"weird","confidence":1.0}')
         assert result.mode == ModeAgentMode.PLAN_IMPLEMENT_LOOP
         assert result.confidence == 0.0
+
+
+class TestHeuristicModeDecision:
+    """Tests for _heuristic_mode_decision including adversarial inputs."""
+
+    def test_empty_input_returns_fallback(self) -> None:
+        result = _heuristic_mode_decision("")
+        assert result is not None
+        assert result.mode == ModeAgentMode.FALLBACK
+
+    def test_continue_from_latest_prd(self) -> None:
+        result = _heuristic_mode_decision("use the latest prd")
+        assert result is not None
+        assert result.mode == ModeAgentMode.IMPLEMENT_ONLY
+
+    def test_review_request(self) -> None:
+        result = _heuristic_mode_decision("review this branch")
+        assert result is not None
+        assert result.mode == ModeAgentMode.REVIEW_ONLY
+
+    def test_cleanup_request(self) -> None:
+        result = _heuristic_mode_decision("cleanup the codebase")
+        assert result is not None
+        assert result.mode == ModeAgentMode.CLEANUP_LOOP
+
+    def test_question_mark_routes_direct(self) -> None:
+        result = _heuristic_mode_decision("what does this function do?")
+        assert result is not None
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+
+    def test_change_routes_direct(self) -> None:
+        result = _heuristic_mode_decision("change the button color to red")
+        assert result is not None
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+
+    def test_rename_routes_direct(self) -> None:
+        result = _heuristic_mode_decision("rename the function foo to bar")
+        assert result is not None
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+
+    def test_build_routes_to_pipeline(self) -> None:
+        result = _heuristic_mode_decision("build a new REST API")
+        assert result is not None
+        assert result.mode == ModeAgentMode.PLAN_IMPLEMENT_LOOP
+
+    def test_implement_routes_to_pipeline(self) -> None:
+        result = _heuristic_mode_decision("implement pagination for the user list")
+        assert result is not None
+        assert result.mode == ModeAgentMode.PLAN_IMPLEMENT_LOOP
+
+    # -- Adversarial inputs: phrases that previously caused false positives --
+
+    def test_make_sure_does_not_route_direct(self) -> None:
+        """'make sure' is not an action verb — should NOT match DIRECT_AGENT."""
+        result = _heuristic_mode_decision("I want to make sure the tests pass")
+        assert result is None or result.mode != ModeAgentMode.DIRECT_AGENT
+
+    def test_make_certain_does_not_route_direct(self) -> None:
+        result = _heuristic_mode_decision("make certain the deploy works")
+        assert result is None or result.mode != ModeAgentMode.DIRECT_AGENT
+
+    def test_make_sense_does_not_route_direct(self) -> None:
+        result = _heuristic_mode_decision("does this make sense?")
+        # Should route as a question (ends with ?) not as DIRECT_AGENT via "make"
+        assert result is not None
+        assert result.mode == ModeAgentMode.DIRECT_AGENT  # from the ? heuristic
+        assert result.confidence == 0.94  # question confidence, not 0.9
+
+    def test_change_my_mind_does_not_route_direct(self) -> None:
+        """'change my mind' is not a code action."""
+        result = _heuristic_mode_decision("change my mind about the approach")
+        assert result is None or result.mode != ModeAgentMode.DIRECT_AGENT
+
+    def test_add_a_note_does_not_route_pipeline(self) -> None:
+        """'add a note' is not a feature request."""
+        result = _heuristic_mode_decision("add a note about this decision")
+        assert result is None or result.mode != ModeAgentMode.PLAN_IMPLEMENT_LOOP
+
+    def test_ambiguous_input_returns_none(self) -> None:
+        """Ambiguous input should fall through to the LLM router."""
+        result = _heuristic_mode_decision("I think we should discuss the architecture")
+        assert result is None
+
+    def test_real_change_request_still_works(self) -> None:
+        """Ensure legitimate change requests still route correctly."""
+        result = _heuristic_mode_decision("change the background color to blue")
+        assert result is not None
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+
+    def test_real_make_request_still_works(self) -> None:
+        """Ensure legitimate make requests still route correctly."""
+        result = _heuristic_mode_decision("make the header font larger")
+        assert result is not None
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
 
 
 class TestChooseTUIMode:
