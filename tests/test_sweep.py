@@ -407,6 +407,45 @@ class TestRunSweepOrchestration:
             call_kwargs = mock_run.call_args.kwargs
             assert call_kwargs.get("skip_planning") is True
 
+    def test_execute_mode_propagates_failure(
+        self, tmp_repo, config, mock_phase_result, analysis_output
+    ):
+        """When execute=True and run() returns a failed RunLog, sweep result should reflect failure."""
+        from colonyos.models import RunLog, RunStatus
+        from colonyos.orchestrator import run_sweep
+
+        result_with_output = self._make_phase_result_with_output(mock_phase_result, analysis_output)
+        failed_run_log = RunLog(
+            run_id="sweep-exec-1",
+            prompt="test",
+            status=RunStatus.FAILED,
+        )
+        with patch("colonyos.orchestrator.run_phase_sync", return_value=result_with_output), \
+             patch("colonyos.orchestrator.run", return_value=failed_run_log):
+            findings_text, phase_result = run_sweep(tmp_repo, config, execute=True)
+
+            assert phase_result.success is False
+            assert "failed" in phase_result.error.lower()
+
+    def test_execute_mode_success_preserves_result(
+        self, tmp_repo, config, mock_phase_result, analysis_output
+    ):
+        """When execute=True and run() succeeds, sweep result should stay successful."""
+        from colonyos.models import RunLog, RunStatus
+        from colonyos.orchestrator import run_sweep
+
+        result_with_output = self._make_phase_result_with_output(mock_phase_result, analysis_output)
+        success_run_log = RunLog(
+            run_id="sweep-exec-2",
+            prompt="test",
+            status=RunStatus.COMPLETED,
+        )
+        with patch("colonyos.orchestrator.run_phase_sync", return_value=result_with_output), \
+             patch("colonyos.orchestrator.run", return_value=success_run_log):
+            findings_text, phase_result = run_sweep(tmp_repo, config, execute=True)
+
+            assert phase_result.success is True
+
     def test_max_tasks_passed_to_template(self, tmp_repo, config, mock_phase_result):
         """max_tasks from config should appear in the prompt sent to the agent."""
         from colonyos.orchestrator import run_sweep

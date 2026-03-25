@@ -888,7 +888,7 @@ def _triage_message_legacy(
     project_stack: str = "",
     vision: str = "",
     triage_scope: str = "",
-    model: str = "opus",
+    model: str = "haiku",
 ) -> TriageResult:
     """Original Slack-specific triage implementation.
 

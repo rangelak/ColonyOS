@@ -471,3 +471,29 @@ class TestKeybindings:
             await pilot.pause()
             transcript = app.query_one(TranscriptView)
             assert len(transcript.lines) > 0
+
+    @pytest.mark.asyncio
+    async def test_consumer_loop_survives_dispatch_error(self) -> None:
+        """If a widget method raises during dispatch, the consumer loop should continue."""
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            status = app.query_one(StatusBar)
+            transcript = app.query_one(TranscriptView)
+            # Record baseline line count
+            baseline = len(transcript.lines)
+            # Temporarily make set_phase raise to simulate a dispatch error
+            original = status.set_phase
+            status.set_phase = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom"))
+            app.event_queue.sync_q.put(
+                PhaseHeaderMsg(phase_name="broken", budget=1.0, model="opus")
+            )
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+            # Restore and send a valid message — consumer should still be alive
+            status.set_phase = original
+            app.event_queue.sync_q.put(TextBlockMsg(text="still alive"))
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+            assert len(transcript.lines) > baseline, "Consumer loop died after dispatch error"

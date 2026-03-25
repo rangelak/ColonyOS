@@ -217,3 +217,30 @@ async def test_status_bar_idle_animation_cycles():
         bar._advance_idle()
         second = bar._last_rendered
         assert first != second
+
+
+@pytest.mark.asyncio
+async def test_status_bar_timers_cleaned_up_on_unmount():
+    """All timers should be stopped when the StatusBar is unmounted."""
+    async with StatusBarApp().run_test() as pilot:
+        bar = pilot.app.query_one(StatusBar)
+        # Start a spinner by entering a phase
+        bar.set_phase("Planning")
+        assert bar._spinner_timer is not None
+        # Simulate unmount
+        bar.on_unmount()
+        assert bar._spinner_timer is None
+        assert bar._idle_timer is None
+
+
+@pytest.mark.asyncio
+async def test_status_bar_unmount_idempotent_when_no_timers():
+    """on_unmount should be safe to call even with no active timers."""
+    async with StatusBarApp().run_test() as pilot:
+        bar = pilot.app.query_one(StatusBar)
+        bar._stop_spinner()
+        bar._stop_idle_animation()
+        # Should not raise
+        bar.on_unmount()
+        assert bar._spinner_timer is None
+        assert bar._idle_timer is None

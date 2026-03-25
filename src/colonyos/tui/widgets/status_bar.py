@@ -61,6 +61,11 @@ class StatusBar(Static):
         self._start_idle_animation()
         self._render_bar()
 
+    def on_unmount(self) -> None:
+        """Clean up all timers when the widget is removed from the DOM."""
+        self._stop_spinner()
+        self._stop_idle_animation()
+
     def _advance_spinner(self) -> None:
         """Cycle through spinner frames (only called while timer is active)."""
         self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)

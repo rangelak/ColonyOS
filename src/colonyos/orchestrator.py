@@ -1664,7 +1664,7 @@ def run_sweep(
     )
 
     _log("Delegating sweep findings to implementation pipeline...")
-    run(
+    exec_result = run(
         sweep_prompt,
         repo_root=repo_root,
         config=config,
@@ -1673,6 +1673,11 @@ def run_sweep(
         quiet=quiet,
         force=force,
     )
+
+    # If execution failed, propagate the failure so callers know
+    if exec_result is not None and exec_result.status == RunStatus.FAILED:
+        result.success = False
+        result.error = "Sweep execution failed during implementation"
 
     return findings_text, result
 

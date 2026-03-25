@@ -145,40 +145,43 @@ class AssistantApp(App):
             except asyncio.CancelledError:
                 break
 
-            if isinstance(msg, PhaseHeaderMsg):
-                status_bar.set_phase(msg.phase_name, msg.budget, msg.model, msg.extra)
-                transcript.append_phase_header(
-                    msg.phase_name,
-                    msg.budget,
-                    msg.model,
-                    msg.extra,
-                )
+            try:
+                if isinstance(msg, PhaseHeaderMsg):
+                    status_bar.set_phase(msg.phase_name, msg.budget, msg.model, msg.extra)
+                    transcript.append_phase_header(
+                        msg.phase_name,
+                        msg.budget,
+                        msg.model,
+                        msg.extra,
+                    )
 
-            elif isinstance(msg, ToolLineMsg):
-                transcript.append_tool_line(msg.tool_name, msg.arg, msg.style)
+                elif isinstance(msg, ToolLineMsg):
+                    transcript.append_tool_line(msg.tool_name, msg.arg, msg.style)
 
-            elif isinstance(msg, TextBlockMsg):
-                transcript.append_text_block(msg.text)
+                elif isinstance(msg, TextBlockMsg):
+                    transcript.append_text_block(msg.text)
 
-            elif isinstance(msg, CommandOutputMsg):
-                transcript.append_command_output(msg.text)
+                elif isinstance(msg, CommandOutputMsg):
+                    transcript.append_command_output(msg.text)
 
-            elif isinstance(msg, PhaseCompleteMsg):
-                duration_s = msg.duration_ms / 1000.0
-                mins, secs = divmod(int(duration_s), 60)
-                duration_str = f"{mins}m {secs}s" if mins else f"{secs}s"
-                status_bar.set_complete(msg.cost, msg.turns, duration_s)
-                transcript.append_phase_complete(msg.cost, msg.turns, duration_str)
+                elif isinstance(msg, PhaseCompleteMsg):
+                    duration_s = msg.duration_ms / 1000.0
+                    mins, secs = divmod(int(duration_s), 60)
+                    duration_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+                    status_bar.set_complete(msg.cost, msg.turns, duration_s)
+                    transcript.append_phase_complete(msg.cost, msg.turns, duration_str)
 
-            elif isinstance(msg, PhaseErrorMsg):
-                status_bar.set_error(msg.error)
-                transcript.append_phase_error(msg.error)
+                elif isinstance(msg, PhaseErrorMsg):
+                    status_bar.set_error(msg.error)
+                    transcript.append_phase_error(msg.error)
 
-            elif isinstance(msg, TurnCompleteMsg):
-                status_bar.set_turn_count(msg.turn_number)
+                elif isinstance(msg, TurnCompleteMsg):
+                    status_bar.set_turn_count(msg.turn_number)
 
-            elif isinstance(msg, UserInjectionMsg):
-                transcript.append_injected_message(msg.text)
+                elif isinstance(msg, UserInjectionMsg):
+                    transcript.append_injected_message(msg.text)
+            except Exception:
+                logger.exception("Error dispatching TUI message %r; consumer loop continues", type(msg).__name__)
 
             queue.task_done()
 
