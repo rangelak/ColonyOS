@@ -17,9 +17,18 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
-from colonyos.sanitize import sanitize_untrusted_content
+from colonyos.sanitize import sanitize_display_text, sanitize_untrusted_content
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_metadata(text: str) -> str:
+    """Sanitize project metadata for safe inclusion in prompts.
+
+    Applies both display-level sanitization (ANSI/control char removal)
+    and content-level sanitization (XML tag stripping) for defense-in-depth.
+    """
+    return sanitize_untrusted_content(sanitize_display_text(text))
 
 # Path to the Q&A instruction template
 _QA_TEMPLATE_PATH = Path(__file__).parent / "instructions" / "qa.md"
@@ -51,6 +60,7 @@ class ModeAgentDecision:
     summary: str
     reasoning: str
     announcement: str
+    skip_planning: bool = False
 
 
 def _heuristic_mode_decision(query: str) -> ModeAgentDecision | None:
@@ -166,7 +176,7 @@ def _build_mode_selection_prompt(
         "",
         "You must respond with ONLY a JSON object (no markdown fencing, no extra text)",
         "with these exact fields:",
-        '  {"mode": str, "confidence": float, "summary": str, "reasoning": str, "announcement": str}',
+        '  {"mode": str, "confidence": float, "summary": str, "reasoning": str, "announcement": str, "skip_planning": bool}',
         "",
         "Valid modes:",
         '- "direct_agent" — handle the request directly in the TUI using a general coding agent. Use for questions, explanations, status-like asks, tiny edits, and focused small requests.',
@@ -186,16 +196,17 @@ def _build_mode_selection_prompt(
         "- announcement must be a short plain-English sentence the TUI can show before the mode starts, for example: 'Entering feature planning mode.'",
         "- confidence should reflect certainty from 0.0 to 1.0.",
         "- summary should briefly describe the user's intent.",
+        "- skip_planning should be true when mode is plan_implement_loop but the request is trivial or small (e.g., typo fix, rename, single-file tweak). Set false for larger or unclear work.",
     ]
 
     if project_name:
-        system_parts.append(f"\nProject: {project_name}")
+        system_parts.append(f"\nProject: {_sanitize_metadata(project_name)}")
     if project_description:
-        system_parts.append(f"Description: {project_description}")
+        system_parts.append(f"Description: {_sanitize_metadata(project_description)}")
     if project_stack:
-        system_parts.append(f"Stack: {project_stack}")
+        system_parts.append(f"Stack: {_sanitize_metadata(project_stack)}")
     if vision:
-        system_parts.append(f"Vision: {vision}")
+        system_parts.append(f"Vision: {_sanitize_metadata(vision)}")
 
     safe_text = sanitize_untrusted_content(query)
     user_prompt = f"Choose the best mode for this user request:\n\n{safe_text}"
@@ -242,12 +253,14 @@ def _parse_mode_selection_response(raw_text: str) -> ModeAgentDecision:
 
     confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
     announcement = str(data.get("announcement", "")).strip() or "Entering feature planning mode."
+    skip_planning = bool(data.get("skip_planning", False))
     return ModeAgentDecision(
         mode=mode,
         confidence=confidence,
         summary=str(data.get("summary", "")),
         reasoning=str(data.get("reasoning", "")),
         announcement=announcement,
+        skip_planning=skip_planning,
     )
 
 
@@ -504,13 +517,13 @@ def _build_router_prompt(
     ]
 
     if project_name:
-        system_parts.append(f"\nProject: {project_name}")
+        system_parts.append(f"\nProject: {_sanitize_metadata(project_name)}")
     if project_description:
-        system_parts.append(f"Description: {project_description}")
+        system_parts.append(f"Description: {_sanitize_metadata(project_description)}")
     if project_stack:
-        system_parts.append(f"Stack: {project_stack}")
+        system_parts.append(f"Stack: {_sanitize_metadata(project_stack)}")
     if vision:
-        system_parts.append(f"Vision: {vision}")
+        system_parts.append(f"Vision: {_sanitize_metadata(vision)}")
 
     safe_text = sanitize_untrusted_content(query)
     user_prompt = f"Classify this user query:\n\n{safe_text}"

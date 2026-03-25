@@ -176,6 +176,26 @@ class TestRun:
         assert result.exit_code == 0
         assert mock_run.call_args.kwargs["skip_planning"] is True
 
+    def test_route_prompt_propagates_skip_planning_from_decision(self, tmp_path: Path):
+        """_route_prompt should propagate skip_planning from mode decision to RouteOutcome."""
+        from colonyos.cli import _route_prompt
+        from colonyos.router import ModeAgentDecision, ModeAgentMode
+
+        config = _make_config(tmp_path)
+        decision_with_skip = ModeAgentDecision(
+            mode=ModeAgentMode.PLAN_IMPLEMENT_LOOP,
+            confidence=0.92,
+            summary="Small fix",
+            reasoning="Trivial change",
+            announcement="Entering feature planning mode.",
+            skip_planning=True,
+        )
+        with patch("colonyos.router.choose_tui_mode", return_value=decision_with_skip), \
+             patch("colonyos.router.log_mode_selection"):
+            outcome = _route_prompt("fix typo in readme", config, tmp_path, "test", quiet=True)
+        assert outcome.skip_planning is True
+        assert outcome.mode == "plan_implement_loop"
+
     def test_direct_agent_route_bypasses_orchestrator(self, runner: CliRunner, tmp_path: Path):
         _make_config(tmp_path)
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
@@ -1726,6 +1746,7 @@ class TestRepl:
              patch("builtins.input", side_effect=capture_input), \
              patch("colonyos.cli.readline", create=True), \
              patch("colonyos.cli.click.echo", side_effect=capture_echo), \
+             patch("colonyos.cli._route_prompt", return_value=RouteOutcome()), \
              patch("colonyos.cli.run_orchestrator", side_effect=[fake_log_1, fake_log_2]):
             from colonyos.cli import _run_repl
             _run_repl()

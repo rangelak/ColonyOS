@@ -2150,6 +2150,40 @@ class TestPreflightRecovery:
         assert result.error is not None
         assert "expanded scope" in result.error
 
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_head_sha", side_effect=["before", "after"])
+    @patch("colonyos.orchestrator._changed_paths_between", return_value={"src/app.py"})
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_run_preflight_recovery_restricts_allowed_tools(
+        self,
+        mock_run_phase_sync,
+        mock_changed_paths,
+        mock_head_sha,
+        mock_check_clean,
+        tmp_path: Path,
+    ) -> None:
+        """Preflight recovery agent should have explicitly scoped tools."""
+        mock_run_phase_sync.return_value = PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=True,
+            cost_usd=0.01,
+            duration_ms=100,
+            session_id="recover",
+        )
+
+        run_preflight_recovery(
+            tmp_path,
+            ColonyConfig(),
+            blocked_prompt="saved prompt",
+            dirty_output="M src/app.py",
+            branch_name="feature/recovery",
+        )
+
+        call_kwargs = mock_run_phase_sync.call_args[1]
+        assert "allowed_tools" in call_kwargs
+        allowed = call_kwargs["allowed_tools"]
+        assert set(allowed) == {"Read", "Glob", "Grep", "Bash", "Write", "Edit"}
+
 
 class TestRunCiFixLoop:
     """Integration tests for _run_ci_fix_loop."""

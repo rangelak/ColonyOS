@@ -173,6 +173,49 @@ class TestParseModeSelectionResponse:
         assert result.mode == ModeAgentMode.PLAN_IMPLEMENT_LOOP
         assert result.confidence == 0.0
 
+    def test_skip_planning_parsed_when_true(self) -> None:
+        """skip_planning=true should be parsed from mode selection response."""
+        raw = json.dumps({
+            "mode": "plan_implement_loop",
+            "confidence": 0.88,
+            "summary": "Small code fix",
+            "reasoning": "Trivial change",
+            "announcement": "Entering feature planning mode.",
+            "skip_planning": True,
+        })
+        result = _parse_mode_selection_response(raw)
+        assert result.mode == ModeAgentMode.PLAN_IMPLEMENT_LOOP
+        assert result.skip_planning is True
+
+    def test_skip_planning_defaults_to_false(self) -> None:
+        """skip_planning should default to False when missing."""
+        raw = json.dumps({
+            "mode": "plan_implement_loop",
+            "confidence": 0.88,
+            "summary": "Feature work",
+            "reasoning": "Larger change",
+            "announcement": "Entering feature planning mode.",
+        })
+        result = _parse_mode_selection_response(raw)
+        assert result.skip_planning is False
+
+
+class TestBuildModeSelectionPromptSanitization:
+    """Verify project metadata is sanitized in mode selection prompts."""
+
+    def test_project_metadata_is_sanitized(self) -> None:
+        system, _user = _build_mode_selection_prompt(
+            "do something",
+            project_name="MyProject\x1b[31m",
+            project_description="A project\x1b[0m",
+            project_stack="Python\x1b]0;pwned\x07",
+            vision="Build\rsomething",
+        )
+        # ANSI escapes and bare CR should be stripped
+        assert "\x1b" not in system
+        assert "\r" not in system
+        assert "\x07" not in system
+
 
 class TestHeuristicModeDecision:
     """Tests for _heuristic_mode_decision including adversarial inputs."""
@@ -559,8 +602,8 @@ class TestRouteQuery:
             assert isinstance(result, RouterResult)
             assert result.category == RouterCategory.QUESTION
 
-    def test_uses_opus_model_by_default(self, tmp_repo: Path) -> None:
-        """route_query should use the default configured router model."""
+    def test_uses_haiku_model_by_default(self, tmp_repo: Path) -> None:
+        """route_query should use the default configured router model (haiku)."""
         with patch("colonyos.agent.run_phase_sync") as mock_run:
             mock_run.return_value = MagicMock(
                 artifacts={"result": '{"category": "code_change", "confidence": 0.9, "summary": "x", "reasoning": "y"}'},
@@ -569,7 +612,7 @@ class TestRouteQuery:
             route_query("add a feature", repo_root=tmp_repo)
             mock_run.assert_called_once()
             call_kwargs = mock_run.call_args[1]
-            assert call_kwargs["model"] == "opus"
+            assert call_kwargs["model"] == "haiku"
 
     def test_respects_explicit_model_override(self, tmp_repo: Path) -> None:
         """route_query should honor an explicit model override."""
@@ -1328,7 +1371,7 @@ class TestSlackQuestionRouting:
             assert result.actionable is False
             assert result.answer == "The function does X."
             mock_answer.assert_called_once()
-            assert mock_route.call_args.kwargs["model"] == "opus"
+            assert mock_route.call_args.kwargs["model"] == "haiku"
             assert mock_answer.call_args.kwargs["model"] == "opus"
 
     def test_code_change_no_answer(self, tmp_repo: Path) -> None:
@@ -1349,7 +1392,7 @@ class TestSlackQuestionRouting:
             )
             assert result.actionable is True
             assert result.answer is None
-            assert mock_route.call_args.kwargs["model"] == "opus"
+            assert mock_route.call_args.kwargs["model"] == "haiku"
 
     def test_question_answer_error_fallback(self, tmp_repo: Path) -> None:
         """If answer_question fails, triage_message should still return with error answer."""

@@ -63,6 +63,10 @@ Rank all tasks by **impact * risk** descending. Ties are broken by lower impleme
 
 Generate at most **{max_tasks}** parent tasks. If your analysis surfaces more findings than this cap, keep only the highest-ranked ones by impact * risk.
 
+## Max Files Per Task
+
+Each parent task should touch at most **{max_files_per_task}** files. If a finding spans more files, split it into multiple parent tasks.
+
 ## Scan Context
 
 {scan_context}

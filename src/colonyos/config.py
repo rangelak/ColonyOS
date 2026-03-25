@@ -58,7 +58,7 @@ DEFAULTS = {
     },
     "router": {
         "enabled": True,
-        "model": "opus",
+        "model": "haiku",
         "qa_model": "opus",
         "confidence_threshold": 0.7,
         "small_fix_threshold": 0.85,
@@ -145,7 +145,7 @@ class RouterConfig:
     """
 
     enabled: bool = True
-    model: str = "opus"
+    model: str = "haiku"
     qa_model: str = "opus"
     confidence_threshold: float = 0.7
     small_fix_threshold: float = 0.85

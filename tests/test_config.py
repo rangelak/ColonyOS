@@ -955,7 +955,7 @@ class TestRouterConfig:
         """RouterConfig has sensible defaults."""
         config = RouterConfig()
         assert config.enabled is True
-        assert config.model == "opus"
+        assert config.model == "haiku"
         assert config.qa_model == "opus"
         assert config.confidence_threshold == 0.7
         assert config.small_fix_threshold == 0.85
@@ -965,7 +965,7 @@ class TestRouterConfig:
         """When no config file exists, router gets defaults."""
         config = load_config(tmp_repo)
         assert config.router.enabled is True
-        assert config.router.model == "opus"
+        assert config.router.model == "haiku"
         assert config.router.qa_model == "opus"
         assert config.router.confidence_threshold == 0.7
         assert config.router.small_fix_threshold == 0.85
@@ -1006,7 +1006,7 @@ class TestRouterConfig:
         )
         config = load_config(tmp_repo)
         assert config.router.enabled is True
-        assert config.router.model == "opus"
+        assert config.router.model == "haiku"
         assert config.router.qa_model == "opus"
         assert config.router.confidence_threshold == 0.7
         assert config.router.small_fix_threshold == 0.85
@@ -1026,7 +1026,7 @@ class TestRouterConfig:
         )
         config = load_config(tmp_repo)
         assert config.router.enabled is False
-        assert config.router.model == "opus"  # default
+        assert config.router.model == "haiku"  # default
         assert config.router.qa_model == "opus"
         assert config.router.confidence_threshold == 0.7  # default
         assert config.router.small_fix_threshold == 0.85
@@ -1149,7 +1149,7 @@ class TestRouterConfig:
         save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.router.enabled is True
-        assert loaded.router.model == "opus"
+        assert loaded.router.model == "haiku"
         assert loaded.router.qa_model == "opus"
         assert loaded.router.confidence_threshold == 0.7
         assert loaded.router.small_fix_threshold == 0.85
@@ -1159,7 +1159,7 @@ class TestRouterConfig:
         """DEFAULTS dict has router section."""
         assert "router" in DEFAULTS
         assert DEFAULTS["router"]["enabled"] is True
-        assert DEFAULTS["router"]["model"] == "opus"
+        assert DEFAULTS["router"]["model"] == "haiku"
         assert DEFAULTS["router"]["qa_model"] == "opus"
         assert DEFAULTS["router"]["confidence_threshold"] == 0.7
         assert DEFAULTS["router"]["small_fix_threshold"] == 0.85

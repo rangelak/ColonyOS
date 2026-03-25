@@ -1034,6 +1034,7 @@ def run_preflight_recovery(
         system_prompt=system_prompt,
         model=model,
         budget_usd=config.budget.per_phase,
+        allowed_tools=["Read", "Glob", "Grep", "Bash", "Write", "Edit"],
         ui=ui,
     )
 
@@ -1525,6 +1526,7 @@ def _build_sweep_prompt(
         categories=categories_block,
         target_scope=target_scope,
         max_tasks=effective_max_tasks,
+        max_files_per_task=config.sweep.max_files_per_task,
         scan_context=scan_block,
     )
 
@@ -1601,7 +1603,7 @@ def run_sweep(
                 for r in scan_results
             )
     except Exception:
-        pass  # Non-critical; sweep will do its own analysis
+        logger.warning("scan_directory() bootstrap failed during sweep; continuing without scan context", exc_info=True)
 
     system, user_prompt = _build_sweep_prompt(
         config,

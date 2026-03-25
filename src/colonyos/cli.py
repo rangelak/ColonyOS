@@ -650,6 +650,7 @@ def _route_prompt(
     return RouteOutcome(
         mode=ModeAgentMode.PLAN_IMPLEMENT_LOOP.value,
         announcement=decision.announcement,
+        skip_planning=decision.skip_planning,
     )
 
 
@@ -4300,7 +4301,7 @@ def sweep(path: str | None, execute: bool, plan_only: bool, max_tasks: int | Non
             }
             write_cleanup_log(runs_dir_path(repo_root), "sweep", log_data)
         except Exception:
-            pass  # Audit logging is non-critical
+            logger.debug("Failed to write sweep audit log", exc_info=True)
 
     except PreflightError as exc:
         click.echo(f"Preflight error: {exc.format_message()}", err=True)
