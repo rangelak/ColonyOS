@@ -1,5 +1,39 @@
 # Changelog
 
+## 20260325_170000 — TUI Default Mode, Smart Routing & Autonomous Sweep
+
+Three features shipped in this release: (1) the TUI is now the default visualization
+for `colonyos run` on interactive terminals, with `--no-tui` escape hatch for CI;
+(2) the intent router gained complexity classification so trivial/small changes skip
+planning and go straight to implement→review; and (3) a new `colonyos sweep` command
+provides autonomous codebase quality analysis that feeds findings through the existing
+implement→verify→review→deliver pipeline to produce fix PRs.
+
+**Created:**
+- `src/colonyos/instructions/sweep.md` — Sweep analysis agent instructions
+- `src/colonyos/instructions/preflight_recovery.md` — Dirty-worktree recovery instructions
+- `tests/test_sweep.py` — Full test suite for the sweep command
+- `tests/test_precommit_hook.py` — Pre-commit hook integration tests
+- `run_precommit_tests.py` — Pre-commit test runner
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `sweep` command, TUI as default mode, `--no-tui` flag
+- `src/colonyos/orchestrator.py` — Sweep analysis phase, skip-planning wiring, parallel result surfacing
+- `src/colonyos/router.py` — Complexity classification, heuristic routing improvements
+- `src/colonyos/config.py` — Sweep configuration support
+- `src/colonyos/models.py` — Complexity field on RouterResult
+- `src/colonyos/sanitize.py` — Security hardening
+- `src/colonyos/tui/adapter.py` — Parallel implement result callbacks
+- `tests/test_cli.py`, `tests/test_orchestrator.py`, `tests/test_router.py` — Extended test coverage
+
+**PRDs:**
+- `cOS_prds/20260323_201206_prd_the_tui_should_be_the_default_visualization_right_now_ctrl_c_doesn_t_work_well_d.md`
+- `cOS_prds/20260324_112017_prd_i_want_to_introduce_a_new_feature_for_a_cleanup_agent_that_basically_functions_l.md`
+
+**Tasks:**
+- `cOS_tasks/20260323_201206_tasks_the_tui_should_be_the_default_visualization_right_now_ctrl_c_doesn_t_work_well_d.md`
+- `cOS_tasks/20260324_112017_tasks_i_want_to_introduce_a_new_feature_for_a_cleanup_agent_that_basically_functions_l.md`
+
 ## 20260323_201500 — Interactive Terminal UI (Textual TUI)
 
 Adds a full interactive terminal UI built on Textual, giving users a mission-control
