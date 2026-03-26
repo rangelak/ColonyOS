@@ -11,16 +11,7 @@ import yaml
 import click
 from click.testing import CliRunner
 
-from colonyos.cli import (
-    RouteOutcome,
-    _compute_elapsed_hours,
-    _launch_tui,
-    _load_latest_loop_state,
-    _resolve_latest_prd_path,
-    _run_direct_agent,
-    _save_loop_state,
-    app,
-)
+from colonyos.cli import app, _save_loop_state, _load_latest_loop_state, _compute_elapsed_hours, _SAFE_TUI_COMMANDS, _handle_tui_command
 from colonyos.config import ColonyConfig, BudgetConfig, save_config
 from colonyos.models import (
     LoopState, LoopStatus, Persona, Phase, PhaseResult,
@@ -2440,3 +2431,44 @@ class TestCleanup:
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
             result = runner.invoke(app, ["cleanup", "artifacts", "--retention-days", "7"])
         assert result.exit_code == 0
+
+
+class TestHandleTuiCommand:
+    """Tests for _SAFE_TUI_COMMANDS and _handle_tui_command()."""
+
+    def test_new_command_returns_conversation_cleared(self):
+        handled, message, should_run = _handle_tui_command("new")
+        assert handled is True
+        assert message == "Conversation cleared."
+        assert should_run is False
+
+    def test_new_command_case_insensitive(self):
+        handled, message, should_run = _handle_tui_command("NEW")
+        assert handled is True
+        assert message == "Conversation cleared."
+        assert should_run is False
+
+    def test_new_command_with_whitespace(self):
+        handled, message, should_run = _handle_tui_command("  new  ")
+        assert handled is True
+        assert message == "Conversation cleared."
+        assert should_run is False
+
+    def test_help_command_lists_available_commands(self):
+        handled, message, should_run = _handle_tui_command("help")
+        assert handled is True
+        assert "/help" in message
+        assert "/new" in message
+        assert should_run is False
+
+    def test_unknown_command_not_handled(self):
+        handled, message, should_run = _handle_tui_command("unknown")
+        assert handled is False
+        assert message == ""
+        assert should_run is False
+
+    def test_safe_tui_commands_contains_new(self):
+        assert "new" in _SAFE_TUI_COMMANDS
+
+    def test_safe_tui_commands_contains_help(self):
+        assert "help" in _SAFE_TUI_COMMANDS

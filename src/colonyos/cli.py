@@ -313,232 +313,42 @@ def _invoke_cli_command(tokens: list[str]) -> None:
         click.echo(f"Error: {exc}", err=True)
 
 
-def _capture_click_output(callback, *args, **kwargs) -> str:  # noqa: ANN001, ANN002, ANN003
-    """Capture stdout/stderr produced by a Click-oriented callback."""
-    output, _ = _capture_click_output_and_result(callback, *args, **kwargs)
-    return output
+# ---------------------------------------------------------------------------
+# TUI slash-command handling
+# ---------------------------------------------------------------------------
+
+_SAFE_TUI_COMMANDS: set[str] = {"help", "new"}
+"""Recognised TUI slash-commands that are handled locally (not routed)."""
 
 
-def _capture_click_output_and_result(callback, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-    """Capture stdout/stderr and return both the output and callback result."""
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    with redirect_stdout(stdout), redirect_stderr(stderr):
-        result = callback(*args, **kwargs)
-    output = stdout.getvalue().strip()
-    error = stderr.getvalue().strip()
-    return "\n".join(part for part in (output, error) if part), result
+def _handle_tui_command(
+    command: str,
+) -> tuple[bool, str, bool]:
+    """Handle a TUI slash-command.
 
+    Parameters
+    ----------
+    command:
+        The command string *without* the leading ``/``.
 
-def _dirty_recovery_help() -> str:
-    """Return the in-TUI help text for dirty-worktree recovery mode."""
-    return (
-        "Dirty-worktree recovery is pending.\n"
-        "Submit `commit` to let ColonyOS prepare a recovery commit and retry the saved prompt,\n"
-        "or submit `cancel` to restore the saved prompt to the composer."
-    )
-
-
-def _current_branch_name(repo_root: Path) -> str:
-    """Return the current git branch, or ``main`` on lookup failure."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=repo_root,
-            check=False,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return "main"
-    branch = result.stdout.strip()
-    return branch or "main"
-
-
-def _resolve_latest_prd_path(repo_root: Path, config: ColonyConfig) -> str:
-    """Return the latest PRD that also has a matching tasks file."""
-    from colonyos.naming import task_filename_from_prd
-
-    prd_dir = repo_root / config.prds_dir
-    tasks_dir = repo_root / config.tasks_dir
-    if not prd_dir.exists():
-        raise click.ClickException(f"No PRD directory found at `{config.prds_dir}`.")
-    if not tasks_dir.exists():
-        raise click.ClickException(f"No tasks directory found at `{config.tasks_dir}`.")
-
-    candidates = sorted(prd_dir.glob("*_prd_*.md"), reverse=True)
-    for prd_path in candidates:
-        task_name = task_filename_from_prd(prd_path.name)
-        task_path = tasks_dir / task_name
-        if task_path.exists():
-            return str(Path(config.prds_dir) / prd_path.name)
-
-    raise click.ClickException(
-        "No PRD/task pair found. Generate a plan first or use an explicit command."
-    )
-
-
-def _announce_mode_cli(message: str | None, *, quiet: bool = False) -> None:
-    """Print a short mode announcement for non-TUI flows."""
-    if message and not quiet:
-        click.echo(click.style(message, dim=True))
-
-
-def _run_direct_agent(
-    request: str,
-    *,
-    repo_root: Path,
-    config: ColonyConfig,
-    ui: Any | None,
-    resume_session_id: str | None = None,
-) -> tuple[bool, str | None]:
-    """Handle a request directly with a lightweight general coding agent.
-
-    Returns a ``(success, session_id)`` tuple.  The *session_id* can be
-    passed back as *resume_session_id* on the next call to continue the
-    conversation via the SDK's native session-resume mechanism.
+    Returns
+    -------
+    tuple[bool, str, bool]
+        ``(handled, message, should_run)`` where *handled* is ``True`` when
+        the command was recognised, *message* is a user-visible response, and
+        *should_run* indicates whether the caller should still execute a
+        normal agent run (always ``False`` for handled commands).
     """
-    from colonyos.agent import run_phase_sync
-    from colonyos.models import Phase
-    from colonyos.router import build_direct_agent_prompt
+    lowered = command.strip().lower()
 
-    system, user = build_direct_agent_prompt(
-        request,
-        project_name=config.project.name if config.project else "",
-        project_description=config.project.description if config.project else "",
-        project_stack=config.project.stack if config.project else "",
-    )
-    model = config.router.model or config.get_model(Phase.IMPLEMENT)
-    budget = config.budget.per_phase
-
-    if ui is not None:
-        ui.phase_header("Direct", budget, model)
-
-    result = run_phase_sync(
-        Phase.QA,
-        user,
-        cwd=repo_root,
-        system_prompt=system,
-        model=model,
-        budget_usd=budget,
-        ui=ui,
-        resume=resume_session_id,
-    )
-    return (result.success, result.session_id or None)
-
-
-def _run_review_only_flow(
-    *,
-    repo_root: Path,
-    config: ColonyConfig,
-    verbose: bool,
-    quiet: bool,
-) -> bool:
-    """Review the current branch against main without entering the plan loop."""
-    from colonyos.orchestrator import reviewer_personas
-
-    branch = _current_branch_name(repo_root)
-    base = "main"
-    if branch == base:
-        raise click.ClickException(
-            "Review-only mode expects a feature branch. Switch branches or use `review <branch>`."
-        )
-
-    all_approved, phase_results, total_cost, decision_verdict = run_standalone_review(
-        branch,
-        base,
-        repo_root,
-        config,
-        verbose=verbose,
-        quiet=quiet,
-        no_fix=True,
-        decide=False,
-    )
-    _print_review_summary(phase_results, reviewer_personas(config), total_cost, decision_verdict=decision_verdict)
-    return all_approved
-
-
-def _run_cleanup_loop() -> None:
-    """Run the default cleanup loop inside the current repository."""
-    cleanup_scan(max_lines=None, max_functions=None, use_ai=True, refactor_file=None)
-
-
-_SAFE_TUI_COMMANDS = {
-    "auto",
-    "doctor",
-    "help",
-    "queue",
-    "show",
-    "stats",
-    "status",
-}
-
-
-def _handle_tui_command(text: str, *, config: ColonyConfig) -> tuple[bool, str | None, bool]:
-    """Handle REPL-style commands from the Textual TUI.
-
-    Returns ``(handled, output, should_exit)``. When ``handled`` is False,
-    the caller should treat the input as a normal feature prompt.
-    """
-    import shlex
-
-    stripped = text.strip()
-    if not stripped:
-        return False, None, False
-
-    lowered = stripped.lower()
-    if lowered in {"quit", "exit"}:
-        return True, "Exiting ColonyOS TUI.", True
+    if lowered == "new":
+        return (True, "Conversation cleared.", False)
 
     if lowered == "help":
-        return True, _capture_click_output(_print_repl_help), False
+        available = ", ".join(f"/{c}" for c in sorted(_SAFE_TUI_COMMANDS))
+        return (True, f"Available commands: {available}", False)
 
-    if lowered.startswith("help "):
-        command_name = stripped.split(None, 1)[1].strip()
-        return True, _capture_click_output(_print_repl_help, command_name), False
-
-    try:
-        tokens = shlex.split(stripped)
-    except ValueError:
-        tokens = stripped.split()
-
-    if not tokens or tokens[0] not in _repl_top_level_names():
-        return False, None, False
-
-    command_name = tokens[0]
-    if command_name in {"run", "tui"}:
-        return (
-            True,
-            "Use the TUI directly: type a feature prompt instead of `run`, and "
-            "you are already inside `tui`.",
-            False,
-        )
-    if command_name in {"ui", "watch"}:
-        return (
-            True,
-            f"`{command_name}` is not launched inside the TUI. Run "
-            f"`colonyos {command_name}` from a normal shell.",
-            False,
-        )
-    if command_name == "auto" and not (config.auto_approve or "--no-confirm" in tokens):
-        return (
-            True,
-            "`auto` inside the TUI needs `--no-confirm` unless `auto_approve` is enabled.",
-            False,
-        )
-    if command_name not in _SAFE_TUI_COMMANDS:
-        return (
-            True,
-            f"`{command_name}` is not supported inside the TUI. Run "
-            f"`colonyos {command_name}` from a normal shell.",
-            False,
-        )
-
-    output = _capture_click_output(_invoke_cli_command, tokens)
-    if not output:
-        output = f"`{' '.join(tokens)}` completed."
-    return True, output, False
+    return (False, "", False)
 
 
 def _print_repl_help(command_name: str | None = None) -> None:
