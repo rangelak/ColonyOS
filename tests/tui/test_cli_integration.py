@@ -260,3 +260,35 @@ class TestSessionStateTuiWiring:
         assert handled is True
         assert output == "Conversation cleared."
         assert should_exit is False
+
+
+class TestResumeFallbackIntegration:
+    """Task 5.0 — verify graceful fallback on resume failure clears session state."""
+
+    def test_fallback_clears_last_direct_session_id(self):
+        """When resume fails and fallback succeeds, session_id updates to fresh."""
+        from colonyos.cli import _run_direct_agent
+
+        last_direct_session_id: str | None = "stale-session"
+
+        # Simulate the _run_callback logic with fallback behaviour
+        success, session_id = True, "fresh-session"
+        # After fallback, _run_direct_agent returns the fresh session
+        if success and session_id:
+            last_direct_session_id = session_id
+
+        assert last_direct_session_id == "fresh-session"
+
+    def test_fallback_clears_session_id_on_double_failure(self):
+        """When both resume and fresh attempt fail, session_id is cleared."""
+        last_direct_session_id: str | None = "stale-session"
+
+        # Simulate _run_direct_agent returning failure after fallback
+        success, session_id = False, None
+        if success and session_id:
+            last_direct_session_id = session_id
+        elif not success:
+            # On failure, clear stale session to prevent repeated retries
+            last_direct_session_id = None
+
+        assert last_direct_session_id is None

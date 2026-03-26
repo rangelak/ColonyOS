@@ -314,6 +314,90 @@ class TestRunDirectAgentSessionResume:
         assert success is False
         assert session_id == "sess-fail"
 
+    def test_fallback_retries_without_resume_on_failure(self, tmp_path: Path):
+        """When resume fails, _run_direct_agent retries once without resume."""
+        config = _make_config(tmp_path)
+        fail_result = PhaseResult(
+            phase=Phase.QA,
+            success=False,
+            session_id="stale-sess",
+            error="session expired",
+            artifacts={"result": ""},
+        )
+        fresh_result = PhaseResult(
+            phase=Phase.QA,
+            success=True,
+            session_id="fresh-sess",
+            artifacts={"result": "done"},
+        )
+        with patch("colonyos.agent.run_phase_sync", side_effect=[fail_result, fresh_result]) as mock_rps, \
+             patch("colonyos.router.build_direct_agent_prompt", return_value=("sys", "usr")):
+            success, session_id = _run_direct_agent(
+                "yes",
+                repo_root=tmp_path,
+                config=config,
+                ui=None,
+                resume_session_id="stale-sess",
+            )
+        assert success is True
+        assert session_id == "fresh-sess"
+        # First call with resume, second without
+        assert mock_rps.call_count == 2
+        assert mock_rps.call_args_list[0].kwargs["resume"] == "stale-sess"
+        assert mock_rps.call_args_list[1].kwargs["resume"] is None
+
+    def test_no_fallback_when_no_resume_session(self, tmp_path: Path):
+        """When there's no resume session and it fails, no retry happens."""
+        config = _make_config(tmp_path)
+        fail_result = PhaseResult(
+            phase=Phase.QA,
+            success=False,
+            session_id="sess-x",
+            error="generic error",
+            artifacts={"result": ""},
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=fail_result) as mock_rps, \
+             patch("colonyos.router.build_direct_agent_prompt", return_value=("sys", "usr")):
+            success, session_id = _run_direct_agent(
+                "do something",
+                repo_root=tmp_path,
+                config=config,
+                ui=None,
+                resume_session_id=None,
+            )
+        assert success is False
+        assert mock_rps.call_count == 1
+
+    def test_fallback_returns_failure_when_retry_also_fails(self, tmp_path: Path):
+        """When both resume and fresh attempt fail, return the fresh failure."""
+        config = _make_config(tmp_path)
+        fail_result_1 = PhaseResult(
+            phase=Phase.QA,
+            success=False,
+            session_id="stale",
+            error="session expired",
+            artifacts={"result": ""},
+        )
+        fail_result_2 = PhaseResult(
+            phase=Phase.QA,
+            success=False,
+            session_id=None,
+            error="another error",
+            artifacts={"result": ""},
+        )
+        with patch("colonyos.agent.run_phase_sync", side_effect=[fail_result_1, fail_result_2]) as mock_rps, \
+             patch("colonyos.router.build_direct_agent_prompt", return_value=("sys", "usr")):
+            success, session_id = _run_direct_agent(
+                "yes",
+                repo_root=tmp_path,
+                config=config,
+                ui=None,
+                resume_session_id="stale",
+            )
+        assert success is False
+        assert session_id is None
+        assert mock_rps.call_count == 2
+
 
 class TestResolveLatestPrdPath:
     def test_returns_latest_matching_prd(self, tmp_path: Path):
