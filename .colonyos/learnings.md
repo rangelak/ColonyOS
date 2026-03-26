@@ -1,6 +1,14 @@
 # ColonyOS Learnings Ledger
 
 
+## Run: run-20260318_164532-71a1390a74
+_Date: 2026-03-18 | Feature: add_a_colonyos_queue_command_that_accepts_multiple_feature_p_
+
+- **[security]** Exception messages persisted verbatim may leak secrets from tracebacks; redact or truncate before writing to disk.
+- **[architecture]** Register signal/cleanup handlers before marking mutable state transitions to prevent crash-orphaned resources.
+- **[code-quality]** Use enums instead of plain strings for fields with a fixed set of valid values to enable type-checking.
+- **[architecture]** Extract feature logic from CLI entry-point files into dedicated modules; god files (>500 LOC) hinder review and testing.
+- **[testing]** Test cross-command integration points; a subcommand passing its own tests doesn't guarantee correct parent output.
 ## Run: run-20260318_173116-0d7234c9e5
 _Date: 2026-03-18 | Feature: i_think_we_should_add_some_sort_of_ui_for_managing_all_this__
 
@@ -129,7 +137,6 @@ _Date: 2026-03-23 | Feature: give_me_fucking_awesome_ux_that_is_a_fucking_amazin
 - **[style]** First-party module imports deferred inside function bodies for non-optional deps signal hasty code; keep at module top-level.
 - **[code-quality]** `encodeURIComponent` encodes `/` to `%2F`, breaking APIs with path-style route params; use a path-aware encoding helper.
 - **[code-quality]** Frontend error handling must distinguish network failures from HTTP API errors to surface meaningful messages to users.
-
 ## Run: run-20260326_134656-6634005688
 _Date: 2026-03-26 | Feature: no_right_now_the_direct_agent_path_is_basically_stateless_be_
 

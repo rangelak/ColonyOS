@@ -19,7 +19,6 @@ command for explicit reset and graceful fallback on resume failure.
 
 **PRD:** `cOS_prds/20260326_134656_prd_no_right_now_the_direct_agent_path_is_basically_stateless_between_completed_subm.md`
 **Tasks:** `cOS_tasks/20260326_134656_tasks_no_right_now_the_direct_agent_path_is_basically_stateless_between_completed_subm.md`
-
 ## 20260325_170000 — TUI Default Mode, Smart Routing & Autonomous Sweep
 
 Three features shipped in this release: (1) the TUI is now the default visualization

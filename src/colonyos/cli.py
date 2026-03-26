@@ -400,7 +400,6 @@ def _run_direct_agent(
     conversation via the SDK's native session-resume mechanism.
     """
     import re
-
     from colonyos.agent import run_phase_sync
     from colonyos.models import Phase
     from colonyos.router import build_direct_agent_prompt
@@ -411,7 +410,6 @@ def _run_direct_agent(
         r"[A-Za-z0-9_-]+", resume_session_id
     ):
         resume_session_id = None
-
     system, user = build_direct_agent_prompt(
         request,
         project_name=config.project.name if config.project else "",
@@ -491,7 +489,6 @@ def _run_cleanup_loop() -> None:
 # Sentinel value returned by _handle_tui_command when the user resets the conversation.
 # Used to detect /new without fragile substring matching on user-facing text.
 _NEW_CONVERSATION_SIGNAL = "Conversation cleared."
-
 _SAFE_TUI_COMMANDS = {
     "auto",
     "doctor",
@@ -522,7 +519,6 @@ def _handle_tui_command(text: str, *, config: ColonyConfig) -> tuple[bool, str |
 
     if lowered == "new":
         return True, _NEW_CONVERSATION_SIGNAL, False
-
     if lowered == "help":
         return True, _capture_click_output(_print_repl_help), False
 
@@ -4981,7 +4977,6 @@ def _launch_tui(
 
             # Non-direct-agent mode: clear conversation state
             last_direct_session_id = None
-
             if route_outcome.mode == "review_only":
                 output, _approved = _capture_click_output_and_result(
                     _run_review_only_flow,
