@@ -5,7 +5,7 @@
 <h1 align="center">ColonyOS</h1>
 
 <p align="center">
-  <strong>The fully autonomous AI pipeline that builds itself.</strong>
+  <strong>The fully autonomous AI engineering team that builds itself.</strong>
 </p>
 
 <p align="center">
