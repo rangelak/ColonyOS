@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from colonyos.cli import app
+from colonyos.cli import _NEW_CONVERSATION_SIGNAL, app
 
 
 @pytest.fixture(autouse=True)
@@ -207,10 +207,10 @@ class TestSessionStateTuiWiring:
         handled, output, should_exit = _handle_tui_command("new", config=MagicMock())
         assert handled is True
         assert output is not None
-        assert "Conversation cleared" in output
+        assert output == _NEW_CONVERSATION_SIGNAL
 
-        # _run_callback checks for "Conversation cleared" in the output
-        if output and "Conversation cleared" in output:
+        # _run_callback checks output against the _NEW_CONVERSATION_SIGNAL constant
+        if output == _NEW_CONVERSATION_SIGNAL:
             last_direct_session_id = None
 
         assert last_direct_session_id is None
@@ -258,7 +258,7 @@ class TestSessionStateTuiWiring:
 
         handled, output, should_exit = _handle_tui_command("new", config=MagicMock())
         assert handled is True
-        assert output == "Conversation cleared."
+        assert output == _NEW_CONVERSATION_SIGNAL
         assert should_exit is False
 
 

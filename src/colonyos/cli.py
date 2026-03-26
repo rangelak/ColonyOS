@@ -399,9 +399,18 @@ def _run_direct_agent(
     passed back as *resume_session_id* on the next call to continue the
     conversation via the SDK's native session-resume mechanism.
     """
+    import re
+
     from colonyos.agent import run_phase_sync
     from colonyos.models import Phase
     from colonyos.router import build_direct_agent_prompt
+
+    # Defense-in-depth: validate session ID format before passing to the SDK.
+    # Session IDs should be alphanumeric with hyphens/underscores only.
+    if resume_session_id is not None and not re.fullmatch(
+        r"[A-Za-z0-9_-]+", resume_session_id
+    ):
+        resume_session_id = None
 
     system, user = build_direct_agent_prompt(
         request,
@@ -479,6 +488,10 @@ def _run_cleanup_loop() -> None:
     cleanup_scan(max_lines=None, max_functions=None, use_ai=True, refactor_file=None)
 
 
+# Sentinel value returned by _handle_tui_command when the user resets the conversation.
+# Used to detect /new without fragile substring matching on user-facing text.
+_NEW_CONVERSATION_SIGNAL = "Conversation cleared."
+
 _SAFE_TUI_COMMANDS = {
     "auto",
     "doctor",
@@ -508,7 +521,7 @@ def _handle_tui_command(text: str, *, config: ColonyConfig) -> tuple[bool, str |
         return True, "Exiting ColonyOS TUI.", True
 
     if lowered == "new":
-        return True, "Conversation cleared.", False
+        return True, _NEW_CONVERSATION_SIGNAL, False
 
     if lowered == "help":
         return True, _capture_click_output(_print_repl_help), False
@@ -4919,7 +4932,7 @@ def _launch_tui(
             if command_output:
                 queue.sync_q.put(CommandOutputMsg(text=command_output))
             # Clear conversation state on /new command
-            if command_output and "Conversation cleared" in command_output:
+            if command_output == _NEW_CONVERSATION_SIGNAL:
                 last_direct_session_id = None
             current_adapter = None
             if should_exit:

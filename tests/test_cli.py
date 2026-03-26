@@ -16,6 +16,7 @@ from colonyos.cli import (
     _save_loop_state,
     _load_latest_loop_state,
     _compute_elapsed_hours,
+    _NEW_CONVERSATION_SIGNAL,
     _SAFE_TUI_COMMANDS,
     _handle_tui_command,
     _run_direct_agent,
@@ -397,6 +398,72 @@ class TestRunDirectAgentSessionResume:
         assert success is False
         assert session_id is None
         assert mock_rps.call_count == 2
+
+
+class TestSessionIdValidation:
+    """Tests for session ID format validation in _run_direct_agent."""
+
+    def test_malformed_session_id_is_treated_as_none(self, tmp_path: Path):
+        """A session ID containing invalid characters is silently discarded."""
+        config = _make_config(tmp_path)
+        fake_result = PhaseResult(
+            phase=Phase.QA,
+            success=True,
+            session_id="fresh-sess",
+            artifacts={"result": "done"},
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result) as mock_rps, \
+             patch("colonyos.router.build_direct_agent_prompt", return_value=("sys", "usr")):
+            success, session_id = _run_direct_agent(
+                "hello",
+                repo_root=tmp_path,
+                config=config,
+                ui=None,
+                resume_session_id="malicious; rm -rf /",
+            )
+        assert success is True
+        # The malformed ID should have been discarded — passed as None
+        assert mock_rps.call_args.kwargs["resume"] is None
+
+    def test_valid_session_id_passes_through(self, tmp_path: Path):
+        """A well-formed session ID (alphanumeric, hyphens, underscores) is preserved."""
+        config = _make_config(tmp_path)
+        fake_result = PhaseResult(
+            phase=Phase.QA,
+            success=True,
+            session_id="sess-456",
+            artifacts={"result": "done"},
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result) as mock_rps, \
+             patch("colonyos.router.build_direct_agent_prompt", return_value=("sys", "usr")):
+            _run_direct_agent(
+                "hello",
+                repo_root=tmp_path,
+                config=config,
+                ui=None,
+                resume_session_id="valid-session_123",
+            )
+        assert mock_rps.call_args.kwargs["resume"] == "valid-session_123"
+
+    def test_empty_string_session_id_is_treated_as_none(self, tmp_path: Path):
+        """An empty string session ID is discarded (fails regex)."""
+        config = _make_config(tmp_path)
+        fake_result = PhaseResult(
+            phase=Phase.QA,
+            success=True,
+            session_id="new-sess",
+            artifacts={"result": "done"},
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result) as mock_rps, \
+             patch("colonyos.router.build_direct_agent_prompt", return_value=("sys", "usr")):
+            _run_direct_agent(
+                "hello",
+                repo_root=tmp_path,
+                config=config,
+                ui=None,
+                resume_session_id="",
+            )
+        assert mock_rps.call_args.kwargs["resume"] is None
 
 
 class TestResolveLatestPrdPath:
@@ -2534,19 +2601,19 @@ class TestHandleTuiCommand:
     def test_new_command_returns_conversation_cleared(self):
         handled, output, should_exit = _handle_tui_command("new", config=ColonyConfig())
         assert handled is True
-        assert output == "Conversation cleared."
+        assert output == _NEW_CONVERSATION_SIGNAL
         assert should_exit is False
 
     def test_new_command_case_insensitive(self):
         handled, output, should_exit = _handle_tui_command("NEW", config=ColonyConfig())
         assert handled is True
-        assert output == "Conversation cleared."
+        assert output == _NEW_CONVERSATION_SIGNAL
         assert should_exit is False
 
     def test_new_command_with_whitespace(self):
         handled, output, should_exit = _handle_tui_command("  new  ", config=ColonyConfig())
         assert handled is True
-        assert output == "Conversation cleared."
+        assert output == _NEW_CONVERSATION_SIGNAL
         assert should_exit is False
 
     def test_help_command_lists_available_commands(self):
