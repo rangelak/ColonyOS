@@ -159,6 +159,8 @@ def _inject_memory_block(
         store, phase, prompt_text, max_tokens=config.memory.max_inject_tokens
     )
     if memory_block:
+        line_count = memory_block.count("\n")
+        _log(f"Injected {line_count} memories ({len(memory_block)} chars) for phase {phase}")
         system += f"\n\n{memory_block}"
     return system
 
@@ -2502,8 +2504,12 @@ def _run_learn_phase(
     log: RunLog,
     prompt: str,
     _make_ui,
+    memory_store: MemoryStore | None = None,
 ) -> None:
     """Execute the learn phase: extract patterns from reviews into the ledger.
+
+    Also writes extracted learnings to the memory store (FR-2) so that
+    future runs benefit from past observations.
 
     This is advisory and must never block the pipeline. All exceptions are
     caught and logged as warnings.
@@ -2550,6 +2556,21 @@ def _run_learn_phase(
                     max_entries=config.learnings.max_entries,
                 )
                 _log(f"  Extracted {len(entries)} learnings")
+
+                # FR-2: Write learnings to memory store alongside the ledger
+                if memory_store is not None:
+                    for entry in entries:
+                        try:
+                            memory_store.add_memory(
+                                category=MemoryCategory.REVIEW_PATTERN,
+                                phase="learn",
+                                run_id=log.run_id,
+                                text=f"[{entry.category}] {entry.text}",
+                                tags=["learn", entry.category],
+                            )
+                        except Exception:
+                            _log("Warning: failed to capture learn-phase memory")
+                    _log(f"  Captured {len(entries)} learn-phase memories")
             else:
                 _log("  No new learnings extracted")
         else:
@@ -3259,375 +3280,372 @@ def _run_pipeline(
     memory_store: MemoryStore | None = None,
 ) -> RunLog:
     """Execute the pipeline phases. Extracted from run() for try/finally branch rollback."""
+    try:
 
-    def _append_phase(result: PhaseResult) -> None:
-        """Append a phase result and persist immediately so progress survives crashes."""
-        log.phases.append(result)
-        _save_run_log(repo_root, log)
+        def _append_phase(result: PhaseResult) -> None:
+            """Append a phase result and persist immediately so progress survives crashes."""
+            log.phases.append(result)
+            _save_run_log(repo_root, log)
 
-    # --- Phase 1: Plan ---
-    _touch_heartbeat(repo_root)
-    if "plan" in skip_phases:
-        _log("Skipping plan phase (already completed in previous run)")
-    elif skip_planning and not from_prd:
-        _log("Skipping plan phase for small-fix fast path")
-    elif from_prd:
-        _log(f"Skipping plan phase, using existing PRD: {from_prd}")
-        prd_rel = from_prd
-        prd_stem = Path(from_prd).stem
-        task_rel = f"{config.tasks_dir}/{prd_stem.replace('_prd_', '_tasks_')}.md"
-    else:
-        plan_ui = _make_ui()
-        if plan_ui is not None:
-            extra = ""
-            persona_agents = _build_persona_agents(config.personas) or None
-            if persona_agents:
-                extra = f"{len(persona_agents)} persona subagents"
-            plan_ui.phase_header("Plan", config.budget.per_phase, config.get_model(Phase.PLAN), extra)
+        # --- Phase 1: Plan ---
+        _touch_heartbeat(repo_root)
+        if "plan" in skip_phases:
+            _log("Skipping plan phase (already completed in previous run)")
+        elif skip_planning and not from_prd:
+            _log("Skipping plan phase for small-fix fast path")
+        elif from_prd:
+            _log(f"Skipping plan phase, using existing PRD: {from_prd}")
+            prd_rel = from_prd
+            prd_stem = Path(from_prd).stem
+            task_rel = f"{config.tasks_dir}/{prd_stem.replace('_prd_', '_tasks_')}.md"
         else:
-            _log("=== Phase 1: Plan ===")
-            persona_agents = _build_persona_agents(config.personas) or None
-            if persona_agents:
-                _log(f"  {len(persona_agents)} persona subagents configured for parallel Q&A")
-
-        prd_filename = Path(prd_rel).name
-        task_filename = Path(task_rel).name
-        system, user = _build_plan_prompt(
-            prompt, config, prd_filename, task_filename,
-            source_issue=log.source_issue,
-            source_issue_url=log.source_issue_url,
-        )
-        system = _inject_memory_block(system, memory_store, "plan", user, config)
-        plan_result = run_phase_sync(
-            Phase.PLAN,
-            user,
-            cwd=repo_root,
-            system_prompt=system,
-            model=config.get_model(Phase.PLAN),
-            budget_usd=config.budget.per_phase,
-            agents=persona_agents,
-            ui=plan_ui,
-        )
-        _append_phase(plan_result)
-        _capture_phase_memory(memory_store, plan_result, log.run_id, config)
-
-        if not plan_result.success:
-            if plan_ui is None:
-                _fail_run_log(repo_root, log, f"Plan phase failed: {plan_result.error}")
+            plan_ui = _make_ui()
+            if plan_ui is not None:
+                extra = ""
+                persona_agents = _build_persona_agents(config.personas) or None
+                if persona_agents:
+                    extra = f"{len(persona_agents)} persona subagents"
+                plan_ui.phase_header("Plan", config.budget.per_phase, config.get_model(Phase.PLAN), extra)
             else:
-                _fail_run_log(repo_root, log, "Plan phase failed")
-            if memory_store is not None:
-                memory_store.close()
+                _log("=== Phase 1: Plan ===")
+                persona_agents = _build_persona_agents(config.personas) or None
+                if persona_agents:
+                    _log(f"  {len(persona_agents)} persona subagents configured for parallel Q&A")
+
+            prd_filename = Path(prd_rel).name
+            task_filename = Path(task_rel).name
+            system, user = _build_plan_prompt(
+                prompt, config, prd_filename, task_filename,
+                source_issue=log.source_issue,
+                source_issue_url=log.source_issue_url,
+            )
+            system = _inject_memory_block(system, memory_store, "plan", user, config)
+            plan_result = run_phase_sync(
+                Phase.PLAN,
+                user,
+                cwd=repo_root,
+                system_prompt=system,
+                model=config.get_model(Phase.PLAN),
+                budget_usd=config.budget.per_phase,
+                agents=persona_agents,
+                ui=plan_ui,
+            )
+            _append_phase(plan_result)
+            _capture_phase_memory(memory_store, plan_result, log.run_id, config)
+
+            if not plan_result.success:
+                if plan_ui is None:
+                    _fail_run_log(repo_root, log, f"Plan phase failed: {plan_result.error}")
+                else:
+                    _fail_run_log(repo_root, log, "Plan phase failed")
+                return log
+
+        if plan_only:
+            log.status = RunStatus.COMPLETED
+            log.mark_finished()
+            _save_run_log(repo_root, log)
+            _log("Plan-only mode: stopping after plan phase.")
             return log
 
-    if plan_only:
+        # --- Phase 2: Implement ---
+        _touch_heartbeat(repo_root)
+        if "implement" in skip_phases:
+            _log("Skipping implement phase (already completed in previous run)")
+        else:
+            impl_ui = _make_ui()
+            if impl_ui is not None:
+                impl_ui.phase_header("Implement", config.budget.per_phase, config.get_model(Phase.IMPLEMENT), branch_name)
+            else:
+                _log("=== Phase 2: Implement ===")
+
+            # Try parallel implement mode first (Task 6.6)
+            impl_result = None
+            if config.parallel_implement.enabled:
+                impl_result = _run_parallel_implement(
+                    log=log,
+                    repo_root=repo_root,
+                    config=config,
+                    branch_name=branch_name,
+                    prd_rel=prd_rel,
+                    task_rel=task_rel,
+                    _make_ui=_make_ui,
+                )
+                if impl_result is not None:
+                    _log(f"Parallel implement completed: {impl_result.artifacts.get('parallelism_ratio', '1.0x')}")
+
+            # Fall back to sequential if parallel mode is not available or disabled
+            if impl_result is None:
+                _log("Using sequential implement mode")
+                system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name, repo_root=repo_root)
+                system = _inject_memory_block(system, memory_store, "implement", user, config)
+                user += _drain_injected_context(user_injection_provider)
+                impl_result = run_phase_sync(
+                    Phase.IMPLEMENT,
+                    user,
+                    cwd=repo_root,
+                    system_prompt=system,
+                    model=config.get_model(Phase.IMPLEMENT),
+                    budget_usd=config.budget.per_phase,
+                    ui=impl_ui,
+                )
+            elif impl_ui is not None:
+                if impl_result.success:
+                    completed_tasks = int(impl_result.artifacts.get("completed", "0"))
+                    impl_ui.phase_complete(
+                        impl_result.cost_usd or 0.0,
+                        completed_tasks,
+                        impl_result.duration_ms,
+                    )
+                else:
+                    message = impl_result.error or "Parallel implement phase failed"
+                    impl_ui.phase_error(message)
+
+            _append_phase(impl_result)
+            _capture_phase_memory(memory_store, impl_result, log.run_id, config)
+
+            if not impl_result.success:
+                if impl_ui is None:
+                    _fail_run_log(repo_root, log, f"Implement phase failed: {impl_result.error}")
+                else:
+                    _fail_run_log(repo_root, log, "Implement phase failed")
+                return log
+
+        # --- Phase 3: Review/Fix Loop ---
+        _touch_heartbeat(repo_root)
+        if "review" in skip_phases:
+            _log("Skipping review phase (already completed in previous run)")
+        elif config.phases.review:
+            reviewers = reviewer_personas(config)
+            if not reviewers:
+                _log("No reviewer personas configured, skipping review phase")
+            else:
+                review_header_ui = _make_ui()
+                if review_header_ui is not None:
+                    review_header_ui.phase_header(
+                        f"Review ({len(reviewers)} reviewers)",
+                        config.budget.per_phase,
+                        config.get_model(Phase.REVIEW),
+                    )
+                else:
+                    _log(f"=== Phase 3: Review ({len(reviewers)} reviewers) ===")
+                review_tools = ["Read", "Glob", "Grep", "Bash"]
+                last_findings: list[tuple[str, str]] = []
+
+                for iteration in range(config.max_fix_iterations + 1):
+                    # Budget guard
+                    cost_so_far = sum(
+                        p.cost_usd for p in log.phases if p.cost_usd is not None
+                    )
+                    remaining = config.budget.per_run - cost_so_far
+                    if remaining < config.budget.per_phase:
+                        _log(
+                            f"Review loop: budget exhausted "
+                            f"({remaining:.2f} remaining). Stopping reviews."
+                        )
+                        break
+
+                    _log(f"  Review round {iteration + 1}/{config.max_fix_iterations + 1}")
+                    if not quiet:
+                        print_reviewer_legend([(i, p.role) for i, p in enumerate(reviewers)])
+
+                    review_calls = []
+                    for i, persona in enumerate(reviewers):
+                        sys_prompt, usr_prompt = _build_persona_review_prompt(
+                            persona, config, prd_rel, branch_name
+                        )
+                        # FR-3: Inject memory context into review phase prompts
+                        sys_prompt = _inject_memory_block(sys_prompt, memory_store, "review", usr_prompt, config)
+                        usr_prompt += _drain_injected_context(user_injection_provider)
+                        persona_ui = _make_ui(prefix=make_reviewer_prefix(i))
+                        review_calls.append(dict(
+                            phase=Phase.REVIEW,
+                            prompt=usr_prompt,
+                            cwd=repo_root,
+                            system_prompt=sys_prompt,
+                            model=config.get_model(Phase.REVIEW),
+                            budget_usd=config.budget.per_phase,
+                            allowed_tools=review_tools,
+                            ui=persona_ui,
+                        ))
+
+                    # Create progress tracker for real-time status updates
+                    progress_tracker: ParallelProgressLine | None = None
+                    if not quiet:
+                        is_tty = sys.stderr.isatty()
+                        reviewer_list = [(i, p.role) for i, p in enumerate(reviewers)]
+                        progress_tracker = ParallelProgressLine(reviewer_list, is_tty=is_tty)
+
+                    results = run_phases_parallel_sync(
+                        review_calls,
+                        on_complete=progress_tracker.on_reviewer_complete if progress_tracker else None,
+                    )
+
+                    # Print summary after all reviewers complete
+                    if progress_tracker is not None:
+                        progress_tracker.print_summary(round_num=iteration + 1)
+
+                    # Save each persona's review artifact and capture memories
+                    for persona, result in zip(reviewers, results):
+                        p_slug = _persona_slug(persona.role)
+                        text = result.artifacts.get("result", "")
+                        artifact = persona_review_artifact_path(
+                            prompt, p_slug, iteration + 1,
+                        )
+                        _save_review_artifact(
+                            repo_root,
+                            config.reviews_dir,
+                            artifact.filename,
+                            f"# Review by {persona.role} (Round {iteration + 1})\n\n{text}",
+                            subdirectory=artifact.subdirectory,
+                        )
+                        _append_phase(result)
+                        _capture_phase_memory(memory_store, result, log.run_id, config)
+
+                    last_findings = _collect_review_findings(results, reviewers)
+
+                    if not last_findings:
+                        _log("  All reviewers approve")
+                        break
+
+                    _log(
+                        f"  {len(last_findings)} reviewer(s) requested changes: "
+                        + ", ".join(role for role, _ in last_findings)
+                    )
+
+                    if iteration < config.max_fix_iterations:
+                        findings_text = "\n\n---\n\n".join(
+                            f"### {role}\n\n{text}" for role, text in last_findings
+                        )
+                        fix_system, fix_user = _build_fix_prompt(
+                            config,
+                            prd_rel,
+                            task_rel,
+                            branch_name,
+                            findings_text,
+                            iteration + 1,
+                            repo_root=repo_root,
+                        )
+                        fix_system = _inject_memory_block(fix_system, memory_store, "fix", fix_user, config)
+                        fix_user += _drain_injected_context(user_injection_provider)
+                        fix_ui = _make_ui()
+                        if fix_ui is not None:
+                            fix_ui.phase_header(
+                                f"Fix (iteration {iteration + 1})",
+                                config.budget.per_phase,
+                                config.get_model(Phase.FIX),
+                            )
+                        else:
+                            _log(f"  Running fix agent (iteration {iteration + 1})...")
+                        fix_result = run_phase_sync(
+                            Phase.FIX,
+                            fix_user,
+                            cwd=repo_root,
+                            system_prompt=fix_system,
+                            model=config.get_model(Phase.FIX),
+                            budget_usd=config.budget.per_phase,
+                            ui=fix_ui,
+                        )
+                        _append_phase(fix_result)
+                        _capture_phase_memory(memory_store, fix_result, log.run_id, config)
+                        if not fix_result.success:
+                            if fix_ui is None:
+                                _log(f"  Fix phase failed: {fix_result.error}")
+                            break
+
+                # --- Decision Gate ---
+                decision_ui = _make_ui()
+                if decision_ui is not None:
+                    decision_ui.phase_header("Decision Gate", config.budget.per_phase, config.get_model(Phase.DECISION))
+                else:
+                    _log("=== Decision Gate ===")
+                system, user = _build_decision_prompt(config, prd_rel, branch_name)
+                user += _drain_injected_context(user_injection_provider)
+                decision_result = run_phase_sync(
+                    Phase.DECISION,
+                    user,
+                    cwd=repo_root,
+                    system_prompt=system,
+                    model=config.get_model(Phase.DECISION),
+                    budget_usd=config.budget.per_phase,
+                    allowed_tools=["Read", "Glob", "Grep", "Bash"],
+                    ui=decision_ui,
+                )
+                _append_phase(decision_result)
+
+                verdict_text = decision_result.artifacts.get("result", "")
+                verdict = _extract_verdict(verdict_text)
+                _log(f"  Decision: {verdict}")
+
+                decision_art = decision_artifact_path(prompt)
+                _save_review_artifact(
+                    repo_root,
+                    config.reviews_dir,
+                    decision_art.filename,
+                    f"# Decision Gate\n\nVerdict: **{verdict}**\n\n{verdict_text}",
+                    subdirectory=decision_art.subdirectory,
+                )
+
+                if verdict == "NO-GO":
+                    _run_learn_phase(config, repo_root, log, prompt, _make_ui, memory_store=memory_store)
+                    _fail_run_log(repo_root, log, "Decision gate: NO-GO. Pipeline stopped before deliver.")
+                    return log
+
+                if verdict == "UNKNOWN":
+                    _log("  Warning: could not parse verdict, proceeding with caution")
+
+        # --- Learn Phase ---
+        _run_learn_phase(config, repo_root, log, prompt, _make_ui, memory_store=memory_store)
+
+        # --- Deliver Phase ---
+        _touch_heartbeat(repo_root)
+        if config.phases.deliver:
+            deliver_ui = _make_ui()
+            if deliver_ui is not None:
+                deliver_ui.phase_header("Deliver", config.budget.per_phase, config.get_model(Phase.DELIVER))
+            else:
+                phase_num = 5 if config.phases.review else 3
+                _log(f"=== Phase {phase_num}: Deliver ===")
+            system, user = _build_deliver_prompt(
+                config, prd_rel, branch_name,
+                source_issue=log.source_issue,
+                base_branch=base_branch,
+            )
+            user += _drain_injected_context(user_injection_provider)
+            deliver_result = run_phase_sync(
+                Phase.DELIVER,
+                user,
+                cwd=repo_root,
+                system_prompt=system,
+                model=config.get_model(Phase.DELIVER),
+                budget_usd=config.budget.per_phase,
+                ui=deliver_ui,
+            )
+            _append_phase(deliver_result)
+
+            # Extract PR URL from deliver artifacts
+            pr_url = deliver_result.artifacts.get("pr_url", "")
+            if pr_url:
+                log.pr_url = pr_url
+
+            if not deliver_result.success:
+                if deliver_ui is None:
+                    _fail_run_log(repo_root, log, f"Deliver phase failed: {deliver_result.error}")
+                else:
+                    _fail_run_log(repo_root, log, "Deliver phase failed")
+                return log
+
+        # --- CI Fix Phase (post-deliver) ---
+        if config.ci_fix.enabled and config.phases.deliver:
+            # Persist the run log before entering the CI fix loop so that
+            # prior phase results are not lost if the loop crashes.
+            _save_run_log(repo_root, log)
+            _run_ci_fix_loop(config, repo_root, log, branch_name)
+
         log.status = RunStatus.COMPLETED
         log.mark_finished()
         _save_run_log(repo_root, log)
+        _log(f"Run complete. Total cost: ${log.total_cost_usd:.4f}")
+        return log
+    finally:
         if memory_store is not None:
             memory_store.close()
-        _log("Plan-only mode: stopping after plan phase.")
-        return log
-
-    # --- Phase 2: Implement ---
-    _touch_heartbeat(repo_root)
-    if "implement" in skip_phases:
-        _log("Skipping implement phase (already completed in previous run)")
-    else:
-        impl_ui = _make_ui()
-        if impl_ui is not None:
-            impl_ui.phase_header("Implement", config.budget.per_phase, config.get_model(Phase.IMPLEMENT), branch_name)
-        else:
-            _log("=== Phase 2: Implement ===")
-
-        # Try parallel implement mode first (Task 6.6)
-        impl_result = None
-        if config.parallel_implement.enabled:
-            impl_result = _run_parallel_implement(
-                log=log,
-                repo_root=repo_root,
-                config=config,
-                branch_name=branch_name,
-                prd_rel=prd_rel,
-                task_rel=task_rel,
-                _make_ui=_make_ui,
-            )
-            if impl_result is not None:
-                _log(f"Parallel implement completed: {impl_result.artifacts.get('parallelism_ratio', '1.0x')}")
-
-        # Fall back to sequential if parallel mode is not available or disabled
-        if impl_result is None:
-            _log("Using sequential implement mode")
-            system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name, repo_root=repo_root)
-            system = _inject_memory_block(system, memory_store, "implement", user, config)
-            user += _drain_injected_context(user_injection_provider)
-            impl_result = run_phase_sync(
-                Phase.IMPLEMENT,
-                user,
-                cwd=repo_root,
-                system_prompt=system,
-                model=config.get_model(Phase.IMPLEMENT),
-                budget_usd=config.budget.per_phase,
-                ui=impl_ui,
-            )
-        elif impl_ui is not None:
-            if impl_result.success:
-                completed_tasks = int(impl_result.artifacts.get("completed", "0"))
-                impl_ui.phase_complete(
-                    impl_result.cost_usd or 0.0,
-                    completed_tasks,
-                    impl_result.duration_ms,
-                )
-            else:
-                message = impl_result.error or "Parallel implement phase failed"
-                impl_ui.phase_error(message)
-
-        _append_phase(impl_result)
-        _capture_phase_memory(memory_store, impl_result, log.run_id, config)
-
-        if not impl_result.success:
-            if impl_ui is None:
-                _fail_run_log(repo_root, log, f"Implement phase failed: {impl_result.error}")
-            else:
-                _fail_run_log(repo_root, log, "Implement phase failed")
-            if memory_store is not None:
-                memory_store.close()
-            return log
-
-    # --- Phase 3: Review/Fix Loop ---
-    _touch_heartbeat(repo_root)
-    if "review" in skip_phases:
-        _log("Skipping review phase (already completed in previous run)")
-    elif config.phases.review:
-        reviewers = reviewer_personas(config)
-        if not reviewers:
-            _log("No reviewer personas configured, skipping review phase")
-        else:
-            review_header_ui = _make_ui()
-            if review_header_ui is not None:
-                review_header_ui.phase_header(
-                    f"Review ({len(reviewers)} reviewers)",
-                    config.budget.per_phase,
-                    config.get_model(Phase.REVIEW),
-                )
-            else:
-                _log(f"=== Phase 3: Review ({len(reviewers)} reviewers) ===")
-            review_tools = ["Read", "Glob", "Grep", "Bash"]
-            last_findings: list[tuple[str, str]] = []
-
-            for iteration in range(config.max_fix_iterations + 1):
-                # Budget guard
-                cost_so_far = sum(
-                    p.cost_usd for p in log.phases if p.cost_usd is not None
-                )
-                remaining = config.budget.per_run - cost_so_far
-                if remaining < config.budget.per_phase:
-                    _log(
-                        f"Review loop: budget exhausted "
-                        f"({remaining:.2f} remaining). Stopping reviews."
-                    )
-                    break
-
-                _log(f"  Review round {iteration + 1}/{config.max_fix_iterations + 1}")
-                if not quiet:
-                    print_reviewer_legend([(i, p.role) for i, p in enumerate(reviewers)])
-
-                review_calls = []
-                for i, persona in enumerate(reviewers):
-                    sys_prompt, usr_prompt = _build_persona_review_prompt(
-                        persona, config, prd_rel, branch_name
-                    )
-                    usr_prompt += _drain_injected_context(user_injection_provider)
-                    persona_ui = _make_ui(prefix=make_reviewer_prefix(i))
-                    review_calls.append(dict(
-                        phase=Phase.REVIEW,
-                        prompt=usr_prompt,
-                        cwd=repo_root,
-                        system_prompt=sys_prompt,
-                        model=config.get_model(Phase.REVIEW),
-                        budget_usd=config.budget.per_phase,
-                        allowed_tools=review_tools,
-                        ui=persona_ui,
-                    ))
-
-                # Create progress tracker for real-time status updates
-                progress_tracker: ParallelProgressLine | None = None
-                if not quiet:
-                    is_tty = sys.stderr.isatty()
-                    reviewer_list = [(i, p.role) for i, p in enumerate(reviewers)]
-                    progress_tracker = ParallelProgressLine(reviewer_list, is_tty=is_tty)
-
-                results = run_phases_parallel_sync(
-                    review_calls,
-                    on_complete=progress_tracker.on_reviewer_complete if progress_tracker else None,
-                )
-
-                # Print summary after all reviewers complete
-                if progress_tracker is not None:
-                    progress_tracker.print_summary(round_num=iteration + 1)
-
-                # Save each persona's review artifact
-                for persona, result in zip(reviewers, results):
-                    p_slug = _persona_slug(persona.role)
-                    text = result.artifacts.get("result", "")
-                    artifact = persona_review_artifact_path(
-                        prompt, p_slug, iteration + 1,
-                    )
-                    _save_review_artifact(
-                        repo_root,
-                        config.reviews_dir,
-                        artifact.filename,
-                        f"# Review by {persona.role} (Round {iteration + 1})\n\n{text}",
-                        subdirectory=artifact.subdirectory,
-                    )
-                    _append_phase(result)
-
-                last_findings = _collect_review_findings(results, reviewers)
-
-                if not last_findings:
-                    _log("  All reviewers approve")
-                    break
-
-                _log(
-                    f"  {len(last_findings)} reviewer(s) requested changes: "
-                    + ", ".join(role for role, _ in last_findings)
-                )
-
-                if iteration < config.max_fix_iterations:
-                    findings_text = "\n\n---\n\n".join(
-                        f"### {role}\n\n{text}" for role, text in last_findings
-                    )
-                    fix_system, fix_user = _build_fix_prompt(
-                        config,
-                        prd_rel,
-                        task_rel,
-                        branch_name,
-                        findings_text,
-                        iteration + 1,
-                        repo_root=repo_root,
-                    )
-                    fix_system = _inject_memory_block(fix_system, memory_store, "fix", fix_user, config)
-                    fix_user += _drain_injected_context(user_injection_provider)
-                    fix_ui = _make_ui()
-                    if fix_ui is not None:
-                        fix_ui.phase_header(
-                            f"Fix (iteration {iteration + 1})",
-                            config.budget.per_phase,
-                            config.get_model(Phase.FIX),
-                        )
-                    else:
-                        _log(f"  Running fix agent (iteration {iteration + 1})...")
-                    fix_result = run_phase_sync(
-                        Phase.FIX,
-                        fix_user,
-                        cwd=repo_root,
-                        system_prompt=fix_system,
-                        model=config.get_model(Phase.FIX),
-                        budget_usd=config.budget.per_phase,
-                        ui=fix_ui,
-                    )
-                    _append_phase(fix_result)
-                    _capture_phase_memory(memory_store, fix_result, log.run_id, config)
-                    if not fix_result.success:
-                        if fix_ui is None:
-                            _log(f"  Fix phase failed: {fix_result.error}")
-                        break
-
-            # --- Decision Gate ---
-            decision_ui = _make_ui()
-            if decision_ui is not None:
-                decision_ui.phase_header("Decision Gate", config.budget.per_phase, config.get_model(Phase.DECISION))
-            else:
-                _log("=== Decision Gate ===")
-            system, user = _build_decision_prompt(config, prd_rel, branch_name)
-            user += _drain_injected_context(user_injection_provider)
-            decision_result = run_phase_sync(
-                Phase.DECISION,
-                user,
-                cwd=repo_root,
-                system_prompt=system,
-                model=config.get_model(Phase.DECISION),
-                budget_usd=config.budget.per_phase,
-                allowed_tools=["Read", "Glob", "Grep", "Bash"],
-                ui=decision_ui,
-            )
-            _append_phase(decision_result)
-
-            verdict_text = decision_result.artifacts.get("result", "")
-            verdict = _extract_verdict(verdict_text)
-            _log(f"  Decision: {verdict}")
-
-            decision_art = decision_artifact_path(prompt)
-            _save_review_artifact(
-                repo_root,
-                config.reviews_dir,
-                decision_art.filename,
-                f"# Decision Gate\n\nVerdict: **{verdict}**\n\n{verdict_text}",
-                subdirectory=decision_art.subdirectory,
-            )
-
-            if verdict == "NO-GO":
-                _run_learn_phase(config, repo_root, log, prompt, _make_ui)
-                _fail_run_log(repo_root, log, "Decision gate: NO-GO. Pipeline stopped before deliver.")
-                return log
-
-            if verdict == "UNKNOWN":
-                _log("  Warning: could not parse verdict, proceeding with caution")
-
-    # --- Learn Phase ---
-    _run_learn_phase(config, repo_root, log, prompt, _make_ui)
-
-    # --- Deliver Phase ---
-    _touch_heartbeat(repo_root)
-    if config.phases.deliver:
-        deliver_ui = _make_ui()
-        if deliver_ui is not None:
-            deliver_ui.phase_header("Deliver", config.budget.per_phase, config.get_model(Phase.DELIVER))
-        else:
-            phase_num = 5 if config.phases.review else 3
-            _log(f"=== Phase {phase_num}: Deliver ===")
-        system, user = _build_deliver_prompt(
-            config, prd_rel, branch_name,
-            source_issue=log.source_issue,
-            base_branch=base_branch,
-        )
-        user += _drain_injected_context(user_injection_provider)
-        deliver_result = run_phase_sync(
-            Phase.DELIVER,
-            user,
-            cwd=repo_root,
-            system_prompt=system,
-            model=config.get_model(Phase.DELIVER),
-            budget_usd=config.budget.per_phase,
-            ui=deliver_ui,
-        )
-        _append_phase(deliver_result)
-
-        # Extract PR URL from deliver artifacts
-        pr_url = deliver_result.artifacts.get("pr_url", "")
-        if pr_url:
-            log.pr_url = pr_url
-
-        if not deliver_result.success:
-            if deliver_ui is None:
-                _fail_run_log(repo_root, log, f"Deliver phase failed: {deliver_result.error}")
-            else:
-                _fail_run_log(repo_root, log, "Deliver phase failed")
-            if memory_store is not None:
-                memory_store.close()
-            return log
-
-    # --- CI Fix Phase (post-deliver) ---
-    if config.ci_fix.enabled and config.phases.deliver:
-        # Persist the run log before entering the CI fix loop so that
-        # prior phase results are not lost if the loop crashes.
-        _save_run_log(repo_root, log)
-        _run_ci_fix_loop(config, repo_root, log, branch_name)
-
-    log.status = RunStatus.COMPLETED
-    log.mark_finished()
-    _save_run_log(repo_root, log)
-    if memory_store is not None:
-        memory_store.close()
-    _log(f"Run complete. Total cost: ${log.total_cost_usd:.4f}")
-    return log

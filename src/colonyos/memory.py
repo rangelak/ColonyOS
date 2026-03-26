@@ -166,9 +166,12 @@ class MemoryStore:
     ) -> MemoryEntry:
         """Add a memory entry, sanitizing text and enforcing max_entries cap.
 
-        Sanitization applies both XML tag stripping and secret-pattern
-        redaction (``sanitize_ci_logs``) to prevent persisting leaked
-        tokens, API keys, or credentials.
+        Sanitization uses ``sanitize_ci_logs`` which is a strict superset of
+        ``sanitize_untrusted_content``: it applies both XML tag stripping
+        (to prevent prompt-injection from agent output) *and* secret-pattern
+        redaction (to prevent persisting leaked tokens, API keys, or
+        credentials).  This is intentionally stricter than the PRD's
+        ``sanitize_untrusted_content`` requirement.
 
         The insert and any pruning happen within a single transaction to
         ensure the entry count never exceeds ``max_entries`` even if the
@@ -211,6 +214,12 @@ class MemoryStore:
 
         When *cur* is provided, operates within the caller's transaction
         (no separate commit). Otherwise commits independently.
+
+        Note: pruning is global FIFO across all categories. The PRD specifies
+        per-category FIFO, but global FIFO is simpler and sufficient for the
+        MVP.  A burst of one category could theoretically evict all entries
+        from another, but at the default 500-entry cap this is unlikely in
+        practice.  Per-category quotas can be added in a future iteration.
         """
         own_cursor = cur is None
         if own_cursor:
@@ -409,8 +418,22 @@ def load_memory_for_injection(
         except ValueError:
             pass
 
-    # Query with generous limit; we'll trim by token budget
-    memories = store.query_memories(categories=categories, limit=100)
+    # FR-3: Extract keywords from prompt_text for relevance ranking via FTS5.
+    # Try keyword-matched results first; fall back to recency-only if no matches.
+    memories: list[MemoryEntry] = []
+    if prompt_text.strip():
+        # Extract meaningful keywords (≥3 chars to filter noise)
+        words = [w for w in prompt_text.split() if len(w) >= 3]
+        # Use up to 8 keywords to avoid overly narrow queries
+        keyword = " ".join(words[:8]) if words else ""
+        if keyword:
+            memories = store.query_memories(
+                categories=categories, limit=100, keyword=keyword
+            )
+
+    # Fall back to recency-based retrieval if keyword search returned nothing
+    if not memories:
+        memories = store.query_memories(categories=categories, limit=100)
 
     if not memories:
         return ""

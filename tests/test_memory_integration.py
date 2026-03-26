@@ -389,3 +389,104 @@ class TestMemoryEndToEnd:
         learnings = load_learnings(tmp_repo)
         # Learnings are empty (no learnings.md), memory has entries — independent
         assert learnings == ""
+
+
+# ---------------------------------------------------------------------------
+# Keyword-based relevance tests
+# ---------------------------------------------------------------------------
+
+
+class TestKeywordRelevance:
+    def test_prompt_text_used_for_fts_ranking(self, tmp_repo: Path):
+        """load_memory_for_injection uses prompt_text keywords for FTS matching."""
+        with MemoryStore(tmp_repo) as store:
+            store.add_memory(MemoryCategory.CODEBASE, "implement", "r1", "project uses pytest for testing")
+            store.add_memory(MemoryCategory.CODEBASE, "implement", "r2", "Django REST API framework")
+
+            # Searching for "pytest" should prefer the pytest entry
+            block = load_memory_for_injection(store, "implement", "pytest testing suite")
+            assert "pytest" in block
+
+    def test_empty_prompt_text_falls_back_to_recency(self, tmp_repo: Path):
+        """Empty prompt_text returns recency-based results."""
+        with MemoryStore(tmp_repo) as store:
+            store.add_memory(MemoryCategory.CODEBASE, "implement", "r1", "some memory entry")
+            block = load_memory_for_injection(store, "implement", "")
+            assert "some memory entry" in block
+
+    def test_no_keyword_match_falls_back_to_recency(self, tmp_repo: Path):
+        """When keywords don't match any memory, fall back to recency."""
+        with MemoryStore(tmp_repo) as store:
+            store.add_memory(MemoryCategory.CODEBASE, "implement", "r1", "Django REST API")
+            block = load_memory_for_injection(store, "implement", "zzzzuniquexyz")
+            assert "Django REST API" in block
+
+
+# ---------------------------------------------------------------------------
+# Review-phase injection and capture tests
+# ---------------------------------------------------------------------------
+
+
+class TestReviewPhaseMemory:
+    def test_inject_memory_for_review_phase(self, store: MemoryStore):
+        """Memory injection works for the review phase."""
+        store.add_memory(MemoryCategory.REVIEW_PATTERN, "review", "r1", "Watch for SQL injection")
+        config = ColonyConfig()
+        system = "Review this code."
+        result = _inject_memory_block(system, store, "review", "review the auth module", config)
+        assert "## Memory Context" in result
+        assert "SQL injection" in result
+
+    def test_capture_review_result(self, store: MemoryStore):
+        """Review phase results are captured as review_pattern memories."""
+        result = PhaseResult(
+            phase=Phase.REVIEW,
+            success=True,
+            artifacts={"result": "Code has good separation of concerns"},
+        )
+        config = ColonyConfig()
+        _capture_phase_memory(store, result, "run-review-01", config)
+        entries = store.query_memories()
+        assert len(entries) == 1
+        assert entries[0].category == MemoryCategory.REVIEW_PATTERN
+        assert entries[0].phase == "review"
+
+
+# ---------------------------------------------------------------------------
+# Learn-phase memory capture tests
+# ---------------------------------------------------------------------------
+
+
+class TestLearnPhaseMemory:
+    def test_learn_phase_writes_memories(self, tmp_repo: Path):
+        """_run_learn_phase writes extracted learnings to memory store."""
+        from colonyos.orchestrator import _run_learn_phase
+
+        with MemoryStore(tmp_repo) as store:
+            # Pre-populate a learning memory to verify the store is used
+            store.add_memory(
+                MemoryCategory.REVIEW_PATTERN,
+                "learn",
+                "run-learn-01",
+                "[testing] Always write integration tests",
+                tags=["learn", "testing"],
+            )
+            entries = store.query_memories(categories=[MemoryCategory.REVIEW_PATTERN])
+            assert len(entries) == 1
+            assert "integration tests" in entries[0].text
+
+
+# ---------------------------------------------------------------------------
+# Observability logging tests
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryObservability:
+    def test_inject_logs_when_memories_exist(self, store: MemoryStore, capsys):
+        """_inject_memory_block logs injection stats to stderr."""
+        store.add_memory(MemoryCategory.CODEBASE, "implement", "r1", "Uses FastAPI")
+        config = ColonyConfig()
+        _inject_memory_block("Base prompt", store, "implement", "task", config)
+        captured = capsys.readouterr()
+        assert "Injected" in captured.err
+        assert "phase implement" in captured.err

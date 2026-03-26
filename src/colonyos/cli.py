@@ -421,7 +421,7 @@ def _run_direct_agent(
                     max_tokens=config.memory.max_inject_tokens,
                 )
         except Exception:
-            pass  # Graceful degradation — memory is not critical
+            logger.warning("Failed to load memory for injection, continuing without memory")
 
     system, user = build_direct_agent_prompt(
         request,
