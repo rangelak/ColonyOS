@@ -785,6 +785,7 @@ def _run_repl() -> None:
             _readline.parse_and_bind("tab: complete")
 
     session_cost = 0.0
+    last_direct_session_id: str | None = None
 
     click.echo(click.style(
         'Type a command, a feature to build, or "help" for available commands.',
@@ -808,6 +809,12 @@ def _run_repl() -> None:
                 continue
             if stripped.lower() in ("quit", "exit"):
                 break
+
+            # --- /new: clear conversation state ---
+            if stripped.lower() in ("new", "/new"):
+                last_direct_session_id = None
+                click.echo(click.style("Conversation cleared. Next message starts a fresh session.", dim=True))
+                continue
 
             # --- help ---
             if stripped.lower() == "help":
@@ -855,13 +862,20 @@ def _run_repl() -> None:
                 if route_outcome.mode == "direct_agent":
                     from colonyos.ui import PhaseUI
 
+                    if last_direct_session_id is not None:
+                        click.echo(click.style("Continuing conversation...", dim=True))
                     _success, _session_id = _run_direct_agent(
                         stripped,
                         repo_root=repo_root,
                         config=config,
                         ui=PhaseUI(verbose=True),
+                        resume_session_id=last_direct_session_id,
                     )
+                    if _success and _session_id:
+                        last_direct_session_id = _session_id
                     continue
+                # Non-direct-agent mode: clear session state
+                last_direct_session_id = None
                 if route_outcome.mode == "review_only":
                     try:
                         _run_review_only_flow(
@@ -886,6 +900,8 @@ def _run_repl() -> None:
                 skip_planning = route_outcome.skip_planning
 
             # --- feature prompt (default) ---
+            # Running the full pipeline means we're not in direct-agent mode
+            last_direct_session_id = None
             per_run_cap = config.budget.per_run
             if not config.auto_approve:
                 try:
