@@ -391,12 +391,25 @@ def _run_direct_agent(
     repo_root: Path,
     config: ColonyConfig,
     ui: Any | None,
-) -> bool:
-    """Handle a request directly with a lightweight general coding agent."""
+    resume_session_id: str | None = None,
+) -> tuple[bool, str | None]:
+    """Handle a request directly with a lightweight general coding agent.
+
+    Returns a ``(success, session_id)`` tuple.  The *session_id* can be
+    passed back as *resume_session_id* on the next call to continue the
+    conversation via the SDK's native session-resume mechanism.
+    """
+    import re
     from colonyos.agent import run_phase_sync
     from colonyos.models import Phase
     from colonyos.router import build_direct_agent_prompt
 
+    # Defense-in-depth: validate session ID format before passing to the SDK.
+    # Session IDs should be alphanumeric with hyphens/underscores only.
+    if resume_session_id is not None and not re.fullmatch(
+        r"[A-Za-z0-9_-]+", resume_session_id
+    ):
+        resume_session_id = None
     system, user = build_direct_agent_prompt(
         request,
         project_name=config.project.name if config.project else "",
@@ -417,8 +430,24 @@ def _run_direct_agent(
         model=model,
         budget_usd=budget,
         ui=ui,
+        resume=resume_session_id,
     )
-    return result.success
+
+    # Graceful fallback: if the run failed and we were resuming a session,
+    # retry once without resume to start a fresh conversation.
+    if not result.success and resume_session_id is not None:
+        result = run_phase_sync(
+            Phase.QA,
+            user,
+            cwd=repo_root,
+            system_prompt=system,
+            model=model,
+            budget_usd=budget,
+            ui=ui,
+            resume=None,
+        )
+
+    return (result.success, result.session_id or None)
 
 
 def _run_review_only_flow(
@@ -457,10 +486,14 @@ def _run_cleanup_loop() -> None:
     cleanup_scan(max_lines=None, max_functions=None, use_ai=True, refactor_file=None)
 
 
+# Sentinel value returned by _handle_tui_command when the user resets the conversation.
+# Used to detect /new without fragile substring matching on user-facing text.
+_NEW_CONVERSATION_SIGNAL = "Conversation cleared."
 _SAFE_TUI_COMMANDS = {
     "auto",
     "doctor",
     "help",
+    "new",
     "queue",
     "show",
     "stats",
@@ -484,6 +517,8 @@ def _handle_tui_command(text: str, *, config: ColonyConfig) -> tuple[bool, str |
     if lowered in {"quit", "exit"}:
         return True, "Exiting ColonyOS TUI.", True
 
+    if lowered == "new":
+        return True, _NEW_CONVERSATION_SIGNAL, False
     if lowered == "help":
         return True, _capture_click_output(_print_repl_help), False
 
@@ -778,6 +813,7 @@ def _run_repl() -> None:
             _readline.parse_and_bind("tab: complete")
 
     session_cost = 0.0
+    last_direct_session_id: str | None = None
 
     click.echo(click.style(
         'Type a command, a feature to build, or "help" for available commands.',
@@ -801,6 +837,12 @@ def _run_repl() -> None:
                 continue
             if stripped.lower() in ("quit", "exit"):
                 break
+
+            # --- /new: clear conversation state ---
+            if stripped.lower() in ("new", "/new"):
+                last_direct_session_id = None
+                click.echo(click.style("Conversation cleared. Next message starts a fresh session.", dim=True))
+                continue
 
             # --- help ---
             if stripped.lower() == "help":
@@ -848,13 +890,20 @@ def _run_repl() -> None:
                 if route_outcome.mode == "direct_agent":
                     from colonyos.ui import PhaseUI
 
-                    _run_direct_agent(
+                    if last_direct_session_id is not None:
+                        click.echo(click.style("Continuing conversation...", dim=True))
+                    _success, _session_id = _run_direct_agent(
                         stripped,
                         repo_root=repo_root,
                         config=config,
                         ui=PhaseUI(verbose=True),
+                        resume_session_id=last_direct_session_id,
                     )
+                    if _success and _session_id:
+                        last_direct_session_id = _session_id
                     continue
+                # Non-direct-agent mode: clear session state
+                last_direct_session_id = None
                 if route_outcome.mode == "review_only":
                     try:
                         _run_review_only_flow(
@@ -879,6 +928,8 @@ def _run_repl() -> None:
                 skip_planning = route_outcome.skip_planning
 
             # --- feature prompt (default) ---
+            # Running the full pipeline means we're not in direct-agent mode
+            last_direct_session_id = None
             per_run_cap = config.budget.per_run
             if not config.auto_approve:
                 try:
@@ -1107,7 +1158,7 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             if route_outcome.mode == "direct_agent":
                 from colonyos.ui import PhaseUI
 
-                success = _run_direct_agent(
+                success, _session_id = _run_direct_agent(
                     effective_prompt,
                     repo_root=repo_root,
                     config=config,
@@ -4802,6 +4853,7 @@ def _launch_tui(
     from colonyos.tui.adapter import CommandOutputMsg, TextBlockMsg, TextualUI
 
     current_adapter: TextualUI | None = None
+    last_direct_session_id: str | None = None
     command_hints = _tui_command_hints()
     def _recovery_callback(text: str) -> None:
         nonlocal current_adapter
@@ -4868,13 +4920,16 @@ def _launch_tui(
         across runs independently — this is intentional so users see lifetime
         session cost while each run's turn count starts at zero.
         """
-        nonlocal current_adapter
+        nonlocal current_adapter, last_direct_session_id
         queue = app_instance.event_queue
 
         handled, command_output, should_exit = _handle_tui_command(text, config=config)
         if handled:
             if command_output:
                 queue.sync_q.put(CommandOutputMsg(text=command_output))
+            # Clear conversation state on /new command
+            if command_output == _NEW_CONVERSATION_SIGNAL:
+                last_direct_session_id = None
             current_adapter = None
             if should_exit:
                 app_instance.call_from_thread(app_instance.exit)
@@ -4902,14 +4957,26 @@ def _launch_tui(
 
         try:
             if route_outcome.mode == "direct_agent":
-                _run_direct_agent(
+                # Emit continuation indicator when resuming a prior conversation
+                if last_direct_session_id is not None:
+                    queue.sync_q.put(TextBlockMsg(text="Continuing conversation..."))
+
+                success, session_id = _run_direct_agent(
                     text,
                     repo_root=repo_root,
                     config=config,
                     ui=adapter,
+                    resume_session_id=last_direct_session_id,
                 )
+                if success and session_id:
+                    last_direct_session_id = session_id
+                elif not success:
+                    # Clear stale session on failure to avoid repeated retries
+                    last_direct_session_id = None
                 return
 
+            # Non-direct-agent mode: clear conversation state
+            last_direct_session_id = None
             if route_outcome.mode == "review_only":
                 output, _approved = _capture_click_output_and_result(
                     _run_review_only_flow,
