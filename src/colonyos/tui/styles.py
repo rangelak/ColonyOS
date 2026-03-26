@@ -2,35 +2,35 @@
 
 from __future__ import annotations
 
-# Core palette
-COLOR_BG = "#0b0d12"
-COLOR_PANEL_BG = "#12161d"
-COLOR_TEXT = "#c8d1dc"
-COLOR_DIM = "#7c8896"
-COLOR_ACCENT = "#f0a030"
-COLOR_COLONY = "#f0a030"
-COLOR_CYAN = "#55eeff"
+# ---------------------------------------------------------------------------
+# Color constants — match TOOL_STYLE from ui.py
+# ---------------------------------------------------------------------------
 
-# Matches the TOOL_STYLE map from colonyos.ui
 TOOL_COLORS: dict[str, str] = {
-    "Read": COLOR_CYAN,
-    "Write": COLOR_ACCENT,
-    "Edit": COLOR_ACCENT,
-    "Bash": COLOR_ACCENT,
-    "Grep": COLOR_TEXT,
-    "Glob": COLOR_TEXT,
-    "Agent": COLOR_ACCENT,
-    "Dispatch": COLOR_ACCENT,
-    "Task": COLOR_ACCENT,
+    "Read": "cyan",
+    "Write": "green",
+    "Edit": "green",
+    "Bash": "yellow",
+    "Grep": "magenta",
+    "Glob": "magenta",
+    "Agent": "blue",
+    "Dispatch": "blue",
+    "Task": "blue",
 }
 
-DEFAULT_TOOL_COLOR = COLOR_DIM
+DEFAULT_TOOL_COLOR = "dim"
+
+# Named palette constants used by widgets
+COLOR_COLONY = "bright_cyan"
+COLOR_TEXT = "bright_white"
 
 # Semantic colors
 COLOR_SUCCESS = "green"
 COLOR_ERROR = "red"
-COLOR_WARNING = COLOR_ACCENT
-COLOR_USER_MESSAGE = COLOR_TEXT
+COLOR_WARNING = "yellow"
+COLOR_ACCENT = "bright_cyan"
+COLOR_DIM = "dim"
+COLOR_USER_MESSAGE = "bright_white"
 
 # Spinner frames for active-phase indicator
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -42,19 +42,20 @@ IDLE_PHRASES = (
     "antennae listening",
 )
 
-# Main app CSS — transcript ~85%, composer at bottom, status bar between.
+# ---------------------------------------------------------------------------
+# Textual CSS for the app layout
+# ---------------------------------------------------------------------------
+
 APP_CSS = """
 Screen {
     layout: vertical;
-    background: #0b0d12;
-    color: #c8d1dc;
 }
 
 StatusBar {
     dock: top;
     height: 1;
-    background: #12161d;
-    color: #7c8896;
+    background: $surface;
+    color: $text-muted;
     padding: 0 1;
 }
 
@@ -70,34 +71,27 @@ TranscriptView RichLog {
 
 Composer {
     height: auto;
-    min-height: 6;
-    max-height: 9;
-    background: #0b0d12;
-    border-top: solid #f0a030;
+    min-height: 3;
+    max-height: 8;
+    border-top: solid $accent;
     padding: 0 1;
 }
 
 Composer:focus-within {
-    border-top: solid #f0a030;
+    border-top: solid $accent;
 }
 
-Composer TextArea, Composer _ComposerTextArea {
+Composer TextArea {
     height: auto;
-    min-height: 5;
+    min-height: 3;
     max-height: 8;
-    background: #12161d;
-    color: #c8d1dc;
-}
-
-Composer:focus-within _ComposerTextArea {
-    border: tall #f0a030;
 }
 
 HintBar {
     dock: bottom;
-    height: 2;
-    background: #12161d;
-    color: #7c8896;
+    height: 1;
+    background: $surface;
+    color: $text-muted;
     padding: 0 1;
 }
 """
