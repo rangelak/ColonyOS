@@ -2566,3 +2566,200 @@ class TestHandleTuiCommand:
 
     def test_safe_tui_commands_contains_help(self):
         assert "help" in _SAFE_TUI_COMMANDS
+
+
+class TestReplSessionState:
+    """Tests for CLI REPL loop maintaining last_direct_session_id across direct-agent runs."""
+
+    def test_repl_stores_session_id_from_direct_agent(self, tmp_path: Path):
+        """First direct-agent run stores session_id; second run passes it as resume."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[Persona(role="Engineer", expertise="Backend", perspective="Scale")],
+        )
+        save_config(tmp_path, config)
+
+        call_count = 0
+        received_resume_ids = []
+
+        def mock_direct_agent(request, *, repo_root, config, ui, resume_session_id=None):
+            nonlocal call_count
+            call_count += 1
+            received_resume_ids.append(resume_session_id)
+            return (True, f"session-{call_count}")
+
+        # Two direct-agent prompts then quit
+        inputs = iter(["hello", "follow up", "quit"])
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("builtins.input", side_effect=inputs), \
+             patch("colonyos.cli.readline", create=True), \
+             patch("colonyos.cli._route_prompt", return_value=RouteOutcome(
+                 mode="direct_agent", announcement="Direct mode.",
+             )), \
+             patch("colonyos.cli._run_direct_agent", side_effect=mock_direct_agent):
+            from colonyos.cli import _run_repl
+            _run_repl()
+
+        assert call_count == 2
+        assert received_resume_ids[0] is None  # First call: no resume
+        assert received_resume_ids[1] == "session-1"  # Second call: resumes first session
+
+    def test_repl_clears_session_on_mode_switch(self, tmp_path: Path):
+        """When the router switches away from direct_agent mode, session_id is cleared."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[Persona(role="Engineer", expertise="Backend", perspective="Scale")],
+            auto_approve=True,
+        )
+        save_config(tmp_path, config)
+
+        received_resume_ids = []
+        call_count = 0
+
+        def mock_direct_agent(request, *, repo_root, config, ui, resume_session_id=None):
+            nonlocal call_count
+            call_count += 1
+            received_resume_ids.append(resume_session_id)
+            return (True, f"session-{call_count}")
+
+        route_results = iter([
+            RouteOutcome(mode="direct_agent", announcement="Direct."),
+            RouteOutcome(mode="plan_implement_loop", announcement="Planning."),
+            RouteOutcome(mode="direct_agent", announcement="Direct again."),
+        ])
+
+        fake_log = RunLog(
+            run_id="r-1", prompt="Build feature",
+            status=RunStatus.COMPLETED, phases=[], total_cost_usd=0.10,
+        )
+
+        inputs = iter(["prompt 1", "build feature", "prompt 3", "quit"])
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("builtins.input", side_effect=inputs), \
+             patch("colonyos.cli.readline", create=True), \
+             patch("colonyos.cli._route_prompt", side_effect=route_results), \
+             patch("colonyos.cli._run_direct_agent", side_effect=mock_direct_agent), \
+             patch("colonyos.cli.run_orchestrator", return_value=fake_log), \
+             patch("colonyos.cli._print_run_summary"):
+            from colonyos.cli import _run_repl
+            _run_repl()
+
+        assert call_count == 2
+        assert received_resume_ids[0] is None  # First direct call: fresh
+        assert received_resume_ids[1] is None  # After pipeline run: session cleared
+
+    def test_repl_new_command_clears_session(self, tmp_path: Path):
+        """The /new command clears conversation state so next run is fresh."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[Persona(role="Engineer", expertise="Backend", perspective="Scale")],
+        )
+        save_config(tmp_path, config)
+
+        received_resume_ids = []
+        call_count = 0
+
+        def mock_direct_agent(request, *, repo_root, config, ui, resume_session_id=None):
+            nonlocal call_count
+            call_count += 1
+            received_resume_ids.append(resume_session_id)
+            return (True, f"session-{call_count}")
+
+        # Prompt 1 (direct), /new, Prompt 2 (direct), quit
+        inputs = iter(["hello", "/new", "hello again", "quit"])
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("builtins.input", side_effect=inputs), \
+             patch("colonyos.cli.readline", create=True), \
+             patch("colonyos.cli._route_prompt", return_value=RouteOutcome(
+                 mode="direct_agent", announcement="Direct mode.",
+             )), \
+             patch("colonyos.cli._run_direct_agent", side_effect=mock_direct_agent):
+            from colonyos.cli import _run_repl
+            _run_repl()
+
+        assert call_count == 2
+        assert received_resume_ids[0] is None  # First call: no resume
+        assert received_resume_ids[1] is None  # After /new: session cleared
+
+    def test_repl_new_without_slash_clears_session(self, tmp_path: Path):
+        """The 'new' command (without slash) also clears conversation state."""
+        _make_config(tmp_path)
+
+        received_resume_ids = []
+        call_count = 0
+
+        def mock_direct_agent(request, *, repo_root, config, ui, resume_session_id=None):
+            nonlocal call_count
+            call_count += 1
+            received_resume_ids.append(resume_session_id)
+            return (True, f"session-{call_count}")
+
+        inputs = iter(["hello", "new", "hello again", "quit"])
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("builtins.input", side_effect=inputs), \
+             patch("colonyos.cli.readline", create=True), \
+             patch("colonyos.cli._route_prompt", return_value=RouteOutcome(
+                 mode="direct_agent", announcement="Direct mode.",
+             )), \
+             patch("colonyos.cli._run_direct_agent", side_effect=mock_direct_agent):
+            from colonyos.cli import _run_repl
+            _run_repl()
+
+        assert call_count == 2
+        assert received_resume_ids[0] is None
+        assert received_resume_ids[1] is None  # After 'new': session cleared
+
+    def test_repl_continuing_conversation_message(self, tmp_path: Path, capsys):
+        """When resuming, a 'Continuing conversation...' message is shown."""
+        _make_config(tmp_path)
+
+        call_count = 0
+
+        def mock_direct_agent(request, *, repo_root, config, ui, resume_session_id=None):
+            nonlocal call_count
+            call_count += 1
+            return (True, f"session-{call_count}")
+
+        inputs = iter(["hello", "follow up", "quit"])
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("builtins.input", side_effect=inputs), \
+             patch("colonyos.cli.readline", create=True), \
+             patch("colonyos.cli._route_prompt", return_value=RouteOutcome(
+                 mode="direct_agent", announcement="Direct mode.",
+             )), \
+             patch("colonyos.cli._run_direct_agent", side_effect=mock_direct_agent):
+            from colonyos.cli import _run_repl
+            _run_repl()
+
+        # The second call should have shown "Continuing conversation..."
+        assert call_count == 2
+
+    def test_repl_failed_direct_agent_does_not_store_session(self, tmp_path: Path):
+        """When _run_direct_agent returns success=False, session_id is not stored."""
+        _make_config(tmp_path)
+
+        received_resume_ids = []
+        call_count = 0
+
+        def mock_direct_agent(request, *, repo_root, config, ui, resume_session_id=None):
+            nonlocal call_count
+            call_count += 1
+            received_resume_ids.append(resume_session_id)
+            if call_count == 1:
+                return (False, "session-fail")  # Failure
+            return (True, "session-2")
+
+        inputs = iter(["hello", "try again", "quit"])
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("builtins.input", side_effect=inputs), \
+             patch("colonyos.cli.readline", create=True), \
+             patch("colonyos.cli._route_prompt", return_value=RouteOutcome(
+                 mode="direct_agent", announcement="Direct mode.",
+             )), \
+             patch("colonyos.cli._run_direct_agent", side_effect=mock_direct_agent):
+            from colonyos.cli import _run_repl
+            _run_repl()
+
+        assert call_count == 2
+        assert received_resume_ids[0] is None  # First call: no resume
+        assert received_resume_ids[1] is None  # Failed first call: no session stored
