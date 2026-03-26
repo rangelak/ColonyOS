@@ -272,6 +272,44 @@ def _invoke_cli_command(tokens: list[str]) -> None:
         click.echo(f"Error: {exc}", err=True)
 
 
+# ---------------------------------------------------------------------------
+# TUI slash-command handling
+# ---------------------------------------------------------------------------
+
+_SAFE_TUI_COMMANDS: set[str] = {"help", "new"}
+"""Recognised TUI slash-commands that are handled locally (not routed)."""
+
+
+def _handle_tui_command(
+    command: str,
+) -> tuple[bool, str, bool]:
+    """Handle a TUI slash-command.
+
+    Parameters
+    ----------
+    command:
+        The command string *without* the leading ``/``.
+
+    Returns
+    -------
+    tuple[bool, str, bool]
+        ``(handled, message, should_run)`` where *handled* is ``True`` when
+        the command was recognised, *message* is a user-visible response, and
+        *should_run* indicates whether the caller should still execute a
+        normal agent run (always ``False`` for handled commands).
+    """
+    lowered = command.strip().lower()
+
+    if lowered == "new":
+        return (True, "Conversation cleared.", False)
+
+    if lowered == "help":
+        available = ", ".join(f"/{c}" for c in sorted(_SAFE_TUI_COMMANDS))
+        return (True, f"Available commands: {available}", False)
+
+    return (False, "", False)
+
+
 def _print_repl_help(command_name: str | None = None) -> None:
     """Print help for a specific command, or list all commands."""
     from rich.console import Console
