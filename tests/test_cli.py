@@ -12,16 +12,16 @@ import click
 from click.testing import CliRunner
 
 from colonyos.cli import (
-    RouteOutcome,
-    _compute_elapsed_hours,
-    _handle_tui_command,
-    _launch_tui,
-    _load_latest_loop_state,
-    _resolve_latest_prd_path,
-    _run_direct_agent,
-    _SAFE_TUI_COMMANDS,
-    _save_loop_state,
     app,
+    _save_loop_state,
+    _load_latest_loop_state,
+    _compute_elapsed_hours,
+    _SAFE_TUI_COMMANDS,
+    _handle_tui_command,
+    _run_direct_agent,
+    _resolve_latest_prd_path,
+    _launch_tui,
+    RouteOutcome,
 )
 from colonyos.config import ColonyConfig, BudgetConfig, save_config
 from colonyos.models import (
@@ -2474,6 +2474,7 @@ class TestHandleTuiCommand:
     def test_unknown_command_not_handled(self):
         handled, output, should_exit = _handle_tui_command("unknown", config=ColonyConfig())
         assert handled is False
+        assert output is None
         assert should_exit is False
 
     def test_safe_tui_commands_contains_new(self):

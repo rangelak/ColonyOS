@@ -4813,6 +4813,7 @@ def _launch_tui(
     from colonyos.tui.adapter import CommandOutputMsg, TextBlockMsg, TextualUI
 
     current_adapter: TextualUI | None = None
+    last_direct_session_id: str | None = None
     command_hints = _tui_command_hints()
     def _recovery_callback(text: str) -> None:
         nonlocal current_adapter
@@ -4879,13 +4880,16 @@ def _launch_tui(
         across runs independently — this is intentional so users see lifetime
         session cost while each run's turn count starts at zero.
         """
-        nonlocal current_adapter
+        nonlocal current_adapter, last_direct_session_id
         queue = app_instance.event_queue
 
         handled, command_output, should_exit = _handle_tui_command(text, config=config)
         if handled:
             if command_output:
                 queue.sync_q.put(CommandOutputMsg(text=command_output))
+            # Clear conversation state on /new command
+            if command_output and "Conversation cleared" in command_output:
+                last_direct_session_id = None
             current_adapter = None
             if should_exit:
                 app_instance.call_from_thread(app_instance.exit)
@@ -4913,13 +4917,23 @@ def _launch_tui(
 
         try:
             if route_outcome.mode == "direct_agent":
-                _run_direct_agent(
+                # Emit continuation indicator when resuming a prior conversation
+                if last_direct_session_id is not None:
+                    queue.sync_q.put(TextBlockMsg(text="Continuing conversation..."))
+
+                success, session_id = _run_direct_agent(
                     text,
                     repo_root=repo_root,
                     config=config,
                     ui=adapter,
+                    resume_session_id=last_direct_session_id,
                 )
-                return  # session_id captured by task 4.0 (TUI state wiring)
+                if success and session_id:
+                    last_direct_session_id = session_id
+                return
+
+            # Non-direct-agent mode: clear conversation state
+            last_direct_session_id = None
 
             if route_outcome.mode == "review_only":
                 output, _approved = _capture_click_output_and_result(
