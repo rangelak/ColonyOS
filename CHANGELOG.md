@@ -1,5 +1,25 @@
 # Changelog
 
+## 20260326_150000 — Direct-Agent Conversational State Persistence
+
+Adds session persistence to the direct-agent path so follow-up messages like "yes"
+or "do it" resolve correctly against the prior exchange. Uses the Claude Agent SDK's
+native `resume` mechanism to carry conversation context between turns, with `/new`
+command for explicit reset and graceful fallback on resume failure.
+
+**Created:**
+- `cOS_prds/20260326_134656_prd_no_right_now_the_direct_agent_path_is_basically_stateless_between_completed_subm.md` — PRD
+- `cOS_tasks/20260326_134656_tasks_no_right_now_the_direct_agent_path_is_basically_stateless_between_completed_subm.md` — Tasks
+
+**Modified:**
+- `src/colonyos/agent.py` — Added `resume` parameter to `run_phase()` / `run_phase_sync()`
+- `src/colonyos/cli.py` — Session ID threading in `_run_direct_agent()`, `_run_callback()`, CLI REPL loop, `/new` command
+- `tests/test_agent.py` — Tests for resume parameter passthrough
+- `tests/test_cli.py` — Tests for session persistence, `/new` command, fallback behavior
+
+**PRD:** `cOS_prds/20260326_134656_prd_no_right_now_the_direct_agent_path_is_basically_stateless_between_completed_subm.md`
+**Tasks:** `cOS_tasks/20260326_134656_tasks_no_right_now_the_direct_agent_path_is_basically_stateless_between_completed_subm.md`
+
 ## 20260325_170000 — TUI Default Mode, Smart Routing & Autonomous Sweep
 
 Three features shipped in this release: (1) the TUI is now the default visualization
