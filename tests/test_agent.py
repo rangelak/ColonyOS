@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Callable
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
+from colonyos.agent import run_phase, run_phase_sync
 from colonyos.models import Phase, PhaseResult
 
 
@@ -324,3 +326,153 @@ class TestRunPhasesParallel:
         assert len(results) == 3
         # All 3 callbacks should have been attempted (even though one failed)
         assert sorted(callback_indices) == [0, 1, 2]
+
+
+class TestRunPhaseResume:
+    """Tests for the resume parameter on run_phase() and run_phase_sync()."""
+
+    @pytest.fixture
+    def mock_query(self):
+        """Create a mock for the query function that yields a ResultMessage."""
+        result_msg = MagicMock()
+        result_msg.is_error = False
+        result_msg.total_cost_usd = 0.01
+        result_msg.num_turns = 1
+        result_msg.duration_ms = 100
+        result_msg.session_id = "sess-abc123"
+        result_msg.result = "done"
+
+        # Make it a ResultMessage instance
+        from claude_agent_sdk import ResultMessage
+        result_msg.__class__ = ResultMessage
+
+        async def fake_query(prompt, options):
+            yield result_msg
+
+        return fake_query, result_msg
+
+    def test_run_phase_without_resume_does_not_set_resume(self, mock_query):
+        """run_phase() without resume should not set resume/continue_conversation on options."""
+        fake_query, _ = mock_query
+        captured_options = {}
+
+        original_fake = fake_query
+
+        async def capturing_query(prompt, options):
+            captured_options["options"] = options
+            async for msg in original_fake(prompt, options):
+                yield msg
+
+        with patch("colonyos.agent.query", side_effect=capturing_query):
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW,
+                    "test prompt",
+                    cwd=Path("/tmp"),
+                    system_prompt="sys",
+                )
+            )
+
+        opts = captured_options["options"]
+        # When resume is None, it should not be set on options
+        assert getattr(opts, "resume", None) is None
+        assert not getattr(opts, "continue_conversation", False)
+
+    def test_run_phase_with_resume_sets_options(self, mock_query):
+        """run_phase() with resume should set resume and continue_conversation on options."""
+        fake_query, _ = mock_query
+        captured_options = {}
+
+        original_fake = fake_query
+
+        async def capturing_query(prompt, options):
+            captured_options["options"] = options
+            async for msg in original_fake(prompt, options):
+                yield msg
+
+        with patch("colonyos.agent.query", side_effect=capturing_query):
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW,
+                    "test prompt",
+                    cwd=Path("/tmp"),
+                    system_prompt="sys",
+                    resume="sess-abc123",
+                )
+            )
+
+        opts = captured_options["options"]
+        assert opts.resume == "sess-abc123"
+        assert opts.continue_conversation is True
+
+    def test_run_phase_with_resume_none_does_not_set_continue(self, mock_query):
+        """run_phase() with resume=None should not set continue_conversation."""
+        fake_query, _ = mock_query
+        captured_options = {}
+
+        original_fake = fake_query
+
+        async def capturing_query(prompt, options):
+            captured_options["options"] = options
+            async for msg in original_fake(prompt, options):
+                yield msg
+
+        with patch("colonyos.agent.query", side_effect=capturing_query):
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW,
+                    "test prompt",
+                    cwd=Path("/tmp"),
+                    system_prompt="sys",
+                    resume=None,
+                )
+            )
+
+        opts = captured_options["options"]
+        assert getattr(opts, "resume", None) is None
+        assert not getattr(opts, "continue_conversation", False)
+
+    def test_run_phase_sync_passes_resume_through(self, mock_query):
+        """run_phase_sync() should pass resume parameter through to run_phase()."""
+        fake_query, _ = mock_query
+        captured_options = {}
+
+        original_fake = fake_query
+
+        async def capturing_query(prompt, options):
+            captured_options["options"] = options
+            async for msg in original_fake(prompt, options):
+                yield msg
+
+        with patch("colonyos.agent.query", side_effect=capturing_query):
+            result = run_phase_sync(
+                Phase.REVIEW,
+                "test prompt",
+                cwd=Path("/tmp"),
+                system_prompt="sys",
+                resume="sess-xyz789",
+            )
+
+        opts = captured_options["options"]
+        assert opts.resume == "sess-xyz789"
+        assert opts.continue_conversation is True
+        assert result.success is True
+
+    def test_run_phase_sync_without_resume_backward_compatible(self, mock_query):
+        """run_phase_sync() without resume should work as before (backward compatible)."""
+        fake_query, _ = mock_query
+
+        async def capturing_query(prompt, options):
+            async for msg in fake_query(prompt, options):
+                yield msg
+
+        with patch("colonyos.agent.query", side_effect=capturing_query):
+            result = run_phase_sync(
+                Phase.REVIEW,
+                "test prompt",
+                cwd=Path("/tmp"),
+                system_prompt="sys",
+            )
+
+        assert result.success is True
+        assert result.session_id == "sess-abc123"
