@@ -1,5 +1,29 @@
 # Changelog
 
+## 20260326_180000 — Persistent Memory System
+
+Adds a native persistent memory system to ColonyOS using SQLite (zero new dependencies).
+Memories are automatically captured at phase boundaries and injected into phase prompts
+based on relevance and recency, so agents accumulate knowledge across runs instead of
+re-discovering codebase patterns, failure modes, and user preferences each time.
+
+**Created:**
+- `src/colonyos/memory.py` — SQLite-backed memory storage with FTS5 search, CRUD operations, relevance-ranked retrieval, and configurable token budget injection
+- `tests/test_memory.py` — Unit tests for memory storage layer
+- `tests/test_memory_integration.py` — Integration tests for memory capture and injection
+- `cOS_prds/20260326_164228_prd_add_memory_to_the_system_https_github_com_thedotmack_claude_mem_git.md` — PRD
+- `cOS_tasks/20260326_164228_tasks_add_memory_to_the_system_https_github_com_thedotmack_claude_mem_git.md` — Tasks
+
+**Modified:**
+- `src/colonyos/config.py` — Added `MemoryConfig` dataclass with `enabled`, `max_entries`, `max_inject_tokens`, `capture_failures` settings
+- `src/colonyos/orchestrator.py` — Post-phase memory capture hooks, memory injection into phase prompts, failure capture
+- `src/colonyos/cli.py` — New `colonyos memory` command group (list, search, delete, clear, stats)
+- `src/colonyos/router.py` — Memory injection in direct-agent prompt builder
+- `.gitignore` — Added `memory.db` pattern
+
+**PRD:** `cOS_prds/20260326_164228_prd_add_memory_to_the_system_https_github_com_thedotmack_claude_mem_git.md`
+**Tasks:** `cOS_tasks/20260326_164228_tasks_add_memory_to_the_system_https_github_com_thedotmack_claude_mem_git.md`
+
 ## 20260326_150000 — Direct-Agent Conversational State Persistence
 
 Adds session persistence to the direct-agent path so follow-up messages like "yes"
