@@ -77,6 +77,7 @@ async def run_phase(
     allowed_tools: list[str] | None = None,
     permission_mode: str = "bypassPermissions",
     ui: PhaseUI | NullUI | None = None,
+    resume: str | None = None,
 ) -> PhaseResult:
     """Run a single phase by invoking Claude Code with the given prompt and instructions."""
     if allowed_tools is None:
@@ -94,6 +95,7 @@ async def run_phase(
         allowed_tools=allowed_tools,
         agents=agents,
         include_partial_messages=ui is not None,
+        **({"resume": resume, "continue_conversation": True} if resume else {}),
     )
 
     if ui is None:
@@ -213,6 +215,7 @@ def run_phase_sync(
     allowed_tools: list[str] | None = None,
     permission_mode: str = "bypassPermissions",
     ui: PhaseUI | NullUI | None = None,
+    resume: str | None = None,
 ) -> PhaseResult:
     """Synchronous wrapper around run_phase for use in non-async contexts."""
     return asyncio.run(
@@ -228,6 +231,7 @@ def run_phase_sync(
             allowed_tools=allowed_tools,
             permission_mode=permission_mode,
             ui=ui,
+            resume=resume,
         )
     )
 
