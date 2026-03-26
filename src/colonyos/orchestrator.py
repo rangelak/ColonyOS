@@ -192,7 +192,13 @@ def _preflight_check(
             file_list += f"\n  ... and {len(dirty_output.splitlines()) - 10} more"
         raise PreflightError(
             f"Uncommitted changes detected:\n  {file_list}\n\n"
-            "Please commit or stash your changes before running colonyos."
+            "Please commit or stash your changes before running colonyos.",
+            code="dirty_worktree",
+            details={
+                "current_branch": current_branch,
+                "dirty_files": dirty_files,
+                "dirty_output": dirty_output,
+            },
         )
 
     # Check if branch already exists locally
@@ -289,7 +295,13 @@ def _resume_preflight(
         file_list = "\n  ".join(dirty_files)
         raise PreflightError(
             f"Uncommitted changes detected:\n  {file_list}\n\n"
-            "Please commit or stash your changes before resuming."
+            "Please commit or stash your changes before resuming.",
+            code="dirty_worktree",
+            details={
+                "current_branch": current_branch,
+                "dirty_files": dirty_files,
+                "dirty_output": dirty_output,
+            },
         )
 
     head_sha = _get_head_sha(repo_root)
@@ -867,6 +879,222 @@ def _build_ci_fix_prompt(
     return system, user
 
 
+def _build_preflight_recovery_prompt(
+    config: ColonyConfig,
+    branch_name: str,
+    blocked_prompt: str,
+    dirty_output: str,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for dirty-worktree recovery."""
+    recovery_template = _load_instruction("preflight_recovery.md")
+
+    system = _format_base(config) + "\n\n" + recovery_template.format(
+        branch_name=branch_name,
+        dirty_output=dirty_output.strip() or "(git status returned no details)",
+    )
+
+    user = (
+        f"A TUI pipeline run was blocked before start because the working tree was dirty.\n\n"
+        f"Saved user prompt:\n{blocked_prompt}\n"
+    )
+    return system, user
+
+
+_SECRET_FILE_NAMES = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+    "credentials.json",
+    "secrets.json",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+}
+_SECRET_FILE_SUFFIXES = {
+    ".pem",
+    ".p12",
+    ".pfx",
+    ".key",
+    ".crt",
+    ".cer",
+    ".der",
+}
+
+
+def _dirty_paths_from_output(dirty_output: str) -> list[str]:
+    """Parse repo-relative paths from ``git status --porcelain`` output."""
+    paths: list[str] = []
+    for raw_line in dirty_output.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        match = re.match(r"^[ MADRCU?!]{1,2}\s+(.*)$", line)
+        candidate = match.group(1) if match else line
+        if " -> " in candidate:
+            candidate = candidate.split(" -> ", 1)[1]
+        path = candidate.strip()
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _is_secret_like_path(path: str) -> bool:
+    """Return True for obviously sensitive files that must never be auto-committed."""
+    pure_path = Path(path)
+    lower_name = pure_path.name.lower()
+    lower_parts = {part.lower() for part in pure_path.parts}
+    if lower_name in _SECRET_FILE_NAMES:
+        return True
+    if lower_name.startswith(".env"):
+        return True
+    if pure_path.suffix.lower() in _SECRET_FILE_SUFFIXES:
+        return True
+    if ".ssh" in lower_parts:
+        return True
+    return False
+
+
+def _recovery_scope_extras(
+    blocked_paths: set[str],
+    changed_paths: set[str],
+) -> list[str]:
+    """Return changed paths that exceed the allowed recovery scope."""
+    extras = sorted(
+        path for path in changed_paths
+        if path not in blocked_paths and not path.startswith("tests/")
+    )
+    return extras
+
+
+def _changed_paths_between(repo_root: Path, before_head: str, after_head: str) -> set[str]:
+    """Return files changed between two revisions."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"{before_head}..{after_head}"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise PreflightError(
+            f"Failed to inspect recovery commit scope: {exc}",
+        ) from exc
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def run_preflight_recovery(
+    repo_root: Path,
+    config: ColonyConfig,
+    *,
+    blocked_prompt: str,
+    dirty_output: str,
+    branch_name: str | None = None,
+    ui: PhaseUI | NullUI | None = None,
+) -> PhaseResult:
+    """Run a dedicated agent that commits dirty worktree changes before retrying."""
+    active_branch = branch_name or _get_current_branch(repo_root)
+    blocked_paths = _dirty_paths_from_output(dirty_output)
+    secret_paths = [path for path in blocked_paths if _is_secret_like_path(path)]
+    if secret_paths:
+        summary = "\n".join(secret_paths[:10])
+        return PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=False,
+            model=config.get_model(Phase.PREFLIGHT_RECOVERY),
+            error=(
+                "Preflight recovery refused to auto-commit sensitive-looking files:\n"
+                f"{summary}\n\nCommit or stash these changes manually."
+            ),
+        )
+
+    system_prompt, user_prompt = _build_preflight_recovery_prompt(
+        config,
+        active_branch,
+        blocked_prompt,
+        dirty_output,
+    )
+    model = config.get_model(Phase.PREFLIGHT_RECOVERY)
+
+    if ui is not None:
+        ui.phase_header(
+            "Preflight Recovery",
+            config.budget.per_phase,
+            model,
+            active_branch,
+        )
+
+    before_head = _get_head_sha(repo_root)
+    phase_result = run_phase_sync(
+        Phase.PREFLIGHT_RECOVERY,
+        user_prompt,
+        cwd=repo_root,
+        system_prompt=system_prompt,
+        model=model,
+        budget_usd=config.budget.per_phase,
+        allowed_tools=["Read", "Glob", "Grep", "Bash", "Write", "Edit"],
+        ui=ui,
+    )
+
+    if not phase_result.success:
+        return phase_result
+
+    is_clean, remaining_dirty = _check_working_tree_clean(repo_root)
+    if not is_clean:
+        dirty_files = remaining_dirty.splitlines()[:10]
+        summary = "\n".join(dirty_files)
+        return PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=False,
+            model=model,
+            error=(
+                "Preflight recovery left uncommitted changes in the working tree:\n"
+                f"{summary}"
+            ),
+        )
+
+    after_head = _get_head_sha(repo_root)
+    if before_head and after_head == before_head:
+        return PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=False,
+            model=model,
+            error="Preflight recovery did not create a commit.",
+        )
+
+    if before_head and after_head:
+        changed_paths = _changed_paths_between(repo_root, before_head, after_head)
+        missing_paths = sorted(path for path in blocked_paths if path not in changed_paths)
+        if missing_paths:
+            summary = "\n".join(missing_paths[:10])
+            return PhaseResult(
+                phase=Phase.PREFLIGHT_RECOVERY,
+                success=False,
+                model=model,
+                error=(
+                    "Preflight recovery created a commit, but it did not cover all blocked files:\n"
+                    f"{summary}"
+                ),
+            )
+
+        extras = _recovery_scope_extras(set(blocked_paths), changed_paths)
+        if extras:
+            summary = "\n".join(extras[:10])
+            return PhaseResult(
+                phase=Phase.PREFLIGHT_RECOVERY,
+                success=False,
+                model=model,
+                error=(
+                    "Preflight recovery expanded scope beyond the blocked files and direct test updates:\n"
+                    f"{summary}"
+                ),
+            )
+
+    return phase_result
+
+
 # ---------------------------------------------------------------------------
 # Deliver, CEO, and other prompt builders
 # ---------------------------------------------------------------------------
@@ -941,6 +1169,76 @@ def _build_learn_prompt(
         f"for existing entries to avoid duplicates."
     )
     return system, user
+
+
+def _write_fast_path_artifacts(
+    repo_root: Path,
+    config: ColonyConfig,
+    prd_rel: str,
+    task_rel: str,
+    prompt: str,
+) -> None:
+    """Create lightweight PRD/task files for skip-planning runs."""
+    safe_prompt = sanitize_untrusted_content(prompt).strip()
+    prd_path = repo_root / prd_rel
+    task_path = repo_root / task_rel
+    prd_path.parent.mkdir(parents=True, exist_ok=True)
+    task_path.parent.mkdir(parents=True, exist_ok=True)
+
+    prd_path.write_text(
+        "\n".join([
+            "# PRD: Fast-Path Small Fix",
+            "",
+            "## Request",
+            "",
+            safe_prompt,
+            "",
+            "## Notes",
+            "",
+            "This PRD was generated automatically because the router classified",
+            "the request as a small fix that can skip the planning phase.",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    task_path.write_text(
+        "\n".join([
+            "# Tasks: Fast-Path Small Fix",
+            "",
+            "## Tasks",
+            "",
+            "- [ ] 1.0 Implement the requested fix",
+            "  - [ ] 1.1 Update or add the relevant tests",
+            "  - [ ] 1.2 Verify the change before review",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+
+def _drain_injected_context(
+    user_injection_provider: Callable[[], list[str]] | None,
+) -> str:
+    """Drain queued mid-run user notes and format them for the current phase.
+
+    **Destructive**: Each call consumes the queued messages. Subsequent calls
+    will only see messages injected *after* the previous drain.  This is
+    intentional — context is timely and should apply to the phase that is
+    active when the user submits it, not to all future phases.
+    """
+    if user_injection_provider is None:
+        return ""
+    messages = [sanitize_untrusted_content(msg).strip() for msg in user_injection_provider()]
+    messages = [msg for msg in messages if msg]
+    if not messages:
+        return ""
+    bullet_lines = "\n".join(f"- {msg}" for msg in messages)
+    return (
+        "\n\n## Additional User Context\n\n"
+        "The user added these notes while the run was active. "
+        "Treat them as clarifications for the remaining work.\n"
+        f"{bullet_lines}"
+    )
 
 
 _LEARNING_ENTRY_RE = re.compile(r"^- \*\*\[([a-z-]+)\]\*\*\s+(.+)$", re.MULTILINE)
@@ -1198,6 +1496,190 @@ def _extract_feature_prompt(proposal_text: str) -> str:
             return body
 
     return proposal_text.strip() or "No proposal generated."
+
+
+def _build_sweep_prompt(
+    config: ColonyConfig,
+    *,
+    target_path: str | None = None,
+    max_tasks: int | None = None,
+    scan_context: str = "",
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the sweep analysis phase."""
+    sweep_template = _load_instruction("sweep.md")
+
+    effective_max_tasks = max_tasks if max_tasks is not None else config.sweep.max_tasks
+    categories_list = config.sweep.default_categories
+    categories_block = "\n".join(f"- {cat.replace('_', ' ').title()}" for cat in categories_list)
+
+    if target_path:
+        target_scope = f"Analyze only the following path: `{target_path}`"
+    else:
+        target_scope = "Analyze the **entire codebase**. Start with the most critical modules and work outward."
+
+    if scan_context:
+        scan_block = f"The following structural scan results are available as a starting point:\n\n{scan_context}"
+    else:
+        scan_block = "_No pre-computed scan data available. Perform your own analysis from scratch._"
+
+    system = sweep_template.format(
+        categories=categories_block,
+        target_scope=target_scope,
+        max_tasks=effective_max_tasks,
+        max_files_per_task=config.sweep.max_files_per_task,
+        scan_context=scan_block,
+    )
+
+    user = (
+        "Analyze this codebase for code quality issues. "
+        "Produce a prioritized task file following the output format in your instructions. "
+        f"Limit your output to the top {effective_max_tasks} findings ranked by impact * risk."
+    )
+    return system, user
+
+
+def parse_sweep_findings(raw_output: str) -> list[dict]:
+    """Parse structured findings from sweep agent markdown output.
+
+    Each finding is extracted from parent task lines matching the pattern:
+    - [ ] N.0 [Category] Title — impact:N risk:N
+
+    Returns a sorted list of dicts with keys:
+    number, category, title, impact, risk, score, raw_line
+    """
+    findings: list[dict] = []
+    pattern = re.compile(
+        r"^- \[ \]\s+(\d+\.\d+)\s+\[([^\]]+)\]\s+(.+?)\s*—\s*impact:(\d+)\s+risk:(\d+)",
+        re.MULTILINE,
+    )
+    for m in pattern.finditer(raw_output):
+        impact = int(m.group(4))
+        risk = int(m.group(5))
+        findings.append({
+            "number": m.group(1),
+            "category": m.group(2),
+            "title": m.group(3).strip(),
+            "impact": impact,
+            "risk": risk,
+            "score": impact * risk,
+            "raw_line": m.group(0),
+        })
+    findings.sort(key=lambda f: f["score"], reverse=True)
+    return findings
+
+
+def run_sweep(
+    repo_root: Path,
+    config: ColonyConfig,
+    *,
+    target_path: str | None = None,
+    max_tasks: int | None = None,
+    execute: bool = False,
+    plan_only: bool = False,
+    verbose: bool = False,
+    quiet: bool = False,
+    force: bool = False,
+    ui: PhaseUI | NullUI | None = None,
+) -> tuple[str, PhaseResult]:
+    """Run the sweep analysis phase: analyze codebase for quality issues.
+
+    Returns a tuple of (findings_text, phase_result).
+    If execute=True, also delegates to run() with skip_planning=True.
+    """
+    effective_max_tasks = max_tasks if max_tasks is not None else config.sweep.max_tasks
+
+    # Optionally bootstrap with structural scan context
+    scan_context = ""
+    try:
+        from colonyos.cleanup import scan_directory
+        scan_results = scan_directory(
+            repo_root,
+            config.cleanup.scan_max_lines,
+            config.cleanup.scan_max_functions,
+        )
+        if scan_results:
+            scan_context = "\n".join(
+                f"- `{r.path}`: {r.line_count} lines, {r.function_count} functions ({r.category.value})"
+                for r in scan_results
+            )
+    except Exception:
+        logger.warning("scan_directory() bootstrap failed during sweep; continuing without scan context", exc_info=True)
+
+    system, user_prompt = _build_sweep_prompt(
+        config,
+        target_path=target_path,
+        max_tasks=effective_max_tasks,
+        scan_context=scan_context,
+    )
+
+    if ui is not None:
+        ui.phase_header("Sweep Analysis", config.budget.per_phase, config.get_model(Phase.SWEEP))
+    else:
+        _log("=== Sweep Analysis Phase ===")
+
+    result = run_phase_sync(
+        Phase.SWEEP,
+        user_prompt,
+        cwd=repo_root,
+        system_prompt=system,
+        model=config.get_model(Phase.SWEEP),
+        budget_usd=config.budget.per_phase,
+        allowed_tools=["Read", "Glob", "Grep"],
+        ui=ui,
+    )
+
+    findings_text = result.artifacts.get("result", "")
+
+    if not result.success:
+        _log(f"Sweep analysis failed: {result.error}")
+        return findings_text, result
+
+    # Write the task file if we have findings
+    if findings_text.strip():
+        from colonyos.naming import generate_timestamp
+        timestamp = generate_timestamp()
+        task_filename = f"{timestamp}_tasks_sweep.md"
+        tasks_dir = repo_root / config.tasks_dir
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        task_path = tasks_dir / task_filename
+        task_path.write_text(findings_text, encoding="utf-8")
+        _log(f"Sweep task file written to: {task_path}")
+        result.artifacts["task_file"] = str(task_path)
+
+    # Dry-run mode: just return findings
+    if not execute:
+        return findings_text, result
+
+    # Plan-only mode: write task file but don't execute
+    if plan_only:
+        _log("Plan-only mode: task file written, stopping before implementation.")
+        return findings_text, result
+
+    # Execute mode: delegate to the main orchestrator
+    scope_desc = target_path or "codebase"
+    sweep_prompt = (
+        f"Implement the following code quality improvements identified by a sweep analysis "
+        f"of {scope_desc}. The task file has already been generated — follow it exactly.\n\n"
+        f"{findings_text}"
+    )
+
+    _log("Delegating sweep findings to implementation pipeline...")
+    exec_result = run(
+        sweep_prompt,
+        repo_root=repo_root,
+        config=config,
+        skip_planning=True,
+        verbose=verbose,
+        quiet=quiet,
+        force=force,
+    )
+
+    # If execution failed, propagate the failure so callers know
+    if exec_result is not None and exec_result.status == RunStatus.FAILED:
+        result.success = False
+        result.error = "Sweep execution failed during implementation"
+
+    return findings_text, result
 
 
 def _parse_parent_tasks(task_content: str) -> list[str]:
@@ -2441,6 +2923,7 @@ def run(
     repo_root: Path,
     config: ColonyConfig,
     plan_only: bool = False,
+    skip_planning: bool = False,
     from_prd: str | None = None,
     resume_from: ResumeState | None = None,
     verbose: bool = False,
@@ -2448,6 +2931,7 @@ def run(
     source_issue: int | None = None,
     source_issue_url: str | None = None,
     ui_factory: object | None = None,
+    user_injection_provider: Callable[[], list[str]] | None = None,
     offline: bool = False,
     force: bool = False,
     base_branch: str | None = None,
@@ -2572,6 +3056,8 @@ def run(
 
         prd_rel = f"{config.prds_dir}/{names.prd_filename}"
         task_rel = f"{config.tasks_dir}/{names.task_filename}"
+        if skip_planning:
+            _write_fast_path_artifacts(repo_root, config, prd_rel, task_rel, prompt)
 
     log.branch_name = branch_name
     log.prd_rel = prd_rel
@@ -2587,12 +3073,14 @@ def run(
             task_rel=task_rel,
             skip_phases=skip_phases,
             plan_only=plan_only,
+            skip_planning=skip_planning,
             from_prd=from_prd,
             is_resume=is_resume,
             prompt=prompt,
             offline=offline,
             quiet=quiet,
             base_branch=base_branch,
+            user_injection_provider=user_injection_provider,
             _make_ui=_make_ui,
         )
     except KeyboardInterrupt:
@@ -2647,12 +3135,14 @@ def _run_pipeline(
     task_rel: str,
     skip_phases: set[str],
     plan_only: bool,
+    skip_planning: bool,
     from_prd: str | None,
     is_resume: bool,
     prompt: str,
     offline: bool,
     quiet: bool,
     base_branch: str | None,
+    user_injection_provider: Callable[[], list[str]] | None,
     _make_ui: Callable[..., PhaseUI | NullUI | None],
 ) -> RunLog:
     """Execute the pipeline phases. Extracted from run() for try/finally branch rollback."""
@@ -2666,6 +3156,8 @@ def _run_pipeline(
     _touch_heartbeat(repo_root)
     if "plan" in skip_phases:
         _log("Skipping plan phase (already completed in previous run)")
+    elif skip_planning and not from_prd:
+        _log("Skipping plan phase for small-fix fast path")
     elif from_prd:
         _log(f"Skipping plan phase, using existing PRD: {from_prd}")
         prd_rel = from_prd
@@ -2748,6 +3240,7 @@ def _run_pipeline(
         if impl_result is None:
             _log("Using sequential implement mode")
             system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name, repo_root=repo_root)
+            user += _drain_injected_context(user_injection_provider)
             impl_result = run_phase_sync(
                 Phase.IMPLEMENT,
                 user,
@@ -2757,6 +3250,17 @@ def _run_pipeline(
                 budget_usd=config.budget.per_phase,
                 ui=impl_ui,
             )
+        elif impl_ui is not None:
+            if impl_result.success:
+                completed_tasks = int(impl_result.artifacts.get("completed", "0"))
+                impl_ui.phase_complete(
+                    impl_result.cost_usd or 0.0,
+                    completed_tasks,
+                    impl_result.duration_ms,
+                )
+            else:
+                message = impl_result.error or "Parallel implement phase failed"
+                impl_ui.phase_error(message)
 
         _append_phase(impl_result)
 
@@ -2810,6 +3314,7 @@ def _run_pipeline(
                     sys_prompt, usr_prompt = _build_persona_review_prompt(
                         persona, config, prd_rel, branch_name
                     )
+                    usr_prompt += _drain_injected_context(user_injection_provider)
                     persona_ui = _make_ui(prefix=make_reviewer_prefix(i))
                     review_calls.append(dict(
                         phase=Phase.REVIEW,
@@ -2878,6 +3383,7 @@ def _run_pipeline(
                         iteration + 1,
                         repo_root=repo_root,
                     )
+                    fix_user += _drain_injected_context(user_injection_provider)
                     fix_ui = _make_ui()
                     if fix_ui is not None:
                         fix_ui.phase_header(
@@ -2909,6 +3415,7 @@ def _run_pipeline(
             else:
                 _log("=== Decision Gate ===")
             system, user = _build_decision_prompt(config, prd_rel, branch_name)
+            user += _drain_injected_context(user_injection_provider)
             decision_result = run_phase_sync(
                 Phase.DECISION,
                 user,
@@ -2959,6 +3466,7 @@ def _run_pipeline(
             source_issue=log.source_issue,
             base_branch=base_branch,
         )
+        user += _drain_injected_context(user_injection_provider)
         deliver_result = run_phase_sync(
             Phase.DELIVER,
             user,

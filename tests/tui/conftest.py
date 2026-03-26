@@ -5,6 +5,18 @@ from __future__ import annotations
 import pytest
 
 
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Group all TUI tests into a single xdist worker to avoid Textual isolation issues."""
+    for item in items:
+        item.add_marker(pytest.mark.xdist_group("tui_serial"))
+
+
+@pytest.fixture()
+def anyio_backend():
+    return "asyncio"
+
+
+
 @pytest.fixture
 def tui_available() -> bool:
     """Return True if the tui extras are installed."""
@@ -21,33 +33,3 @@ def require_tui(tui_available: bool) -> None:
     """Skip the test if tui extras are not installed."""
     if not tui_available:
         pytest.skip("TUI extras not installed (pip install colonyos[tui])")
-
-
-@pytest.fixture()
-def sync_queue():
-    """Create a janus queue and return its sync side for adapter tests."""
-    import asyncio
-    import threading
-
-    import janus
-
-    result = {}
-
-    def _create():
-        asyncio.set_event_loop(asyncio.new_event_loop())
-        _loop = asyncio.get_event_loop()
-        _q = janus.Queue()
-        result["queue"] = _q
-        result["loop"] = _loop
-        _loop.run_forever()
-
-    t = threading.Thread(target=_create, daemon=True)
-    t.start()
-
-    import time
-    time.sleep(0.05)
-
-    yield result.get("queue")
-
-    if result.get("loop"):
-        result["loop"].call_soon_threadsafe(result["loop"].stop)

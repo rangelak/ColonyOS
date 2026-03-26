@@ -8,12 +8,13 @@ so the Textual event loop can consume events asynchronously.
 
 from __future__ import annotations
 
+from collections import deque
 import json
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from threading import Lock
 from typing import TYPE_CHECKING
 
-from colonyos.sanitize import sanitize_display_text
+from colonyos.sanitize import sanitize_display_text, sanitize_untrusted_content
 from colonyos.ui import TOOL_ARG_KEYS, TOOL_STYLE, DEFAULT_TOOL_STYLE, _first_meaningful_line, _truncate
 
 if TYPE_CHECKING:
@@ -70,10 +71,24 @@ class TextBlockMsg:
 
 
 @dataclass(frozen=True)
+class CommandOutputMsg:
+    """Preformatted CLI command output captured inside the TUI."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class TurnCompleteMsg:
     """A turn has completed (for status bar turn counting)."""
 
     turn_number: int
+
+
+@dataclass(frozen=True)
+class UserInjectionMsg:
+    """A user message queued during an active run."""
+
+    text: str
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +122,8 @@ class TextualUI:
         self._text_buf: str = ""
         self._in_tool: bool = False
         self._turn_count: int = 0
+        self._pending_injections: deque[str] = deque()
+        self._injection_lock = Lock()
 
     # -- phase-level markers ------------------------------------------------
 
@@ -117,6 +134,7 @@ class TextualUI:
         model: str,
         extra: str = "",
     ) -> None:
+        self._turn_count = 0
         self._queue.put(PhaseHeaderMsg(
             phase_name=sanitize_display_text(phase_name),
             budget=budget,
@@ -178,6 +196,22 @@ class TextualUI:
         self._flush_text()
         self._turn_count += 1
         self._queue.put(TurnCompleteMsg(turn_number=self._turn_count))
+
+    def enqueue_user_injection(self, text: str) -> None:
+        """Queue sanitized user context for the next phase boundary."""
+        sanitized = sanitize_untrusted_content(text).strip()
+        if not sanitized:
+            return
+        with self._injection_lock:
+            self._pending_injections.append(sanitized)
+        self._queue.put(UserInjectionMsg(text=sanitize_display_text(sanitized)))
+
+    def drain_user_injections(self) -> list[str]:
+        """Drain all queued user injections in FIFO order."""
+        with self._injection_lock:
+            messages = list(self._pending_injections)
+            self._pending_injections.clear()
+        return messages
 
     # -- internals ----------------------------------------------------------
 

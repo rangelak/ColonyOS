@@ -101,6 +101,20 @@ async def test_composer_submitted_message_carries_text():
 
 
 @pytest.mark.asyncio
+async def test_composer_restore_text_restores_draft():
+    """Composer should be able to restore a cleared draft."""
+    async with ComposerApp().run_test() as pilot:
+        app = pilot.app
+        composer = app.query_one(Composer)
+        composer.restore_text("retry this prompt")
+        await pilot.pause()
+
+        ta = app.query_one(TextArea)
+        assert ta.text == "retry this prompt"
+        assert ta.has_focus
+
+
+@pytest.mark.asyncio
 async def test_hint_bar_renders_keybinding_text():
     """HintBar should display the keybinding hints."""
     async with ComposerApp().run_test() as pilot:
@@ -108,9 +122,27 @@ async def test_hint_bar_renders_keybinding_text():
         hint = app.query_one(HintBar)
         # In Textual 8.x, use render() to get the renderable
         rendered = str(hint.render())
+        assert "Ask for a change or explain what you need" in rendered
         assert "Enter send" in rendered
         assert "Ctrl+C cancel" in rendered
+        assert "Ctrl+J newline" in rendered
         assert "Ctrl+L clear" in rendered
+
+
+@pytest.mark.asyncio
+async def test_composer_ctrl_j_inserts_newline():
+    """Ctrl+J should always insert a newline fallback."""
+    async with ComposerApp().run_test() as pilot:
+        app = pilot.app
+        ta = app.query_one(TextArea)
+        ta.insert("line1")
+        await pilot.pause()
+
+        await pilot.press("ctrl+j")
+        await pilot.pause()
+
+        assert app.submitted_texts == []
+        assert "\n" in ta.text
 
 
 @pytest.mark.asyncio
@@ -125,12 +157,12 @@ async def test_composer_height_grows_with_content():
         await pilot.pause()
 
         composer = app.query_one(Composer)
-        # Height should have grown beyond the minimum of 3
-        # (exact value depends on Textual layout engine, but styles.height
-        # should be set to at least 5 for 5 lines of content)
+        # Container should reserve an extra row for its own border chrome.
         height = composer.styles.height
         assert height is not None
-        assert height.value >= Composer.MIN_HEIGHT
+        assert height.value >= Composer.TEXTAREA_MIN_HEIGHT + Composer.CONTAINER_CHROME_HEIGHT
+        assert ta.styles.height is not None
+        assert height.value == ta.styles.height.value + Composer.CONTAINER_CHROME_HEIGHT
 
 
 @pytest.mark.asyncio
@@ -148,4 +180,23 @@ async def test_composer_height_caps_at_max():
         composer = app.query_one(Composer)
         height = composer.styles.height
         assert height is not None
-        assert height.value <= Composer.MAX_HEIGHT
+        assert height.value <= (
+            Composer.TEXTAREA_MAX_HEIGHT + Composer.CONTAINER_CHROME_HEIGHT
+        )
+
+
+@pytest.mark.asyncio
+async def test_composer_initial_height_reserves_border_row():
+    """Composer should start one row taller than the inner TextArea."""
+    async with ComposerApp().run_test() as pilot:
+        app = pilot.app
+        composer = app.query_one(Composer)
+        ta = app.query_one(TextArea)
+        await pilot.pause()
+
+        assert composer.styles.height is not None
+        assert ta.styles.height is not None
+        assert (
+            composer.styles.height.value
+            == ta.styles.height.value + Composer.CONTAINER_CHROME_HEIGHT
+        )

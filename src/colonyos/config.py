@@ -59,9 +59,15 @@ DEFAULTS = {
     "router": {
         "enabled": True,
         "model": "haiku",
-        "qa_model": "sonnet",
+        "qa_model": "opus",
         "confidence_threshold": 0.7,
+        "small_fix_threshold": 0.85,
         "qa_budget": 0.50,
+    },
+    "sweep": {
+        "max_tasks": 5,
+        "max_files_per_task": 5,
+        "default_categories": ["bugs", "dead_code", "error_handling", "complexity", "consistency"],
     },
 }
 
@@ -140,9 +146,17 @@ class RouterConfig:
 
     enabled: bool = True
     model: str = "haiku"
-    qa_model: str = "sonnet"
+    qa_model: str = "opus"
     confidence_threshold: float = 0.7
+    small_fix_threshold: float = 0.85
     qa_budget: float = 0.50
+
+
+@dataclass
+class SweepConfig:
+    max_tasks: int = 5
+    max_files_per_task: int = 5
+    default_categories: list[str] = field(default_factory=lambda: ["bugs", "dead_code", "error_handling", "complexity", "consistency"])
 
 
 @dataclass
@@ -188,6 +202,7 @@ class ColonyConfig:
     pr_review: PRReviewConfig = field(default_factory=PRReviewConfig)
     parallel_implement: ParallelImplementConfig = field(default_factory=ParallelImplementConfig)
     router: RouterConfig = field(default_factory=RouterConfig)
+    sweep: SweepConfig = field(default_factory=SweepConfig)
 
     def get_model(self, phase: Phase) -> str:
         """Return the model for a phase, falling back to the global default."""
@@ -460,6 +475,12 @@ def _parse_router_config(raw: dict) -> RouterConfig:
             f"router.confidence_threshold must be between 0 and 1, got {confidence_threshold}"
         )
 
+    small_fix_threshold = float(raw.get("small_fix_threshold", defaults["small_fix_threshold"]))
+    if small_fix_threshold < 0 or small_fix_threshold > 1:
+        raise ValueError(
+            f"router.small_fix_threshold must be between 0 and 1, got {small_fix_threshold}"
+        )
+
     qa_budget = float(raw.get("qa_budget", defaults["qa_budget"]))
     if qa_budget <= 0:
         raise ValueError(
@@ -471,7 +492,27 @@ def _parse_router_config(raw: dict) -> RouterConfig:
         model=model,
         qa_model=qa_model,
         confidence_threshold=confidence_threshold,
+        small_fix_threshold=small_fix_threshold,
         qa_budget=qa_budget,
+    )
+
+
+def _parse_sweep_config(raw: dict) -> SweepConfig:
+    """Parse the ``sweep`` section from config.yaml."""
+    if not raw:
+        return SweepConfig()
+    defaults = DEFAULTS["sweep"]
+    max_tasks = int(raw.get("max_tasks", defaults["max_tasks"]))
+    if max_tasks < 1:
+        raise ValueError(f"sweep.max_tasks must be positive, got {max_tasks}")
+    max_files_per_task = int(raw.get("max_files_per_task", defaults["max_files_per_task"]))
+    if max_files_per_task < 1:
+        raise ValueError(f"sweep.max_files_per_task must be positive, got {max_files_per_task}")
+    default_categories = list(raw.get("default_categories", defaults["default_categories"]))
+    return SweepConfig(
+        max_tasks=max_tasks,
+        max_files_per_task=max_files_per_task,
+        default_categories=default_categories,
     )
 
 
@@ -521,6 +562,9 @@ def load_config(repo_root: Path) -> ColonyConfig:
                 phase_key,
             )
 
+    ceo_persona_raw = raw.get("ceo_persona")
+    ceo_persona = _parse_persona(ceo_persona_raw) if isinstance(ceo_persona_raw, dict) else None
+
     return ColonyConfig(
         project=_parse_project(raw.get("project", {})),
         personas=_parse_personas(raw.get("personas", [])),
@@ -543,7 +587,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         tasks_dir=raw.get("tasks_dir", DEFAULTS["tasks_dir"]),
         reviews_dir=raw.get("reviews_dir", DEFAULTS["reviews_dir"]),
         proposals_dir=raw.get("proposals_dir", DEFAULTS["proposals_dir"]),
-        ceo_persona=_parse_persona(raw.get("ceo_persona")) if raw.get("ceo_persona") else None,
+        ceo_persona=ceo_persona,
         vision=raw.get("vision", ""),
         user_directions=str(raw.get("user_directions", "")),
         directions_auto_update=bool(raw.get("directions_auto_update", True)),
@@ -559,6 +603,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         pr_review=_parse_pr_review_config(raw.get("pr_review", {})),
         parallel_implement=_parse_parallel_implement_config(raw.get("parallel_implement", {})),
         router=_parse_router_config(raw.get("router", {})),
+        sweep=_parse_sweep_config(raw.get("sweep", {})),
     )
 
 
@@ -709,6 +754,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         or config.router.model != router_defaults["model"]
         or config.router.qa_model != router_defaults["qa_model"]
         or config.router.confidence_threshold != router_defaults["confidence_threshold"]
+        or config.router.small_fix_threshold != router_defaults["small_fix_threshold"]
         or config.router.qa_budget != router_defaults["qa_budget"]
     ):
         data["router"] = {
@@ -716,7 +762,21 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "model": config.router.model,
             "qa_model": config.router.qa_model,
             "confidence_threshold": config.router.confidence_threshold,
+            "small_fix_threshold": config.router.small_fix_threshold,
             "qa_budget": config.router.qa_budget,
+        }
+
+    # Only serialize sweep if values differ from defaults
+    sweep_defaults = DEFAULTS["sweep"]
+    if (
+        config.sweep.max_tasks != sweep_defaults["max_tasks"]
+        or config.sweep.max_files_per_task != sweep_defaults["max_files_per_task"]
+        or config.sweep.default_categories != sweep_defaults["default_categories"]
+    ):
+        data["sweep"] = {
+            "max_tasks": config.sweep.max_tasks,
+            "max_files_per_task": config.sweep.max_files_per_task,
+            "default_categories": list(config.sweep.default_categories),
         }
 
     if not config.directions_auto_update:

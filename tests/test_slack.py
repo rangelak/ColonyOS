@@ -1132,6 +1132,18 @@ class TestPhaseTriageEnum:
         assert Phase.TRIAGE.value == "triage"
 
 
+class TestTriageLegacyDefaults:
+    """Tests for _triage_message_legacy default parameters."""
+
+    def test_legacy_triage_defaults_to_haiku(self) -> None:
+        """The legacy triage function should default to haiku to keep routing costs low."""
+        import inspect
+        from colonyos.slack import _triage_message_legacy
+
+        sig = inspect.signature(_triage_message_legacy)
+        assert sig.parameters["model"].default == "haiku"
+
+
 class TestSlackWatchStateCircuitBreaker:
     """Tests for circuit breaker persistence in SlackWatchState."""
 

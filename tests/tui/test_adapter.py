@@ -17,6 +17,7 @@ from colonyos.tui.adapter import (
     TextualUI,
     ToolLineMsg,
     TurnCompleteMsg,
+    UserInjectionMsg,
 )
 
 
@@ -296,6 +297,31 @@ class TestTurnComplete:
         turn_msgs = [m for m in msgs if isinstance(m, TurnCompleteMsg)]
         assert [m.turn_number for m in turn_msgs] == [1, 2, 3]
 
+    def test_turn_number_resets_on_new_phase(self, ui: TextualUI, fake_queue: FakeSyncQueue) -> None:
+        ui.phase_header("plan", budget=1.0, model="opus")
+        ui.on_turn_complete()
+        ui.on_turn_complete()
+        ui.phase_header("implement", budget=2.0, model="opus")
+        ui.on_turn_complete()
+        msgs = fake_queue.drain()
+        turn_msgs = [m for m in msgs if isinstance(m, TurnCompleteMsg)]
+        assert [m.turn_number for m in turn_msgs] == [1, 2, 1]
+
+
+class TestUserInjection:
+    def test_enqueue_user_injection_emits_message(self, ui: TextualUI, fake_queue: FakeSyncQueue) -> None:
+        ui.enqueue_user_injection("<tag>please fix auth</tag>")
+        msg = fake_queue.get()
+        assert isinstance(msg, UserInjectionMsg)
+        assert "<tag>" not in msg.text
+        assert "please fix auth" in msg.text
+
+    def test_drain_user_injections_preserves_fifo(self, ui: TextualUI) -> None:
+        ui.enqueue_user_injection("first")
+        ui.enqueue_user_injection("second")
+        assert ui.drain_user_injections() == ["first", "second"]
+        assert ui.drain_user_injections() == []
+
 
 # ---------------------------------------------------------------------------
 # Message dataclass immutability
@@ -316,6 +342,7 @@ class TestMessageImmutability:
             ToolLineMsg(tool_name="t", arg="a", style="s"),
             TextBlockMsg(text="t"),
             TurnCompleteMsg(turn_number=1),
+            UserInjectionMsg(text="note"),
         ]
         for msg in msgs:
             assert hasattr(msg, "__dataclass_fields__")
