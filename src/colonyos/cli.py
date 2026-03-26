@@ -425,6 +425,21 @@ def _run_direct_agent(
         ui=ui,
         resume=resume_session_id,
     )
+
+    # Graceful fallback: if the run failed and we were resuming a session,
+    # retry once without resume to start a fresh conversation.
+    if not result.success and resume_session_id is not None:
+        result = run_phase_sync(
+            Phase.QA,
+            user,
+            cwd=repo_root,
+            system_prompt=system,
+            model=model,
+            budget_usd=budget,
+            ui=ui,
+            resume=None,
+        )
+
     return (result.success, result.session_id or None)
 
 
@@ -4930,6 +4945,9 @@ def _launch_tui(
                 )
                 if success and session_id:
                     last_direct_session_id = session_id
+                elif not success:
+                    # Clear stale session on failure to avoid repeated retries
+                    last_direct_session_id = None
                 return
 
             # Non-direct-agent mode: clear conversation state
