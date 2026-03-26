@@ -17,6 +17,7 @@ from colonyos.cli import (
     _launch_tui,
     _load_latest_loop_state,
     _resolve_latest_prd_path,
+    _run_direct_agent,
     _save_loop_state,
     app,
 )
@@ -204,12 +205,112 @@ class TestRun:
                  "colonyos.cli._route_prompt",
                  return_value=RouteOutcome(mode="direct_agent", announcement="Handling this directly."),
              ), \
-             patch("colonyos.cli._run_direct_agent", return_value=True) as mock_direct, \
+             patch("colonyos.cli._run_direct_agent", return_value=(True, "session-abc")) as mock_direct, \
              patch("colonyos.cli.run_orchestrator") as mock_run:
             result = runner.invoke(app, ["run", "What does this do?"])
         assert result.exit_code == 0
         mock_direct.assert_called_once()
         mock_run.assert_not_called()
+
+
+class TestRunDirectAgentSessionResume:
+    """Tests for _run_direct_agent resume_session_id parameter and tuple return type."""
+
+    def test_returns_success_and_session_id_tuple(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        fake_result = PhaseResult(
+            phase=Phase.QA,
+            success=True,
+            session_id="sess-123",
+            artifacts={"result": "done"},
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result), \
+             patch("colonyos.router.build_direct_agent_prompt", return_value=("sys", "usr")):
+            success, session_id = _run_direct_agent(
+                "fix the bug",
+                repo_root=tmp_path,
+                config=config,
+                ui=None,
+            )
+        assert success is True
+        assert session_id == "sess-123"
+
+    def test_returns_none_session_id_on_empty(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        fake_result = PhaseResult(
+            phase=Phase.QA,
+            success=True,
+            session_id="",
+            artifacts={"result": "done"},
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result), \
+             patch("colonyos.router.build_direct_agent_prompt", return_value=("sys", "usr")):
+            success, session_id = _run_direct_agent(
+                "fix the bug",
+                repo_root=tmp_path,
+                config=config,
+                ui=None,
+            )
+        assert success is True
+        assert session_id is None
+
+    def test_passes_resume_session_id_to_run_phase_sync(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        fake_result = PhaseResult(
+            phase=Phase.QA,
+            success=True,
+            session_id="sess-456",
+            artifacts={"result": "done"},
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result) as mock_rps, \
+             patch("colonyos.router.build_direct_agent_prompt", return_value=("sys", "usr")):
+            _run_direct_agent(
+                "yes",
+                repo_root=tmp_path,
+                config=config,
+                ui=None,
+                resume_session_id="sess-123",
+            )
+        assert mock_rps.call_args.kwargs["resume"] == "sess-123"
+
+    def test_no_resume_when_session_id_is_none(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        fake_result = PhaseResult(
+            phase=Phase.QA,
+            success=True,
+            session_id="sess-new",
+            artifacts={"result": "done"},
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result) as mock_rps, \
+             patch("colonyos.router.build_direct_agent_prompt", return_value=("sys", "usr")):
+            _run_direct_agent(
+                "hello",
+                repo_root=tmp_path,
+                config=config,
+                ui=None,
+                resume_session_id=None,
+            )
+        assert mock_rps.call_args.kwargs["resume"] is None
+
+    def test_returns_false_on_failure(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        fake_result = PhaseResult(
+            phase=Phase.QA,
+            success=False,
+            session_id="sess-fail",
+            error="something went wrong",
+            artifacts={"result": ""},
+        )
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result), \
+             patch("colonyos.router.build_direct_agent_prompt", return_value=("sys", "usr")):
+            success, session_id = _run_direct_agent(
+                "do something",
+                repo_root=tmp_path,
+                config=config,
+                ui=None,
+            )
+        assert success is False
+        assert session_id == "sess-fail"
 
 
 class TestResolveLatestPrdPath:
@@ -347,7 +448,7 @@ class TestResolveLatestPrdPath:
                  "colonyos.cli._route_prompt",
                  return_value=RouteOutcome(mode="direct_agent", announcement="Handling this directly."),
              ), \
-             patch("colonyos.cli._run_direct_agent", return_value=True) as mock_direct, \
+             patch("colonyos.cli._run_direct_agent", return_value=(True, "session-abc")) as mock_direct, \
              patch("colonyos.cli.run_orchestrator") as mock_run, \
              patch("colonyos.cli.signal.signal"):
             _launch_tui(tmp_path, config)
