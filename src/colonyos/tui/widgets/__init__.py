@@ -1,1 +1,1 @@
-"""TUI widget package."""
+"""TUI widget components for ColonyOS."""

@@ -1,8 +1,11 @@
-"""CSS-in-Python layout and color constants for the TUI."""
+"""CSS-in-Python layout strings and color constants for the TUI."""
 
 from __future__ import annotations
 
-# Matches the TOOL_STYLE map from colonyos.ui
+# ---------------------------------------------------------------------------
+# Color constants — match TOOL_STYLE from ui.py
+# ---------------------------------------------------------------------------
+
 TOOL_COLORS: dict[str, str] = {
     "Read": "cyan",
     "Write": "green",
@@ -17,17 +20,32 @@ TOOL_COLORS: dict[str, str] = {
 
 DEFAULT_TOOL_COLOR = "dim"
 
-# Main app CSS — transcript ~85%, composer at bottom, status bar between.
+# Semantic colors
+COLOR_SUCCESS = "green"
+COLOR_ERROR = "red"
+COLOR_WARNING = "yellow"
+COLOR_ACCENT = "bright_cyan"
+COLOR_DIM = "dim"
+COLOR_USER_MESSAGE = "bright_white"
+
+# Spinner frames for active-phase indicator
+SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+# ---------------------------------------------------------------------------
+# Textual CSS for the app layout
+# ---------------------------------------------------------------------------
+
 APP_CSS = """
 Screen {
     layout: vertical;
 }
 
 StatusBar {
-    height: 1;
     dock: top;
+    height: 1;
     background: $surface;
-    color: $text;
+    color: $text-muted;
+    padding: 0 1;
 }
 
 TranscriptView {
@@ -35,16 +53,34 @@ TranscriptView {
     min-height: 10;
 }
 
+TranscriptView RichLog {
+    padding: 0 2;
+    scrollbar-size: 1 1;
+}
+
 Composer {
+    height: auto;
+    min-height: 3;
+    max-height: 8;
+    border-top: solid $accent;
+    padding: 0 1;
+}
+
+Composer:focus-within {
+    border-top: solid $accent;
+}
+
+Composer TextArea {
     height: auto;
     min-height: 3;
     max-height: 8;
 }
 
 HintBar {
-    height: 1;
     dock: bottom;
+    height: 1;
     background: $surface;
     color: $text-muted;
+    padding: 0 1;
 }
 """
