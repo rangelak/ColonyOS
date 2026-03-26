@@ -5,6 +5,18 @@ from __future__ import annotations
 import pytest
 
 
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Group all TUI tests into a single xdist worker to avoid Textual isolation issues."""
+    for item in items:
+        item.add_marker(pytest.mark.xdist_group("tui_serial"))
+
+
+@pytest.fixture()
+def anyio_backend():
+    return "asyncio"
+
+
+
 @pytest.fixture
 def tui_available() -> bool:
     """Return True if the tui extras are installed."""

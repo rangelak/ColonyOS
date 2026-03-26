@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from colonyos.config import SlackConfig, runs_dir_path
+from colonyos.config import RouterConfig, SlackConfig, load_config, runs_dir_path
 from colonyos.sanitize import sanitize_untrusted_content, strip_slack_links
 
 if TYPE_CHECKING:
@@ -786,14 +786,16 @@ def triage_message(
     is provided or the router is unavailable, falls back to the original
     Slack-specific triage prompt.
 
-    Uses a single-turn haiku call with no tool access to minimize cost
-    and prompt injection blast radius.
+    Uses the configured router model by default and falls back to ``opus``
+    when no project config is available.
 
     Args:
         repo_root: Repository root directory. Falls back to cwd if not provided.
     """
     # When triage_scope is set, use the Slack-specific prompt path
     # since the router does not support scope filtering.
+    effective_root = repo_root if repo_root is not None else Path.cwd()
+    router_cfg = load_config(effective_root).router if effective_root is not None else RouterConfig()
     if triage_scope:
         return _triage_message_legacy(
             message_text,
@@ -803,6 +805,7 @@ def triage_message(
             project_stack=project_stack,
             vision=vision,
             triage_scope=triage_scope,
+            model=router_cfg.model,
         )
 
     from colonyos.router import (
@@ -820,10 +823,10 @@ def triage_message(
         project_stack=project_stack,
         vision=vision,
         source="slack",
+        model=router_cfg.model,
     )
 
     # Log for audit trail
-    effective_root = repo_root if repo_root is not None else Path.cwd()
     log_router_decision(
         repo_root=effective_root,
         prompt=message_text,
@@ -849,6 +852,7 @@ def triage_message(
                 project_name=project_name,
                 project_description=project_description,
                 project_stack=project_stack,
+                model=router_cfg.qa_model,
             )
         except Exception:
             logger.exception("Q&A agent failed for Slack question")
@@ -884,6 +888,7 @@ def _triage_message_legacy(
     project_stack: str = "",
     vision: str = "",
     triage_scope: str = "",
+    model: str = "haiku",
 ) -> TriageResult:
     """Original Slack-specific triage implementation.
 
@@ -908,7 +913,7 @@ def _triage_message_legacy(
         user,
         cwd=cwd,
         system_prompt=system,
-        model="haiku",
+        model=model,
         budget_usd=0.05,  # tiny budget for triage
         allowed_tools=[],  # no tool access
     )
