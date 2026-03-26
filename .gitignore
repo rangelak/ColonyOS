@@ -9,6 +9,7 @@ build/
 .env
 .colonyos/runs/
 .colonyos/queue.json
+.colonyos/memory.db
 web/node_modules/
 src/colonyos/web_dist/
 generated/

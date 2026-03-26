@@ -16,7 +16,6 @@ def anyio_backend():
     return "asyncio"
 
 
-
 @pytest.fixture
 def tui_available() -> bool:
     """Return True if the tui extras are installed."""
