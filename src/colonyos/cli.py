@@ -468,6 +468,7 @@ _SAFE_TUI_COMMANDS = {
     "auto",
     "doctor",
     "help",
+    "new",
     "queue",
     "show",
     "stats",
@@ -490,6 +491,9 @@ def _handle_tui_command(text: str, *, config: ColonyConfig) -> tuple[bool, str |
     lowered = stripped.lower()
     if lowered in {"quit", "exit"}:
         return True, "Exiting ColonyOS TUI.", True
+
+    if lowered == "new":
+        return True, "Conversation cleared.", False
 
     if lowered == "help":
         return True, _capture_click_output(_print_repl_help), False
