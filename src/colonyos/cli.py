@@ -391,8 +391,14 @@ def _run_direct_agent(
     repo_root: Path,
     config: ColonyConfig,
     ui: Any | None,
-) -> bool:
-    """Handle a request directly with a lightweight general coding agent."""
+    resume_session_id: str | None = None,
+) -> tuple[bool, str | None]:
+    """Handle a request directly with a lightweight general coding agent.
+
+    Returns a ``(success, session_id)`` tuple.  The *session_id* can be
+    passed back as *resume_session_id* on the next call to continue the
+    conversation via the SDK's native session-resume mechanism.
+    """
     from colonyos.agent import run_phase_sync
     from colonyos.models import Phase
     from colonyos.router import build_direct_agent_prompt
@@ -417,8 +423,9 @@ def _run_direct_agent(
         model=model,
         budget_usd=budget,
         ui=ui,
+        resume=resume_session_id,
     )
-    return result.success
+    return (result.success, result.session_id or None)
 
 
 def _run_review_only_flow(
@@ -848,7 +855,7 @@ def _run_repl() -> None:
                 if route_outcome.mode == "direct_agent":
                     from colonyos.ui import PhaseUI
 
-                    _run_direct_agent(
+                    _success, _session_id = _run_direct_agent(
                         stripped,
                         repo_root=repo_root,
                         config=config,
@@ -1107,7 +1114,7 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             if route_outcome.mode == "direct_agent":
                 from colonyos.ui import PhaseUI
 
-                success = _run_direct_agent(
+                success, _session_id = _run_direct_agent(
                     effective_prompt,
                     repo_root=repo_root,
                     config=config,
@@ -4908,7 +4915,7 @@ def _launch_tui(
                     config=config,
                     ui=adapter,
                 )
-                return
+                return  # session_id captured by task 4.0 (TUI state wiring)
 
             if route_outcome.mode == "review_only":
                 output, _approved = _capture_click_output_and_result(
