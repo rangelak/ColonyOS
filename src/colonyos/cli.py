@@ -5,13 +5,17 @@ import logging
 import os
 import re
 import signal
+import io
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 
 import click
 
@@ -37,6 +41,7 @@ from colonyos.orchestrator import (
     validate_branch_exists,
     extract_review_verdict,
     run as run_orchestrator,
+    run_preflight_recovery,
     run_ceo,
     run_standalone_review,
     prepare_resume,
@@ -46,6 +51,17 @@ from colonyos.orchestrator import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class RouteOutcome:
+    """Structured result of mode selection before request execution."""
+
+    mode: str = "plan_implement_loop"
+    announcement: str | None = None
+    display_text: str | None = None
+    skip_planning: bool = False
+    from_prd: str | None = None
+
+
 def _find_repo_root() -> Path:
     """Walk up from cwd to find a .git directory, or use cwd."""
     cwd = Path.cwd()
@@ -53,6 +69,22 @@ def _find_repo_root() -> Path:
         if (parent / ".git").exists():
             return parent
     return cwd
+
+
+def _tui_available() -> bool:
+    """Return True when the optional TUI dependencies are importable."""
+    try:
+        import colonyos.tui  # noqa: F401
+        import janus  # noqa: F401
+        import textual  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _interactive_stdio() -> bool:
+    """Return True when both stdin and stdout are interactive terminals."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def _print_run_summary(log: RunLog) -> None:
@@ -237,6 +269,15 @@ def app(ctx: click.Context) -> None:
     """ColonyOS — autonomous agent loop that turns prompts into shipped PRs."""
     _load_dotenv()
     if ctx.invoked_subcommand is None:
+        repo_root = _find_repo_root()
+        config = load_config(repo_root)
+        if (
+            _interactive_stdio()
+            and _tui_available()
+            and config.project is not None
+        ):
+            _launch_tui(repo_root, config)
+            return
         _show_welcome()
         if sys.stdin.isatty():
             _run_repl()
@@ -270,6 +311,227 @@ def _invoke_cli_command(tokens: list[str]) -> None:
         click.echo()
     except Exception as exc:
         click.echo(f"Error: {exc}", err=True)
+
+
+def _capture_click_output(callback, *args, **kwargs) -> str:  # noqa: ANN001, ANN002, ANN003
+    """Capture stdout/stderr produced by a Click-oriented callback."""
+    output, _ = _capture_click_output_and_result(callback, *args, **kwargs)
+    return output
+
+
+def _capture_click_output_and_result(callback, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+    """Capture stdout/stderr and return both the output and callback result."""
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        result = callback(*args, **kwargs)
+    output = stdout.getvalue().strip()
+    error = stderr.getvalue().strip()
+    return "\n".join(part for part in (output, error) if part), result
+
+
+def _dirty_recovery_help() -> str:
+    """Return the in-TUI help text for dirty-worktree recovery mode."""
+    return (
+        "Dirty-worktree recovery is pending.\n"
+        "Submit `commit` to let ColonyOS prepare a recovery commit and retry the saved prompt,\n"
+        "or submit `cancel` to restore the saved prompt to the composer."
+    )
+
+
+def _current_branch_name(repo_root: Path) -> str:
+    """Return the current git branch, or ``main`` on lookup failure."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=repo_root,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return "main"
+    branch = result.stdout.strip()
+    return branch or "main"
+
+
+def _resolve_latest_prd_path(repo_root: Path, config: ColonyConfig) -> str:
+    """Return the latest PRD that also has a matching tasks file."""
+    from colonyos.naming import task_filename_from_prd
+
+    prd_dir = repo_root / config.prds_dir
+    tasks_dir = repo_root / config.tasks_dir
+    if not prd_dir.exists():
+        raise click.ClickException(f"No PRD directory found at `{config.prds_dir}`.")
+    if not tasks_dir.exists():
+        raise click.ClickException(f"No tasks directory found at `{config.tasks_dir}`.")
+
+    candidates = sorted(prd_dir.glob("*_prd_*.md"), reverse=True)
+    for prd_path in candidates:
+        task_name = task_filename_from_prd(prd_path.name)
+        task_path = tasks_dir / task_name
+        if task_path.exists():
+            return str(Path(config.prds_dir) / prd_path.name)
+
+    raise click.ClickException(
+        "No PRD/task pair found. Generate a plan first or use an explicit command."
+    )
+
+
+def _announce_mode_cli(message: str | None, *, quiet: bool = False) -> None:
+    """Print a short mode announcement for non-TUI flows."""
+    if message and not quiet:
+        click.echo(click.style(message, dim=True))
+
+
+def _run_direct_agent(
+    request: str,
+    *,
+    repo_root: Path,
+    config: ColonyConfig,
+    ui: Any | None,
+) -> bool:
+    """Handle a request directly with a lightweight general coding agent."""
+    from colonyos.agent import run_phase_sync
+    from colonyos.models import Phase
+    from colonyos.router import build_direct_agent_prompt
+
+    system, user = build_direct_agent_prompt(
+        request,
+        project_name=config.project.name if config.project else "",
+        project_description=config.project.description if config.project else "",
+        project_stack=config.project.stack if config.project else "",
+    )
+    model = config.router.model or config.get_model(Phase.IMPLEMENT)
+    budget = config.budget.per_phase
+
+    if ui is not None:
+        ui.phase_header("Direct", budget, model)
+
+    result = run_phase_sync(
+        Phase.QA,
+        user,
+        cwd=repo_root,
+        system_prompt=system,
+        model=model,
+        budget_usd=budget,
+        ui=ui,
+    )
+    return result.success
+
+
+def _run_review_only_flow(
+    *,
+    repo_root: Path,
+    config: ColonyConfig,
+    verbose: bool,
+    quiet: bool,
+) -> bool:
+    """Review the current branch against main without entering the plan loop."""
+    from colonyos.orchestrator import reviewer_personas
+
+    branch = _current_branch_name(repo_root)
+    base = "main"
+    if branch == base:
+        raise click.ClickException(
+            "Review-only mode expects a feature branch. Switch branches or use `review <branch>`."
+        )
+
+    all_approved, phase_results, total_cost, decision_verdict = run_standalone_review(
+        branch,
+        base,
+        repo_root,
+        config,
+        verbose=verbose,
+        quiet=quiet,
+        no_fix=True,
+        decide=False,
+    )
+    _print_review_summary(phase_results, reviewer_personas(config), total_cost, decision_verdict=decision_verdict)
+    return all_approved
+
+
+def _run_cleanup_loop() -> None:
+    """Run the default cleanup loop inside the current repository."""
+    cleanup_scan(max_lines=None, max_functions=None, use_ai=True, refactor_file=None)
+
+
+_SAFE_TUI_COMMANDS = {
+    "auto",
+    "doctor",
+    "help",
+    "queue",
+    "show",
+    "stats",
+    "status",
+}
+
+
+def _handle_tui_command(text: str, *, config: ColonyConfig) -> tuple[bool, str | None, bool]:
+    """Handle REPL-style commands from the Textual TUI.
+
+    Returns ``(handled, output, should_exit)``. When ``handled`` is False,
+    the caller should treat the input as a normal feature prompt.
+    """
+    import shlex
+
+    stripped = text.strip()
+    if not stripped:
+        return False, None, False
+
+    lowered = stripped.lower()
+    if lowered in {"quit", "exit"}:
+        return True, "Exiting ColonyOS TUI.", True
+
+    if lowered == "help":
+        return True, _capture_click_output(_print_repl_help), False
+
+    if lowered.startswith("help "):
+        command_name = stripped.split(None, 1)[1].strip()
+        return True, _capture_click_output(_print_repl_help, command_name), False
+
+    try:
+        tokens = shlex.split(stripped)
+    except ValueError:
+        tokens = stripped.split()
+
+    if not tokens or tokens[0] not in _repl_top_level_names():
+        return False, None, False
+
+    command_name = tokens[0]
+    if command_name in {"run", "tui"}:
+        return (
+            True,
+            "Use the TUI directly: type a feature prompt instead of `run`, and "
+            "you are already inside `tui`.",
+            False,
+        )
+    if command_name in {"ui", "watch"}:
+        return (
+            True,
+            f"`{command_name}` is not launched inside the TUI. Run "
+            f"`colonyos {command_name}` from a normal shell.",
+            False,
+        )
+    if command_name == "auto" and not (config.auto_approve or "--no-confirm" in tokens):
+        return (
+            True,
+            "`auto` inside the TUI needs `--no-confirm` unless `auto_approve` is enabled.",
+            False,
+        )
+    if command_name not in _SAFE_TUI_COMMANDS:
+        return (
+            True,
+            f"`{command_name}` is not supported inside the TUI. Run "
+            f"`colonyos {command_name}` from a normal shell.",
+            False,
+        )
+
+    output = _capture_click_output(_invoke_cli_command, tokens)
+    if not output:
+        output = f"`{' '.join(tokens)}` completed."
+    return True, output, False
 
 
 def _print_repl_help(command_name: str | None = None) -> None:
@@ -306,6 +568,92 @@ def _print_repl_help(command_name: str | None = None) -> None:
     con.print()
 
 
+def _route_prompt(
+    prompt: str,
+    config: ColonyConfig,
+    repo_root: Path,
+    source: str,
+    quiet: bool = False,
+) -> RouteOutcome:
+    """Choose a TUI/CLI execution mode for the incoming prompt."""
+    from colonyos.router import (
+        ModeAgentMode,
+        choose_tui_mode,
+        log_mode_selection,
+    )
+
+    if not quiet:
+        click.echo(click.style("Choosing the best mode...", dim=True))
+
+    decision = choose_tui_mode(
+        prompt,
+        repo_root=repo_root,
+        project_name=config.project.name if config.project else "",
+        project_description=config.project.description if config.project else "",
+        project_stack=config.project.stack if config.project else "",
+        vision=config.vision,
+        source=source,
+    )
+
+    log_mode_selection(
+        repo_root=repo_root,
+        prompt=prompt,
+        result=decision,
+        source=source,
+    )
+
+    if decision.confidence < config.router.confidence_threshold:
+        if not quiet:
+            click.echo(click.style(
+                f"Low confidence ({decision.confidence:.0%}), entering feature planning mode...",
+                dim=True,
+            ))
+        return RouteOutcome(
+            mode=ModeAgentMode.PLAN_IMPLEMENT_LOOP.value,
+            announcement="Entering feature planning mode.",
+        )
+
+    if decision.mode == ModeAgentMode.DIRECT_AGENT:
+        return RouteOutcome(
+            mode=decision.mode.value,
+            announcement=decision.announcement,
+        )
+
+    if decision.mode == ModeAgentMode.IMPLEMENT_ONLY:
+        return RouteOutcome(
+            mode=decision.mode.value,
+            announcement=decision.announcement,
+        )
+
+    if decision.mode == ModeAgentMode.REVIEW_ONLY:
+        return RouteOutcome(
+            mode=decision.mode.value,
+            announcement=decision.announcement,
+        )
+
+    if decision.mode == ModeAgentMode.CLEANUP_LOOP:
+        return RouteOutcome(
+            mode=decision.mode.value,
+            announcement=decision.announcement,
+        )
+
+    if decision.mode == ModeAgentMode.FALLBACK:
+        return RouteOutcome(
+            mode=decision.mode.value,
+            announcement=decision.announcement,
+            display_text=(
+                "I need a bit more direction before I choose a workflow. "
+                "Try asking a concrete coding question or describing the change you want."
+            ),
+        )
+
+    return RouteOutcome(
+        mode=ModeAgentMode.PLAN_IMPLEMENT_LOOP.value,
+        announcement=decision.announcement,
+        skip_planning=decision.skip_planning,
+    )
+
+
 def _handle_routed_query(
     prompt: str,
     config: ColonyConfig,
@@ -313,13 +661,7 @@ def _handle_routed_query(
     source: str,
     quiet: bool = False,
 ) -> str | None:
-    """Classify a user prompt via the intent router and handle non-pipeline categories.
-
-    Returns ``None`` if the prompt should proceed to the full pipeline
-    (CODE_CHANGE or low-confidence fallback).  Returns a user-visible
-    string for QUESTION (the answer), STATUS, and OUT_OF_SCOPE so the
-    caller can display it and skip the pipeline.
-    """
+    """Compatibility wrapper preserving the legacy category-based helper behavior."""
     from colonyos.router import (
         RouterCategory,
         answer_question,
@@ -339,7 +681,6 @@ def _handle_routed_query(
         vision=config.vision,
         source=source,
     )
-
     log_router_decision(
         repo_root=repo_root,
         prompt=prompt,
@@ -348,17 +689,9 @@ def _handle_routed_query(
     )
 
     if router_result.confidence < config.router.confidence_threshold:
-        if not quiet:
-            click.echo(click.style(
-                f"Low confidence ({router_result.confidence:.0%}), treating as feature request...",
-                dim=True,
-            ))
-        return None  # proceed to pipeline
-
+        return None
     if router_result.category == RouterCategory.QUESTION:
-        if not quiet:
-            click.echo(click.style("Treating this as a question...", dim=True))
-        answer = answer_question(
+        return answer_question(
             prompt,
             repo_root=repo_root,
             project_name=config.project.name if config.project else "",
@@ -367,26 +700,26 @@ def _handle_routed_query(
             model=config.router.qa_model,
             qa_budget=config.router.qa_budget,
         )
-        return answer
-
     if router_result.category == RouterCategory.STATUS:
-        suggested = router_result.suggested_command or "colonyos status"
-        return click.style(
-            f"This looks like a status query. Try: {suggested}",
-            fg="yellow",
-        )
-
+        return router_result.suggested_command or "colonyos status"
     if router_result.category == RouterCategory.OUT_OF_SCOPE:
-        return click.style(
+        return (
             "This request doesn't seem related to coding or this project. "
-            "For code changes, describe the feature you want to build.",
-            fg="yellow",
+            "For code changes, describe the feature you want to build."
         )
-
-    # CODE_CHANGE: proceed to pipeline
-    if not quiet:
-        click.echo(click.style("Treating this as a feature request...", dim=True))
     return None
+
+
+def _tui_command_hints() -> list[str]:
+    """Return a short set of natural-language examples for the TUI footer."""
+    return [
+        "what does this do?",
+        "change this button to red",
+        "continue the last plan",
+        "review this branch",
+        "cleanup the repo",
+        "help",
+    ]
 
 
 def _run_repl() -> None:
@@ -494,9 +827,11 @@ def _run_repl() -> None:
                 continue
 
             # --- intent routing for feature prompts ---
+            from_prd: str | None = None
+            skip_planning = False
             if config.router.enabled:
                 try:
-                    handled = _handle_routed_query(
+                    route_outcome = _route_prompt(
                         stripped, config, repo_root, source="repl",
                     )
                 except KeyboardInterrupt:
@@ -505,10 +840,43 @@ def _run_repl() -> None:
                         dim=True,
                     ))
                     continue
-                if handled is not None:
+                _announce_mode_cli(route_outcome.announcement)
+                if route_outcome.display_text is not None:
                     click.echo()
-                    click.echo(handled)
+                    click.echo(route_outcome.display_text)
                     continue
+                if route_outcome.mode == "direct_agent":
+                    from colonyos.ui import PhaseUI
+
+                    _run_direct_agent(
+                        stripped,
+                        repo_root=repo_root,
+                        config=config,
+                        ui=PhaseUI(verbose=True),
+                    )
+                    continue
+                if route_outcome.mode == "review_only":
+                    try:
+                        _run_review_only_flow(
+                            repo_root=repo_root,
+                            config=config,
+                            verbose=True,
+                            quiet=False,
+                        )
+                    except click.ClickException as exc:
+                        click.echo(f"Error: {exc.format_message()}", err=True)
+                    continue
+                if route_outcome.mode == "cleanup_loop":
+                    _run_cleanup_loop()
+                    continue
+                if route_outcome.mode == "implement_only":
+                    try:
+                        from_prd = _resolve_latest_prd_path(repo_root, config)
+                        click.echo(click.style(f"Using latest PRD: {from_prd}", dim=True))
+                    except click.ClickException as exc:
+                        click.echo(f"Error: {exc.format_message()}", err=True)
+                        continue
+                skip_planning = route_outcome.skip_planning
 
             # --- feature prompt (default) ---
             per_run_cap = config.budget.per_run
@@ -528,6 +896,8 @@ def _run_repl() -> None:
                     stripped,
                     repo_root=repo_root,
                     config=config,
+                    skip_planning=skip_planning,
+                    from_prd=from_prd,
                     verbose=True,
                 )
                 session_cost += log.total_cost_usd
@@ -625,7 +995,8 @@ def init(
 @click.option("--offline", is_flag=True, help="Skip network calls in pre-flight checks.")
 @click.option("--force", is_flag=True, help="Bypass pre-flight checks (for power users).")
 @click.option("--no-triage", is_flag=True, help="Skip intent routing and run the full pipeline directly.")
-def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool, offline: bool, force: bool, no_triage: bool) -> None:
+@click.option("--no-tui", is_flag=True, help="Force plain streaming output even in interactive terminals.")
+def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id: str | None, issue_ref: str | None, verbose: bool, quiet: bool, offline: bool, force: bool, no_triage: bool, no_tui: bool = False) -> None:
     """Run the autonomous agent loop for a feature prompt."""
     # Mutual exclusivity checks
     if resume_run_id:
@@ -657,6 +1028,20 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             err=True,
         )
         sys.exit(1)
+
+    use_tui = (
+        not no_tui
+        and not quiet
+        and prompt is not None
+        and from_prd is None
+        and resume_run_id is None
+        and issue_ref is None
+        and _interactive_stdio()
+        and _tui_available()
+    )
+    if use_tui:
+        _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
+        return
 
     if resume_run_id:
         resume_state = prepare_resume(repo_root, resume_run_id)
@@ -705,24 +1090,64 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
             and prompt  # Only route freeform prompts
         )
 
+        skip_planning = False
         if should_route:
             try:
-                handled = _handle_routed_query(
+                route_outcome = _route_prompt(
                     effective_prompt, config, repo_root, source="cli", quiet=quiet,
                 )
             except KeyboardInterrupt:
                 click.echo(click.style("\nInterrupted.", dim=True))
                 return
-            if handled is not None:
+            _announce_mode_cli(route_outcome.announcement, quiet=quiet)
+            if route_outcome.display_text is not None:
                 click.echo()
-                click.echo(handled)
+                click.echo(route_outcome.display_text)
                 return
+            if route_outcome.mode == "direct_agent":
+                from colonyos.ui import PhaseUI
+
+                success = _run_direct_agent(
+                    effective_prompt,
+                    repo_root=repo_root,
+                    config=config,
+                    ui=None if quiet else PhaseUI(verbose=verbose),
+                )
+                if not success:
+                    sys.exit(1)
+                return
+            if route_outcome.mode == "review_only":
+                try:
+                    approved = _run_review_only_flow(
+                        repo_root=repo_root,
+                        config=config,
+                        verbose=verbose,
+                        quiet=quiet,
+                    )
+                except click.ClickException as exc:
+                    click.echo(f"Error: {exc.format_message()}", err=True)
+                    sys.exit(1)
+                if not approved:
+                    sys.exit(1)
+                return
+            if route_outcome.mode == "cleanup_loop":
+                _run_cleanup_loop()
+                return
+            if route_outcome.mode == "implement_only":
+                try:
+                    from_prd = _resolve_latest_prd_path(repo_root, config)
+                except click.ClickException as exc:
+                    click.echo(f"Error: {exc.format_message()}", err=True)
+                    sys.exit(1)
+                click.echo(click.style(f"Using latest PRD: {from_prd}", dim=True))
+            skip_planning = route_outcome.skip_planning
 
         log = run_orchestrator(
             effective_prompt,
             repo_root=repo_root,
             config=config,
             plan_only=plan_only,
+            skip_planning=skip_planning,
             from_prd=from_prd,
             verbose=verbose,
             quiet=quiet,
@@ -3731,6 +4156,159 @@ def cleanup_scan(
 
 
 # ---------------------------------------------------------------------------
+# colonyos sweep — autonomous codebase quality agent
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+@click.argument("path", required=False, default=None)
+@click.option("--execute", is_flag=True, help="Run the implement→review pipeline on findings (default: dry-run report only).")
+@click.option("--plan-only", is_flag=True, help="Generate analysis + task file but stop before implementation.")
+@click.option("--max-tasks", type=int, default=None, help="Cap the number of findings (default: from config).")
+@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output.")
+@click.option("-q", "--quiet", is_flag=True, help="Minimal output.")
+@click.option("--no-tui", is_flag=True, help="Force plain streaming output.")
+@click.option("--force", is_flag=True, help="Bypass pre-flight checks.")
+def sweep(path: str | None, execute: bool, plan_only: bool, max_tasks: int | None, verbose: bool, quiet: bool, no_tui: bool, force: bool) -> None:
+    """Analyze codebase for quality issues and optionally fix them.
+
+    By default, runs in dry-run mode: prints a prioritized findings report.
+    Use --execute to feed findings through the implement→review pipeline.
+    Use --execute --plan-only to generate the task file without running the pipeline.
+
+    Optionally pass a PATH to scope analysis to a specific file or directory.
+    """
+    from datetime import datetime, timezone
+
+    from colonyos.config import load_config, runs_dir_path
+    from colonyos.models import PreflightError
+
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+
+    if not config.project:
+        click.echo(
+            "No ColonyOS config found. Run `colonyos init` first.",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Validate target path if provided
+    if path:
+        target = repo_root / path
+        if not target.exists():
+            click.echo(f"Error: path '{path}' does not exist.", err=True)
+            sys.exit(1)
+
+    if plan_only and not execute:
+        click.echo(
+            "Error: --plan-only requires --execute (it stops the execute pipeline after task generation).",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        from colonyos.orchestrator import run_sweep as _run_sweep, parse_sweep_findings
+
+        ui = None
+        if not quiet:
+            from colonyos.ui import PhaseUI
+
+            ui = PhaseUI(verbose=verbose)
+
+        findings_text, phase_result = _run_sweep(
+            repo_root,
+            config,
+            target_path=path,
+            max_tasks=max_tasks,
+            execute=execute,
+            plan_only=plan_only,
+            verbose=verbose,
+            quiet=quiet,
+            force=force,
+            ui=ui,
+        )
+
+        if not phase_result.success:
+            click.echo(f"Sweep analysis failed: {phase_result.error}", err=True)
+            sys.exit(1)
+
+        # Print dry-run report
+        if not execute or plan_only:
+            findings = parse_sweep_findings(findings_text)
+
+            if findings:
+                from rich.console import Console
+                from rich.table import Table
+
+                con = Console()
+                table = Table(
+                    title="Sweep Findings",
+                    show_header=True,
+                    header_style="bold",
+                    padding=(0, 2),
+                )
+                table.add_column("#", justify="right", style="dim")
+                table.add_column("Category", style="cyan")
+                table.add_column("Impact", justify="center")
+                table.add_column("Risk", justify="center")
+                table.add_column("Score", justify="center")
+                table.add_column("Description")
+
+                for f in findings:
+                    score = f["score"]
+                    if score >= 16:
+                        score_style = "bold red"
+                    elif score >= 9:
+                        score_style = "yellow"
+                    else:
+                        score_style = "dim"
+                    table.add_row(
+                        f["number"],
+                        f["category"],
+                        str(f["impact"]),
+                        str(f["risk"]),
+                        f"[{score_style}]{score}[/{score_style}]",
+                        f["title"],
+                    )
+
+                con.print(table)
+                click.echo(f"\n{len(findings)} finding(s) identified.")
+
+                if not execute:
+                    click.echo("\nRun with --execute to fix these issues automatically.")
+            else:
+                click.echo("No actionable findings identified.")
+
+            if phase_result.artifacts.get("task_file"):
+                click.echo(f"Task file: {phase_result.artifacts['task_file']}")
+
+        # Print cost
+        if phase_result.cost_usd:
+            click.echo(f"Analysis cost: ${phase_result.cost_usd:.2f}")
+
+        # Audit log
+        try:
+            from colonyos.cleanup import write_cleanup_log
+
+            log_data = {
+                "mode": "execute" if execute else "dry-run",
+                "target_path": path,
+                "max_tasks": max_tasks or config.sweep.max_tasks,
+                "findings_count": len(parse_sweep_findings(findings_text)),
+                "cost_usd": phase_result.cost_usd,
+                "plan_only": plan_only,
+            }
+            write_cleanup_log(runs_dir_path(repo_root), "sweep", log_data)
+        except Exception:
+            logger.debug("Failed to write sweep audit log", exc_info=True)
+
+    except PreflightError as exc:
+        click.echo(f"Preflight error: {exc.format_message()}", err=True)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # colonyos ui — local web dashboard
 # ---------------------------------------------------------------------------
 
@@ -3855,10 +4433,13 @@ def pr_review(
     click.echo(f"[colonyos] Budget: ${effective_budget:.2f}, Poll interval: {effective_poll_interval}s")
 
     # Load or create state
-    state = load_pr_review_state(repo_root, pr_number)
-    if state is None:
+    loaded_state = load_pr_review_state(repo_root, pr_number)
+    state: PRReviewState
+    if loaded_state is None:
         state = PRReviewState(pr_number=pr_number)
         save_pr_review_state(repo_root, state)
+    else:
+        state = loaded_state
 
     def process_comments() -> list[tuple[str, str]]:
         """Process new actionable comments. Returns list of (sha, summary) for fixes."""
@@ -4195,3 +4776,240 @@ def _get_latest_commit_sha(repo_root: Path) -> str:
         return result.stdout.strip()
     except Exception:
         return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# TUI (Textual) interactive terminal UI
+# ---------------------------------------------------------------------------
+
+
+def _launch_tui(
+    repo_root: Path,
+    config: ColonyConfig,
+    prompt: str | None = None,
+    verbose: bool = False,
+) -> None:
+    """Launch the interactive Textual TUI.
+
+    Imports the ``colonyos.tui`` package lazily so that the ``textual``
+    dependency is only required when the TUI is actually used.
+
+    Raises:
+        ImportError: If textual or janus is not installed.
+    """
+    import colonyos.tui  # noqa: F401 — triggers dependency check
+    from colonyos.tui.app import AssistantApp
+    from colonyos.tui.adapter import CommandOutputMsg, TextBlockMsg, TextualUI
+
+    current_adapter: TextualUI | None = None
+    command_hints = _tui_command_hints()
+    def _recovery_callback(text: str) -> None:
+        nonlocal current_adapter
+        queue = app_instance.event_queue
+
+        recovery_state = app_instance.get_dirty_worktree_recovery()
+        if recovery_state is None:
+            queue.sync_q.put(CommandOutputMsg(text="No dirty-worktree recovery is pending."))
+            app_instance.call_from_thread(app_instance.clear_dirty_worktree_recovery)
+            return
+        saved_prompt, recovery_error = recovery_state
+
+        command = text.strip().lower()
+        if command == "cancel":
+            app_instance.call_from_thread(app_instance.cancel_dirty_worktree_recovery)
+            return
+
+        if command != "commit":
+            queue.sync_q.put(CommandOutputMsg(text=_dirty_recovery_help()))
+            return
+
+        queue.sync_q.put(CommandOutputMsg(text="Starting dirty-worktree recovery agent..."))
+        adapter = TextualUI(queue.sync_q)
+        current_adapter = adapter
+        try:
+            branch_name = recovery_error.details.get("current_branch")
+            dirty_output = str(recovery_error.details.get("dirty_output", "")).strip()
+            result = run_preflight_recovery(
+                repo_root,
+                config,
+                blocked_prompt=saved_prompt,
+                dirty_output=dirty_output or recovery_error.format_message(),
+                branch_name=branch_name if isinstance(branch_name, str) else None,
+                ui=cast(Any, adapter),
+            )
+        except Exception as exc:
+            logger.exception("Dirty-worktree recovery failed")
+            app_instance.call_from_thread(
+                app_instance.show_run_blocked,
+                saved_prompt,
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+        finally:
+            current_adapter = None
+
+        if not result.success:
+            app_instance.call_from_thread(
+                app_instance.show_run_blocked,
+                saved_prompt,
+                result.error or "Preflight recovery failed.",
+            )
+            return
+
+        app_instance.call_from_thread(app_instance.clear_dirty_worktree_recovery)
+        queue.sync_q.put(CommandOutputMsg(text="Recovery commit completed. Retrying saved prompt..."))
+        _run_callback(saved_prompt)
+
+    def _run_callback(text: str) -> None:
+        """Run the orchestrator in a worker thread when the user submits input.
+
+        Each submission creates a fresh TextualUI adapter so that turn counts
+        and tool state are isolated per-run.  The status bar accumulates cost
+        across runs independently — this is intentional so users see lifetime
+        session cost while each run's turn count starts at zero.
+        """
+        nonlocal current_adapter
+        queue = app_instance.event_queue
+
+        handled, command_output, should_exit = _handle_tui_command(text, config=config)
+        if handled:
+            if command_output:
+                queue.sync_q.put(CommandOutputMsg(text=command_output))
+            current_adapter = None
+            if should_exit:
+                app_instance.call_from_thread(app_instance.exit)
+            return
+
+        adapter = TextualUI(queue.sync_q)
+        current_adapter = adapter
+
+        def _ui_factory(prefix: str = "") -> TextualUI:
+            return adapter
+
+        route_outcome = _route_prompt(
+            text,
+            config,
+            repo_root,
+            source="tui",
+            quiet=True,
+        )
+        if route_outcome.announcement:
+            queue.sync_q.put(TextBlockMsg(text=route_outcome.announcement))
+        if route_outcome.display_text is not None:
+            queue.sync_q.put(TextBlockMsg(text=route_outcome.display_text))
+            current_adapter = None
+            return
+
+        try:
+            if route_outcome.mode == "direct_agent":
+                _run_direct_agent(
+                    text,
+                    repo_root=repo_root,
+                    config=config,
+                    ui=adapter,
+                )
+                return
+
+            if route_outcome.mode == "review_only":
+                output, _approved = _capture_click_output_and_result(
+                    _run_review_only_flow,
+                    repo_root=repo_root,
+                    config=config,
+                    verbose=verbose,
+                    quiet=False,
+                )
+                if output:
+                    queue.sync_q.put(CommandOutputMsg(text=output))
+                return
+
+            if route_outcome.mode == "cleanup_loop":
+                output, _ = _capture_click_output_and_result(_run_cleanup_loop)
+                if output:
+                    queue.sync_q.put(CommandOutputMsg(text=output))
+                return
+
+            from_prd = route_outcome.from_prd
+            if route_outcome.mode == "implement_only":
+                from_prd = _resolve_latest_prd_path(repo_root, config)
+                queue.sync_q.put(CommandOutputMsg(text=f"Using latest PRD: {from_prd}"))
+
+            run_orchestrator(
+                text,
+                repo_root=repo_root,
+                config=config,
+                verbose=verbose,
+                ui_factory=_ui_factory,
+                skip_planning=route_outcome.skip_planning,
+                from_prd=from_prd,
+                user_injection_provider=adapter.drain_user_injections,
+            )
+        except PreflightError as exc:
+            logger.info("TUI run blocked by preflight: %s", exc)
+            if exc.code == "dirty_worktree":
+                app_instance.call_from_thread(app_instance.begin_dirty_worktree_recovery, text, exc)
+            else:
+                app_instance.call_from_thread(app_instance.show_run_blocked, text, str(exc))
+        except Exception as exc:
+            logger.exception("Unhandled TUI run failure")
+            app_instance.call_from_thread(
+                app_instance.show_run_blocked,
+                text,
+                f"{type(exc).__name__}: {exc}",
+            )
+        finally:
+            current_adapter = None
+
+    def _inject_callback(text: str) -> None:
+        if current_adapter is not None:
+            current_adapter.enqueue_user_injection(text)
+
+    app_instance = AssistantApp(
+        run_callback=_run_callback,
+        recovery_callback=_recovery_callback,
+        inject_callback=_inject_callback,
+        initial_prompt=prompt,
+        command_hints=command_hints,
+    )
+
+    previous_handler = signal.getsignal(signal.SIGINT)
+
+    def _sigint_handler(signum, frame) -> None:  # noqa: ANN001
+        app_instance.call_from_thread(app_instance.action_cancel_run)
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+    try:
+        app_instance.run()
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
+
+
+@app.command()
+@click.argument("prompt", required=False)
+@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
+def tui(prompt: str | None, verbose: bool) -> None:
+    """Launch the interactive terminal UI (Textual TUI).
+
+    Provides a scrollable transcript, multi-line composer, and status bar
+    for real-time pipeline interaction. Requires the ``tui`` extra::
+
+        pip install colonyos[tui]
+    """
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+
+    if not config.project:
+        click.echo(
+            "No ColonyOS config found. Run `colonyos init` first.",
+            err=True,
+        )
+        sys.exit(1)
+
+    click.echo(click.style("`colonyos tui` is deprecated; use `colonyos run` instead.", dim=True))
+    try:
+        _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
+    except ImportError as exc:
+        click.echo(
+            f"Error: {exc}\n\nInstall the TUI extra: pip install colonyos[tui]",
+            err=True,
+        )
+        sys.exit(1)

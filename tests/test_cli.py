@@ -3,6 +3,7 @@ import os
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -10,11 +11,19 @@ import yaml
 import click
 from click.testing import CliRunner
 
-from colonyos.cli import app, _save_loop_state, _load_latest_loop_state, _compute_elapsed_hours
+from colonyos.cli import (
+    RouteOutcome,
+    _compute_elapsed_hours,
+    _launch_tui,
+    _load_latest_loop_state,
+    _resolve_latest_prd_path,
+    _save_loop_state,
+    app,
+)
 from colonyos.config import ColonyConfig, BudgetConfig, save_config
 from colonyos.models import (
     LoopState, LoopStatus, Persona, Phase, PhaseResult,
-    ProjectInfo, RunLog, RunStatus,
+    PreflightError, ProjectInfo, RunLog, RunStatus,
 )
 from colonyos.persona_packs import PACKS
 
@@ -51,6 +60,30 @@ class TestVersion:
         assert result.exit_code == 0
         assert "colonyos" in result.output
         assert __version__ in result.output
+
+
+class TestRootCommand:
+    def test_bare_colonyos_defaults_to_tui(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=True), \
+             patch("colonyos.cli._interactive_stdio", return_value=True), \
+             patch("colonyos.cli._show_welcome") as mock_welcome, \
+             patch("colonyos.cli._run_repl") as mock_repl, \
+             patch("colonyos.cli._launch_tui") as mock_launch:
+            result = runner.invoke(app, [])
+        assert result.exit_code == 0
+        mock_launch.assert_called_once()
+        mock_welcome.assert_not_called()
+        mock_repl.assert_not_called()
+
+    def test_bare_colonyos_falls_back_without_tui(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=False):
+            result = runner.invoke(app, [], input="exit\n")
+        assert result.exit_code == 0
+        assert "ColonyOS" in result.output
 
 
 class TestStatus:
@@ -98,6 +131,229 @@ class TestRun:
             result = runner.invoke(app, ["run", "Add feature"])
         assert result.exit_code != 0
         assert "colonyos init" in result.output
+
+    def test_interactive_run_defaults_to_tui(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=True), \
+             patch("colonyos.cli._interactive_stdio", return_value=True), \
+             patch("colonyos.cli._launch_tui") as mock_launch:
+            result = runner.invoke(app, ["run", "Add feature"])
+        assert result.exit_code == 0
+        mock_launch.assert_called_once()
+
+    def test_no_tui_forces_streaming(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        fake_log = RunLog(
+            run_id="run-test",
+            prompt="Add feature",
+            status=RunStatus.COMPLETED,
+            phases=[],
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=True), \
+             patch("colonyos.cli._interactive_stdio", return_value=True), \
+             patch("colonyos.cli._launch_tui") as mock_launch, \
+             patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            result = runner.invoke(app, ["run", "--no-tui", "Add feature"])
+        assert result.exit_code == 0
+        mock_launch.assert_not_called()
+        mock_run.assert_called_once()
+
+    def test_small_fix_route_passes_skip_planning(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        fake_log = RunLog(
+            run_id="run-test",
+            prompt="Fix typo",
+            status=RunStatus.COMPLETED,
+            phases=[],
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=False), \
+             patch("colonyos.cli._route_prompt", return_value=RouteOutcome(skip_planning=True)), \
+             patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            result = runner.invoke(app, ["run", "Fix typo"])
+        assert result.exit_code == 0
+        assert mock_run.call_args.kwargs["skip_planning"] is True
+
+    def test_route_prompt_propagates_skip_planning_from_decision(self, tmp_path: Path):
+        """_route_prompt should propagate skip_planning from mode decision to RouteOutcome."""
+        from colonyos.cli import _route_prompt
+        from colonyos.router import ModeAgentDecision, ModeAgentMode
+
+        config = _make_config(tmp_path)
+        decision_with_skip = ModeAgentDecision(
+            mode=ModeAgentMode.PLAN_IMPLEMENT_LOOP,
+            confidence=0.92,
+            summary="Small fix",
+            reasoning="Trivial change",
+            announcement="Entering feature planning mode.",
+            skip_planning=True,
+        )
+        with patch("colonyos.router.choose_tui_mode", return_value=decision_with_skip), \
+             patch("colonyos.router.log_mode_selection"):
+            outcome = _route_prompt("fix typo in readme", config, tmp_path, "test", quiet=True)
+        assert outcome.skip_planning is True
+        assert outcome.mode == "plan_implement_loop"
+
+    def test_direct_agent_route_bypasses_orchestrator(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=False), \
+             patch(
+                 "colonyos.cli._route_prompt",
+                 return_value=RouteOutcome(mode="direct_agent", announcement="Handling this directly."),
+             ), \
+             patch("colonyos.cli._run_direct_agent", return_value=True) as mock_direct, \
+             patch("colonyos.cli.run_orchestrator") as mock_run:
+            result = runner.invoke(app, ["run", "What does this do?"])
+        assert result.exit_code == 0
+        mock_direct.assert_called_once()
+        mock_run.assert_not_called()
+
+
+class TestResolveLatestPrdPath:
+    def test_returns_latest_matching_prd(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        prds_dir = tmp_path / config.prds_dir
+        tasks_dir = tmp_path / config.tasks_dir
+        prds_dir.mkdir(exist_ok=True)
+        tasks_dir.mkdir(exist_ok=True)
+
+        older_prd = prds_dir / "20260320_100000_prd_old_feature.md"
+        newer_prd = prds_dir / "20260324_120000_prd_new_feature.md"
+        older_prd.write_text("# old", encoding="utf-8")
+        newer_prd.write_text("# new", encoding="utf-8")
+        (tasks_dir / "20260320_100000_tasks_old_feature.md").write_text("# tasks", encoding="utf-8")
+        (tasks_dir / "20260324_120000_tasks_new_feature.md").write_text("# tasks", encoding="utf-8")
+
+        result = _resolve_latest_prd_path(tmp_path, config)
+        assert result == "cOS_prds/20260324_120000_prd_new_feature.md"
+
+    def test_implement_only_route_uses_latest_prd(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        fake_log = RunLog(
+            run_id="run-test",
+            prompt="continue the last plan",
+            status=RunStatus.COMPLETED,
+            phases=[],
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=False), \
+             patch(
+                 "colonyos.cli._route_prompt",
+                 return_value=RouteOutcome(mode="implement_only", announcement="Continuing the latest plan."),
+             ), \
+             patch("colonyos.cli._resolve_latest_prd_path", return_value="cOS_prds/latest_prd_test.md"), \
+             patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            result = runner.invoke(app, ["run", "continue the last plan"])
+        assert result.exit_code == 0
+        assert mock_run.call_args.kwargs["from_prd"] == "cOS_prds/latest_prd_test.md"
+
+    def test_tui_recovery_success_retries_saved_prompt_once(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        dirty_error = PreflightError(
+            "Uncommitted changes detected",
+            code="dirty_worktree",
+            details={
+                "current_branch": "main",
+                "dirty_output": "M src/app.py",
+            },
+        )
+        fake_log = RunLog(
+            run_id="run-test",
+            prompt="Add feature",
+            status=RunStatus.COMPLETED,
+            phases=[],
+        )
+        recovery_result = PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=True,
+            cost_usd=0.01,
+            duration_ms=100,
+            session_id="recover",
+        )
+
+        class FakeApp:
+            def __init__(self, **kwargs):
+                self.run_callback = kwargs["run_callback"]
+                self.recovery_callback = kwargs["recovery_callback"]
+                self._pending_recovery = None
+                self.messages: list[object] = []
+                self.event_queue = SimpleNamespace(
+                    sync_q=SimpleNamespace(put=self.messages.append),
+                )
+
+            def call_from_thread(self, fn, *args):
+                return fn(*args)
+
+            def begin_dirty_worktree_recovery(self, text, error):
+                self._pending_recovery = (text, error)
+
+            def get_dirty_worktree_recovery(self):
+                return self._pending_recovery
+
+            def clear_dirty_worktree_recovery(self):
+                self._pending_recovery = None
+
+            def cancel_dirty_worktree_recovery(self):
+                self._pending_recovery = None
+
+            def show_run_blocked(self, *args):
+                self.blocked = args
+
+            def exit(self):
+                self.exited = True
+
+            def run(self):
+                self.run_callback("Add feature")
+                assert self._pending_recovery is not None
+                self.recovery_callback("commit")
+
+        with patch("colonyos.tui.app.AssistantApp", FakeApp), \
+             patch("colonyos.cli._route_prompt", return_value=RouteOutcome()), \
+             patch("colonyos.cli.run_orchestrator", side_effect=[dirty_error, fake_log]) as mock_run, \
+             patch("colonyos.cli.run_preflight_recovery", return_value=recovery_result) as mock_recovery, \
+             patch("colonyos.cli.signal.signal"):
+            _launch_tui(tmp_path, config)
+
+        assert mock_recovery.call_count == 1
+        assert mock_run.call_count == 2
+        assert mock_run.call_args_list[0].args[0] == "Add feature"
+        assert mock_run.call_args_list[1].args[0] == "Add feature"
+
+    def test_tui_direct_agent_route_uses_direct_handler(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+
+        class FakeApp:
+            def __init__(self, **kwargs):
+                self.run_callback = kwargs["run_callback"]
+                self.messages: list[object] = []
+                self.event_queue = SimpleNamespace(
+                    sync_q=SimpleNamespace(put=self.messages.append),
+                )
+
+            def call_from_thread(self, fn, *args):
+                return fn(*args)
+
+            def exit(self):
+                self.exited = True
+
+            def run(self):
+                self.run_callback("What does this do?")
+
+        with patch("colonyos.tui.app.AssistantApp", FakeApp), \
+             patch(
+                 "colonyos.cli._route_prompt",
+                 return_value=RouteOutcome(mode="direct_agent", announcement="Handling this directly."),
+             ), \
+             patch("colonyos.cli._run_direct_agent", return_value=True) as mock_direct, \
+             patch("colonyos.cli.run_orchestrator") as mock_run, \
+             patch("colonyos.cli.signal.signal"):
+            _launch_tui(tmp_path, config)
+
+        mock_direct.assert_called_once()
+        mock_run.assert_not_called()
 
 
 def _make_config(tmp_path: Path) -> ColonyConfig:
@@ -1490,6 +1746,7 @@ class TestRepl:
              patch("builtins.input", side_effect=capture_input), \
              patch("colonyos.cli.readline", create=True), \
              patch("colonyos.cli.click.echo", side_effect=capture_echo), \
+             patch("colonyos.cli._route_prompt", return_value=RouteOutcome()), \
              patch("colonyos.cli.run_orchestrator", side_effect=[fake_log_1, fake_log_2]):
             from colonyos.cli import _run_repl
             _run_repl()
@@ -1594,6 +1851,63 @@ class TestRepl:
              patch("colonyos.cli.run_orchestrator", side_effect=KeyboardInterrupt):
             from colonyos.cli import _run_repl
             _run_repl()  # Should not raise; returns to prompt then quits
+
+
+class TestTuiCommandHandling:
+    def test_exit_command_requests_tui_exit(self) -> None:
+        from colonyos.cli import _handle_tui_command
+
+        handled, output, should_exit = _handle_tui_command("exit", config=ColonyConfig())
+
+        assert handled is True
+        assert should_exit is True
+        assert "Exiting" in (output or "")
+
+    def test_run_command_redirects_to_prompt_mode(self) -> None:
+        from colonyos.cli import _handle_tui_command
+
+        handled, output, should_exit = _handle_tui_command(
+            "run build a dashboard",
+            config=ColonyConfig(),
+        )
+
+        assert handled is True
+        assert should_exit is False
+        assert "type a feature prompt" in (output or "").lower()
+
+    def test_auto_requires_no_confirm_when_not_auto_approved(self) -> None:
+        from colonyos.cli import _handle_tui_command
+
+        handled, output, should_exit = _handle_tui_command("auto", config=ColonyConfig())
+
+        assert handled is True
+        assert should_exit is False
+        assert "--no-confirm" in (output or "")
+
+    def test_status_command_is_captured(self) -> None:
+        from colonyos.cli import _handle_tui_command
+
+        with patch("colonyos.cli._capture_click_output", return_value="status output"):
+            handled, output, should_exit = _handle_tui_command(
+                "status",
+                config=ColonyConfig(),
+            )
+
+        assert handled is True
+        assert should_exit is False
+        assert output == "status output"
+
+    def test_unsupported_command_is_rejected(self) -> None:
+        from colonyos.cli import _handle_tui_command
+
+        handled, output, should_exit = _handle_tui_command(
+            "init --quick",
+            config=ColonyConfig(),
+        )
+
+        assert handled is True
+        assert should_exit is False
+        assert "not supported inside the TUI" in (output or "")
 
 
 class TestCIFixCommand:

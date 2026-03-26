@@ -9,11 +9,19 @@ import pytest
 
 from colonyos.config import ColonyConfig, RouterConfig, load_config
 from colonyos.router import (
+    ModeAgentMode,
+    ModeAgentDecision,
     RouterCategory,
     RouterResult,
+    _build_mode_selection_prompt,
     _build_router_prompt,
+    _heuristic_mode_decision,
+    _parse_mode_selection_response,
     _parse_router_response,
+    build_direct_agent_prompt,
+    choose_tui_mode,
     log_router_decision,
+    log_mode_selection,
     route_query,
 )
 
@@ -118,6 +126,249 @@ class TestRouterResult:
 
 
 # ---------------------------------------------------------------------------
+# Mode-selection agent tests
+# ---------------------------------------------------------------------------
+
+
+class TestModeAgentDecision:
+    def test_basic_construction(self) -> None:
+        result = ModeAgentDecision(
+            mode=ModeAgentMode.DIRECT_AGENT,
+            confidence=0.9,
+            summary="Answer a question directly",
+            reasoning="This is small and focused",
+            announcement="Handling this directly.",
+        )
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+        assert result.announcement == "Handling this directly."
+
+
+class TestBuildModeSelectionPrompt:
+    def test_lists_supported_modes(self) -> None:
+        system, user = _build_mode_selection_prompt("continue the last plan")
+        assert "direct_agent" in system
+        assert "plan_implement_loop" in system
+        assert "implement_only" in system
+        assert "review_only" in system
+        assert "cleanup_loop" in system
+        assert "continue the last plan" in user
+
+
+class TestParseModeSelectionResponse:
+    def test_valid_direct_agent_json(self) -> None:
+        raw = json.dumps({
+            "mode": "direct_agent",
+            "confidence": 0.91,
+            "summary": "Small direct request",
+            "reasoning": "This should not enter the full pipeline",
+            "announcement": "Handling this directly.",
+        })
+        result = _parse_mode_selection_response(raw)
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+        assert result.confidence == 0.91
+        assert result.announcement == "Handling this directly."
+
+    def test_invalid_mode_falls_back_to_pipeline(self) -> None:
+        result = _parse_mode_selection_response('{"mode":"weird","confidence":1.0}')
+        assert result.mode == ModeAgentMode.PLAN_IMPLEMENT_LOOP
+        assert result.confidence == 0.0
+
+    def test_skip_planning_parsed_when_true(self) -> None:
+        """skip_planning=true should be parsed from mode selection response."""
+        raw = json.dumps({
+            "mode": "plan_implement_loop",
+            "confidence": 0.88,
+            "summary": "Small code fix",
+            "reasoning": "Trivial change",
+            "announcement": "Entering feature planning mode.",
+            "skip_planning": True,
+        })
+        result = _parse_mode_selection_response(raw)
+        assert result.mode == ModeAgentMode.PLAN_IMPLEMENT_LOOP
+        assert result.skip_planning is True
+
+    def test_skip_planning_defaults_to_false(self) -> None:
+        """skip_planning should default to False when missing."""
+        raw = json.dumps({
+            "mode": "plan_implement_loop",
+            "confidence": 0.88,
+            "summary": "Feature work",
+            "reasoning": "Larger change",
+            "announcement": "Entering feature planning mode.",
+        })
+        result = _parse_mode_selection_response(raw)
+        assert result.skip_planning is False
+
+
+class TestBuildModeSelectionPromptSanitization:
+    """Verify project metadata is sanitized in mode selection prompts."""
+
+    def test_project_metadata_is_sanitized(self) -> None:
+        system, _user = _build_mode_selection_prompt(
+            "do something",
+            project_name="MyProject\x1b[31m",
+            project_description="A project\x1b[0m",
+            project_stack="Python\x1b]0;pwned\x07",
+            vision="Build\rsomething",
+        )
+        # ANSI escapes and bare CR should be stripped
+        assert "\x1b" not in system
+        assert "\r" not in system
+        assert "\x07" not in system
+
+
+class TestHeuristicModeDecision:
+    """Tests for _heuristic_mode_decision including adversarial inputs."""
+
+    def test_empty_input_returns_fallback(self) -> None:
+        result = _heuristic_mode_decision("")
+        assert result is not None
+        assert result.mode == ModeAgentMode.FALLBACK
+
+    def test_continue_from_latest_prd(self) -> None:
+        result = _heuristic_mode_decision("use the latest prd")
+        assert result is not None
+        assert result.mode == ModeAgentMode.IMPLEMENT_ONLY
+
+    def test_review_request(self) -> None:
+        result = _heuristic_mode_decision("review this branch")
+        assert result is not None
+        assert result.mode == ModeAgentMode.REVIEW_ONLY
+
+    def test_cleanup_request(self) -> None:
+        result = _heuristic_mode_decision("cleanup the codebase")
+        assert result is not None
+        assert result.mode == ModeAgentMode.CLEANUP_LOOP
+
+    def test_question_mark_routes_direct(self) -> None:
+        result = _heuristic_mode_decision("what does this function do?")
+        assert result is not None
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+
+    def test_change_routes_direct(self) -> None:
+        result = _heuristic_mode_decision("change the button color to red")
+        assert result is not None
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+
+    def test_rename_routes_direct(self) -> None:
+        result = _heuristic_mode_decision("rename the function foo to bar")
+        assert result is not None
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+
+    def test_build_routes_to_pipeline(self) -> None:
+        result = _heuristic_mode_decision("build a new REST API")
+        assert result is not None
+        assert result.mode == ModeAgentMode.PLAN_IMPLEMENT_LOOP
+
+    def test_implement_routes_to_pipeline(self) -> None:
+        result = _heuristic_mode_decision("implement pagination for the user list")
+        assert result is not None
+        assert result.mode == ModeAgentMode.PLAN_IMPLEMENT_LOOP
+
+    # -- Adversarial inputs: phrases that previously caused false positives --
+
+    def test_make_sure_does_not_route_direct(self) -> None:
+        """'make sure' is not an action verb — should NOT match DIRECT_AGENT."""
+        result = _heuristic_mode_decision("I want to make sure the tests pass")
+        assert result is None or result.mode != ModeAgentMode.DIRECT_AGENT
+
+    def test_make_certain_does_not_route_direct(self) -> None:
+        result = _heuristic_mode_decision("make certain the deploy works")
+        assert result is None or result.mode != ModeAgentMode.DIRECT_AGENT
+
+    def test_make_sense_does_not_route_direct(self) -> None:
+        result = _heuristic_mode_decision("does this make sense?")
+        # Should route as a question (ends with ?) not as DIRECT_AGENT via "make"
+        assert result is not None
+        assert result.mode == ModeAgentMode.DIRECT_AGENT  # from the ? heuristic
+        assert result.confidence == 0.94  # question confidence, not 0.9
+
+    def test_change_my_mind_does_not_route_direct(self) -> None:
+        """'change my mind' is not a code action."""
+        result = _heuristic_mode_decision("change my mind about the approach")
+        assert result is None or result.mode != ModeAgentMode.DIRECT_AGENT
+
+    def test_add_a_note_does_not_route_pipeline(self) -> None:
+        """'add a note' is not a feature request."""
+        result = _heuristic_mode_decision("add a note about this decision")
+        assert result is None or result.mode != ModeAgentMode.PLAN_IMPLEMENT_LOOP
+
+    def test_ambiguous_input_returns_none(self) -> None:
+        """Ambiguous input should fall through to the LLM router."""
+        result = _heuristic_mode_decision("I think we should discuss the architecture")
+        assert result is None
+
+    def test_real_change_request_still_works(self) -> None:
+        """Ensure legitimate change requests still route correctly."""
+        result = _heuristic_mode_decision("change the background color to blue")
+        assert result is not None
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+
+    def test_real_make_request_still_works(self) -> None:
+        """Ensure legitimate make requests still route correctly."""
+        result = _heuristic_mode_decision("make the header font larger")
+        assert result is not None
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+
+
+class TestChooseTUIMode:
+    @pytest.fixture
+    def tmp_repo(self, tmp_path: Path) -> Path:
+        config_dir = tmp_path / ".colonyos"
+        config_dir.mkdir()
+        return tmp_path
+
+    def test_uses_triage_phase(self, tmp_repo: Path) -> None:
+        with patch("colonyos.agent.run_phase_sync") as mock_run:
+            mock_run.return_value = MagicMock(
+                artifacts={
+                    "result": json.dumps({
+                        "mode": "direct_agent",
+                        "confidence": 0.9,
+                        "summary": "Question",
+                        "reasoning": "Small ask",
+                        "announcement": "Handling this directly.",
+                    })
+                },
+                error=None,
+            )
+            result = choose_tui_mode("please decide the right workflow", repo_root=tmp_repo)
+            assert result.mode == ModeAgentMode.DIRECT_AGENT
+            call_args = mock_run.call_args.args
+            from colonyos.models import Phase
+            assert call_args[0] == Phase.TRIAGE
+
+
+class TestBuildDirectAgentPrompt:
+    def test_mentions_direct_handling(self) -> None:
+        system, user = build_direct_agent_prompt("change this button to red")
+        assert "handling a request directly" in system.lower()
+        assert "change this button to red" in user
+
+
+class TestLogModeSelection:
+    def test_writes_mode_selection_log(self, tmp_path: Path) -> None:
+        result = ModeAgentDecision(
+            mode=ModeAgentMode.DIRECT_AGENT,
+            confidence=0.88,
+            summary="Direct answer",
+            reasoning="Small ask",
+            announcement="Handling this directly.",
+        )
+        log_path = log_mode_selection(
+            repo_root=tmp_path,
+            prompt="what does this do?",
+            result=result,
+            source="tui",
+        )
+        assert log_path is not None
+        assert log_path.exists()
+        data = json.loads(log_path.read_text(encoding="utf-8"))
+        assert data["mode"] == "direct_agent"
+        assert data["source"] == "tui"
+
+
+# ---------------------------------------------------------------------------
 # _build_router_prompt tests (Task 1.4)
 # ---------------------------------------------------------------------------
 
@@ -137,6 +388,7 @@ class TestBuildRouterPrompt:
         assert "json" in system.lower()
         assert "category" in system.lower()
         assert "confidence" in system.lower()
+        assert "complexity" in system.lower()
 
     def test_includes_user_query(self) -> None:
         system, user = _build_router_prompt("what does the sanitize function do?")
@@ -186,12 +438,14 @@ class TestParseRouterResponse:
             "confidence": 0.95,
             "summary": "Add health check endpoint",
             "reasoning": "User wants to add a new feature",
+            "complexity": "small",
         })
         result = _parse_router_response(raw)
         assert result.category == RouterCategory.CODE_CHANGE
         assert result.confidence == 0.95
         assert result.summary == "Add health check endpoint"
         assert result.reasoning == "User wants to add a new feature"
+        assert result.complexity == "small"
 
     def test_valid_question_json(self) -> None:
         raw = json.dumps({
@@ -243,6 +497,17 @@ class TestParseRouterResponse:
         assert result.category == RouterCategory.QUESTION
         assert result.confidence == 0.0
         assert result.summary == ""
+        assert result.complexity == "large"
+
+    def test_invalid_complexity_defaults_to_large(self) -> None:
+        result = _parse_router_response(json.dumps({
+            "category": "code_change",
+            "confidence": 0.9,
+            "summary": "Fix typo",
+            "reasoning": "Small edit",
+            "complexity": "odd",
+        }))
+        assert result.complexity == "large"
 
     def test_invalid_category_returns_code_change_fallback(self) -> None:
         """Unknown category should fail-open to CODE_CHANGE."""
@@ -337,8 +602,8 @@ class TestRouteQuery:
             assert isinstance(result, RouterResult)
             assert result.category == RouterCategory.QUESTION
 
-    def test_uses_haiku_model(self, tmp_repo: Path) -> None:
-        """route_query should use haiku model for classification."""
+    def test_uses_haiku_model_by_default(self, tmp_repo: Path) -> None:
+        """route_query should use the default configured router model (haiku)."""
         with patch("colonyos.agent.run_phase_sync") as mock_run:
             mock_run.return_value = MagicMock(
                 artifacts={"result": '{"category": "code_change", "confidence": 0.9, "summary": "x", "reasoning": "y"}'},
@@ -348,6 +613,17 @@ class TestRouteQuery:
             mock_run.assert_called_once()
             call_kwargs = mock_run.call_args[1]
             assert call_kwargs["model"] == "haiku"
+
+    def test_respects_explicit_model_override(self, tmp_repo: Path) -> None:
+        """route_query should honor an explicit model override."""
+        with patch("colonyos.agent.run_phase_sync") as mock_run:
+            mock_run.return_value = MagicMock(
+                artifacts={"result": '{"category": "code_change", "confidence": 0.9, "summary": "x", "reasoning": "y"}'},
+                error=None,
+            )
+            route_query("add a feature", repo_root=tmp_repo, model="sonnet")
+            call_kwargs = mock_run.call_args[1]
+            assert call_kwargs["model"] == "sonnet"
 
     def test_uses_no_tools(self, tmp_repo: Path) -> None:
         """route_query should use no tools (read-only classification)."""
@@ -581,8 +857,8 @@ class TestAnswerQuestion:
             call_args = mock_run.call_args[0]
             assert call_args[0] == Phase.QA
 
-    def test_uses_sonnet_model_by_default(self, tmp_repo: Path) -> None:
-        """answer_question should use sonnet model by default (matching RouterConfig.qa_model)."""
+    def test_uses_opus_model_by_default(self, tmp_repo: Path) -> None:
+        """answer_question should use opus model by default (matching RouterConfig.qa_model)."""
         from colonyos.router import answer_question
         with patch("colonyos.agent.run_phase_sync") as mock_run:
             mock_run.return_value = MagicMock(
@@ -592,7 +868,7 @@ class TestAnswerQuestion:
             )
             answer_question("test question", repo_root=tmp_repo)
             call_kwargs = mock_run.call_args[1]
-            assert call_kwargs["model"] == "sonnet"
+            assert call_kwargs["model"] == "opus"
 
     def test_uses_read_only_tools(self, tmp_repo: Path) -> None:
         """answer_question should only have read-only tools (Read, Glob, Grep)."""
@@ -677,8 +953,8 @@ class TestAnswerQuestion:
         sig = inspect.signature(answer_question)
         assert "model" in sig.parameters
         param = sig.parameters["model"]
-        # Default should match RouterConfig.qa_model default (sonnet)
-        assert param.default == "sonnet"
+        # Default should match RouterConfig.qa_model default (opus)
+        assert param.default == "opus"
 
 
 class TestAnswerQuestionIntegration:
@@ -1095,6 +1371,8 @@ class TestSlackQuestionRouting:
             assert result.actionable is False
             assert result.answer == "The function does X."
             mock_answer.assert_called_once()
+            assert mock_route.call_args.kwargs["model"] == "haiku"
+            assert mock_answer.call_args.kwargs["model"] == "opus"
 
     def test_code_change_no_answer(self, tmp_repo: Path) -> None:
         """CODE_CHANGE triage should not populate answer."""
@@ -1114,6 +1392,7 @@ class TestSlackQuestionRouting:
             )
             assert result.actionable is True
             assert result.answer is None
+            assert mock_route.call_args.kwargs["model"] == "haiku"
 
     def test_question_answer_error_fallback(self, tmp_repo: Path) -> None:
         """If answer_question fails, triage_message should still return with error answer."""

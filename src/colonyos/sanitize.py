@@ -84,15 +84,28 @@ def sanitize_ci_logs(text: str) -> str:
     return text
 
 
-# Regex to strip ANSI escape sequences (color codes, cursor movement, etc.)
-# Matches sequences like \x1b[31m, \x1b[0m, \x1b[38;5;196m
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# Regex to strip ALL ANSI/terminal escape sequences:
+# 1. CSI sequences: \x1b[ ... <letter>  (colors, cursor movement)
+# 2. OSC sequences: \x1b] ... (ST|\x07)  (window title, clipboard writes)
+# 3. DCS sequences: \x1bP ... (ST|\x07)  (device control strings)
+# 4. Single-char escapes: \x1b followed by one printable char (e.g. \x1b7, \x1b8)
+# ST (String Terminator) = \x1b\\ or \x07 (BEL)
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-9;]*[A-Za-z]"           # CSI sequences
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"  # OSC sequences (terminated by BEL or ST)
+    r"|\x1bP[^\x07\x1b]*(?:\x07|\x1b\\)?"   # DCS sequences (terminated by BEL or ST)
+    r"|\x1b[\x20-\x7e]"                # Single-char escape sequences
+)
 
 # Regex to strip control characters:
-# - \x00-\x1f: C0 control codes (null, bell, backspace, tab, newline, etc.)
+# - \x00-\x08: C0 control codes before tab (null, bell, backspace, etc.)
+# - \x0b-\x0c: vertical tab, form feed (between \n and \r)
+# - \x0e-\x1f: C0 control codes after carriage return
 # - \x7f: DEL character
 # - \x80-\x9f: C1 control codes
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# Preserves \t (\x09) and \n (\x0a) for display formatting.
+# \r (\x0d) is NOT preserved — bare \r enables content-overwrite attacks.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]")
 
 
 def sanitize_display_text(text: str) -> str:
@@ -106,6 +119,11 @@ def sanitize_display_text(text: str) -> str:
     Preserves:
     - Normal printable ASCII
     - Unicode characters (emoji, accented chars, box-drawing, etc.)
+    - Tabs (\\t) and newlines (\\n)
+
+    Carriage returns are normalized: ``\\r\\n`` becomes ``\\n``, and bare
+    ``\\r`` is stripped to prevent content-overwrite attacks where
+    ``"safe text\\rmalicious"`` renders as ``malicious`` in some terminals.
 
     Args:
         text: Raw text that may contain ANSI escapes or control characters.
@@ -114,8 +132,11 @@ def sanitize_display_text(text: str) -> str:
         Sanitized text safe for terminal display, with leading/trailing
         whitespace stripped.
     """
-    # Strip ANSI escape sequences first
+    # Strip ANSI escape sequences first (CSI, OSC, DCS, single-char)
     text = _ANSI_ESCAPE_RE.sub("", text)
-    # Strip control characters
+    # Normalize CRLF to LF, then strip bare CR to prevent overwrite attacks
+    text = text.replace("\r\n", "\n")
+    text = text.replace("\r", "")
+    # Strip remaining control characters
     text = _CONTROL_CHARS_RE.sub("", text)
     return text.strip()

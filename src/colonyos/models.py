@@ -17,7 +17,17 @@ class PreflightError(click.ClickException):
     Subclass of ClickException so callers can catch it specifically
     without catching all ClickExceptions from other phases.
     """
-    pass
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
 
 
 class BranchRestoreError(RuntimeError):
@@ -35,6 +45,7 @@ class Phase(str, Enum):
     CEO = "ceo"
     PLAN = "plan"
     TRIAGE = "triage"
+    PREFLIGHT_RECOVERY = "preflight_recovery"
     IMPLEMENT = "implement"
     REVIEW = "review"
     DECISION = "decision"
@@ -45,6 +56,7 @@ class Phase(str, Enum):
     CI_FIX = "ci_fix"
     CONFLICT_RESOLVE = "conflict_resolve"
     QA = "qa"  # Intent Router: read-only Q&A agent for codebase questions
+    SWEEP = "sweep"
 
 
 class TaskStatus(str, Enum):
