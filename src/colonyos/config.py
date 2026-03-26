@@ -69,6 +69,12 @@ DEFAULTS = {
         "max_files_per_task": 5,
         "default_categories": ["bugs", "dead_code", "error_handling", "complexity", "consistency"],
     },
+    "memory": {
+        "enabled": True,
+        "max_entries": 500,
+        "max_inject_tokens": 1500,
+        "capture_failures": True,
+    },
 }
 
 
@@ -153,6 +159,16 @@ class RouterConfig:
 
 
 @dataclass
+class MemoryConfig:
+    """Configuration for the persistent memory system."""
+
+    enabled: bool = True
+    max_entries: int = 500
+    max_inject_tokens: int = 1500
+    capture_failures: bool = True
+
+
+@dataclass
 class SweepConfig:
     max_tasks: int = 5
     max_files_per_task: int = 5
@@ -203,6 +219,7 @@ class ColonyConfig:
     parallel_implement: ParallelImplementConfig = field(default_factory=ParallelImplementConfig)
     router: RouterConfig = field(default_factory=RouterConfig)
     sweep: SweepConfig = field(default_factory=SweepConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     def get_model(self, phase: Phase) -> str:
         """Return the model for a phase, falling back to the global default."""
@@ -497,6 +514,29 @@ def _parse_router_config(raw: dict) -> RouterConfig:
     )
 
 
+def _parse_memory_config(raw: dict) -> MemoryConfig:
+    """Parse the ``memory`` section from config.yaml."""
+    if not raw:
+        return MemoryConfig()
+    defaults = DEFAULTS["memory"]
+    enabled = bool(raw.get("enabled", defaults["enabled"]))
+    max_entries = int(raw.get("max_entries", defaults["max_entries"]))
+    if max_entries < 1:
+        raise ValueError(f"memory.max_entries must be positive, got {max_entries}")
+    max_inject_tokens = int(raw.get("max_inject_tokens", defaults["max_inject_tokens"]))
+    if max_inject_tokens < 0:
+        raise ValueError(
+            f"memory.max_inject_tokens must be non-negative, got {max_inject_tokens}"
+        )
+    capture_failures = bool(raw.get("capture_failures", defaults["capture_failures"]))
+    return MemoryConfig(
+        enabled=enabled,
+        max_entries=max_entries,
+        max_inject_tokens=max_inject_tokens,
+        capture_failures=capture_failures,
+    )
+
+
 def _parse_sweep_config(raw: dict) -> SweepConfig:
     """Parse the ``sweep`` section from config.yaml."""
     if not raw:
@@ -604,6 +644,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         parallel_implement=_parse_parallel_implement_config(raw.get("parallel_implement", {})),
         router=_parse_router_config(raw.get("router", {})),
         sweep=_parse_sweep_config(raw.get("sweep", {})),
+        memory=_parse_memory_config(raw.get("memory", {})),
     )
 
 
@@ -777,6 +818,21 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "max_tasks": config.sweep.max_tasks,
             "max_files_per_task": config.sweep.max_files_per_task,
             "default_categories": list(config.sweep.default_categories),
+        }
+
+    # Only serialize memory if values differ from defaults
+    memory_defaults = DEFAULTS["memory"]
+    if (
+        config.memory.enabled != memory_defaults["enabled"]
+        or config.memory.max_entries != memory_defaults["max_entries"]
+        or config.memory.max_inject_tokens != memory_defaults["max_inject_tokens"]
+        or config.memory.capture_failures != memory_defaults["capture_failures"]
+    ):
+        data["memory"] = {
+            "enabled": config.memory.enabled,
+            "max_entries": config.memory.max_entries,
+            "max_inject_tokens": config.memory.max_inject_tokens,
+            "capture_failures": config.memory.capture_failures,
         }
 
     if not config.directions_auto_update:

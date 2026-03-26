@@ -39,6 +39,7 @@ from colonyos.naming import (
     summary_artifact_path,
 )
 from colonyos.github import check_open_pr
+from colonyos.memory import MemoryCategory, MemoryStore, load_memory_for_injection
 from colonyos.sanitize import sanitize_untrusted_content
 from colonyos.slack import is_valid_git_ref
 from colonyos.ui import NullUI, ParallelProgressLine, PhaseUI, make_reviewer_prefix, print_reviewer_legend
@@ -53,6 +54,113 @@ def _touch_heartbeat(repo_root: Path) -> None:
 
 def _log(msg: str) -> None:
     print(f"[colonyos] {msg}", file=sys.stderr, flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Memory helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_memory_store(
+    repo_root: Path, config: ColonyConfig
+) -> MemoryStore | None:
+    """Return a MemoryStore if memory is enabled, else None."""
+    if not config.memory.enabled:
+        return None
+    try:
+        return MemoryStore(
+            repo_root, max_entries=config.memory.max_entries
+        )
+    except Exception:
+        _log("Warning: failed to open memory store, continuing without memory")
+        return None
+
+
+def _capture_phase_memory(
+    store: MemoryStore | None,
+    phase_result: PhaseResult,
+    run_id: str,
+    config: ColonyConfig,
+) -> None:
+    """Extract key observations from a phase result and persist them.
+
+    Writes happen only inside the orchestrator process — never from agent
+    sessions — to prevent prompt-injection from poisoning the memory store.
+    """
+    if store is None:
+        return
+
+    phase_name = phase_result.phase.value
+
+    # Capture failure context
+    if not phase_result.success:
+        if not config.memory.capture_failures:
+            return
+        error_text = phase_result.error or "Phase failed (no error message)"
+        try:
+            store.add_memory(
+                category=MemoryCategory.FAILURE,
+                phase=phase_name,
+                run_id=run_id,
+                text=f"Phase {phase_name} failed: {error_text}",
+                tags=["failure", phase_name],
+            )
+        except Exception:
+            _log(f"Warning: failed to capture failure memory for {phase_name}")
+        return
+
+    # Map phase to appropriate category
+    phase_category_map: dict[str, MemoryCategory] = {
+        "implement": MemoryCategory.CODEBASE,
+        "fix": MemoryCategory.CODEBASE,
+        "plan": MemoryCategory.CODEBASE,
+        "review": MemoryCategory.REVIEW_PATTERN,
+        "decision": MemoryCategory.REVIEW_PATTERN,
+        "standalone_review": MemoryCategory.REVIEW_PATTERN,
+        "standalone_fix": MemoryCategory.CODEBASE,
+        "standalone_decision": MemoryCategory.REVIEW_PATTERN,
+        "thread_fix": MemoryCategory.CODEBASE,
+    }
+
+    category = phase_category_map.get(phase_name)
+    if category is None:
+        return
+
+    # Extract result text from artifacts if available
+    result_text = phase_result.artifacts.get("result", "")
+    if not result_text:
+        return
+
+    # Truncate to a reasonable summary length
+    summary = result_text[:2000] if len(result_text) > 2000 else result_text
+    try:
+        store.add_memory(
+            category=category,
+            phase=phase_name,
+            run_id=run_id,
+            text=summary,
+            tags=[phase_name],
+        )
+    except Exception:
+        _log(f"Warning: failed to capture memory for {phase_name}")
+
+
+def _inject_memory_block(
+    system: str,
+    store: MemoryStore | None,
+    phase: str,
+    prompt_text: str,
+    config: ColonyConfig,
+) -> str:
+    """Append a memory context block to the system prompt if applicable."""
+    if store is None:
+        return system
+    memory_block = load_memory_for_injection(
+        store, phase, prompt_text, max_tokens=config.memory.max_inject_tokens
+    )
+    if memory_block:
+        system += f"\n\n{memory_block}"
+    return system
 
 
 def _get_current_branch(repo_root: Path) -> str:
@@ -2956,6 +3064,9 @@ def run(
     # Track original branch for rollback if we checkout a base branch.
     original_branch: str | None = None
 
+    # Open memory store for capture + injection (closed at function exit)
+    memory_store = _get_memory_store(repo_root, config)
+
     # --- Resume mode ---
     if resume_from:
         log = resume_from.log
@@ -3082,6 +3193,7 @@ def run(
             base_branch=base_branch,
             user_injection_provider=user_injection_provider,
             _make_ui=_make_ui,
+            memory_store=memory_store,
         )
     except KeyboardInterrupt:
         _log("Interrupted — saving run state...")
@@ -3144,6 +3256,7 @@ def _run_pipeline(
     base_branch: str | None,
     user_injection_provider: Callable[[], list[str]] | None,
     _make_ui: Callable[..., PhaseUI | NullUI | None],
+    memory_store: MemoryStore | None = None,
 ) -> RunLog:
     """Execute the pipeline phases. Extracted from run() for try/finally branch rollback."""
 
@@ -3184,6 +3297,7 @@ def _run_pipeline(
             source_issue=log.source_issue,
             source_issue_url=log.source_issue_url,
         )
+        system = _inject_memory_block(system, memory_store, "plan", user, config)
         plan_result = run_phase_sync(
             Phase.PLAN,
             user,
@@ -3195,18 +3309,23 @@ def _run_pipeline(
             ui=plan_ui,
         )
         _append_phase(plan_result)
+        _capture_phase_memory(memory_store, plan_result, log.run_id, config)
 
         if not plan_result.success:
             if plan_ui is None:
                 _fail_run_log(repo_root, log, f"Plan phase failed: {plan_result.error}")
             else:
                 _fail_run_log(repo_root, log, "Plan phase failed")
+            if memory_store is not None:
+                memory_store.close()
             return log
 
     if plan_only:
         log.status = RunStatus.COMPLETED
         log.mark_finished()
         _save_run_log(repo_root, log)
+        if memory_store is not None:
+            memory_store.close()
         _log("Plan-only mode: stopping after plan phase.")
         return log
 
@@ -3240,6 +3359,7 @@ def _run_pipeline(
         if impl_result is None:
             _log("Using sequential implement mode")
             system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name, repo_root=repo_root)
+            system = _inject_memory_block(system, memory_store, "implement", user, config)
             user += _drain_injected_context(user_injection_provider)
             impl_result = run_phase_sync(
                 Phase.IMPLEMENT,
@@ -3263,12 +3383,15 @@ def _run_pipeline(
                 impl_ui.phase_error(message)
 
         _append_phase(impl_result)
+        _capture_phase_memory(memory_store, impl_result, log.run_id, config)
 
         if not impl_result.success:
             if impl_ui is None:
                 _fail_run_log(repo_root, log, f"Implement phase failed: {impl_result.error}")
             else:
                 _fail_run_log(repo_root, log, "Implement phase failed")
+            if memory_store is not None:
+                memory_store.close()
             return log
 
     # --- Phase 3: Review/Fix Loop ---
@@ -3383,6 +3506,7 @@ def _run_pipeline(
                         iteration + 1,
                         repo_root=repo_root,
                     )
+                    fix_system = _inject_memory_block(fix_system, memory_store, "fix", fix_user, config)
                     fix_user += _drain_injected_context(user_injection_provider)
                     fix_ui = _make_ui()
                     if fix_ui is not None:
@@ -3403,6 +3527,7 @@ def _run_pipeline(
                         ui=fix_ui,
                     )
                     _append_phase(fix_result)
+                    _capture_phase_memory(memory_store, fix_result, log.run_id, config)
                     if not fix_result.success:
                         if fix_ui is None:
                             _log(f"  Fix phase failed: {fix_result.error}")
@@ -3488,6 +3613,8 @@ def _run_pipeline(
                 _fail_run_log(repo_root, log, f"Deliver phase failed: {deliver_result.error}")
             else:
                 _fail_run_log(repo_root, log, "Deliver phase failed")
+            if memory_store is not None:
+                memory_store.close()
             return log
 
     # --- CI Fix Phase (post-deliver) ---
@@ -3500,5 +3627,7 @@ def _run_pipeline(
     log.status = RunStatus.COMPLETED
     log.mark_finished()
     _save_run_log(repo_root, log)
+    if memory_store is not None:
+        memory_store.close()
     _log(f"Run complete. Total cost: ${log.total_cost_usd:.4f}")
     return log

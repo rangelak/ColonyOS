@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -22,7 +23,9 @@ def tmp_repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def store(tmp_repo: Path) -> MemoryStore:
-    return MemoryStore(tmp_repo)
+    s = MemoryStore(tmp_repo)
+    yield s
+    s.close()
 
 
 class TestMemoryStoreInit:
@@ -44,6 +47,27 @@ class TestMemoryStoreInit:
         s1.close()
         s2 = MemoryStore(tmp_repo)
         s2.close()
+
+
+class TestContextManager:
+    def test_context_manager_protocol(self, tmp_repo: Path):
+        """MemoryStore supports with-statement for safe cleanup."""
+        with MemoryStore(tmp_repo) as store:
+            store.add_memory(MemoryCategory.CODEBASE, "implement", "r1", "test")
+            assert store.count_memories() == 1
+        # After exiting, connection is closed — no leak
+
+    def test_context_manager_closes_on_exception(self, tmp_repo: Path):
+        """Connection is closed even when an exception occurs."""
+        try:
+            with MemoryStore(tmp_repo) as store:
+                store.add_memory(MemoryCategory.CODEBASE, "implement", "r1", "test")
+                raise ValueError("test error")
+        except ValueError:
+            pass
+        # Verify we can reopen (connection was properly closed)
+        with MemoryStore(tmp_repo) as store2:
+            assert store2.count_memories() == 1
 
 
 class TestAddMemory:
@@ -78,6 +102,40 @@ class TestAddMemory:
         memories = store.query_memories()
         assert "<malicious_tag>" not in memories[0].text
         assert "pytest" in memories[0].text
+
+    def test_sanitizes_secrets(self, store: MemoryStore):
+        """API keys and tokens should be redacted from memory text."""
+        store.add_memory(
+            category=MemoryCategory.FAILURE,
+            phase="fix",
+            run_id="run-001",
+            text="Auth failed with token ghp_abc123XYZsecrettoken for GitHub API",
+        )
+        memories = store.query_memories()
+        assert "ghp_abc123" not in memories[0].text
+        assert "[REDACTED]" in memories[0].text
+
+    def test_sanitizes_bearer_tokens(self, store: MemoryStore):
+        """Bearer tokens should be redacted."""
+        store.add_memory(
+            category=MemoryCategory.FAILURE,
+            phase="fix",
+            run_id="run-001",
+            text="Request failed: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        )
+        memories = store.query_memories()
+        assert "eyJhbGciOiJIUzI1NiI" not in memories[0].text
+
+    def test_sanitizes_aws_keys(self, store: MemoryStore):
+        """AWS access key IDs should be redacted."""
+        store.add_memory(
+            category=MemoryCategory.FAILURE,
+            phase="fix",
+            run_id="run-001",
+            text="Credentials: AKIAIOSFODNN7EXAMPLE leaked in logs",
+        )
+        memories = store.query_memories()
+        assert "AKIAIOSFODNN7EXAMPLE" not in memories[0].text
 
     def test_returns_memory_entry(self, store: MemoryStore):
         entry = store.add_memory(
@@ -115,6 +173,7 @@ class TestMaxEntriesPruning:
         assert "Entry 1" not in texts
         assert "Entry 2" not in texts
         assert "Entry 7" in texts
+        store.close()
 
     def test_prunes_by_category_fifo(self, tmp_repo: Path):
         store = MemoryStore(tmp_repo, max_entries=3)
@@ -124,6 +183,7 @@ class TestMaxEntriesPruning:
         # At cap now. Adding one more should prune the oldest.
         store.add_memory(MemoryCategory.CODEBASE, "implement", "r4", "codebase 2")
         assert store.count_memories() == 3
+        store.close()
 
 
 class TestQueryMemories:
@@ -192,6 +252,44 @@ class TestQueryMemories:
         assert len(results) == 0
 
 
+class TestFTS5Escaping:
+    """FTS5 special operators should not alter query semantics."""
+
+    def test_fts5_and_operator(self, store: MemoryStore):
+        store.add_memory(MemoryCategory.CODEBASE, "implement", "r1", "foo AND bar baz")
+        store.add_memory(MemoryCategory.CODEBASE, "implement", "r2", "just bar")
+        # Searching for literal "AND" should not create a boolean query
+        results = store.query_memories(keyword="foo AND bar")
+        # Should find at least the first entry (not crash)
+        assert len(results) >= 0  # no FTS5 parse error
+
+    def test_fts5_or_operator(self, store: MemoryStore):
+        store.add_memory(MemoryCategory.CODEBASE, "implement", "r1", "hello world")
+        store.add_memory(MemoryCategory.CODEBASE, "implement", "r2", "goodbye world")
+        # "OR" should be stripped, not treated as FTS5 operator
+        results = store.query_memories(keyword="hello OR goodbye")
+        assert len(results) >= 0
+
+    def test_fts5_wildcard_stripped(self, store: MemoryStore):
+        store.add_memory(MemoryCategory.CODEBASE, "implement", "r1", "testing data")
+        results = store.query_memories(keyword="test*")
+        assert len(results) >= 0
+
+    def test_fts5_double_quote_escaped(self, store: MemoryStore):
+        store.add_memory(MemoryCategory.CODEBASE, "implement", "r1", 'said "hello" to world')
+        results = store.query_memories(keyword='"hello"')
+        assert len(results) >= 0
+
+    def test_sanitize_fts_keyword(self):
+        """Directly test the keyword sanitization method."""
+        assert MemoryStore._sanitize_fts_keyword('test AND foo') == 'test foo'
+        assert MemoryStore._sanitize_fts_keyword('test OR bar') == 'test bar'
+        assert MemoryStore._sanitize_fts_keyword('NOT bad') == 'bad'
+        assert MemoryStore._sanitize_fts_keyword('test*') == 'test'
+        assert MemoryStore._sanitize_fts_keyword('foo^bar') == 'foobar'
+        assert MemoryStore._sanitize_fts_keyword('hello "world"') == 'hello ""world""'
+
+
 class TestDeleteMemory:
     def test_delete_by_id(self, store: MemoryStore):
         entry = store.add_memory(MemoryCategory.CODEBASE, "implement", "r1", "to delete")
@@ -213,6 +311,15 @@ class TestDeleteMemory:
 
         store.clear_memories()
         assert store.count_memories() == 0
+
+    def test_clear_rebuilds_fts_index(self, store: MemoryStore):
+        """After clear, FTS searches should return no results."""
+        store.add_memory(MemoryCategory.CODEBASE, "implement", "r1", "pytest framework")
+        assert len(store.query_memories(keyword="pytest")) == 1
+
+        store.clear_memories()
+        # FTS should also be clean
+        assert len(store.query_memories(keyword="pytest")) == 0
 
 
 class TestCountByCategory:

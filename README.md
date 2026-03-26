@@ -251,6 +251,17 @@ flowchart TD
 | `colonyos queue clear` | Remove all pending items |
 | `colonyos queue unpause` | Unpause the queue after a circuit breaker trip |
 
+### Memory
+
+| Command | Description |
+|---|---|
+| `colonyos memory list` | Show recent memory entries |
+| `colonyos memory list --category codebase` | Filter by category |
+| `colonyos memory search QUERY` | Search memories by keyword |
+| `colonyos memory delete ID` | Delete a memory entry by ID |
+| `colonyos memory clear --yes` | Delete all memory entries |
+| `colonyos memory stats` | Show memory store statistics |
+
 ### CI fix
 
 | Command | Description |

@@ -11,6 +11,7 @@ dependencies.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from colonyos.sanitize import sanitize_untrusted_content
+from colonyos.sanitize import sanitize_ci_logs
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,12 @@ PHASE_CATEGORY_MAP: dict[str, list[str]] = {
     "decision": ["review_pattern", "codebase"],
     "direct_agent": ["codebase", "failure", "preference", "review_pattern"],
 }
+
+# FTS5 special tokens that must be stripped from user-supplied keywords to
+# prevent unintended query syntax.  We quote the keyword in double-quotes,
+# which handles most operators, but these tokens inside quotes can still
+# cause parse errors in some FTS5 builds.
+_FTS5_SPECIAL_RE = re.compile(r"\b(AND|OR|NOT|NEAR)\b", re.IGNORECASE)
 
 
 class MemoryCategory(str, Enum):
@@ -60,6 +67,11 @@ class MemoryEntry:
 class MemoryStore:
     """SQLite-backed persistent memory store.
 
+    Supports the context-manager protocol for safe resource cleanup::
+
+        with MemoryStore(repo_root) as store:
+            store.add_memory(...)
+
     Parameters
     ----------
     repo_root:
@@ -78,6 +90,16 @@ class MemoryStore:
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.row_factory = sqlite3.Row
         self._init_db()
+
+    # -- Context manager protocol ------------------------------------------
+
+    def __enter__(self) -> MemoryStore:
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        self.close()
+
+    # -- Schema init -------------------------------------------------------
 
     def _init_db(self) -> None:
         """Create schema and FTS5 virtual table if they don't exist."""
@@ -132,6 +154,8 @@ class MemoryStore:
         """Close the database connection."""
         self._conn.close()
 
+    # -- CRUD --------------------------------------------------------------
+
     def add_memory(
         self,
         category: MemoryCategory,
@@ -142,9 +166,17 @@ class MemoryStore:
     ) -> MemoryEntry:
         """Add a memory entry, sanitizing text and enforcing max_entries cap.
 
+        Sanitization applies both XML tag stripping and secret-pattern
+        redaction (``sanitize_ci_logs``) to prevent persisting leaked
+        tokens, API keys, or credentials.
+
+        The insert and any pruning happen within a single transaction to
+        ensure the entry count never exceeds ``max_entries`` even if the
+        process crashes mid-operation.
+
         Returns the created ``MemoryEntry``.
         """
-        sanitized_text = sanitize_untrusted_content(text)
+        sanitized_text = sanitize_ci_logs(text)
         tags = tags or []
         tags_str = ",".join(tags)
         now = datetime.now(timezone.utc).isoformat()
@@ -158,10 +190,11 @@ class MemoryStore:
             (now, category.value, phase, run_id, sanitized_text, tags_str),
         )
         entry_id = cur.lastrowid
-        self._conn.commit()
 
-        # Enforce max_entries cap — prune oldest entries
-        self._prune_if_needed()
+        # Enforce max_entries cap within the same transaction
+        self._prune_if_needed(cur)
+
+        self._conn.commit()
 
         return MemoryEntry(
             id=entry_id,
@@ -173,14 +206,22 @@ class MemoryStore:
             tags=tags,
         )
 
-    def _prune_if_needed(self) -> None:
-        """Remove oldest entries if count exceeds max_entries."""
-        count = self.count_memories()
+    def _prune_if_needed(self, cur: sqlite3.Cursor | None = None) -> None:
+        """Remove oldest entries if count exceeds max_entries.
+
+        When *cur* is provided, operates within the caller's transaction
+        (no separate commit). Otherwise commits independently.
+        """
+        own_cursor = cur is None
+        if own_cursor:
+            cur = self._conn.cursor()
+
+        row = cur.execute("SELECT COUNT(*) FROM memories").fetchone()
+        count = row[0]
         if count <= self.max_entries:
             return
 
         excess = count - self.max_entries
-        cur = self._conn.cursor()
         cur.execute(
             """
             DELETE FROM memories WHERE id IN (
@@ -189,7 +230,8 @@ class MemoryStore:
             """,
             (excess,),
         )
-        self._conn.commit()
+        if own_cursor:
+            self._conn.commit()
 
     def query_memories(
         self,
@@ -227,6 +269,24 @@ class MemoryStore:
         )
         return [self._row_to_entry(row) for row in cur.fetchall()]
 
+    @staticmethod
+    def _sanitize_fts_keyword(keyword: str) -> str:
+        """Escape a user-supplied keyword for safe FTS5 MATCH usage.
+
+        Handles double-quote escaping **and** strips FTS5 boolean operators
+        (AND, OR, NOT, NEAR) plus wildcard ``*`` and grouping ``^`` characters
+        that would otherwise alter query semantics.
+        """
+        # Strip FTS5 boolean operators
+        safe = _FTS5_SPECIAL_RE.sub("", keyword)
+        # Remove wildcard and caret operators
+        safe = safe.replace("*", "").replace("^", "")
+        # Escape double-quotes for the phrase query wrapper
+        safe = safe.replace('"', '""')
+        # Collapse whitespace left by removals
+        safe = " ".join(safe.split())
+        return safe
+
     def _query_fts(
         self,
         keyword: str,
@@ -235,8 +295,9 @@ class MemoryStore:
         phase: Optional[str] = None,
     ) -> list[MemoryEntry]:
         """Full-text search via FTS5."""
-        # Escape special FTS5 characters and build a prefix query
-        safe_keyword = keyword.replace('"', '""')
+        safe_keyword = self._sanitize_fts_keyword(keyword)
+        if not safe_keyword.strip():
+            return self.query_memories(categories=categories, limit=limit, phase=phase)
         fts_query = f'"{safe_keyword}"'
 
         conditions = ["m.id IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?)"]
@@ -268,9 +329,11 @@ class MemoryStore:
         return cur.rowcount > 0
 
     def clear_memories(self) -> None:
-        """Delete all memories."""
+        """Delete all memories and rebuild the FTS5 index."""
         cur = self._conn.cursor()
         cur.execute("DELETE FROM memories")
+        # Rebuild FTS index to purge stale shadow-table content
+        cur.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
         self._conn.commit()
 
     def count_memories(self) -> int:
@@ -327,7 +390,7 @@ def load_memory_for_injection(
     phase:
         Current pipeline phase (used to determine relevant categories).
     prompt_text:
-        Current prompt/task text (used for keyword relevance — future use).
+        Current prompt/task text (reserved for future keyword-based relevance).
     max_tokens:
         Maximum approximate token budget for the injected block.
 

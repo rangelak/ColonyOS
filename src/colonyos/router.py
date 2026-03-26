@@ -350,8 +350,16 @@ def build_direct_agent_prompt(
     project_name: str = "",
     project_description: str = "",
     project_stack: str = "",
+    memory_block: str = "",
 ) -> tuple[str, str]:
-    """Build the prompt for the lightweight direct TUI agent."""
+    """Build the prompt for the lightweight direct TUI agent.
+
+    Parameters
+    ----------
+    memory_block:
+        Pre-formatted memory context block (from ``load_memory_for_injection``).
+        Appended to the system prompt when non-empty.
+    """
     system_parts = [
         _load_base_instruction(),
         "",
@@ -369,6 +377,9 @@ def build_direct_agent_prompt(
         system_parts.append(f"Description: {project_description}")
     if project_stack:
         system_parts.append(f"Stack: {project_stack}")
+
+    if memory_block:
+        system_parts.append(f"\n{memory_block}")
 
     safe_request = sanitize_untrusted_content(request)
     user_prompt = f"Handle this request directly inside the TUI:\n\n{safe_request}"
