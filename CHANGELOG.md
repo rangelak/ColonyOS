@@ -1,5 +1,67 @@
 # Changelog
 
+## 20260325_170000 — TUI Default Mode, Smart Routing & Autonomous Sweep
+
+Three features shipped in this release: (1) the TUI is now the default visualization
+for `colonyos run` on interactive terminals, with `--no-tui` escape hatch for CI;
+(2) the intent router gained complexity classification so trivial/small changes skip
+planning and go straight to implement→review; and (3) a new `colonyos sweep` command
+provides autonomous codebase quality analysis that feeds findings through the existing
+implement→verify→review→deliver pipeline to produce fix PRs.
+
+**Created:**
+- `src/colonyos/instructions/sweep.md` — Sweep analysis agent instructions
+- `src/colonyos/instructions/preflight_recovery.md` — Dirty-worktree recovery instructions
+- `tests/test_sweep.py` — Full test suite for the sweep command
+- `tests/test_precommit_hook.py` — Pre-commit hook integration tests
+- `run_precommit_tests.py` — Pre-commit test runner
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `sweep` command, TUI as default mode, `--no-tui` flag
+- `src/colonyos/orchestrator.py` — Sweep analysis phase, skip-planning wiring, parallel result surfacing
+- `src/colonyos/router.py` — Complexity classification, heuristic routing improvements
+- `src/colonyos/config.py` — Sweep configuration support
+- `src/colonyos/models.py` — Complexity field on RouterResult
+- `src/colonyos/sanitize.py` — Security hardening
+- `src/colonyos/tui/adapter.py` — Parallel implement result callbacks
+- `tests/test_cli.py`, `tests/test_orchestrator.py`, `tests/test_router.py` — Extended test coverage
+
+**PRDs:**
+- `cOS_prds/20260323_201206_prd_the_tui_should_be_the_default_visualization_right_now_ctrl_c_doesn_t_work_well_d.md`
+- `cOS_prds/20260324_112017_prd_i_want_to_introduce_a_new_feature_for_a_cleanup_agent_that_basically_functions_l.md`
+
+**Tasks:**
+- `cOS_tasks/20260323_201206_tasks_the_tui_should_be_the_default_visualization_right_now_ctrl_c_doesn_t_work_well_d.md`
+- `cOS_tasks/20260324_112017_tasks_i_want_to_introduce_a_new_feature_for_a_cleanup_agent_that_basically_functions_l.md`
+
+## 20260323_201500 — Interactive Terminal UI (Textual TUI)
+
+Adds a full interactive terminal UI built on Textual, giving users a mission-control
+experience for ColonyOS pipeline runs. Features a scrollable execution transcript,
+multi-line composer for mid-run input, live status bar with phase/cost/turns/elapsed
+display, and color-coded event rendering. Interactive terminals now default to the TUI
+via `colonyos run`, with `--no-tui` available to force plain streaming output.
+
+**Created:**
+- `src/colonyos/tui/__init__.py` — Package init with optional-dependency guard
+- `src/colonyos/tui/app.py` — AssistantApp main Textual application shell
+- `src/colonyos/tui/adapter.py` — Bridge between PhaseUI callbacks and TUI widgets
+- `src/colonyos/tui/styles.py` — TCSS stylesheet for the TUI layout
+- `src/colonyos/tui/widgets/composer.py` — Multi-line input with auto-grow
+- `src/colonyos/tui/widgets/hint_bar.py` — Keyboard shortcut hints
+- `src/colonyos/tui/widgets/status_bar.py` — Persistent phase/cost/turns/elapsed bar
+- `src/colonyos/tui/widgets/transcript.py` — Scrollable event display with auto-scroll
+- `tests/tui/` — Full test suite for all TUI components
+
+**Modified:**
+- `src/colonyos/cli.py` — Added the Textual TUI, the deprecated `colonyos tui` alias, and the `--no-tui` escape hatch on `colonyos run`
+- `src/colonyos/sanitize.py` — Fixed newline stripping bug
+- `pyproject.toml` — Added `[tui]` optional dependency group
+- `README.md` — Updated with TUI documentation
+
+**PRD:** `cOS_prds/20260323_190105_prd_give_me_fucking_awesome_ux_that_is_a_fucking_amazing_experience_and_it_gets_peop.md`
+**Tasks:** `cOS_tasks/20260323_190105_tasks_give_me_fucking_awesome_ux_that_is_a_fucking_amazing_experience_and_it_gets_peop.md`
+
 ## 20260321_211500 — Intent Router Agent
 
 Adds a lightweight intent router that classifies user input before running the full pipeline.
@@ -488,11 +550,11 @@ auto-close on merge, and `colonyos status` displays source issue URLs.
 
 ## 20260317_215200 — Pre-commit hook for test suite
 
-Added a `pre-commit` hook that runs `pytest` before every commit to prevent
+Added a `pre-commit` hook to run project tests before commits and prevent
 regressions from being committed.
 
 **Created:**
-- `.pre-commit-config.yaml` — Local hook running `pytest --tb=short -q`
+- `.pre-commit-config.yaml` — Local hook entry for the pre-commit pytest runner
 
 **Modified:**
 - `pyproject.toml` — Added `[project.optional-dependencies] dev` with `pre-commit` and `pytest`

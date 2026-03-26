@@ -2,9 +2,9 @@ repos:
   - repo: local
     hooks:
       - id: pytest
-        name: pytest
-        entry: .venv/bin/pytest --tb=short -q
-        language: system
+        name: pytest-targeted
+        entry: python run_precommit_tests.py
+        language: python
         pass_filenames: false
         always_run: true
         stages: [pre-commit]

@@ -352,8 +352,11 @@ class TestPreflightCheck:
 
         mock_run.side_effect = side_effect
         config = ColonyConfig()
-        with pytest.raises(PreflightError, match="Uncommitted changes"):
+        with pytest.raises(PreflightError, match="Uncommitted changes") as exc_info:
             _preflight_check(tmp_path, "colonyos/test-feature", config)
+        assert exc_info.value.code == "dirty_worktree"
+        assert exc_info.value.details["dirty_output"] == "M file.py"
+        assert exc_info.value.details["dirty_files"] == ["M file.py"]
 
     @patch("colonyos.orchestrator.subprocess.run")
     def test_git_status_nonzero_is_fail_closed(self, mock_run, tmp_path: Path) -> None:

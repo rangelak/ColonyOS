@@ -198,6 +198,15 @@ flowchart TD
 | `colonyos run --resume RUN_ID` | Resume a failed run from the last successful phase |
 | `colonyos run --offline` | Skip remote git checks (preflight) |
 | `colonyos run --force` | Bypass preflight warnings |
+| `colonyos run "prompt"` | Run the pipeline; interactive terminals default to the Textual TUI |
+| `colonyos run "prompt" --no-tui` | Force plain streaming output instead of the TUI |
+
+### Interactive TUI
+
+| Command | Description |
+|---|---|
+| `colonyos tui` | Deprecated alias for the interactive terminal UI (requires `pip install colonyos[tui]`) |
+| `colonyos tui "prompt"` | Deprecated alias that launches the TUI and immediately runs a prompt |
 
 ### Autonomous mode
 
@@ -210,6 +219,16 @@ flowchart TD
 | `colonyos auto --no-confirm` | Skip human approval of CEO proposals |
 | `colonyos auto --propose-only` | CEO proposes but does not execute |
 | `colonyos auto --resume-loop` | Resume the most recent interrupted loop |
+
+### Codebase sweep
+
+| Command | Description |
+|---|---|
+| `colonyos sweep` | Analyze entire codebase for quality issues (dry-run report) |
+| `colonyos sweep PATH` | Scope analysis to a specific file or directory |
+| `colonyos sweep --execute` | Fix findings via the implement→review pipeline |
+| `colonyos sweep --execute --plan-only` | Generate task file but stop before implementation |
+| `colonyos sweep --max-tasks N` | Cap the number of findings (default: 5) |
 
 ### Code review
 
@@ -668,7 +687,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The `[dev]` extra installs `pytest`, `pre-commit`, and the dashboard dependencies. A pre-commit hook runs `pytest` before every commit to prevent regressions.
+The `[dev]` extra installs `pytest`, `pre-commit`, and the dashboard dependencies. The pre-commit hook runs a targeted pytest selection based on staged files so local commits stay fast, while CI still runs the full suite.
 
 ### Releasing
 

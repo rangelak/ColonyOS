@@ -7,16 +7,18 @@ import pytest
 
 from colonyos.config import ColonyConfig, BudgetConfig, LearningsConfig, PhasesConfig, save_config
 from colonyos.learnings import learnings_path, LearningEntry, append_learnings
-from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, ProjectInfo, ResumeState, RunLog, RunStatus
+from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightResult, ProjectInfo, ResumeState, RunLog, RunStatus
 from colonyos.orchestrator import (
     run,
     run_thread_fix,
     prepare_resume,
+    _drain_injected_context,
     _extract_pr_number_from_log,
     _fail_run_log,
     _format_personas_block,
     _build_persona_agents,
     _build_ci_fix_prompt,
+    _build_preflight_recovery_prompt,
     _build_implement_prompt,
     _build_fix_prompt,
     _build_learn_prompt,
@@ -30,6 +32,7 @@ from colonyos.orchestrator import (
     _parse_parent_tasks,
     _persona_slug,
     _run_ci_fix_loop,
+    run_preflight_recovery,
     reviewer_personas,
     _build_persona_review_prompt,
     extract_review_verdict,
@@ -152,7 +155,23 @@ class TestPhaseReviewEnum:
 
     def test_phase_ordering(self):
         phases = list(Phase)
-        assert phases == [Phase.CEO, Phase.PLAN, Phase.TRIAGE, Phase.IMPLEMENT, Phase.REVIEW, Phase.DECISION, Phase.FIX, Phase.LEARN, Phase.VERIFY, Phase.DELIVER, Phase.CI_FIX, Phase.CONFLICT_RESOLVE, Phase.QA]
+        assert phases == [
+            Phase.CEO,
+            Phase.PLAN,
+            Phase.TRIAGE,
+            Phase.PREFLIGHT_RECOVERY,
+            Phase.IMPLEMENT,
+            Phase.REVIEW,
+            Phase.DECISION,
+            Phase.FIX,
+            Phase.LEARN,
+            Phase.VERIFY,
+            Phase.DELIVER,
+            Phase.CI_FIX,
+            Phase.CONFLICT_RESOLVE,
+            Phase.QA,
+            Phase.SWEEP,
+        ]
 
     def test_fix_phase_exists(self):
         assert Phase.FIX == "fix"
@@ -342,6 +361,32 @@ class TestRun:
 
         assert log.status == RunStatus.COMPLETED
         assert mock_run.call_count == 5
+        assert mock_parallel.call_count == 1
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_small_fix_skip_planning_still_reviews(
+        self,
+        mock_run,
+        mock_parallel,
+        tmp_git_repo: Path,
+        config: ColonyConfig,
+    ):
+        save_config(tmp_git_repo, config)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Fix typo", repo_root=tmp_git_repo, config=config, skip_planning=True)
+
+        phase_types = [phase.phase for phase in log.phases]
+        assert Phase.PLAN not in phase_types
+        assert Phase.IMPLEMENT in phase_types
+        assert any(phase.phase == Phase.REVIEW for phase in log.phases)
         assert mock_parallel.call_count == 1
 
     @patch("colonyos.orchestrator.run_phase_sync")
@@ -1982,6 +2027,164 @@ class TestBuildCiFixPrompt:
         assert "feature/fix-tests" in user
 
 
+class TestPreflightRecovery:
+    def test_build_prompt_includes_dirty_context(self) -> None:
+        config = ColonyConfig()
+        system, user = _build_preflight_recovery_prompt(
+            config,
+            "feature/recovery",
+            "ship this prompt",
+            "M src/app.py",
+        )
+        assert "feature/recovery" in system
+        assert "M src/app.py" in system
+        assert "ship this prompt" in user
+
+    def test_run_preflight_recovery_rejects_secret_like_paths(self, tmp_path: Path) -> None:
+        result = run_preflight_recovery(
+            tmp_path,
+            ColonyConfig(),
+            blocked_prompt="saved prompt",
+            dirty_output="M .env\nM src/app.py",
+            branch_name="feature/recovery",
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "sensitive-looking files" in result.error
+
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_head_sha", side_effect=["before", "after"])
+    @patch("colonyos.orchestrator._changed_paths_between", return_value={"src/app.py"})
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_run_preflight_recovery_requires_new_commit(
+        self,
+        mock_run_phase_sync,
+        mock_changed_paths,
+        mock_head_sha,
+        mock_check_clean,
+        tmp_path: Path,
+    ) -> None:
+        mock_run_phase_sync.return_value = PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=True,
+            cost_usd=0.01,
+            duration_ms=100,
+            session_id="recover",
+        )
+
+        result = run_preflight_recovery(
+            tmp_path,
+            ColonyConfig(),
+            blocked_prompt="saved prompt",
+            dirty_output="M src/app.py",
+            branch_name="feature/recovery",
+        )
+
+        assert result.success is True
+
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_head_sha", side_effect=["before", "after"])
+    @patch("colonyos.orchestrator._changed_paths_between", return_value={"tests/test_app.py"})
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_run_preflight_recovery_fails_when_blocked_files_not_committed(
+        self,
+        mock_run_phase_sync,
+        mock_changed_paths,
+        mock_head_sha,
+        mock_check_clean,
+        tmp_path: Path,
+    ) -> None:
+        mock_run_phase_sync.return_value = PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=True,
+            cost_usd=0.01,
+            duration_ms=100,
+            session_id="recover",
+        )
+
+        result = run_preflight_recovery(
+            tmp_path,
+            ColonyConfig(),
+            blocked_prompt="saved prompt",
+            dirty_output="M src/app.py",
+            branch_name="feature/recovery",
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "did not cover all blocked files" in result.error
+
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_head_sha", side_effect=["before", "after"])
+    @patch(
+        "colonyos.orchestrator._changed_paths_between",
+        return_value={"src/app.py", "docs/notes.md"},
+    )
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_run_preflight_recovery_fails_on_scope_expansion(
+        self,
+        mock_run_phase_sync,
+        mock_changed_paths,
+        mock_head_sha,
+        mock_check_clean,
+        tmp_path: Path,
+    ) -> None:
+        mock_run_phase_sync.return_value = PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=True,
+            cost_usd=0.01,
+            duration_ms=100,
+            session_id="recover",
+        )
+
+        result = run_preflight_recovery(
+            tmp_path,
+            ColonyConfig(),
+            blocked_prompt="saved prompt",
+            dirty_output="M src/app.py",
+            branch_name="feature/recovery",
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "expanded scope" in result.error
+
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_head_sha", side_effect=["before", "after"])
+    @patch("colonyos.orchestrator._changed_paths_between", return_value={"src/app.py"})
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_run_preflight_recovery_restricts_allowed_tools(
+        self,
+        mock_run_phase_sync,
+        mock_changed_paths,
+        mock_head_sha,
+        mock_check_clean,
+        tmp_path: Path,
+    ) -> None:
+        """Preflight recovery agent should have explicitly scoped tools."""
+        mock_run_phase_sync.return_value = PhaseResult(
+            phase=Phase.PREFLIGHT_RECOVERY,
+            success=True,
+            cost_usd=0.01,
+            duration_ms=100,
+            session_id="recover",
+        )
+
+        run_preflight_recovery(
+            tmp_path,
+            ColonyConfig(),
+            blocked_prompt="saved prompt",
+            dirty_output="M src/app.py",
+            branch_name="feature/recovery",
+        )
+
+        call_kwargs = mock_run_phase_sync.call_args[1]
+        assert "allowed_tools" in call_kwargs
+        allowed = call_kwargs["allowed_tools"]
+        assert set(allowed) == {"Read", "Glob", "Grep", "Bash", "Write", "Edit"}
+
+
 class TestRunCiFixLoop:
     """Integration tests for _run_ci_fix_loop."""
 
@@ -3117,3 +3320,114 @@ class TestParallelImplementIntegration:
 
         # Should return None when disabled
         assert result is None
+
+    @patch("colonyos.orchestrator._run_parallel_implement")
+    @patch("colonyos.orchestrator._preflight_check")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_parallel_implement_failure_surfaces_to_ui(
+        self,
+        mock_run_phase_sync,
+        mock_preflight,
+        mock_parallel_implement,
+        tmp_git_repo: Path,
+        config: ColonyConfig,
+    ) -> None:
+        class FakeUI:
+            def __init__(self) -> None:
+                self.errors: list[str] = []
+
+            def phase_header(self, *args, **kwargs) -> None:
+                pass
+
+            def phase_complete(self, *args, **kwargs) -> None:
+                pass
+
+            def phase_error(self, error: str) -> None:
+                self.errors.append(error)
+
+        ui = FakeUI()
+        mock_preflight.return_value = PreflightResult(
+            current_branch="main",
+            is_clean=True,
+            branch_exists=False,
+            action_taken="proceed",
+        )
+        mock_run_phase_sync.return_value = _fake_phase_result(Phase.PLAN)
+        mock_parallel_implement.return_value = PhaseResult(
+            phase=Phase.IMPLEMENT,
+            success=False,
+            error="parallel worktree creation failed",
+        )
+
+        log = run(
+            "Build cleanup agent",
+            repo_root=tmp_git_repo,
+            config=config,
+            ui_factory=lambda prefix="": ui,
+        )
+
+        assert log.status == RunStatus.FAILED
+        assert ui.errors == ["parallel worktree creation failed"]
+
+
+# ---------------------------------------------------------------------------
+# _drain_injected_context tests — destructive drain semantics
+# ---------------------------------------------------------------------------
+
+
+class TestDrainInjectedContext:
+    """Verify _drain_injected_context drains destructively and formats correctly."""
+
+    def test_none_provider_returns_empty(self) -> None:
+        assert _drain_injected_context(None) == ""
+
+    def test_empty_queue_returns_empty(self) -> None:
+        assert _drain_injected_context(lambda: []) == ""
+
+    def test_single_message_formatted(self) -> None:
+        result = _drain_injected_context(lambda: ["Please use pytest"])
+        assert "## Additional User Context" in result
+        assert "- Please use pytest" in result
+
+    def test_multiple_messages_all_included(self) -> None:
+        result = _drain_injected_context(lambda: ["note one", "note two"])
+        assert "- note one" in result
+        assert "- note two" in result
+
+    def test_whitespace_only_messages_stripped(self) -> None:
+        result = _drain_injected_context(lambda: ["  ", "\n", "real note"])
+        assert "- real note" in result
+        assert result.count("- ") == 1
+
+    def test_destructive_drain_semantics(self) -> None:
+        """Second call returns empty because the first call consumed the queue."""
+        queue: list[str] = ["first", "second"]
+
+        def provider() -> list[str]:
+            msgs = list(queue)
+            queue.clear()
+            return msgs
+
+        first = _drain_injected_context(provider)
+        assert "- first" in first
+        assert "- second" in first
+
+        second = _drain_injected_context(provider)
+        assert second == ""
+
+    def test_messages_injected_between_drains_are_visible(self) -> None:
+        """Messages added after a drain are visible on the next drain."""
+        queue: list[str] = ["phase-1 note"]
+
+        def provider() -> list[str]:
+            msgs = list(queue)
+            queue.clear()
+            return msgs
+
+        first = _drain_injected_context(provider)
+        assert "- phase-1 note" in first
+
+        queue.append("phase-2 note")
+        second = _drain_injected_context(provider)
+        assert "- phase-2 note" in second
+        assert "phase-1" not in second
