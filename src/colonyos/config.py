@@ -75,6 +75,13 @@ DEFAULTS = {
         "max_inject_tokens": 1500,
         "capture_failures": True,
     },
+    "recovery": {
+        "enabled": True,
+        "max_phase_retries": 1,
+        "allow_nuke": True,
+        "max_nuke_attempts": 1,
+        "incident_char_cap": 4000,
+    },
 }
 
 
@@ -169,6 +176,17 @@ class MemoryConfig:
 
 
 @dataclass
+class RecoveryConfig:
+    """Configuration for automatic recovery and nuke escalation."""
+
+    enabled: bool = True
+    max_phase_retries: int = 1
+    allow_nuke: bool = True
+    max_nuke_attempts: int = 1
+    incident_char_cap: int = 4000
+
+
+@dataclass
 class SweepConfig:
     max_tasks: int = 5
     max_files_per_task: int = 5
@@ -220,6 +238,7 @@ class ColonyConfig:
     router: RouterConfig = field(default_factory=RouterConfig)
     sweep: SweepConfig = field(default_factory=SweepConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
 
     def get_model(self, phase: Phase) -> str:
         """Return the model for a phase, falling back to the global default."""
@@ -537,6 +556,37 @@ def _parse_memory_config(raw: dict) -> MemoryConfig:
     )
 
 
+def _parse_recovery_config(raw: dict) -> RecoveryConfig:
+    """Parse the ``recovery`` section from config.yaml."""
+    if not raw:
+        return RecoveryConfig()
+    defaults = DEFAULTS["recovery"]
+    enabled = bool(raw.get("enabled", defaults["enabled"]))
+    max_phase_retries = int(raw.get("max_phase_retries", defaults["max_phase_retries"]))
+    if max_phase_retries < 0:
+        raise ValueError(
+            f"recovery.max_phase_retries must be non-negative, got {max_phase_retries}"
+        )
+    allow_nuke = bool(raw.get("allow_nuke", defaults["allow_nuke"]))
+    max_nuke_attempts = int(raw.get("max_nuke_attempts", defaults["max_nuke_attempts"]))
+    if max_nuke_attempts < 0:
+        raise ValueError(
+            f"recovery.max_nuke_attempts must be non-negative, got {max_nuke_attempts}"
+        )
+    incident_char_cap = int(raw.get("incident_char_cap", defaults["incident_char_cap"]))
+    if incident_char_cap < 200:
+        raise ValueError(
+            f"recovery.incident_char_cap must be at least 200, got {incident_char_cap}"
+        )
+    return RecoveryConfig(
+        enabled=enabled,
+        max_phase_retries=max_phase_retries,
+        allow_nuke=allow_nuke,
+        max_nuke_attempts=max_nuke_attempts,
+        incident_char_cap=incident_char_cap,
+    )
+
+
 def _parse_sweep_config(raw: dict) -> SweepConfig:
     """Parse the ``sweep`` section from config.yaml."""
     if not raw:
@@ -645,6 +695,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         router=_parse_router_config(raw.get("router", {})),
         sweep=_parse_sweep_config(raw.get("sweep", {})),
         memory=_parse_memory_config(raw.get("memory", {})),
+        recovery=_parse_recovery_config(raw.get("recovery", {})),
     )
 
 
@@ -833,6 +884,22 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "max_entries": config.memory.max_entries,
             "max_inject_tokens": config.memory.max_inject_tokens,
             "capture_failures": config.memory.capture_failures,
+        }
+
+    recovery_defaults = DEFAULTS["recovery"]
+    if (
+        config.recovery.enabled != recovery_defaults["enabled"]
+        or config.recovery.max_phase_retries != recovery_defaults["max_phase_retries"]
+        or config.recovery.allow_nuke != recovery_defaults["allow_nuke"]
+        or config.recovery.max_nuke_attempts != recovery_defaults["max_nuke_attempts"]
+        or config.recovery.incident_char_cap != recovery_defaults["incident_char_cap"]
+    ):
+        data["recovery"] = {
+            "enabled": config.recovery.enabled,
+            "max_phase_retries": config.recovery.max_phase_retries,
+            "allow_nuke": config.recovery.allow_nuke,
+            "max_nuke_attempts": config.recovery.max_nuke_attempts,
+            "incident_char_cap": config.recovery.incident_char_cap,
         }
 
     if not config.directions_auto_update:

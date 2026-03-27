@@ -46,6 +46,7 @@ class Phase(str, Enum):
     PLAN = "plan"
     TRIAGE = "triage"
     PREFLIGHT_RECOVERY = "preflight_recovery"
+    AUTO_RECOVERY = "auto_recovery"
     IMPLEMENT = "implement"
     REVIEW = "review"
     DECISION = "decision"
@@ -55,6 +56,7 @@ class Phase(str, Enum):
     DELIVER = "deliver"
     CI_FIX = "ci_fix"
     CONFLICT_RESOLVE = "conflict_resolve"
+    NUKE = "nuke"
     QA = "qa"  # Intent Router: read-only Q&A agent for codebase questions
     SWEEP = "sweep"
 
@@ -229,6 +231,7 @@ class RunLog:
     parallel_tasks: int | None = None
     wall_time_ms: int | None = None
     agent_time_ms: int | None = None
+    recovery_events: list[dict[str, Any]] = field(default_factory=list)
 
     def mark_finished(self) -> None:
         self.finished_at = datetime.now(timezone.utc).isoformat()

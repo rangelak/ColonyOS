@@ -5,7 +5,15 @@ from unittest.mock import patch, MagicMock
 import click
 import pytest
 
-from colonyos.config import ColonyConfig, BudgetConfig, LearningsConfig, PhasesConfig, save_config
+from colonyos.config import (
+    BudgetConfig,
+    ColonyConfig,
+    LearningsConfig,
+    ParallelImplementConfig,
+    PhasesConfig,
+    RecoveryConfig,
+    save_config,
+)
 from colonyos.learnings import learnings_path, LearningEntry, append_learnings
 from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightResult, ProjectInfo, ResumeState, RunLog, RunStatus
 from colonyos.orchestrator import (
@@ -43,6 +51,7 @@ from colonyos.orchestrator import (
     _compute_next_phase,
     _SKIP_MAP,
 )
+from colonyos.recovery import PreservationResult
 
 
 REVIEWER_PERSONA = Persona(
@@ -160,6 +169,7 @@ class TestPhaseReviewEnum:
             Phase.PLAN,
             Phase.TRIAGE,
             Phase.PREFLIGHT_RECOVERY,
+            Phase.AUTO_RECOVERY,
             Phase.IMPLEMENT,
             Phase.REVIEW,
             Phase.DECISION,
@@ -169,6 +179,7 @@ class TestPhaseReviewEnum:
             Phase.DELIVER,
             Phase.CI_FIX,
             Phase.CONFLICT_RESOLVE,
+            Phase.NUKE,
             Phase.QA,
             Phase.SWEEP,
         ]
@@ -3352,6 +3363,7 @@ class TestParallelImplementIntegration:
             branch_exists=False,
             action_taken="proceed",
         )
+        config.recovery.enabled = False
         mock_run_phase_sync.return_value = _fake_phase_result(Phase.PLAN)
         mock_parallel_implement.return_value = PhaseResult(
             phase=Phase.IMPLEMENT,
@@ -3368,6 +3380,92 @@ class TestParallelImplementIntegration:
 
         assert log.status == RunStatus.FAILED
         assert ui.errors == ["parallel worktree creation failed"]
+
+
+class TestAutomaticRecovery:
+    @patch("colonyos.orchestrator.run_phases_parallel_sync", return_value=[])
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_implement_failure_triggers_auto_recovery_and_retry(
+        self,
+        mock_run_phase_sync,
+        _mock_parallel,
+        tmp_git_repo: Path,
+    ) -> None:
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[],
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+            phases=PhasesConfig(plan=True, implement=True, review=False, deliver=False),
+            parallel_implement=ParallelImplementConfig(enabled=False),
+            recovery=RecoveryConfig(enabled=True, max_phase_retries=1, allow_nuke=False),
+        )
+        save_config(tmp_git_repo, config)
+
+        mock_run_phase_sync.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            PhaseResult(phase=Phase.IMPLEMENT, success=False, error="merge conflict"),
+            PhaseResult(phase=Phase.AUTO_RECOVERY, success=True, artifacts={"result": "fixed"}),
+            _fake_phase_result(Phase.IMPLEMENT),
+            _fake_phase_result(Phase.LEARN),
+        ]
+
+        log = run("Fix the broken branch", repo_root=tmp_git_repo, config=config)
+
+        phases = [p.phase for p in log.phases]
+        assert Phase.AUTO_RECOVERY in phases
+        assert phases.count(Phase.IMPLEMENT) == 2
+        assert log.status == RunStatus.COMPLETED
+        assert any(event["kind"] == "auto_recovery" for event in log.recovery_events)
+
+    @patch("colonyos.orchestrator.create_branch")
+    @patch("colonyos.orchestrator.checkout_branch")
+    @patch("colonyos.orchestrator.preserve_and_reset_worktree")
+    @patch("colonyos.orchestrator.run_phases_parallel_sync", return_value=[])
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_failed_recovery_escalates_to_nuke(
+        self,
+        mock_run_phase_sync,
+        _mock_parallel,
+        mock_preserve,
+        mock_checkout,
+        mock_create_branch,
+        tmp_git_repo: Path,
+    ) -> None:
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[],
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+            phases=PhasesConfig(plan=True, implement=True, review=False, deliver=False),
+            parallel_implement=ParallelImplementConfig(enabled=False),
+            recovery=RecoveryConfig(enabled=True, max_phase_retries=1, allow_nuke=True, max_nuke_attempts=1),
+        )
+        save_config(tmp_git_repo, config)
+
+        snapshot_dir = tmp_git_repo / ".colonyos" / "recovery" / "snapshot"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        mock_preserve.return_value = PreservationResult(
+            snapshot_dir=snapshot_dir,
+            preservation_mode="snapshot",
+            stash_message=None,
+        )
+        mock_run_phase_sync.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            PhaseResult(phase=Phase.IMPLEMENT, success=False, error="unmerged index"),
+            PhaseResult(phase=Phase.AUTO_RECOVERY, success=False, error="still broken"),
+            PhaseResult(phase=Phase.NUKE, success=True, artifacts={"result": "start clean from main"}),
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            _fake_phase_result(Phase.LEARN),
+        ]
+
+        log = run("Rescue this run", repo_root=tmp_git_repo, config=config)
+
+        assert log.status == RunStatus.COMPLETED
+        mock_preserve.assert_called_once()
+        mock_checkout.assert_called_once_with(tmp_git_repo, "main")
+        mock_create_branch.assert_called_once()
+        assert log.prompt.startswith("Rescue this run")
+        assert "Recovery context:" in log.prompt
 
 
 # ---------------------------------------------------------------------------

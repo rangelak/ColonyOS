@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable
+from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
 
@@ -40,6 +41,15 @@ from colonyos.naming import (
 )
 from colonyos.github import check_open_pr
 from colonyos.memory import MemoryCategory, MemoryStore, load_memory_for_injection
+from colonyos.recovery import (
+    PreservationResult,
+    checkout_branch,
+    create_branch,
+    incident_slug,
+    preserve_and_reset_worktree,
+    recovery_dir_path,
+    write_incident_summary,
+)
 from colonyos.sanitize import sanitize_untrusted_content
 from colonyos.slack import is_valid_git_ref
 from colonyos.ui import NullUI, ParallelProgressLine, PhaseUI, make_reviewer_prefix, print_reviewer_legend
@@ -1205,6 +1215,122 @@ def run_preflight_recovery(
     return phase_result
 
 
+def _build_auto_recovery_prompt(
+    config: ColonyConfig,
+    *,
+    phase: Phase,
+    branch_name: str,
+    prd_rel: str,
+    task_rel: str,
+    original_prompt: str,
+    failure_reason: str,
+) -> tuple[str, str]:
+    """Build the prompt for an automatic phase-recovery agent."""
+    recovery_template = _load_instruction("auto_recovery.md")
+    system = _format_base(config) + "\n\n" + recovery_template.format(
+        failed_phase=phase.value,
+        branch_name=branch_name,
+        prd_rel=prd_rel,
+        task_rel=task_rel,
+    )
+    user = (
+        f"Original user prompt:\n{original_prompt}\n\n"
+        f"Failure reason:\n{failure_reason.strip() or '(missing error message)'}\n"
+    )
+    return system, user
+
+
+def run_auto_recovery(
+    repo_root: Path,
+    config: ColonyConfig,
+    *,
+    phase: Phase,
+    branch_name: str,
+    prd_rel: str,
+    task_rel: str,
+    original_prompt: str,
+    failure_reason: str,
+    ui: PhaseUI | NullUI | None = None,
+) -> PhaseResult:
+    """Run a narrow repair agent after a failed pipeline phase."""
+    system_prompt, user_prompt = _build_auto_recovery_prompt(
+        config,
+        phase=phase,
+        branch_name=branch_name,
+        prd_rel=prd_rel,
+        task_rel=task_rel,
+        original_prompt=original_prompt,
+        failure_reason=failure_reason,
+    )
+    model = config.get_model(Phase.AUTO_RECOVERY)
+    if ui is not None:
+        ui.phase_header("Auto Recovery", config.budget.per_phase, model, phase.value)
+    return run_phase_sync(
+        Phase.AUTO_RECOVERY,
+        user_prompt,
+        cwd=repo_root,
+        system_prompt=system_prompt,
+        model=model,
+        budget_usd=config.budget.per_phase,
+        allowed_tools=["Read", "Glob", "Grep", "Bash", "Write", "Edit"],
+        ui=ui,
+    )
+
+
+def _build_nuke_recovery_prompt(
+    config: ColonyConfig,
+    *,
+    phase: Phase,
+    branch_name: str,
+    original_prompt: str,
+    failure_reason: str,
+) -> tuple[str, str]:
+    """Build the prompt for the final read-only incident summarizer."""
+    nuke_template = _load_instruction("nuke_recovery.md")
+    system = _format_base(config) + "\n\n" + nuke_template.format(
+        failed_phase=phase.value,
+        branch_name=branch_name,
+    )
+    user = (
+        f"Original user prompt:\n{original_prompt}\n\n"
+        f"Failure reason:\n{failure_reason.strip() or '(missing error message)'}\n"
+    )
+    return system, user
+
+
+def run_nuke_summary(
+    repo_root: Path,
+    config: ColonyConfig,
+    *,
+    phase: Phase,
+    branch_name: str,
+    original_prompt: str,
+    failure_reason: str,
+    ui: PhaseUI | NullUI | None = None,
+) -> PhaseResult:
+    """Run a read-only agent that compresses incident context for nuke recovery."""
+    system_prompt, user_prompt = _build_nuke_recovery_prompt(
+        config,
+        phase=phase,
+        branch_name=branch_name,
+        original_prompt=original_prompt,
+        failure_reason=failure_reason,
+    )
+    model = config.get_model(Phase.NUKE)
+    if ui is not None:
+        ui.phase_header("Nuke Summary", config.budget.per_phase, model, phase.value)
+    return run_phase_sync(
+        Phase.NUKE,
+        user_prompt,
+        cwd=repo_root,
+        system_prompt=system_prompt,
+        model=model,
+        budget_usd=config.budget.per_phase,
+        allowed_tools=["Read", "Glob", "Grep"],
+        ui=ui,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Deliver, CEO, and other prompt builders
 # ---------------------------------------------------------------------------
@@ -1886,6 +2012,7 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
                 "preflight": log.preflight.to_dict() if log.preflight else None,
                 "last_successful_phase": last_successful_phase,
                 "resume_events": resume_events,
+                "recovery_events": list(log.recovery_events),
                 "phases": [
                     {
                         "phase": p.phase.value,
@@ -1922,6 +2049,15 @@ def _fail_run_log(
     log.mark_finished()
     _save_run_log(repo_root, log)
     return log
+
+
+def _record_recovery_event(log: RunLog, *, kind: str, details: dict[str, object]) -> None:
+    """Append a recovery event to the run log metadata."""
+    log.recovery_events.append({
+        "kind": kind,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **details,
+    })
 
 
 def _validate_run_id(run_id: str) -> None:
@@ -1990,6 +2126,7 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
             preflight=PreflightResult.from_dict(data["preflight"]) if data.get("preflight") else None,
             source_type=data.get("source_type"),
             review_comment_id=data.get("review_comment_id"),
+            recovery_events=list(data.get("recovery_events", [])),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise click.ClickException(
@@ -3064,6 +3201,8 @@ def run(
     offline: bool = False,
     force: bool = False,
     base_branch: str | None = None,
+    branch_name_override: str | None = None,
+    _nuke_depth: int = 0,
 ) -> RunLog:
     """Execute the full orchestration loop: plan -> implement -> review -> deliver.
 
@@ -3122,7 +3261,7 @@ def run(
 
         slug = slugify(prompt)
         names = planning_names(prompt)
-        branch_name = f"{config.branch_prefix}{slug}"
+        branch_name = branch_name_override or f"{config.branch_prefix}{slug}"
 
         # --- Base branch validation ---
         # Save original branch so we can restore on failure (critical for
@@ -3215,6 +3354,7 @@ def run(
             user_injection_provider=user_injection_provider,
             _make_ui=_make_ui,
             memory_store=memory_store,
+            nuke_depth=_nuke_depth,
         )
     except KeyboardInterrupt:
         _log("Interrupted — saving run state...")
@@ -3278,6 +3418,7 @@ def _run_pipeline(
     user_injection_provider: Callable[[], list[str]] | None,
     _make_ui: Callable[..., PhaseUI | NullUI | None],
     memory_store: MemoryStore | None = None,
+    nuke_depth: int = 0,
 ) -> RunLog:
     """Execute the pipeline phases. Extracted from run() for try/finally branch rollback."""
     try:
@@ -3286,6 +3427,165 @@ def _run_pipeline(
             """Append a phase result and persist immediately so progress survives crashes."""
             log.phases.append(result)
             _save_run_log(repo_root, log)
+
+        def _run_nuke_recovery(failed_phase: Phase, failure_reason: str) -> RunLog | None:
+            """Escalate to last-resort recovery on a fresh branch."""
+            if not config.recovery.enabled or not config.recovery.allow_nuke:
+                return None
+            if nuke_depth >= config.recovery.max_nuke_attempts:
+                return None
+
+            summary_ui = _make_ui()
+            summary_result = run_nuke_summary(
+                repo_root,
+                config,
+                phase=failed_phase,
+                branch_name=branch_name,
+                original_prompt=prompt,
+                failure_reason=failure_reason,
+                ui=summary_ui,
+            )
+            _append_phase(summary_result)
+
+            summary_text = (
+                summary_result.artifacts.get("result")
+                or summary_result.error
+                or failure_reason
+            )[:config.recovery.incident_char_cap]
+            label = incident_slug(f"{failed_phase.value}-nuke")
+            summary_path = write_incident_summary(
+                repo_root,
+                label,
+                summary=summary_text,
+                metadata={
+                    "run_id": log.run_id,
+                    "failed_phase": failed_phase.value,
+                    "branch_name": branch_name,
+                },
+            )
+            preserve_result = preserve_and_reset_worktree(repo_root, label)
+            checkout_branch(repo_root, "main")
+            recovery_branch = (
+                f"{config.branch_prefix}recovery-"
+                f"{sha1(f'{log.run_id}-{failed_phase.value}-{nuke_depth}'.encode()).hexdigest()[:10]}"
+            )
+            create_branch(repo_root, recovery_branch)
+
+            _record_recovery_event(
+                log,
+                kind="nuke",
+                details={
+                    "phase": failed_phase.value,
+                    "summary_path": str(summary_path),
+                    "preservation_mode": preserve_result.preservation_mode,
+                    "stash_message": preserve_result.stash_message,
+                    "recovery_branch": recovery_branch,
+                },
+            )
+            _save_run_log(repo_root, log)
+            _fail_run_log(repo_root, log, f"Escalating to nuke recovery from {failed_phase.value}")
+
+            recovery_prompt = (
+                f"{prompt}\n\n"
+                "Recovery context:\n"
+                f"- Previous branch: {branch_name}\n"
+                f"- Failed phase: {failed_phase.value}\n"
+                f"- Incident summary: {summary_path}\n"
+                f"- Preservation mode: {preserve_result.preservation_mode}\n\n"
+                "Replan from scratch on this clean recovery branch and avoid the prior failure.\n\n"
+                f"{summary_text}"
+            )
+            return run(
+                recovery_prompt,
+                repo_root=repo_root,
+                config=config,
+                plan_only=False,
+                skip_planning=False,
+                from_prd=None,
+                resume_from=None,
+                quiet=quiet,
+                source_issue=log.source_issue,
+                source_issue_url=log.source_issue_url,
+                ui_factory=_make_ui,
+                user_injection_provider=user_injection_provider,
+                offline=offline,
+                force=True,
+                base_branch=None,
+                branch_name_override=recovery_branch,
+                _nuke_depth=nuke_depth + 1,
+            )
+
+        def _attempt_phase_recovery(
+            failed_phase: Phase,
+            failed_result: PhaseResult,
+            *,
+            rerun_phase: Callable[[], PhaseResult],
+        ) -> tuple[PhaseResult | None, RunLog | None]:
+            """Try automatic recovery, then optionally escalate to nuke."""
+            if not config.recovery.enabled:
+                return None, None
+
+            prior_attempts = sum(
+                1
+                for event in log.recovery_events
+                if event.get("kind") == "auto_recovery" and event.get("phase") == failed_phase.value
+            )
+            if prior_attempts >= config.recovery.max_phase_retries:
+                return None, _run_nuke_recovery(
+                    failed_phase,
+                    failed_result.error or f"{failed_phase.value} phase failed",
+                )
+
+            recovery_ui = _make_ui()
+            recovery_result = run_auto_recovery(
+                repo_root,
+                config,
+                phase=failed_phase,
+                branch_name=branch_name,
+                prd_rel=prd_rel,
+                task_rel=task_rel,
+                original_prompt=prompt,
+                failure_reason=failed_result.error or f"{failed_phase.value} phase failed",
+                ui=recovery_ui,
+            )
+            _append_phase(recovery_result)
+            _record_recovery_event(
+                log,
+                kind="auto_recovery",
+                details={
+                    "phase": failed_phase.value,
+                    "success": recovery_result.success,
+                    "error": recovery_result.error or "",
+                },
+            )
+            _save_run_log(repo_root, log)
+
+            if not recovery_result.success:
+                return None, _run_nuke_recovery(
+                    failed_phase,
+                    recovery_result.error or failed_result.error or f"{failed_phase.value} phase failed",
+                )
+
+            rerun_result = rerun_phase()
+            _append_phase(rerun_result)
+            _capture_phase_memory(memory_store, rerun_result, log.run_id, config)
+            _record_recovery_event(
+                log,
+                kind="phase_retry",
+                details={
+                    "phase": failed_phase.value,
+                    "success": rerun_result.success,
+                    "error": rerun_result.error or "",
+                },
+            )
+            _save_run_log(repo_root, log)
+
+            if rerun_result.success:
+                return rerun_result, None
+            return None, _run_nuke_recovery(
+                failed_phase,
+                rerun_result.error or failed_result.error or f"{failed_phase.value} phase failed",
+            )
 
         # --- Phase 1: Plan ---
         _touch_heartbeat(repo_root)
@@ -3358,57 +3658,77 @@ def _run_pipeline(
             else:
                 _log("=== Phase 2: Implement ===")
 
-            # Try parallel implement mode first (Task 6.6)
-            impl_result = None
-            if config.parallel_implement.enabled:
-                impl_result = _run_parallel_implement(
-                    log=log,
-                    repo_root=repo_root,
-                    config=config,
-                    branch_name=branch_name,
-                    prd_rel=prd_rel,
-                    task_rel=task_rel,
-                    _make_ui=_make_ui,
-                )
-                if impl_result is not None:
-                    _log(f"Parallel implement completed: {impl_result.artifacts.get('parallelism_ratio', '1.0x')}")
-
-            # Fall back to sequential if parallel mode is not available or disabled
-            if impl_result is None:
-                _log("Using sequential implement mode")
-                system, user = _build_implement_prompt(config, prd_rel, task_rel, branch_name, repo_root=repo_root)
-                system = _inject_memory_block(system, memory_store, "implement", user, config)
-                user += _drain_injected_context(user_injection_provider)
-                impl_result = run_phase_sync(
-                    Phase.IMPLEMENT,
-                    user,
-                    cwd=repo_root,
-                    system_prompt=system,
-                    model=config.get_model(Phase.IMPLEMENT),
-                    budget_usd=config.budget.per_phase,
-                    ui=impl_ui,
-                )
-            elif impl_ui is not None:
-                if impl_result.success:
-                    completed_tasks = int(impl_result.artifacts.get("completed", "0"))
-                    impl_ui.phase_complete(
-                        impl_result.cost_usd or 0.0,
-                        completed_tasks,
-                        impl_result.duration_ms,
+            def _execute_implement_phase() -> PhaseResult:
+                """Run implement once, preferring parallel mode when enabled."""
+                attempt_result = None
+                if config.parallel_implement.enabled:
+                    attempt_result = _run_parallel_implement(
+                        log=log,
+                        repo_root=repo_root,
+                        config=config,
+                        branch_name=branch_name,
+                        prd_rel=prd_rel,
+                        task_rel=task_rel,
+                        _make_ui=_make_ui,
                     )
-                else:
-                    message = impl_result.error or "Parallel implement phase failed"
-                    impl_ui.phase_error(message)
+                    if attempt_result is not None:
+                        _log(
+                            "Parallel implement completed: "
+                            f"{attempt_result.artifacts.get('parallelism_ratio', '1.0x')}"
+                        )
+
+                if attempt_result is None:
+                    _log("Using sequential implement mode")
+                    system, user = _build_implement_prompt(
+                        config,
+                        prd_rel,
+                        task_rel,
+                        branch_name,
+                        repo_root=repo_root,
+                    )
+                    system = _inject_memory_block(system, memory_store, "implement", user, config)
+                    user += _drain_injected_context(user_injection_provider)
+                    attempt_result = run_phase_sync(
+                        Phase.IMPLEMENT,
+                        user,
+                        cwd=repo_root,
+                        system_prompt=system,
+                        model=config.get_model(Phase.IMPLEMENT),
+                        budget_usd=config.budget.per_phase,
+                        ui=impl_ui,
+                    )
+                elif impl_ui is not None:
+                    if attempt_result.success:
+                        completed_tasks = int(attempt_result.artifacts.get("completed", "0"))
+                        impl_ui.phase_complete(
+                            attempt_result.cost_usd or 0.0,
+                            completed_tasks,
+                            attempt_result.duration_ms,
+                        )
+                    else:
+                        message = attempt_result.error or "Parallel implement phase failed"
+                        impl_ui.phase_error(message)
+                return attempt_result
+
+            impl_result = _execute_implement_phase()
 
             _append_phase(impl_result)
             _capture_phase_memory(memory_store, impl_result, log.run_id, config)
 
             if not impl_result.success:
-                if impl_ui is None:
-                    _fail_run_log(repo_root, log, f"Implement phase failed: {impl_result.error}")
-                else:
-                    _fail_run_log(repo_root, log, "Implement phase failed")
-                return log
+                recovered_result, recovery_log = _attempt_phase_recovery(
+                    Phase.IMPLEMENT,
+                    impl_result,
+                    rerun_phase=_execute_implement_phase,
+                )
+                if recovery_log is not None:
+                    return recovery_log
+                if recovered_result is None:
+                    if impl_ui is None:
+                        _fail_run_log(repo_root, log, f"Implement phase failed: {impl_result.error}")
+                    else:
+                        _fail_run_log(repo_root, log, "Implement phase failed")
+                    return log
 
         # --- Phase 3: Review/Fix Loop ---
         _touch_heartbeat(repo_root)
@@ -3605,21 +3925,25 @@ def _run_pipeline(
             else:
                 phase_num = 5 if config.phases.review else 3
                 _log(f"=== Phase {phase_num}: Deliver ===")
-            system, user = _build_deliver_prompt(
-                config, prd_rel, branch_name,
-                source_issue=log.source_issue,
-                base_branch=base_branch,
-            )
-            user += _drain_injected_context(user_injection_provider)
-            deliver_result = run_phase_sync(
-                Phase.DELIVER,
-                user,
-                cwd=repo_root,
-                system_prompt=system,
-                model=config.get_model(Phase.DELIVER),
-                budget_usd=config.budget.per_phase,
-                ui=deliver_ui,
-            )
+
+            def _execute_deliver_phase() -> PhaseResult:
+                system, user = _build_deliver_prompt(
+                    config, prd_rel, branch_name,
+                    source_issue=log.source_issue,
+                    base_branch=base_branch,
+                )
+                user += _drain_injected_context(user_injection_provider)
+                return run_phase_sync(
+                    Phase.DELIVER,
+                    user,
+                    cwd=repo_root,
+                    system_prompt=system,
+                    model=config.get_model(Phase.DELIVER),
+                    budget_usd=config.budget.per_phase,
+                    ui=deliver_ui,
+                )
+
+            deliver_result = _execute_deliver_phase()
             _append_phase(deliver_result)
 
             # Extract PR URL from deliver artifacts
@@ -3628,11 +3952,22 @@ def _run_pipeline(
                 log.pr_url = pr_url
 
             if not deliver_result.success:
-                if deliver_ui is None:
-                    _fail_run_log(repo_root, log, f"Deliver phase failed: {deliver_result.error}")
-                else:
-                    _fail_run_log(repo_root, log, "Deliver phase failed")
-                return log
+                recovered_result, recovery_log = _attempt_phase_recovery(
+                    Phase.DELIVER,
+                    deliver_result,
+                    rerun_phase=_execute_deliver_phase,
+                )
+                if recovery_log is not None:
+                    return recovery_log
+                if recovered_result is None:
+                    if deliver_ui is None:
+                        _fail_run_log(repo_root, log, f"Deliver phase failed: {deliver_result.error}")
+                    else:
+                        _fail_run_log(repo_root, log, "Deliver phase failed")
+                    return log
+                recovered_pr_url = recovered_result.artifacts.get("pr_url", "")
+                if recovered_pr_url:
+                    log.pr_url = recovered_pr_url
 
         # --- CI Fix Phase (post-deliver) ---
         if config.ci_fix.enabled and config.phases.deliver:

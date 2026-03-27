@@ -497,7 +497,16 @@ def _run_review_only_flow(
 
 def _run_cleanup_loop() -> None:
     """Run the default cleanup loop inside the current repository."""
-    cleanup_scan(max_lines=None, max_functions=None, use_ai=True, refactor_file=None)
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+    _run_cleanup_scan_impl(
+        repo_root,
+        config,
+        max_lines=None,
+        max_functions=None,
+        use_ai=True,
+        refactor_file=None,
+    )
 
 
 # Sentinel value returned by _handle_tui_command when the user resets the conversation.
@@ -623,6 +632,7 @@ def _route_prompt(
     repo_root: Path,
     source: str,
     quiet: bool = False,
+    continuation_active: bool = False,
 ) -> RouteOutcome:
     """Choose a TUI/CLI execution mode for the incoming prompt."""
     from colonyos.router import (
@@ -642,6 +652,7 @@ def _route_prompt(
         project_stack=config.project.stack if config.project else "",
         vision=config.vision,
         source=source,
+        continuation_active=continuation_active,
     )
 
     log_mode_selection(
@@ -652,6 +663,11 @@ def _route_prompt(
     )
 
     if decision.confidence < config.router.confidence_threshold:
+        if continuation_active:
+            return RouteOutcome(
+                mode=ModeAgentMode.DIRECT_AGENT.value,
+                announcement="Continuing conversation.",
+            )
         if not quiet:
             click.echo(click.style(
                 f"Low confidence ({decision.confidence:.0%}), entering feature planning mode...",
@@ -888,7 +904,11 @@ def _run_repl() -> None:
             if config.router.enabled:
                 try:
                     route_outcome = _route_prompt(
-                        stripped, config, repo_root, source="repl",
+                        stripped,
+                        config,
+                        repo_root,
+                        source="repl",
+                        continuation_active=last_direct_session_id is not None,
                     )
                 except KeyboardInterrupt:
                     click.echo(click.style(
@@ -4241,18 +4261,16 @@ def cleanup_artifacts(
     write_cleanup_log(runs_dir, "artifacts", log_data)
 
 
-@cleanup.command("scan")
-@click.option("--max-lines", type=int, default=None, help="Line count threshold (default: from config).")
-@click.option("--max-functions", type=int, default=None, help="Function count threshold (default: from config).")
-@click.option("--ai", "use_ai", is_flag=True, help="Run AI-powered qualitative analysis (uses budget).")
-@click.option("--refactor", "refactor_file", type=click.Path(), default=None, help="Delegate refactoring of FILE to colonyos run.")
-def cleanup_scan(
+def _run_cleanup_scan_impl(
+    repo_root: Path,
+    config: ColonyConfig,
+    *,
     max_lines: int | None,
     max_functions: int | None,
     use_ai: bool,
     refactor_file: str | None,
 ) -> None:
-    """Scan codebase for structural complexity."""
+    """Shared implementation for CLI and TUI cleanup scans."""
     from rich.console import Console
     from rich.table import Table
 
@@ -4262,8 +4280,6 @@ def cleanup_scan(
         write_cleanup_log,
     )
 
-    repo_root = _find_repo_root()
-    config = load_config(repo_root)
     lines_threshold = max_lines if max_lines is not None else config.cleanup.scan_max_lines
     funcs_threshold = max_functions if max_functions is not None else config.cleanup.scan_max_functions
 
@@ -4380,6 +4396,30 @@ def cleanup_scan(
 
         except Exception as exc:
             click.echo(f"\nAI scan error: {exc}", err=True)
+
+
+@cleanup.command("scan")
+@click.option("--max-lines", type=int, default=None, help="Line count threshold (default: from config).")
+@click.option("--max-functions", type=int, default=None, help="Function count threshold (default: from config).")
+@click.option("--ai", "use_ai", is_flag=True, help="Run AI-powered qualitative analysis (uses budget).")
+@click.option("--refactor", "refactor_file", type=click.Path(), default=None, help="Delegate refactoring of FILE to colonyos run.")
+def cleanup_scan(
+    max_lines: int | None,
+    max_functions: int | None,
+    use_ai: bool,
+    refactor_file: str | None,
+) -> None:
+    """Scan codebase for structural complexity."""
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+    _run_cleanup_scan_impl(
+        repo_root,
+        config,
+        max_lines=max_lines,
+        max_functions=max_functions,
+        use_ai=use_ai,
+        refactor_file=refactor_file,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -5123,6 +5163,7 @@ def _launch_tui(
             repo_root,
             source="tui",
             quiet=True,
+            continuation_active=last_direct_session_id is not None,
         )
         if route_outcome.announcement:
             queue.sync_q.put(TextBlockMsg(text=route_outcome.announcement))

@@ -12,6 +12,7 @@ from colonyos.config import (
     DEFAULTS,
     LearningsConfig,
     PhasesConfig,
+    RecoveryConfig,
     RouterConfig,
     SlackConfig,
     VALID_MODELS,
@@ -42,6 +43,9 @@ class TestLoadConfig:
         assert config.reviews_dir == "cOS_reviews"
         assert config.personas == []
         assert config.project is None
+        assert config.recovery.enabled is True
+        assert config.recovery.max_phase_retries == 1
+        assert config.recovery.allow_nuke is True
 
     def test_loads_from_yaml(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
@@ -231,6 +235,23 @@ class TestSaveConfig:
         config_path = tmp_repo / ".colonyos" / "config.yaml"
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert raw["reviews_dir"] == "custom_reviews"
+
+    def test_recovery_roundtrip(self, tmp_repo: Path):
+        original = ColonyConfig(
+            recovery=RecoveryConfig(
+                enabled=True,
+                max_phase_retries=2,
+                allow_nuke=True,
+                max_nuke_attempts=3,
+                incident_char_cap=6000,
+            )
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.recovery.max_phase_retries == 2
+        assert loaded.recovery.allow_nuke is True
+        assert loaded.recovery.max_nuke_attempts == 3
+        assert loaded.recovery.incident_char_cap == 6000
 
 
 class TestReviewerField:

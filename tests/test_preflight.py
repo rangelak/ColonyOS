@@ -281,6 +281,34 @@ class TestPreflightCheck:
         result = _preflight_check(tmp_path, "colonyos/test-feature", config, offline=True)
         assert result.main_behind_count is None
 
+    @patch("colonyos.orchestrator.subprocess.run")
+    def test_recovery_artifacts_do_not_block_preflight(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.orchestrator import _preflight_check
+        from colonyos.config import ColonyConfig
+
+        def side_effect(cmd, **kwargs):
+            if cmd[1] == "rev-parse":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="main\n", stderr="")
+            if cmd[1] == "status":
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=0,
+                    stdout="?? .colonyos/recovery/incident.md\n",
+                    stderr="",
+                )
+            if cmd[1] == "branch":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+            if cmd[1] == "fetch":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+            if cmd[1] == "rev-list":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+        config = ColonyConfig()
+        result = _preflight_check(tmp_path, "colonyos/test-feature", config)
+        assert result.is_clean is True
+
     @patch("colonyos.orchestrator.check_open_pr", return_value=(99, "https://github.com/org/repo/pull/99"))
     @patch("colonyos.orchestrator.subprocess.run")
     def test_force_bypasses_all_checks(self, mock_run, mock_check_pr, tmp_path: Path) -> None:

@@ -252,6 +252,31 @@ class TestSessionStateTuiWiring:
         # Should retain old session_id
         assert last_direct_session_id == "session-old"
 
+    def test_active_session_biases_short_followup_to_direct_agent(self, _mock_tui_env: Path):
+        from colonyos.cli import _route_prompt
+        from colonyos.config import load_config
+        from colonyos.router import ModeAgentDecision, ModeAgentMode
+
+        config = load_config(_mock_tui_env)
+        low_confidence = ModeAgentDecision(
+            mode=ModeAgentMode.FALLBACK,
+            confidence=0.1,
+            summary="ambiguous",
+            reasoning="short follow-up",
+            announcement="I need a bit more direction.",
+        )
+        with patch("colonyos.router.choose_tui_mode", return_value=low_confidence), \
+             patch("colonyos.router.log_mode_selection"):
+            outcome = _route_prompt(
+                "v0.3.3 please",
+                config,
+                _mock_tui_env,
+                "tui",
+                quiet=True,
+                continuation_active=True,
+            )
+        assert outcome.mode == "direct_agent"
+
     def test_handle_tui_command_new_returns_conversation_cleared(self):
         """_handle_tui_command('new') returns the Conversation cleared signal."""
         from colonyos.cli import _handle_tui_command
