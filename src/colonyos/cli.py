@@ -5252,25 +5252,56 @@ def _launch_tui(
     def _run_auto_in_tui(raw_text: str) -> None:
         """Run the auto loop inside the TUI, using the TextualUI adapter for output."""
         import shlex
+        import time as _time
 
         from colonyos.ceo_profiles import get_ceo_profile
         from colonyos.tui.adapter import IterationHeaderMsg, LoopCompleteMsg, TextualUI
 
         nonlocal current_adapter
 
+        # Guard against concurrent auto loops (FR-1.7)
+        if app_instance._auto_loop_active:
+            queue = app_instance.event_queue
+            queue.sync_q.put(CommandOutputMsg(
+                text="An auto loop is already running. Wait for it to finish or press Ctrl+C to cancel."
+            ))
+            return
+
         try:
             tokens = shlex.split(raw_text)
         except ValueError:
             tokens = raw_text.split()
 
-        # Parse auto options from tokens
+        # Parse auto options from tokens (--loop, --max-budget, --max-hours, --persona)
         loop_count = 1
+        max_budget: float | None = None
+        max_hours: float | None = None
+        persona_name: str | None = None
         for i, tok in enumerate(tokens):
             if tok == "--loop" and i + 1 < len(tokens):
                 try:
                     loop_count = int(tokens[i + 1])
                 except ValueError:
                     loop_count = 1
+            elif tok == "--max-budget" and i + 1 < len(tokens):
+                try:
+                    max_budget = float(tokens[i + 1])
+                except ValueError:
+                    pass
+            elif tok == "--max-hours" and i + 1 < len(tokens):
+                try:
+                    max_hours = float(tokens[i + 1])
+                except ValueError:
+                    pass
+            elif tok == "--persona" and i + 1 < len(tokens):
+                persona_name = tokens[i + 1]
+
+        # Resolve budget/time caps: CLI flags > config > defaults (mirrors auto command)
+        effective_max_budget = max_budget if max_budget is not None else config.budget.max_total_usd
+        effective_max_hours = max_hours if max_hours is not None else config.budget.max_duration_hours
+
+        # Resolve custom CEO profiles from config
+        custom_profiles = config.ceo_profiles if config.ceo_profiles else None
 
         queue = app_instance.event_queue
         app_instance._stop_event.clear()
@@ -5279,13 +5310,33 @@ def _launch_tui(
         aggregate_cost = 0.0
         last_persona_role: str | None = None
         completed = 0
+        loop_start = _time.monotonic()
 
         try:
             for iteration in range(1, loop_count + 1):
                 if app_instance._stop_event.is_set():
                     break
 
-                persona = get_ceo_profile(exclude=last_persona_role)
+                # --- Time cap check ---
+                elapsed_hours = (_time.monotonic() - loop_start) / 3600.0
+                if elapsed_hours >= effective_max_hours:
+                    queue.sync_q.put(CommandOutputMsg(
+                        text=f"Time limit reached ({elapsed_hours:.1f}h / {effective_max_hours:.1f}h). Stopping auto loop."
+                    ))
+                    break
+
+                # --- Budget cap check ---
+                if aggregate_cost >= effective_max_budget:
+                    queue.sync_q.put(CommandOutputMsg(
+                        text=f"Budget limit reached (${aggregate_cost:.2f} / ${effective_max_budget:.2f}). Stopping auto loop."
+                    ))
+                    break
+
+                persona = get_ceo_profile(
+                    name=persona_name,
+                    exclude=last_persona_role,
+                    custom_profiles=custom_profiles,
+                )
                 last_persona_role = persona.role
 
                 queue.sync_q.put(IterationHeaderMsg(
@@ -5315,6 +5366,13 @@ def _launch_tui(
                     current_adapter = None
 
                 aggregate_cost += ceo_result.cost_usd or 0.0
+
+                # --- Post-CEO budget cap check ---
+                if aggregate_cost >= effective_max_budget:
+                    queue.sync_q.put(CommandOutputMsg(
+                        text=f"Budget limit reached (${aggregate_cost:.2f} / ${effective_max_budget:.2f}). Stopping auto loop."
+                    ))
+                    break
 
                 if not ceo_result.success or not prompt:
                     queue.sync_q.put(CommandOutputMsg(
@@ -5367,6 +5425,13 @@ def _launch_tui(
                 finally:
                     current_adapter = None
 
+                # --- Post-pipeline budget cap check ---
+                if aggregate_cost >= effective_max_budget:
+                    queue.sync_q.put(CommandOutputMsg(
+                        text=f"Budget limit reached (${aggregate_cost:.2f} / ${effective_max_budget:.2f}). Stopping auto loop."
+                    ))
+                    break
+
         finally:
             app_instance._auto_loop_active = False
             queue.sync_q.put(LoopCompleteMsg(
@@ -5378,12 +5443,23 @@ def _launch_tui(
         if current_adapter is not None:
             current_adapter.enqueue_user_injection(text)
 
+    # Instantiate TranscriptLogWriter for this TUI session (FR-3)
+    from colonyos.tui.log_writer import TranscriptLogWriter
+    from datetime import datetime, timezone
+
+    logs_dir = repo_root / ".colonyos" / "logs"
+    run_id = datetime.now(timezone.utc).strftime("tui_%Y%m%d_%H%M%S")
+    log_writer = TranscriptLogWriter(
+        logs_dir, run_id, max_log_files=config.max_log_files,
+    )
+
     app_instance = AssistantApp(
         run_callback=_run_callback,
         recovery_callback=_recovery_callback,
         inject_callback=_inject_callback,
         initial_prompt=prompt,
         command_hints=command_hints,
+        log_writer=log_writer,
     )
 
     previous_handler = signal.getsignal(signal.SIGINT)

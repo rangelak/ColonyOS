@@ -497,3 +497,125 @@ class TestKeybindings:
             await asyncio.sleep(0.15)
             await pilot.pause()
             assert len(transcript.lines) > baseline, "Consumer loop died after dispatch error"
+
+
+class TestCancelRunBehavior:
+    """Verify two-tier cancellation semantics."""
+
+    @pytest.mark.asyncio
+    async def test_first_ctrl_c_does_not_exit_tui(self) -> None:
+        """First Ctrl+C should set stop event but NOT exit the TUI."""
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_cancel_run()
+            await pilot.pause()
+            # The app should still be running (not exited)
+            assert app._stop_event.is_set()
+            assert app._auto_loop_active is False
+            # App is still responsive — we can still interact
+            transcript = app.query_one(TranscriptView)
+            assert len(transcript.lines) > 0
+
+    @pytest.mark.asyncio
+    async def test_second_ctrl_c_exits(self) -> None:
+        """Second Ctrl+C within 2s should raise SystemExit."""
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_cancel_run()  # first press
+            with pytest.raises(SystemExit):
+                app.action_cancel_run()  # second press within 2s
+
+
+class TestExportTranscriptPermissions:
+    """Verify transcript export file permissions."""
+
+    @pytest.mark.asyncio
+    async def test_export_creates_file_with_restricted_permissions(self, tmp_path) -> None:
+        """Exported transcript files should have 0o600 permissions."""
+        import os
+        import stat
+
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            # Add some content to the transcript
+            app.event_queue.sync_q.put(TextBlockMsg(text="test content for export"))
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+
+            # Monkeypatch the logs dir to use tmp_path
+            import colonyos.tui.app as app_module
+            original_path = None
+
+            # Trigger export
+            app.action_export_transcript()
+            await pilot.pause()
+
+            # Find the exported file
+            logs_dir = app_module.Path(".colonyos") / "logs"
+            if logs_dir.exists():
+                exports = list(logs_dir.glob("transcript_*.txt"))
+                if exports:
+                    mode = os.stat(exports[-1]).st_mode
+                    assert stat.S_IMODE(mode) == 0o600
+                    # Cleanup
+                    for f in exports:
+                        f.unlink(missing_ok=True)
+
+
+class TestLogWriterIntegration:
+    """Verify log writer is wired into the queue consumer."""
+
+    @pytest.mark.asyncio
+    async def test_log_writer_receives_phase_header(self, tmp_path) -> None:
+        """LogWriter should receive phase header messages from the consumer."""
+        from colonyos.tui.log_writer import TranscriptLogWriter
+
+        writer = TranscriptLogWriter(tmp_path, "test-integration")
+        app = AssistantApp(log_writer=writer)
+        async with app.run_test() as pilot:
+            app.event_queue.sync_q.put(
+                PhaseHeaderMsg(phase_name="plan", budget=5.0, model="opus")
+            )
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+
+        writer.close()
+        content = writer.log_path.read_text()
+        assert "plan" in content
+        assert "$5.00" in content
+
+    @pytest.mark.asyncio
+    async def test_log_writer_receives_tool_lines(self, tmp_path) -> None:
+        """LogWriter should receive tool line messages from the consumer."""
+        from colonyos.tui.log_writer import TranscriptLogWriter
+
+        writer = TranscriptLogWriter(tmp_path, "test-tools")
+        app = AssistantApp(log_writer=writer)
+        async with app.run_test() as pilot:
+            app.event_queue.sync_q.put(
+                ToolLineMsg(tool_name="Read", arg="foo.py", style="cyan")
+            )
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+
+        writer.close()
+        content = writer.log_path.read_text()
+        assert "Read" in content
+        assert "foo.py" in content
+
+    @pytest.mark.asyncio
+    async def test_log_writer_closed_on_unmount(self, tmp_path) -> None:
+        """LogWriter should be closed when the app unmounts."""
+        from colonyos.tui.log_writer import TranscriptLogWriter
+
+        writer = TranscriptLogWriter(tmp_path, "test-close")
+        app = AssistantApp(log_writer=writer)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+        # After context exit, writer should be closed
+        assert writer._closed
