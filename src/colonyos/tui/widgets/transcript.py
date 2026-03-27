@@ -8,9 +8,10 @@ renderables for color-coded, structured output.
 from __future__ import annotations
 
 import re
+from io import StringIO
 
 from rich import box
-from rich.console import Group
+from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
@@ -39,30 +40,30 @@ class TranscriptView(RichLog):
 
     # Layout CSS is defined in APP_CSS (styles.py) — no DEFAULT_CSS needed.
 
-    # Number of lines from the bottom within which auto-scroll stays active.
-    _AUTO_SCROLL_THRESHOLD = 3
-
     def __init__(self, **kwargs: object) -> None:
         # RichLog constructor args
         super().__init__(highlight=False, markup=True, wrap=True, **kwargs)
         self._auto_scroll = True
+        self._programmatic_scroll: bool = False
 
     # -- scroll tracking -----------------------------------------------------
 
     def on_scroll_y(self) -> None:
         """Track whether the user has scrolled away from the bottom."""
+        if self._programmatic_scroll:
+            return
         max_scroll = self.virtual_size.height - self.size.height
         if max_scroll <= 0:
             self._auto_scroll = True
         else:
-            self._auto_scroll = (
-                self.scroll_y >= max_scroll - self._AUTO_SCROLL_THRESHOLD
-            )
+            self._auto_scroll = self.scroll_y >= max_scroll
 
     def _scroll_to_end(self) -> None:
         """Scroll to the bottom if auto-scroll is active."""
         if self._auto_scroll:
+            self._programmatic_scroll = True
             self.scroll_end(animate=False)
+            self._programmatic_scroll = False
 
     # -- public API ----------------------------------------------------------
 
@@ -236,6 +237,24 @@ class TranscriptView(RichLog):
         )
         self.write(panel, expand=True)
         self.write(Text())
+        self._scroll_to_end()
+
+    def get_plain_text(self) -> str:
+        """Return all transcript content as plain text (for transcript export).
+
+        Uses Rich's Console to render each line without markup.
+        """
+        parts: list[str] = []
+        for line_entry in self.lines:
+            buf = StringIO()
+            console = Console(file=buf, width=200, no_color=True, highlight=False)
+            console.print(line_entry, end="")
+            parts.append(buf.getvalue())
+        return "\n".join(parts)
+
+    def re_enable_auto_scroll(self) -> None:
+        """Re-enable auto-scroll and jump to the bottom."""
+        self._auto_scroll = True
         self._scroll_to_end()
 
     def clear_transcript(self) -> None:

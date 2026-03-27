@@ -239,6 +239,8 @@ class ColonyConfig:
     sweep: SweepConfig = field(default_factory=SweepConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
+    ceo_profiles: list[Persona] = field(default_factory=list)
+    max_log_files: int = 50
 
     def get_model(self, phase: Phase) -> str:
         """Return the model for a phase, falling back to the global default."""
@@ -696,6 +698,8 @@ def load_config(repo_root: Path) -> ColonyConfig:
         sweep=_parse_sweep_config(raw.get("sweep", {})),
         memory=_parse_memory_config(raw.get("memory", {})),
         recovery=_parse_recovery_config(raw.get("recovery", {})),
+        ceo_profiles=_parse_personas(raw.get("ceo_profiles", [])),
+        max_log_files=int(raw.get("max_log_files", 50)),
     )
 
 

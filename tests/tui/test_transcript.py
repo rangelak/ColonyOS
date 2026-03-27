@@ -202,3 +202,37 @@ class TestTranscriptView:
             log = tv
             # Should have entries from both phases
             assert len(log.lines) >= 6  # noqa: SLF001
+
+    async def test_programmatic_scroll_guard(self, require_tui: None) -> None:
+        """on_scroll_y should be a no-op when _programmatic_scroll is True."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv._auto_scroll = True
+            tv._programmatic_scroll = True
+            tv.on_scroll_y()
+            # _auto_scroll should remain True because the guard skipped the check
+            assert tv._auto_scroll is True
+
+    async def test_get_plain_text_returns_string(self, require_tui: None) -> None:
+        """get_plain_text should return transcript content as a string."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv.append_user_message("hello plain text")
+            text = tv.get_plain_text()
+            assert isinstance(text, str)
+            assert "hello" in text.lower() or "plain" in text.lower()
+
+    async def test_get_plain_text_empty(self, require_tui: None) -> None:
+        """get_plain_text on empty transcript returns empty or whitespace string."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            text = tv.get_plain_text()
+            assert isinstance(text, str)
+
+    async def test_re_enable_auto_scroll(self, require_tui: None) -> None:
+        """re_enable_auto_scroll should set _auto_scroll to True."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv._auto_scroll = False
+            tv.re_enable_auto_scroll()
+            assert tv._auto_scroll is True

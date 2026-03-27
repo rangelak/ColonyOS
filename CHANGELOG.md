@@ -1,5 +1,35 @@
 # Changelog
 
+## 20260327_200000 — TUI-Native Auto Mode, CEO Profile Rotation & UX Fixes
+
+Brings the full autonomous loop (CEO → plan → implement → review → deliver) into the TUI
+with real-time transcript output, iteration tracking in the StatusBar, and graceful Ctrl+C
+cancellation. Adds rotating CEO persona profiles for diverse feature proposals, persistent
+run log files, Ctrl+S transcript export, and fixes the auto-scroll bug that yanked users
+to the bottom while reading earlier content.
+
+**Created:**
+- `src/colonyos/ceo_profiles.py` — Curated pool of CEO persona profiles with random rotation and config override support
+- `src/colonyos/tui/log_writer.py` — Per-run plain-text log writer with secret sanitization and log rotation
+- `tests/test_ceo_profiles.py` — Unit tests for CEO profile selection, rotation, and config loading
+- `tests/tui/test_auto_in_tui.py` — Integration tests for auto mode running inside the TUI
+- `tests/tui/test_log_writer.py` — Unit tests for log writer, sanitization, and file rotation
+- `tests/tui/test_transcript.py` — Tests for auto-scroll fix behavior
+- `tests/tui/test_app.py` — Extended TUI app tests for auto command handling
+
+**Modified:**
+- `src/colonyos/cli.py` — Wired auto loop into TUI with iteration lifecycle, budget caps, and cancellation
+- `src/colonyos/tui/app.py` — Auto command handling, Ctrl+S export, StatusBar iteration display
+- `src/colonyos/tui/adapter.py` — Added `IterationHeaderMsg` and `LoopCompleteMsg` message types
+- `src/colonyos/tui/widgets/transcript.py` — Fixed auto-scroll with programmatic scroll guard
+- `src/colonyos/tui/widgets/status_bar.py` — Iteration count and cost display during auto loops
+- `src/colonyos/tui/widgets/hint_bar.py` — Added Ctrl+S keybinding hint
+- `src/colonyos/config.py` — Added `ceo_profiles` and `max_log_files` config fields
+- `src/colonyos/orchestrator.py` — Pass CEO persona through to pipeline phases
+
+**PRD:** `cOS_prds/20260327_171407_prd_add_support_for_auto_inside_the_tui_the_tui_should_be_the_default_colonyos_exper.md`
+**Tasks:** `cOS_tasks/20260327_171407_tasks_add_support_for_auto_inside_the_tui_the_tui_should_be_the_default_colonyos_exper.md`
+
 ## 20260326_180000 — Persistent Memory System
 
 Adds a native persistent memory system to ColonyOS using SQLite (zero new dependencies).

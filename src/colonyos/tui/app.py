@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import janus
@@ -19,6 +23,8 @@ from textual.binding import Binding
 from colonyos.models import PreflightError
 from colonyos.tui.adapter import (
     CommandOutputMsg,
+    IterationHeaderMsg,
+    LoopCompleteMsg,
     PhaseCompleteMsg,
     PhaseErrorMsg,
     PhaseHeaderMsg,
@@ -62,6 +68,8 @@ class AssistantApp(App):
         Binding("ctrl+c", "cancel_run", "Cancel current run", show=False),
         Binding("ctrl+l", "clear_transcript", "Clear transcript", show=False),
         Binding("escape", "focus_composer", "Focus composer", show=False),
+        Binding("end", "scroll_to_end", "Scroll to bottom", show=False),
+        Binding("ctrl+s", "export_transcript", "Export transcript", show=False),
     ]
 
     def __init__(
@@ -72,6 +80,7 @@ class AssistantApp(App):
         cancel_callback: Callable[[], None] | None = None,
         initial_prompt: str | None = None,
         command_hints: Sequence[str] | None = None,
+        log_writer: Any | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -81,12 +90,15 @@ class AssistantApp(App):
         self._cancel_callback = cancel_callback
         self._initial_prompt = initial_prompt
         self._command_hints = list(command_hints or [])
+        self._log_writer = log_writer
         self._event_queue: janus.Queue[object] | None = None
         self._consumer_task: asyncio.Task[None] | None = None
         self._run_active = False
         self._last_cancel_at = 0.0
         self._pending_recovery_error: PreflightError | None = None
         self._pending_recovery_prompt: str | None = None
+        self._stop_event = threading.Event()
+        self._auto_loop_active = False
 
     @property
     def event_queue(self) -> janus.Queue[object]:
@@ -119,7 +131,7 @@ class AssistantApp(App):
             self.query_one(TranscriptView).append_welcome_banner()
 
     async def on_unmount(self) -> None:
-        """Clean up the consumer task and queue on exit."""
+        """Clean up the consumer task, queue, and log writer on exit."""
         if self._consumer_task is not None:
             self._consumer_task.cancel()
             try:
@@ -128,6 +140,8 @@ class AssistantApp(App):
                 pass
         if self._event_queue is not None:
             self._event_queue.close()
+        if self._log_writer is not None:
+            self._log_writer.close()
 
     # -----------------------------------------------------------------
     # Queue consumer loop
@@ -138,6 +152,7 @@ class AssistantApp(App):
         queue = self.event_queue.async_q
         transcript: TranscriptView = self.query_one(TranscriptView)
         status_bar: StatusBar = self.query_one(StatusBar)
+        lw = self._log_writer  # may be None
 
         while True:
             try:
@@ -154,15 +169,23 @@ class AssistantApp(App):
                         msg.model,
                         msg.extra,
                     )
+                    if lw:
+                        lw.write_phase_header(msg.phase_name, msg.budget, msg.model, msg.extra)
 
                 elif isinstance(msg, ToolLineMsg):
                     transcript.append_tool_line(msg.tool_name, msg.arg, msg.style)
+                    if lw:
+                        lw.write_tool_line(msg.tool_name, msg.arg)
 
                 elif isinstance(msg, TextBlockMsg):
                     transcript.append_text_block(msg.text)
+                    if lw:
+                        lw.write_text_block(msg.text)
 
                 elif isinstance(msg, CommandOutputMsg):
                     transcript.append_command_output(msg.text)
+                    if lw:
+                        lw.write_text_block(msg.text)
 
                 elif isinstance(msg, PhaseCompleteMsg):
                     duration_s = msg.duration_ms / 1000.0
@@ -170,16 +193,41 @@ class AssistantApp(App):
                     duration_str = f"{mins}m {secs}s" if mins else f"{secs}s"
                     status_bar.set_complete(msg.cost, msg.turns, duration_s)
                     transcript.append_phase_complete(msg.cost, msg.turns, duration_str)
+                    if lw:
+                        lw.write_phase_complete(msg.cost, msg.turns, duration_str)
 
                 elif isinstance(msg, PhaseErrorMsg):
                     status_bar.set_error(msg.error)
                     transcript.append_phase_error(msg.error)
+                    if lw:
+                        lw.write_phase_error(msg.error)
 
                 elif isinstance(msg, TurnCompleteMsg):
                     status_bar.set_turn_count(msg.turn_number)
 
                 elif isinstance(msg, UserInjectionMsg):
                     transcript.append_injected_message(msg.text)
+                    if lw:
+                        lw.write_user_message(msg.text)
+
+                elif isinstance(msg, IterationHeaderMsg):
+                    status_bar.set_iteration(msg.iteration, msg.total)
+                    transcript.append_notice(
+                        f"Iteration {msg.iteration}/{msg.total}  "
+                        f"Persona: {msg.persona_name}  "
+                        f"Cost so far: ${msg.aggregate_cost:.2f}"
+                    )
+                    if lw:
+                        lw.write_iteration_header(msg.iteration, msg.total, msg.persona_name, msg.aggregate_cost)
+
+                elif isinstance(msg, LoopCompleteMsg):
+                    status_bar.clear_iteration()
+                    transcript.append_notice(
+                        f"Auto loop complete: {msg.iterations_completed} iterations, "
+                        f"${msg.total_cost:.2f} total cost"
+                    )
+                    if lw:
+                        lw.write_notice(f"Auto loop complete: {msg.iterations_completed} iterations, ${msg.total_cost:.2f} total cost")
             except Exception:
                 logger.exception("Error dispatching TUI message %r; consumer loop continues", type(msg).__name__)
 
@@ -214,21 +262,29 @@ class AssistantApp(App):
     # -----------------------------------------------------------------
 
     def action_cancel_run(self) -> None:
-        """Cancel the current orchestrator run (Ctrl+C)."""
+        """Cancel the current orchestrator run (Ctrl+C).
+
+        Two-tier cancellation: first press sets the stop event (graceful),
+        second press within 2 seconds exits the TUI immediately.
+        """
         now = time.monotonic()
         if now - self._last_cancel_at <= 2.0:
+            # Second press within 2s — hard exit
             raise SystemExit(1)
         self._last_cancel_at = now
 
+        # First press — graceful stop: signal the auto loop to break between
+        # iterations and cancel running workers, but keep the TUI alive.
+        self._stop_event.set()
         self.workers.cancel_all()
         status_bar = self.query_one(StatusBar)
         status_bar.set_error("Cancelled by user")
         transcript = self.query_one(TranscriptView)
-        transcript.append_notice("Run cancelled by user")
+        transcript.append_notice("Run cancelled by user (press Ctrl+C again within 2s to exit TUI)")
         self._run_active = False
+        self._auto_loop_active = False
         if self._cancel_callback is not None:
             self._cancel_callback()
-        self.exit()
 
     def action_clear_transcript(self) -> None:
         """Clear all entries from the transcript."""
@@ -239,6 +295,26 @@ class AssistantApp(App):
         composer = self.query_one(Composer)
         ta = composer.query_one("TextArea")
         ta.focus()
+
+    def action_scroll_to_end(self) -> None:
+        """Re-enable auto-scroll and jump to the bottom of the transcript."""
+        self.query_one(TranscriptView).re_enable_auto_scroll()
+
+    def action_export_transcript(self) -> None:
+        """Export the current transcript to a plain-text file."""
+        transcript = self.query_one(TranscriptView)
+        text = transcript.get_plain_text()
+        if not text.strip():
+            transcript.append_notice("Transcript is empty, nothing to export.")
+            return
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        logs_dir = Path(".colonyos") / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        export_path = logs_dir / f"transcript_{timestamp}.txt"
+        fd = os.open(str(export_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        transcript.append_notice(f"Transcript exported to {export_path}")
 
     def restore_composer_text(self, text: str) -> None:
         """Put submitted text back into the composer after a blocked run."""
