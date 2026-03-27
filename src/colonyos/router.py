@@ -63,7 +63,77 @@ class ModeAgentDecision:
     skip_planning: bool = False
 
 
-def _heuristic_mode_decision(query: str) -> ModeAgentDecision | None:
+def _is_cleanup_request(lowered: str) -> bool:
+    """Return True only for explicit cleanup workflow requests.
+
+    Avoid hijacking pasted diagnostic text that merely mentions the word
+    "cleanup" while describing some other failure.
+    """
+    return (
+        lowered.startswith("cleanup")
+        or lowered.startswith("clean up")
+        or lowered.startswith("repo hygiene")
+        or lowered.startswith("code hygiene")
+        or " cleanup the " in f" {lowered} "
+        or " clean up the " in f" {lowered} "
+        or " hygiene for " in f" {lowered} "
+    )
+
+
+def _has_explicit_workflow_intent(lowered: str) -> bool:
+    """Return True when the request clearly wants a non-direct workflow."""
+    if any(phrase in lowered for phrase in (
+        "continue the last plan",
+        "continue from the last",
+        "continue existing",
+        "use the latest prd",
+        "continue from prd",
+        "continue from tasks",
+    )):
+        return True
+    if lowered.startswith("review ") or " just review" in lowered or "review this branch" in lowered:
+        return True
+    if _is_cleanup_request(lowered):
+        return True
+    return any(re.search(pat, lowered) for pat in (
+        r"\badd\b(?!\s+(?:a note|me to|more context))",
+        r"\bbuild\b",
+        r"\bimplement\b",
+        r"\bfeature\b",
+        r"\brefactor\b",
+        r"\bintroduce\b",
+        r"\bcreate\b",
+    ))
+
+
+def _looks_like_direct_followup(lowered: str) -> bool:
+    """Heuristic for short continuation turns in an active direct thread."""
+    if not lowered or _has_explicit_workflow_intent(lowered):
+        return False
+
+    words = [part for part in re.split(r"\s+", lowered) if part]
+    if not words:
+        return False
+    if len(words) <= 12:
+        return True
+    if any(phrase in lowered for phrase in (
+        "go ahead",
+        "do it",
+        "use that",
+        "ship it",
+        "sounds good",
+        "that works",
+        "please",
+    )) and len(words) <= 18:
+        return True
+    return False
+
+
+def _heuristic_mode_decision(
+    query: str,
+    *,
+    continuation_active: bool = False,
+) -> ModeAgentDecision | None:
     """Use cheap keyword heuristics for obvious requests before invoking a model."""
     lowered = sanitize_untrusted_content(query).strip().lower()
     if not lowered:
@@ -73,6 +143,15 @@ def _heuristic_mode_decision(query: str) -> ModeAgentDecision | None:
             summary="Empty request",
             reasoning="The request is empty after sanitization.",
             announcement="I need a bit more direction.",
+        )
+
+    if continuation_active and _looks_like_direct_followup(lowered):
+        return ModeAgentDecision(
+            mode=ModeAgentMode.DIRECT_AGENT,
+            confidence=0.99,
+            summary="Continue active direct conversation",
+            reasoning="A direct-agent session is already active and this looks like a short follow-up.",
+            announcement="Continuing conversation.",
         )
 
     if any(phrase in lowered for phrase in (
@@ -100,7 +179,7 @@ def _heuristic_mode_decision(query: str) -> ModeAgentDecision | None:
             announcement="Entering review mode.",
         )
 
-    if "cleanup" in lowered or "clean up" in lowered or "hygiene" in lowered:
+    if _is_cleanup_request(lowered):
         return ModeAgentDecision(
             mode=ModeAgentMode.CLEANUP_LOOP,
             confidence=0.96,
@@ -274,13 +353,17 @@ def choose_tui_mode(
     vision: str = "",
     source: str = "tui",
     model: str | None = None,
+    continuation_active: bool = False,
 ) -> ModeAgentDecision:
     """Select the best TUI operating mode for a user request."""
     from colonyos.agent import run_phase_sync
     from colonyos.config import RouterConfig, load_config
     from colonyos.models import Phase
 
-    heuristic = _heuristic_mode_decision(query)
+    heuristic = _heuristic_mode_decision(
+        query,
+        continuation_active=continuation_active,
+    )
     if heuristic is not None:
         logger.debug("Mode selector used heuristic decision: %s", heuristic.mode.value)
         return heuristic

@@ -21,6 +21,7 @@ from colonyos.cli import (
     _SAFE_TUI_COMMANDS,
     _handle_tui_command,
     _run_direct_agent,
+    _run_cleanup_loop,
     _resolve_latest_prd_path,
     _save_loop_state,
     _resolve_latest_prd_path,
@@ -201,6 +202,31 @@ class TestRun:
         assert outcome.skip_planning is True
         assert outcome.mode == "plan_implement_loop"
 
+    def test_route_prompt_biases_to_direct_for_active_continuation(self, tmp_path: Path):
+        from colonyos.cli import _route_prompt
+        from colonyos.router import ModeAgentDecision, ModeAgentMode
+
+        config = _make_config(tmp_path)
+        low_confidence = ModeAgentDecision(
+            mode=ModeAgentMode.FALLBACK,
+            confidence=0.2,
+            summary="ambiguous follow-up",
+            reasoning="short reply",
+            announcement="I need a bit more direction.",
+        )
+        with patch("colonyos.router.choose_tui_mode", return_value=low_confidence), \
+             patch("colonyos.router.log_mode_selection"):
+            outcome = _route_prompt(
+                "dude 033 please",
+                config,
+                tmp_path,
+                "test",
+                quiet=True,
+                continuation_active=True,
+            )
+        assert outcome.mode == "direct_agent"
+        assert outcome.announcement == "Continuing conversation."
+
     def test_direct_agent_route_bypasses_orchestrator(self, runner: CliRunner, tmp_path: Path):
         _make_config(tmp_path)
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
@@ -315,6 +341,17 @@ class TestRunDirectAgentSessionResume:
             )
         assert success is False
         assert session_id == "sess-fail"
+
+
+class TestCleanupLoop:
+    def test_run_cleanup_loop_calls_shared_helper(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.load_config", return_value=config), \
+             patch("colonyos.cli._run_cleanup_scan_impl") as mock_impl:
+            _run_cleanup_loop()
+        mock_impl.assert_called_once()
+        assert mock_impl.call_args.kwargs["use_ai"] is True
 
     def test_fallback_retries_without_resume_on_failure(self, tmp_path: Path):
         """When resume fails, _run_direct_agent retries once without resume."""

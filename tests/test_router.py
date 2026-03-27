@@ -240,6 +240,28 @@ class TestHeuristicModeDecision:
         assert result is not None
         assert result.mode == ModeAgentMode.CLEANUP_LOOP
 
+    def test_cleanup_mention_in_diagnostic_text_does_not_hijack_mode(self) -> None:
+        result = _heuristic_mode_decision(
+            "this cleanup crash is bullshit and should never happen again"
+        )
+        assert result is None
+
+    def test_continuation_routes_short_followup_direct(self) -> None:
+        result = _heuristic_mode_decision(
+            "dude 033 please",
+            continuation_active=True,
+        )
+        assert result is not None
+        assert result.mode == ModeAgentMode.DIRECT_AGENT
+
+    def test_continuation_still_honors_explicit_cleanup(self) -> None:
+        result = _heuristic_mode_decision(
+            "cleanup the repo",
+            continuation_active=True,
+        )
+        assert result is not None
+        assert result.mode == ModeAgentMode.CLEANUP_LOOP
+
     def test_question_mark_routes_direct(self) -> None:
         result = _heuristic_mode_decision("what does this function do?")
         assert result is not None

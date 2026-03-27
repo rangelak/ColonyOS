@@ -1,30 +1,17 @@
-I've created the updated Strategic Directions document at `STRATEGIC_DIRECTIONS.md`. Here's a summary:
+Updated `STRATEGIC_DIRECTIONS.md` to iteration 3. Here's what changed:
 
-## Key Findings
+**New projects added:**
+- **Superpowers** (118K stars) — the dominant skills framework showing mandatory workflows beat optional suggestions
+- **Paperclip** (35K stars) — "zero-human company" orchestrator with org charts, budgets, governance, and goal alignment
+- **oh-my-claudecode** (13.5K stars) — multi-agent Claude Code plugin with a team pipeline very similar to ColonyOS
+- **RuFlo** (27K stars) — self-learning swarm orchestration with Q-Learning routing
+- **gptme** (4.2K stars) — lean terminal-native agent showing simplicity wins for adoption
+- **Claw-Empire** (870 stars) — visual agent office simulator with worktree isolation
 
-**Landscape Overview:**
-- The space has stratified into three tiers: foundation orchestrators (crewAI, AutoGen), full-stack autonomous devs (OpenHands, Cline, Aider), and persona/memory systems (gstack, mem0, OpenClaw)
-- The hottest trend is **persona-driven specialization** — gstack's 15-persona setup proves focused roles outperform generic agents
+**Key new patterns:**
+- **Company primitives** (budgets, org charts, governance) not just agent primitives — inspired by Paperclip
+- **Subagent-per-task with fresh context** — from Superpowers' architecture
+- **Self-improving routing** — from RuFlo's Q-Learning approach
+- **Socratic requirements gathering** — from oh-my-claudecode's `/deep-interview`
 
-**8 Projects Worth Studying (all verified via GitHub API):**
-1. **OpenClaw** (328K stars) - Skills Registry extensibility model
-2. **gstack** (33K stars) - Garry Tan's opinionated personas, direct ColonyOS inspiration
-3. **OpenHands** (69K stars) - Sandboxed Docker execution + SWE-bench evaluation
-4. **Cline** (59K stars) - Best-in-class permission UX for human oversight
-5. **AutoGen** (56K stars) - Multi-agent conversation modeling
-6. **mem0** (51K stars) - Episodic vs semantic memory stratification
-7. **crewAI** (47K stars) - Role-based Agent → Task → Crew hierarchies
-8. **Aider** (42K stars) - Repo maps for context management
-
-**Key Patterns:**
-- Persona specialization beats general agents
-- Memory stratification (episodic + semantic) is non-negotiable at scale
-- Skills/Tools as extension points enables ecosystem growth
-- Sandboxing unlocks true autonomy
-
-**Watch Out For:**
-- Context window exhaustion (solved by repo maps)
-- Agent sprawl without clear decision-makers
-- Demo-ware that fails on real codebases
-
-The document includes the user's North Star verbatim and positions ColonyOS within this landscape.
+**Removed/replaced:** Stale entries for OpenClaw, mem0, crewAI, and Aider (kept AutoGen, dropped the others in favor of more relevant projects). The landscape framing shifted from "three tiers" to the current energy centers: skills frameworks, company-as-code orchestrators, and multi-agent coordination layers.
