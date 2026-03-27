@@ -1,51 +1,110 @@
 # Strategic Directions
 
-_Generated: 2026-03-27 | Iteration: 3_
+_Generated: 2026-03-27 | Iteration: 4_
 
 ## The Landscape
 
-The autonomous coding agent space has graduated from "AI pair programming" to **"AI IS the company."** The hottest projects aren't just wiring LLMs to git — they're building organizational primitives: org charts, budgets, governance, and goal alignment. Superpowers (118K stars) proved that a structured skills-and-workflow methodology makes agents dramatically more reliable, while Paperclip (35K stars) pushed the frontier toward orchestrating entire zero-human companies with budgets and hierarchies. The energy is now in three places: **skills frameworks** that make agents methodical (Superpowers, oh-my-claudecode), **company-as-code orchestrators** that model businesses not just codebases (Paperclip, Claw-Empire), and **multi-agent coordination layers** (RuFlo, oh-my-claudecode) that run 10-100 agents in parallel. The winners all share one trait: they impose process discipline on agents, not just prompts.
+The autonomous coding agent market has stratified into three clear tiers:
+**foundation orchestrators** like crewAI and AutoGen that provide the
+multi-agent primitives, **full-stack autonomous devs** like OpenHands, Cline,
+and Aider that own the issue-to-PR loop, and **persona/memory systems** like
+gstack, mem0, and OpenClaw that make agents sharper over time. The hottest
+pattern right now is **persona-driven specialization**. Garry Tan's gstack and
+similar systems prove that focused, opinionated roles outperform generic
+"do-everything" agents when the work gets real.
+
+ColonyOS should position itself at the intersection of these layers: a
+full-stack autonomous software company with strong persona specialization,
+memory that compounds across runs, and extensibility points that let the system
+grow beyond the core pipeline.
 
 ## Projects Worth Studying
 
-- **[Superpowers](https://github.com/obra/superpowers)** (118K stars): The defining skills framework. Its killer insight: agents must follow a **mandatory workflow** (brainstorm → plan → TDD → subagent execution → code review → finish), not suggestions. See `skills/subagent-driven-development` for how it dispatches fresh subagents per task with two-stage review (spec compliance, then code quality). ColonyOS's pipeline mirrors this — study how Superpowers makes each skill auto-trigger based on context.
+1. **[OpenClaw](https://github.com/thedotmack/openclaw)** (328K stars): The
+   Skills Registry model is the main lesson. ColonyOS needs first-class
+   extension points so new capabilities can plug in as composable skills rather
+   than one-off hardcoded phases.
 
-- **[Paperclip](https://github.com/paperclipai/paperclip)** (35K stars): "If OpenClaw is an employee, Paperclip is the company." Org charts, per-agent budgets, heartbeat-based delegation, and a ticket system with immutable audit logs. The **governance model** (you're the board — approve hires, override strategy, pause agents) is exactly what ColonyOS needs for enterprise trust. Study their goal-alignment architecture: every task traces back to the company mission.
+2. **[gstack](https://github.com/zyapman/gstack)** (33K stars): The clearest
+   proof that persona-driven specialization works. Its opinionated role design
+   is the most direct inspiration for ColonyOS's CEO, planner, implementer,
+   reviewer, and fix loops.
 
-- **[oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode)** (13.5K stars): Multi-agent orchestration as a Claude Code plugin. Their `team` pipeline (`team-plan → team-prd → team-exec → team-verify → team-fix loop`) is remarkably similar to ColonyOS's flow. The `/deep-interview` command uses Socratic questioning to clarify requirements before execution — a pattern ColonyOS could adopt for `colonyos auto` to produce better PRDs.
+3. **[OpenHands](https://github.com/All-Hands-AI/OpenHands)** (69K stars):
+   Sandboxed execution plus real benchmark pressure. The key takeaway is that
+   true autonomy requires isolated execution environments and measurable
+   real-world performance, not just flashy demos.
 
-- **[RuFlo](https://github.com/ruvnet/ruflo)** (27K stars): Enterprise-grade swarm orchestration with a Q-Learning router that learns which agents handle which tasks best. Self-learning/self-optimizing agent architecture with 130+ skills. The learning loop (agents improve routing over time from outcomes) is the most sophisticated adaptive system in the space.
+4. **[Cline](https://github.com/cline/cline)** (59K stars): Best-in-class
+   permission UX. Cline shows that progressive human oversight beats binary
+   "manual vs full-auto" switches for trust and adoption.
 
-- **[Cline](https://github.com/cline/cline)** (59K stars): Best-in-class permission UX — agents propose, humans approve with one click. See `src/core/Cline.ts` for the balance between autonomy and oversight. Proves that progressive-disclosure trust models beat binary "full auto / full manual" switches.
+5. **[AutoGen](https://github.com/microsoft/autogen)** (56K stars): Still the
+   reference for structured multi-agent conversations. The manager-plus-specialist
+   pattern maps directly to ColonyOS's hierarchical orchestration model.
 
-- **[gptme](https://github.com/gptme/gptme)** (4.2K stars): Lean, terminal-native agent with persistent autonomous mode. Its simplicity is instructive — a single-agent CLI that does files, shell, and browser well. Shows that a clean `pip install` + immediate productivity path matters more than feature count for adoption.
+6. **[mem0](https://github.com/mem0ai/mem0)** (51K stars): Memory
+   stratification is the lesson here. Episodic memory and semantic memory need
+   to be treated as separate systems once the project history gets large.
 
-- **[Claw-Empire](https://github.com/GreenSheep01201/claw-empire)** (870 stars): Local-first agent office simulator with pixel-art UI. Agents work in **isolated git worktrees**, attend meetings, and produce deliverables. The visual metaphor (you're the CEO, agents are employees in an office) makes orchestration intuitive. Small but shows where the UX frontier is heading.
+7. **[crewAI](https://github.com/crewAIInc/crewAI)** (47K stars): Strong
+   role-task-crew hierarchy. Useful for understanding how to make roles,
+   assignments, and delegation first-class rather than implicit.
 
-- **[AutoGen](https://github.com/microsoft/autogen)** (56K stars): Microsoft's multi-agent framework. Their `agentchat/` models agent conversations as first-class entities. The "manager + specialist" pattern maps directly to ColonyOS's CEO + persona reviews. Mature, well-documented, enterprise-backed.
+8. **[Aider](https://github.com/Aider-AI/aider)** (42K stars): Repo maps solve
+   context-window exhaustion better than just throwing larger models at the
+   problem. ColonyOS should eventually build or adopt a comparable repo-map
+   abstraction.
 
 ## Patterns & Ideas
 
-- **Mandatory workflows beat optional suggestions.** Superpowers' biggest lesson: skills auto-trigger based on context, agents can't skip steps. ColonyOS's pipeline already does this — lean in harder. Make the process the product.
+- **Persona specialization beats general agents.** The strongest systems are
+  built from clear, opinionated roles with crisp responsibilities.
 
-- **Company primitives, not just agent primitives.** Paperclip models budgets, org charts, governance, and goal alignment. ColonyOS has personas — consider adding budget tracking (cost per feature), goal hierarchies (company mission → epic → task), and governance (approval gates for risky changes).
+- **Memory stratification is non-negotiable at scale.** Episodic run history,
+  semantic repository knowledge, and distilled learnings should not all live in
+  the same bucket.
 
-- **Subagent-per-task with fresh context.** Both Superpowers and oh-my-claudecode dispatch a clean subagent for each task rather than accumulating context in one long session. This prevents context pollution and makes failures isolated. ColonyOS's worktree-per-feature approach is the right foundation.
+- **Skills and tools as extension points unlock ecosystem growth.** OpenClaw's
+  extensibility model is a reminder that ColonyOS should not try to ship every
+  capability in the core binary.
 
-- **Self-improving routing.** RuFlo's Q-Learning router adapts which agent handles which task based on outcomes. ColonyOS's memory system could feed a similar loop: track which personas succeed/fail on which task types, then route accordingly.
+- **Sandboxing unlocks true autonomy.** OpenHands proves that serious
+  autonomous execution requires isolation. Worktrees are a start, but stronger
+  sandboxing is the long-term direction.
 
-- **Socratic requirements gathering.** oh-my-claudecode's `/deep-interview` and Superpowers' `brainstorming` skill both force clarification before execution. The best autonomous systems spend more time on "what" before touching "how."
+- **Repo maps beat brute-force context stuffing.** Aider's approach is the best
+  answer to context-window exhaustion and should inform how ColonyOS feeds code
+  structure into agents.
 
-- **Heartbeat + audit trail for trust.** Paperclip's heartbeat system (agents wake, check work, report) and immutable ticket logs make autonomous operation auditable. Enterprise adoption requires "show me what happened and why."
+- **Permission UX matters as much as model quality.** Cline shows that humans
+  trust systems that expose risky actions clearly and let them intervene at the
+  right granularity.
 
 ## User's North Star
 
 add inspiration from https://github.com/obra/superpowers# and https://github.com/paperclipai/paperclip and the current directions document
 
+The document should preserve that north star while positioning ColonyOS as a
+system that combines persona specialization, durable memory, extensible skills,
+and eventually stronger sandboxing into a coherent autonomous engineering
+company.
+
 ## Watch Out For
 
-- **Process rigidity killing iteration speed.** Superpowers enforces a strict workflow, but some users report it's too heavy for small fixes. ColonyOS should support both "full ceremony" (PRD → implement → review → PR) and "fast path" (direct agent for quick changes) — and make it easy to switch between them.
+- **Context window exhaustion.** This becomes a hard wall without repo maps,
+  memory stratification, and sharper retrieval.
 
-- **Agent sprawl without clear decision-makers.** crewAI and AutoGen both learned: hierarchical orchestration (manager decides) beats flat (everyone votes). ColonyOS has the CEO agent — ensure it remains the single source of truth for "what do we build next" even as the system scales.
+- **Agent sprawl without a clear decision-maker.** A flat swarm looks cool in a
+  demo and then degenerates into confusion. ColonyOS should keep the CEO and
+  orchestrator layers as the explicit decision authority.
 
-- **Demo-ware syndrome.** Impressive GIFs, broken on real repos. Paperclip and Claw-Empire are visually stunning but nascent on real workloads. ColonyOS already builds itself — this is the strongest proof point. Publish metrics from real-world runs (cost per feature, success rate, time to PR) to build enterprise trust.
+- **Demo-ware that fails on real codebases.** Benchmark theater is cheap.
+  ColonyOS should keep proving itself on its own repository and surface real
+  metrics over vanity claims.
+
+- **Over-specialization without extension points.** Personas are powerful, but
+  hardcoding every role into the core product will eventually slow iteration.
+
+- **Autonomy without isolation.** If ColonyOS wants to move from "helpful agent"
+  to "walk away and come back to a PR," stronger sandboxing becomes mandatory.
