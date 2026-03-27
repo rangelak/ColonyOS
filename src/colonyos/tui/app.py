@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import janus
@@ -19,6 +22,8 @@ from textual.binding import Binding
 from colonyos.models import PreflightError
 from colonyos.tui.adapter import (
     CommandOutputMsg,
+    IterationHeaderMsg,
+    LoopCompleteMsg,
     PhaseCompleteMsg,
     PhaseErrorMsg,
     PhaseHeaderMsg,
@@ -62,6 +67,8 @@ class AssistantApp(App):
         Binding("ctrl+c", "cancel_run", "Cancel current run", show=False),
         Binding("ctrl+l", "clear_transcript", "Clear transcript", show=False),
         Binding("escape", "focus_composer", "Focus composer", show=False),
+        Binding("end", "scroll_to_end", "Scroll to bottom", show=False),
+        Binding("ctrl+s", "export_transcript", "Export transcript", show=False),
     ]
 
     def __init__(
@@ -87,6 +94,8 @@ class AssistantApp(App):
         self._last_cancel_at = 0.0
         self._pending_recovery_error: PreflightError | None = None
         self._pending_recovery_prompt: str | None = None
+        self._stop_event = threading.Event()
+        self._auto_loop_active = False
 
     @property
     def event_queue(self) -> janus.Queue[object]:
@@ -180,6 +189,21 @@ class AssistantApp(App):
 
                 elif isinstance(msg, UserInjectionMsg):
                     transcript.append_injected_message(msg.text)
+
+                elif isinstance(msg, IterationHeaderMsg):
+                    status_bar.set_iteration(msg.iteration, msg.total)
+                    transcript.append_notice(
+                        f"Iteration {msg.iteration}/{msg.total}  "
+                        f"Persona: {msg.persona_name}  "
+                        f"Cost so far: ${msg.aggregate_cost:.2f}"
+                    )
+
+                elif isinstance(msg, LoopCompleteMsg):
+                    status_bar.clear_iteration()
+                    transcript.append_notice(
+                        f"Auto loop complete: {msg.iterations_completed} iterations, "
+                        f"${msg.total_cost:.2f} total cost"
+                    )
             except Exception:
                 logger.exception("Error dispatching TUI message %r; consumer loop continues", type(msg).__name__)
 
@@ -214,18 +238,24 @@ class AssistantApp(App):
     # -----------------------------------------------------------------
 
     def action_cancel_run(self) -> None:
-        """Cancel the current orchestrator run (Ctrl+C)."""
+        """Cancel the current orchestrator run (Ctrl+C).
+
+        Two-tier cancellation: first press sets the stop event (graceful),
+        second press within 2 seconds exits immediately.
+        """
         now = time.monotonic()
         if now - self._last_cancel_at <= 2.0:
             raise SystemExit(1)
         self._last_cancel_at = now
 
+        self._stop_event.set()
         self.workers.cancel_all()
         status_bar = self.query_one(StatusBar)
         status_bar.set_error("Cancelled by user")
         transcript = self.query_one(TranscriptView)
         transcript.append_notice("Run cancelled by user")
         self._run_active = False
+        self._auto_loop_active = False
         if self._cancel_callback is not None:
             self._cancel_callback()
         self.exit()
@@ -239,6 +269,24 @@ class AssistantApp(App):
         composer = self.query_one(Composer)
         ta = composer.query_one("TextArea")
         ta.focus()
+
+    def action_scroll_to_end(self) -> None:
+        """Re-enable auto-scroll and jump to the bottom of the transcript."""
+        self.query_one(TranscriptView).re_enable_auto_scroll()
+
+    def action_export_transcript(self) -> None:
+        """Export the current transcript to a plain-text file."""
+        transcript = self.query_one(TranscriptView)
+        text = transcript.get_plain_text()
+        if not text.strip():
+            transcript.append_notice("Transcript is empty, nothing to export.")
+            return
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        logs_dir = Path(".colonyos") / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        export_path = logs_dir / f"transcript_{timestamp}.txt"
+        export_path.write_text(text, encoding="utf-8")
+        transcript.append_notice(f"Transcript exported to {export_path}")
 
     def restore_composer_text(self, text: str) -> None:
         """Put submitted text back into the composer after a blocked run."""

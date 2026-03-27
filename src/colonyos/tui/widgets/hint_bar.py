@@ -50,4 +50,7 @@ class HintBar(Static):
         text.append("  ·  ", style=COLOR_DIM)
         text.append("Ctrl+L", style=f"bold {COLOR_ACCENT}")
         text.append(" clear", style=COLOR_DIM)
+        text.append("  ·  ", style=COLOR_DIM)
+        text.append("Ctrl+S", style=f"bold {COLOR_ACCENT}")
+        text.append(" export", style=COLOR_DIM)
         self.update(text)

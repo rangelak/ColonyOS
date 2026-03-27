@@ -512,6 +512,7 @@ def _run_cleanup_loop() -> None:
 # Sentinel value returned by _handle_tui_command when the user resets the conversation.
 # Used to detect /new without fragile substring matching on user-facing text.
 _NEW_CONVERSATION_SIGNAL = "Conversation cleared."
+_AUTO_COMMAND_SIGNAL = "__AUTO_COMMAND__"
 _SAFE_TUI_COMMANDS = {
     "auto",
     "doctor",
@@ -572,12 +573,14 @@ def _handle_tui_command(text: str, *, config: ColonyConfig) -> tuple[bool, str |
             f"`colonyos {command_name}` from a normal shell.",
             False,
         )
-    if command_name == "auto" and not (config.auto_approve or "--no-confirm" in tokens):
-        return (
-            True,
-            "`auto` inside the TUI needs `--no-confirm` unless `auto_approve` is enabled.",
-            False,
-        )
+    if command_name == "auto":
+        if not (config.auto_approve or "--no-confirm" in tokens):
+            return (
+                True,
+                "`auto` inside the TUI needs `--no-confirm` unless `auto_approve` is enabled.",
+                False,
+            )
+        return True, _AUTO_COMMAND_SIGNAL, False
     if command_name not in _SAFE_TUI_COMMANDS:
         return (
             True,
@@ -5141,6 +5144,9 @@ def _launch_tui(
 
         handled, command_output, should_exit = _handle_tui_command(text, config=config)
         if handled:
+            if command_output == _AUTO_COMMAND_SIGNAL:
+                _run_auto_in_tui(text)
+                return
             if command_output:
                 queue.sync_q.put(CommandOutputMsg(text=command_output))
             # Clear conversation state on /new command
@@ -5242,6 +5248,131 @@ def _launch_tui(
             )
         finally:
             current_adapter = None
+
+    def _run_auto_in_tui(raw_text: str) -> None:
+        """Run the auto loop inside the TUI, using the TextualUI adapter for output."""
+        import shlex
+
+        from colonyos.ceo_profiles import get_ceo_profile
+        from colonyos.tui.adapter import IterationHeaderMsg, LoopCompleteMsg, TextualUI
+
+        nonlocal current_adapter
+
+        try:
+            tokens = shlex.split(raw_text)
+        except ValueError:
+            tokens = raw_text.split()
+
+        # Parse auto options from tokens
+        loop_count = 1
+        for i, tok in enumerate(tokens):
+            if tok == "--loop" and i + 1 < len(tokens):
+                try:
+                    loop_count = int(tokens[i + 1])
+                except ValueError:
+                    loop_count = 1
+
+        queue = app_instance.event_queue
+        app_instance._stop_event.clear()
+        app_instance._auto_loop_active = True
+
+        aggregate_cost = 0.0
+        last_persona_role: str | None = None
+        completed = 0
+
+        try:
+            for iteration in range(1, loop_count + 1):
+                if app_instance._stop_event.is_set():
+                    break
+
+                persona = get_ceo_profile(exclude=last_persona_role)
+                last_persona_role = persona.role
+
+                queue.sync_q.put(IterationHeaderMsg(
+                    iteration=iteration,
+                    total=loop_count,
+                    persona_name=persona.role,
+                    aggregate_cost=aggregate_cost,
+                ))
+
+                adapter = TextualUI(queue.sync_q)
+                current_adapter = adapter
+
+                try:
+                    prompt, ceo_result = run_ceo(
+                        repo_root,
+                        config,
+                        ui=cast(Any, adapter),
+                        ceo_persona=persona,
+                    )
+                except Exception as exc:
+                    logger.exception("CEO phase failed in auto TUI loop iter %d", iteration)
+                    queue.sync_q.put(CommandOutputMsg(
+                        text=f"CEO phase failed: {type(exc).__name__}: {exc}"
+                    ))
+                    continue
+                finally:
+                    current_adapter = None
+
+                aggregate_cost += ceo_result.cost_usd or 0.0
+
+                if not ceo_result.success or not prompt:
+                    queue.sync_q.put(CommandOutputMsg(
+                        text=f"CEO phase did not produce a prompt (iter {iteration}). Continuing..."
+                    ))
+                    continue
+
+                queue.sync_q.put(TextBlockMsg(text=f"CEO Proposal: {prompt[:200]}..."))
+
+                if config.directions_auto_update:
+                    try:
+                        directions_cost = update_directions_after_ceo(
+                            repo_root, config, prompt, iteration,
+                            ui=cast(Any, adapter),
+                        )
+                        aggregate_cost += directions_cost
+                    except Exception:
+                        logger.exception("Directions update failed in auto TUI loop")
+
+                if app_instance._stop_event.is_set():
+                    break
+
+                # Run the orchestrator pipeline
+                adapter2 = TextualUI(queue.sync_q)
+                current_adapter = adapter2
+
+                def _ui_factory(prefix: str = "") -> TextualUI:
+                    return adapter2
+
+                try:
+                    log = run_orchestrator(
+                        prompt,
+                        repo_root=repo_root,
+                        config=config,
+                        verbose=False,
+                        ui_factory=_ui_factory,
+                        user_injection_provider=adapter2.drain_user_injections,
+                    )
+                    aggregate_cost += log.total_cost_usd
+                    completed += 1
+                except PreflightError as exc:
+                    queue.sync_q.put(CommandOutputMsg(
+                        text=f"Pre-flight failed (iter {iteration}): {exc}"
+                    ))
+                except Exception as exc:
+                    logger.exception("Pipeline failed in auto TUI loop iter %d", iteration)
+                    queue.sync_q.put(CommandOutputMsg(
+                        text=f"Pipeline failed (iter {iteration}): {type(exc).__name__}: {exc}"
+                    ))
+                finally:
+                    current_adapter = None
+
+        finally:
+            app_instance._auto_loop_active = False
+            queue.sync_q.put(LoopCompleteMsg(
+                iterations_completed=completed,
+                total_cost=aggregate_cost,
+            ))
 
     def _inject_callback(text: str) -> None:
         if current_adapter is not None:
