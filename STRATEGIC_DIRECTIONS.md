@@ -11,12 +11,19 @@ and Aider that own the issue-to-PR loop, and **persona/memory systems** like
 gstack, mem0, and OpenClaw that make agents sharper over time. The hottest
 pattern right now is **persona-driven specialization**. Garry Tan's gstack and
 similar systems prove that focused, opinionated roles outperform generic
-"do-everything" agents when the work gets real.
+"do-everything" agents when the work gets real. At the same time, the earlier
+wave of **skills frameworks** and **company-as-code orchestrators** still
+matters. Superpowers showed that mandatory workflows make agents more reliable,
+while Paperclip pushed toward org charts, budgets, governance, and
+goal-tracking. ColonyOS should treat the new three-tier framing as an
+extension of those earlier lessons, not a replacement.
 
-ColonyOS should position itself at the intersection of these layers: a
-full-stack autonomous software company with strong persona specialization,
-memory that compounds across runs, and extensibility points that let the system
-grow beyond the core pipeline.
+ColonyOS should position itself at the intersection of these layers as **the
+autonomous company**: not just a coding agent, but a full-stack autonomous
+software company with strong persona specialization, memory that compounds
+across runs, extensibility points that let the system grow beyond the core
+pipeline, and governance primitives that make the company legible and
+controllable.
 
 ## Projects Worth Studying
 
@@ -56,6 +63,39 @@ grow beyond the core pipeline.
    problem. ColonyOS should eventually build or adopt a comparable repo-map
    abstraction.
 
+## Additional Prior Directions To Keep
+
+- **[Superpowers](https://github.com/obra/superpowers)**: Still one of the most
+  important projects in the space even if it is not in the "8 verified to
+  study" list above. Its core lesson is that **mandatory workflow discipline**
+  beats optional best-practice suggestions. ColonyOS should keep learning from
+  its subagent-driven development flow and auto-triggered skills model.
+
+- **[Paperclip](https://github.com/paperclipai/paperclip)**: The strongest
+  reference for **company primitives** like budgets, heartbeats, governance,
+  and mission alignment. ColonyOS should keep borrowing from this if the goal
+  is "AI is the company," not just "AI helps write code."
+
+- **[oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode)**:
+  Worth preserving because its `team-plan -> team-prd -> team-exec ->
+  team-verify -> team-fix` loop is very close to ColonyOS's own orchestration
+  shape, and its Socratic requirement-clarification pattern is still highly
+  relevant.
+
+- **[RuFlo](https://github.com/ruvnet/ruflo)**: Keep this in view for
+  self-improving routing. Its learning-based agent selection is still one of
+  the best references for how ColonyOS could evolve persona/task routing over
+  time.
+
+- **[gptme](https://github.com/gptme/gptme)**: Important as a reminder that a
+  clean terminal-native UX and a lightweight install path matter for adoption,
+  not just architecture sophistication.
+
+- **[Claw-Empire](https://github.com/GreenSheep01201/claw-empire)**: Still
+  useful as a UX frontier reference. Even if it is not yet a mature benchmark
+  for real codebase execution, the office/CEO metaphor remains instructive for
+  how to make orchestration legible to humans.
+
 ## Patterns & Ideas
 
 - **Persona specialization beats general agents.** The strongest systems are
@@ -69,6 +109,10 @@ grow beyond the core pipeline.
   extensibility model is a reminder that ColonyOS should not try to ship every
   capability in the core binary.
 
+- **Mandatory workflows beat optional suggestions.** This remains the central
+  Superpowers lesson and should stay core to ColonyOS thinking. The pipeline
+  should feel like the product, not just scaffolding around prompts.
+
 - **Sandboxing unlocks true autonomy.** OpenHands proves that serious
   autonomous execution requires isolation. Worktrees are a start, but stronger
   sandboxing is the long-term direction.
@@ -81,14 +125,19 @@ grow beyond the core pipeline.
   trust systems that expose risky actions clearly and let them intervene at the
   right granularity.
 
+- **Company primitives, not just agent primitives.** Paperclip is still the
+  key reference here. ColonyOS should keep moving toward budgets, governance,
+  audit trails, and mission-to-task traceability.
+
 ## User's North Star
 
 add inspiration from https://github.com/obra/superpowers# and https://github.com/paperclipai/paperclip and the current directions document
 
-The document should preserve that north star while positioning ColonyOS as a
-system that combines persona specialization, durable memory, extensible skills,
-and eventually stronger sandboxing into a coherent autonomous engineering
-company.
+The document should preserve that north star while positioning ColonyOS as
+**the autonomous company**: a system that combines persona specialization,
+durable memory, extensible skills, stronger sandboxing, and explicit company
+primitives into a coherent organization that can decide, build, review, fix,
+and ship with minimal human intervention.
 
 ## Watch Out For
 
