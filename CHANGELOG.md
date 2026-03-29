@@ -1,5 +1,26 @@
 # Changelog
 
+## 20260330_002500 — Handle 529 Overloaded Errors with Retry and Optional Model Fallback
+
+Adds a transport-level retry layer with exponential backoff and jitter inside `run_phase()` so that transient API 529/503 errors are handled transparently without triggering the orchestrator's heavyweight recovery. Includes optional model fallback (hard-blocked on safety-critical phases), full observability via `PhaseResult.retry_info`, and configurable `RetryConfig` in `config.yaml`.
+
+Closes #47.
+
+**Created:**
+- `tests/test_agent.py` — Comprehensive tests for retry loop, transient error detection, fallback logic
+- `tests/test_config.py` — Tests for RetryConfig defaults and YAML deserialization
+- `tests/test_models.py` — Tests for PhaseResult retry_info field
+
+**Modified:**
+- `src/colonyos/agent.py` — Added `_is_transient_error()`, retry loop with backoff in `run_phase()`, optional model fallback
+- `src/colonyos/config.py` — Added `RetryConfig` dataclass with `max_attempts`, `base_delay_seconds`, `max_delay_seconds`, `fallback_model`
+- `src/colonyos/models.py` — Added `retry_info` field to `PhaseResult`
+- `src/colonyos/orchestrator.py` — Wired `RetryConfig` through to `run_phase()` calls
+- `README.md` — Added retry configuration reference section
+
+**PRD:** `cOS_prds/20260329_225200_prd_the_following_github_issue_is_the_source_feature_description_treat_it_as_the_pri.md`
+**Tasks:** `cOS_tasks/20260329_225200_tasks_the_following_github_issue_is_the_source_feature_description_treat_it_as_the_pri.md`
+
 ## 20260329_235900 — Sequential Task Implementation as Default
 
 Makes sequential task execution the default implement mode, replacing parallel worktree-based

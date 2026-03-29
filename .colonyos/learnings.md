@@ -87,3 +87,12 @@ _Date: 2026-03-29 | Feature: when_we_implement_a_new_functionality_from_the_task
 - **[architecture]** Feature branches must be scoped to a single PRD; bundling unrelated changes inflates diffs and obscures review.
 - **[security]** Sibling API endpoints (list vs detail) must apply identical output sanitization; inconsistent coverage creates XSS gaps.
 - **[code-quality]** Defined-but-unwired code paths (helpers, config fields, aliases) add maintenance cost; delete or integrate before merge.
+
+## Run: run-20260329_225200-3d45c3c7a5
+_Date: 2026-03-30 | Feature: the_following_github_issue_is_the_source_feature_description_
+
+- **[code-quality]** Crash-recovery `finally` blocks using invalid stdlib checks (e.g., `os.get_inheritable` for fd liveness) mask the original error.
+- **[code-quality]** Dead parameters accepted but never read inside a function mislead callers and signal incomplete refactoring.
+- **[architecture]** Rich console renderers should accept a `Console` instance, not create their own, to enable test output capture.
+- **[testing]** `useEffect` polling with stale closures (state in dependency array) causes interval churn; use `useRef` for latest value.
+- **[security]** CORS allow-origin for dev hosts (e.g., localhost:5173) must be conditional on a dev/debug flag, not unconditional.
