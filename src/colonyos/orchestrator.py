@@ -617,9 +617,19 @@ def _build_single_task_implement_prompt(
         branch_name=branch_name,
     )
 
-    # Add context about completed tasks so the agent knows what's already done
+    # Add context about completed tasks so the agent knows what's already done.
+    # Cap at 10 most recent to avoid consuming excessive context window.
     if completed_tasks:
-        completed_block = "\n".join(f"  - {t}" for t in completed_tasks)
+        max_completed_shown = 10
+        if len(completed_tasks) > max_completed_shown:
+            trimmed = completed_tasks[-max_completed_shown:]
+            omitted = len(completed_tasks) - max_completed_shown
+            completed_block = (
+                f"  - ... ({omitted} earlier task(s) omitted)\n"
+                + "\n".join(f"  - {t}" for t in trimmed)
+            )
+        else:
+            completed_block = "\n".join(f"  - {t}" for t in completed_tasks)
         system += (
             "\n\n## Previously Completed Tasks\n\n"
             "The following tasks have already been implemented and committed. "
@@ -711,6 +721,8 @@ def _run_sequential_implement(
     prd_rel: str,
     task_rel: str,
     _make_ui,
+    memory_store: MemoryStore | None = None,
+    user_injection_provider: Callable[[], list[str]] | None = None,
 ) -> PhaseResult | None:
     """Run sequential implementation: one task at a time in topological order.
 
@@ -802,6 +814,10 @@ def _run_sequential_implement(
             repo_root=repo_root,
         )
 
+        # Inject semantic memory and external context (Slack/GitHub)
+        system = _inject_memory_block(system, memory_store, "implement", user, config)
+        user += _drain_injected_context(user_injection_provider)
+
         ui = _make_ui()
         if ui is not None:
             ui.phase_header(
@@ -855,11 +871,15 @@ def _run_sequential_implement(
                 text=True,
                 timeout=30,
             )
+            if diff_result.returncode != 0:
+                _log(f"Task {task_id}: git diff failed (rc={diff_result.returncode}): {diff_result.stderr.strip()}")
+            if untracked_result.returncode != 0:
+                _log(f"Task {task_id}: git ls-files failed (rc={untracked_result.returncode}): {untracked_result.stderr.strip()}")
             changed_files = [
                 f.strip()
                 for f in (
-                    diff_result.stdout.splitlines()
-                    + untracked_result.stdout.splitlines()
+                    (diff_result.stdout.splitlines() if diff_result.returncode == 0 else [])
+                    + (untracked_result.stdout.splitlines() if untracked_result.returncode == 0 else [])
                 )
                 if f.strip()
             ]
@@ -3996,6 +4016,8 @@ def _run_pipeline(
                         prd_rel=prd_rel,
                         task_rel=task_rel,
                         _make_ui=_make_ui,
+                        memory_store=memory_store,
+                        user_injection_provider=user_injection_provider,
                     )
                     if attempt_result is not None:
                         _log(

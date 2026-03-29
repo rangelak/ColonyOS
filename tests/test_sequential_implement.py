@@ -67,6 +67,30 @@ def _make_run_log() -> RunLog:
     )
 
 
+def _setup_repo(tmp_path: Path, task_content: str) -> tuple[Path, str, str]:
+    """Create a minimal repo structure for testing."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    prd_dir = repo / "cOS_prds"
+    prd_dir.mkdir()
+    (prd_dir / "test.md").write_text("# PRD\nTest feature.")
+
+    task_dir = repo / "cOS_tasks"
+    task_dir.mkdir()
+    (task_dir / "test_tasks.md").write_text(task_content)
+
+    # Create instructions directory with implement.md
+    instr_dir = repo / "src" / "colonyos" / "instructions"
+    instr_dir.mkdir(parents=True)
+    (instr_dir / "implement.md").write_text(
+        "Implement feature.\n"
+        "PRD: {prd_path}\nTasks: {task_path}\nBranch: {branch_name}"
+    )
+    (instr_dir / "base.md").write_text("You are a coding assistant.")
+
+    return repo, "cOS_prds/test.md", "cOS_tasks/test_tasks.md"
+
+
 # ---------------------------------------------------------------------------
 # Task 1.0 — Default config is sequential (parallel disabled)
 # ---------------------------------------------------------------------------
@@ -265,29 +289,6 @@ class TestSingleTaskPromptBuilder:
 class TestRunSequentialImplement:
     """Tests that exercise _run_sequential_implement with mocked agent calls."""
 
-    def _setup_repo(self, tmp_path: Path, task_content: str) -> tuple[Path, str, str]:
-        """Create a minimal repo structure for testing."""
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        prd_dir = repo / "cOS_prds"
-        prd_dir.mkdir()
-        (prd_dir / "test.md").write_text("# PRD\nTest feature.")
-
-        task_dir = repo / "cOS_tasks"
-        task_dir.mkdir()
-        (task_dir / "test_tasks.md").write_text(task_content)
-
-        # Create instructions directory with implement.md
-        instr_dir = repo / "src" / "colonyos" / "instructions"
-        instr_dir.mkdir(parents=True)
-        (instr_dir / "implement.md").write_text(
-            "Implement feature.\n"
-            "PRD: {prd_path}\nTasks: {task_path}\nBranch: {branch_name}"
-        )
-        (instr_dir / "base.md").write_text("You are a coding assistant.")
-
-        return repo, "cOS_prds/test.md", "cOS_tasks/test_tasks.md"
-
     @patch("colonyos.orchestrator.run_phase_sync")
     @patch("colonyos.orchestrator.subprocess")
     def test_all_tasks_succeed(
@@ -295,7 +296,7 @@ class TestRunSequentialImplement:
     ) -> None:
         from colonyos.orchestrator import _run_sequential_implement
 
-        repo, prd_rel, task_rel = self._setup_repo(tmp_path, SIMPLE_TASK_FILE)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, SIMPLE_TASK_FILE)
         mock_run.return_value = _make_phase_result(success=True, cost=1.0)
         mock_subprocess.run.return_value = MagicMock(
             returncode=0, stdout="file.py\n",
@@ -330,7 +331,7 @@ class TestRunSequentialImplement:
     ) -> None:
         from colonyos.orchestrator import _run_sequential_implement
 
-        repo, prd_rel, task_rel = self._setup_repo(tmp_path, SIMPLE_TASK_FILE)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, SIMPLE_TASK_FILE)
         # First call fails, rest would succeed
         mock_run.side_effect = [
             _make_phase_result(success=False, cost=0.5),
@@ -369,7 +370,7 @@ class TestRunSequentialImplement:
     ) -> None:
         from colonyos.orchestrator import _run_sequential_implement
 
-        repo, prd_rel, task_rel = self._setup_repo(tmp_path, INDEPENDENT_TASK_FILE)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, INDEPENDENT_TASK_FILE)
         # Task 1.0 fails, 2.0 succeeds, 3.0 would be blocked (depends on 1.0)
         mock_run.side_effect = [
             _make_phase_result(success=False, cost=0.5),  # 1.0 fails
@@ -405,7 +406,7 @@ class TestRunSequentialImplement:
     ) -> None:
         from colonyos.orchestrator import _run_sequential_implement
 
-        repo, prd_rel, task_rel = self._setup_repo(tmp_path, NO_TASKS_FILE)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, NO_TASKS_FILE)
 
         log = _make_run_log()
         config = ColonyConfig()
@@ -455,7 +456,7 @@ class TestRunSequentialImplement:
     ) -> None:
         from colonyos.orchestrator import _run_sequential_implement
 
-        repo, prd_rel, task_rel = self._setup_repo(tmp_path, SIMPLE_TASK_FILE)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, SIMPLE_TASK_FILE)
         mock_run.return_value = _make_phase_result(success=True, cost=1.0)
         mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
 
@@ -487,7 +488,7 @@ class TestRunSequentialImplement:
     ) -> None:
         from colonyos.orchestrator import _run_sequential_implement
 
-        repo, prd_rel, task_rel = self._setup_repo(tmp_path, SIMPLE_TASK_FILE)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, SIMPLE_TASK_FILE)
         mock_run.return_value = _make_phase_result(success=True, cost=1.0)
         mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
 
@@ -516,7 +517,7 @@ class TestRunSequentialImplement:
     ) -> None:
         from colonyos.orchestrator import _run_sequential_implement
 
-        repo, prd_rel, task_rel = self._setup_repo(tmp_path, SIMPLE_TASK_FILE)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, SIMPLE_TASK_FILE)
         mock_run.side_effect = RuntimeError("agent crashed")
         mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
 
@@ -549,28 +550,6 @@ class TestRunSequentialImplement:
 class TestSelectiveStagingSecurity:
     """Tests for the security fix: git add -A replaced with selective staging."""
 
-    def _setup_repo(self, tmp_path: Path, task_content: str) -> tuple[Path, str, str]:
-        """Create a minimal repo structure for testing."""
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        prd_dir = repo / "cOS_prds"
-        prd_dir.mkdir()
-        (prd_dir / "test.md").write_text("# PRD\nTest feature.")
-
-        task_dir = repo / "cOS_tasks"
-        task_dir.mkdir()
-        (task_dir / "test_tasks.md").write_text(task_content)
-
-        instr_dir = repo / "src" / "colonyos" / "instructions"
-        instr_dir.mkdir(parents=True)
-        (instr_dir / "implement.md").write_text(
-            "Implement feature.\n"
-            "PRD: {prd_path}\nTasks: {task_path}\nBranch: {branch_name}"
-        )
-        (instr_dir / "base.md").write_text("You are a coding assistant.")
-
-        return repo, "cOS_prds/test.md", "cOS_tasks/test_tasks.md"
-
     @patch("colonyos.orchestrator.run_phase_sync")
     @patch("colonyos.orchestrator.subprocess")
     def test_secret_files_excluded_from_staging(
@@ -584,7 +563,7 @@ class TestSelectiveStagingSecurity:
             - [ ] 1.0 Add feature
               depends_on: []
         """)
-        repo, prd_rel, task_rel = self._setup_repo(tmp_path, single_task)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, single_task)
         mock_run.return_value = _make_phase_result(success=True, cost=1.0)
 
         # git diff returns a mix of safe and secret files
@@ -634,7 +613,7 @@ class TestSelectiveStagingSecurity:
             - [ ] 1.0 Add feature
               depends_on: []
         """)
-        repo, prd_rel, task_rel = self._setup_repo(tmp_path, single_task)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, single_task)
         mock_run.return_value = _make_phase_result(success=True, cost=1.0)
 
         # Only secret files changed
@@ -673,7 +652,7 @@ class TestSelectiveStagingSecurity:
             - [ ] 1.0 Add feature
               depends_on: []
         """)
-        repo, prd_rel, task_rel = self._setup_repo(tmp_path, single_task)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, single_task)
         mock_run.return_value = _make_phase_result(success=True, cost=1.0)
         mock_subprocess.run.return_value = MagicMock(
             returncode=0, stdout="file.py\n",
@@ -711,7 +690,7 @@ class TestSelectiveStagingSecurity:
             - [ ] 1.0 <script>alert('xss')</script> Add feature
               depends_on: []
         """)
-        repo, prd_rel, task_rel = self._setup_repo(tmp_path, injected_task)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, injected_task)
         mock_run.return_value = _make_phase_result(success=True, cost=1.0)
         mock_subprocess.run.return_value = MagicMock(
             returncode=0, stdout="file.py\n",
@@ -755,3 +734,189 @@ class TestParallelStillWorksAsOptIn:
     def test_parallel_disabled_by_default(self) -> None:
         config = ColonyConfig()
         assert config.parallel_implement.enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Memory injection and context trimming
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryInjectionAndContextTrimming:
+    """Tests for _inject_memory_block / _drain_injected_context wiring and context caps."""
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    @patch("colonyos.orchestrator._inject_memory_block")
+    @patch("colonyos.orchestrator._drain_injected_context")
+    def test_memory_block_injected_per_task(
+        self,
+        mock_drain: MagicMock,
+        mock_inject: MagicMock,
+        mock_subprocess: MagicMock,
+        mock_run: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """_inject_memory_block should be called once per task."""
+        from colonyos.orchestrator import _run_sequential_implement
+
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, SIMPLE_TASK_FILE)
+        mock_run.return_value = _make_phase_result(success=True, cost=1.0)
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
+        mock_inject.side_effect = lambda system, *args, **kwargs: system
+        mock_drain.return_value = ""
+
+        fake_store = MagicMock()
+        log = _make_run_log()
+        config = ColonyConfig()
+
+        _run_sequential_implement(
+            log=log,
+            repo_root=repo,
+            config=config,
+            branch_name="test-branch",
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            _make_ui=lambda: None,
+            memory_store=fake_store,
+        )
+
+        # Called once per task (3 tasks)
+        assert mock_inject.call_count == 3
+        # Each call passes the memory_store and phase="implement"
+        for call in mock_inject.call_args_list:
+            assert call[0][1] is fake_store
+            assert call[0][2] == "implement"
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    @patch("colonyos.orchestrator._inject_memory_block")
+    @patch("colonyos.orchestrator._drain_injected_context")
+    def test_drain_injected_context_called_per_task(
+        self,
+        mock_drain: MagicMock,
+        mock_inject: MagicMock,
+        mock_subprocess: MagicMock,
+        mock_run: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """_drain_injected_context should be called once per task."""
+        from colonyos.orchestrator import _run_sequential_implement
+
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, SIMPLE_TASK_FILE)
+        mock_run.return_value = _make_phase_result(success=True, cost=1.0)
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
+        mock_inject.side_effect = lambda system, *args, **kwargs: system
+        mock_drain.return_value = ""
+
+        fake_provider = MagicMock(return_value=[])
+        log = _make_run_log()
+        config = ColonyConfig()
+
+        _run_sequential_implement(
+            log=log,
+            repo_root=repo,
+            config=config,
+            branch_name="test-branch",
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            _make_ui=lambda: None,
+            user_injection_provider=fake_provider,
+        )
+
+        # Called once per task (3 tasks)
+        assert mock_drain.call_count == 3
+        for call in mock_drain.call_args_list:
+            assert call[0][0] is fake_provider
+
+    def test_completed_tasks_trimmed_above_10(self) -> None:
+        """When more than 10 tasks are completed, only the last 10 should appear."""
+        from colonyos.orchestrator import _build_single_task_implement_prompt
+
+        config = ColonyConfig()
+        # Use unique names that aren't substrings of each other
+        completed = [f"task_{i:03d}: Implement feature {i:03d}" for i in range(1, 16)]  # 15 tasks
+        system, _user = _build_single_task_implement_prompt(
+            config,
+            task_id="16.0",
+            task_description="Final task",
+            prd_path="cOS_prds/test.md",
+            task_path="cOS_tasks/test.md",
+            branch_name="feature/test",
+            completed_tasks=completed,
+        )
+        assert "Previously Completed Tasks" in system
+        # The first 5 tasks should be omitted
+        assert "task_001: Implement feature 001" not in system
+        assert "task_005: Implement feature 005" not in system
+        # The last 10 should be present
+        assert "task_006: Implement feature 006" in system
+        assert "task_015: Implement feature 015" in system
+        # Omission notice
+        assert "5 earlier task(s) omitted" in system
+
+    def test_completed_tasks_not_trimmed_at_10(self) -> None:
+        """Exactly 10 completed tasks should all appear without trimming."""
+        from colonyos.orchestrator import _build_single_task_implement_prompt
+
+        config = ColonyConfig()
+        completed = [f"{i}.0: Task {i}" for i in range(1, 11)]  # 10 tasks
+        system, _user = _build_single_task_implement_prompt(
+            config,
+            task_id="11.0",
+            task_description="Next task",
+            prd_path="cOS_prds/test.md",
+            task_path="cOS_tasks/test.md",
+            branch_name="feature/test",
+            completed_tasks=completed,
+        )
+        assert "omitted" not in system
+        assert "1.0: Task 1" in system
+        assert "10.0: Task 10" in system
+
+
+class TestGitReturnCodeChecking:
+    """Tests that git diff/ls-files failures are handled gracefully."""
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    def test_git_diff_failure_skips_diff_files(
+        self, mock_subprocess: MagicMock, mock_run: MagicMock, tmp_path: Path
+    ) -> None:
+        """When git diff fails, its output should be ignored (not staged)."""
+        from colonyos.orchestrator import _run_sequential_implement
+
+        single_task = textwrap.dedent("""\
+            # Tasks
+            - [ ] 1.0 Add feature
+              depends_on: []
+        """)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, single_task)
+        mock_run.return_value = _make_phase_result(success=True, cost=1.0)
+
+        # git diff fails, but ls-files works
+        diff_mock = MagicMock(returncode=128, stdout="bad.py\n", stderr="fatal: error")
+        untracked_mock = MagicMock(returncode=0, stdout="new_file.py\n")
+        add_mock = MagicMock(returncode=0, stdout="")
+        commit_mock = MagicMock(returncode=0, stdout="")
+        mock_subprocess.run.side_effect = [diff_mock, untracked_mock, add_mock, commit_mock]
+
+        log = _make_run_log()
+        config = ColonyConfig()
+
+        result = _run_sequential_implement(
+            log=log,
+            repo_root=repo,
+            config=config,
+            branch_name="test-branch",
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            _make_ui=lambda: None,
+        )
+
+        assert result is not None
+        assert result.success is True
+        # git add should only include untracked file, not the diff file
+        add_call = mock_subprocess.run.call_args_list[2]
+        staged_files = add_call[0][0][3:]  # after ["git", "add", "--"]
+        assert "new_file.py" in staged_files
+        assert "bad.py" not in staged_files
