@@ -4025,10 +4025,22 @@ def _run_pipeline(
                             f"{attempt_result.artifacts.get('completed', '0')}/"
                             f"{attempt_result.artifacts.get('total_tasks', '?')} tasks"
                         )
+                        if impl_ui is not None:
+                            if attempt_result.success:
+                                completed_tasks = int(attempt_result.artifacts.get("completed", "0"))
+                                impl_ui.phase_complete(
+                                    attempt_result.cost_usd or 0.0,
+                                    completed_tasks,
+                                    attempt_result.duration_ms,
+                                )
+                            else:
+                                message = attempt_result.error or "Sequential implement phase failed"
+                                impl_ui.phase_error(message)
                         return attempt_result
 
                 # Last-resort fallback: single-prompt sequential mode
-                _log("Falling back to single-prompt implement mode")
+                mode_attempted = "parallel" if config.parallel_implement.enabled else "sequential"
+                _log(f"Falling back to single-prompt implement mode ({mode_attempted} returned None)")
                 system, user = _build_implement_prompt(
                     config,
                     prd_rel,
