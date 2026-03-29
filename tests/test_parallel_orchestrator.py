@@ -282,7 +282,9 @@ class TestShouldUseParallel:
         assert should_use_parallel(config, task_count=1) is False
 
     def test_multiple_tasks_enabled(self) -> None:
-        config = ColonyConfig()
+        config = ColonyConfig(
+            parallel_implement=ParallelImplementConfig(enabled=True),
+        )
         assert should_use_parallel(config, task_count=3) is True
 
     def test_zero_tasks(self) -> None:

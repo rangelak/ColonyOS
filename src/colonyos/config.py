@@ -50,7 +50,7 @@ DEFAULTS = {
         "scan_max_functions": 20,
     },
     "parallel_implement": {
-        "enabled": True,
+        "enabled": False,
         "max_parallel_agents": 3,
         "conflict_strategy": "auto",
         "merge_timeout_seconds": 60,
@@ -143,7 +143,7 @@ VALID_CONFLICT_STRATEGIES: frozenset[str] = frozenset({"auto", "fail", "manual"}
 class ParallelImplementConfig:
     """Configuration for parallel implement mode."""
 
-    enabled: bool = True
+    enabled: bool = False
     max_parallel_agents: int = 3
     conflict_strategy: str = "auto"
     merge_timeout_seconds: int = 60
@@ -484,6 +484,13 @@ def _parse_parallel_implement_config(raw: dict) -> ParallelImplementConfig:
     defaults = DEFAULTS["parallel_implement"]
 
     enabled = bool(raw.get("enabled", defaults["enabled"]))
+
+    if "enabled" in raw and raw["enabled"] is True:
+        logger.warning(
+            "parallel_implement.enabled is True — parallel mode risks merge "
+            "conflicts when tasks touch overlapping files. Consider using "
+            "sequential mode (the default) for safer, incremental implementation."
+        )
 
     max_parallel_agents = int(raw.get("max_parallel_agents", defaults["max_parallel_agents"]))
     if max_parallel_agents < 1:

@@ -1,66 +1,6 @@
 # ColonyOS Learnings Ledger
 
 
-## Run: run-20260319_152207-801fef63d9
-_Date: 2026-03-19 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
-
-- **[architecture]** Verdict regex duplication across modules (cli vs orchestrator) — this is about duplicating business logic regex across modules. Existing entries menti
-- **[code-quality]** Console/resource creation inside helpers instead of accepting as parameter — dependency injection pattern.
-- **[security]** Prompt templates should prohibit LLM "cheat" fixes like `# type: ignore` or `# noqa`.
-- **[architecture]** Budget cap logic relying on optional config fields having non-None defaults is fragile.
-- **[code-quality]** Helpers that create their own Console/logger instances instead of accepting them as parameters break testability and consistency.
-- **[architecture]** Business-logic regexes duplicated across modules drift silently; extract to a single shared constant or function.
-- **[security]** Prompt templates sent to LLMs should explicitly prohibit suppression-based "fixes" like `# type: ignore` or `# noqa`.
-- **[code-quality]** Optional config fields assumed non-None without guards cause crashes when defaults are absent; validate at load time.
-- **[code-quality]** Helpers that create their own Console/logger instead of accepting one as a parameter break testability and consistency.
-- **[architecture]** Business-logic regexes duplicated across modules drift silently; extract to a shared constant or function.
-- **[security]** Prompt templates should explicitly prohibit suppression-based "fixes" like `# type: ignore` or `# noqa`.
-- **[code-quality]** Optional config fields assumed non-None without guards cause crashes when defaults are missing; validate at load.
-- **[code-quality]** Helpers that create their own I/O resources (e.g. Console) instead of accepting them as params reduce testability.
-- **[architecture]** Business-logic regexes duplicated across modules drift silently; extract to a shared constant or function.
-- **[security]** Prompt templates should prohibit LLM suppression-only fixes like `# type: ignore` or `# noqa`.
-- **[code-quality]** Optional config fields assumed non-None without validation cause crashes when defaults are absent.
-- **[code-quality]** Helpers that create own I/O resources (Console, logger) instead of accepting them as params reduce testability.
-- **[architecture]** Business-logic regexes duplicated across modules drift silently; extract shared constants.
-- **[security]** Prompt templates should explicitly prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
-- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load time.
-- **[code-quality]** Helpers that instantiate their own I/O resources (Console, logger) instead of accepting params reduce testability.
-- **[architecture]** Business-logic regexes duplicated across modules drift silently; extract to a shared constant.
-- **[security]** Prompt templates should explicitly prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
-- **[code-quality]** Optional config fields assumed non-None without validation crash when defaults are absent; validate at load time.
-- **[code-quality]** Helpers that instantiate their own I/O resources instead of accepting them as parameters reduce testability.
-- **[architecture]** Business-logic regexes duplicated across modules drift silently; extract to a shared constant.
-- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
-- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are absent; validate at load time.
-- **[code-quality]** Helpers that instantiate their own I/O resources instead of accepting them as parameters reduce testability.
-- **[architecture]** Business-logic regexes copied across modules drift silently; extract to a single shared constant.
-- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
-- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are absent; validate at load time.
-- **[code-quality]** Helpers that instantiate their own I/O resources instead of accepting them as parameters reduce testability.
-- **[architecture]** Business-logic regexes copied across modules drift silently; extract to a single shared constant.
-- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
-- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are absent; validate at load time.
-- **[code-quality]** Helpers that instantiate own I/O resources instead of accepting them as params reduce testability.
-- **[architecture]** Business-logic regexes copied across modules drift silently; extract to a single shared constant.
-- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
-- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are absent; validate at load.
-- **[code-quality]** Helpers that instantiate own I/O resources instead of accepting them as params reduce testability.
-- **[architecture]** Business-logic regexes copied across modules drift silently; extract to a single shared constant.
-- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
-- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are absent; validate at load.
-- **[code-quality]** Helpers that create own I/O objects (Console, logger) instead of accepting them as params hurt testability.
-- **[architecture]** Business-logic regexes copied across modules drift silently; extract to one shared constant.
-- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
-- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load time.
-- **[code-quality]** Helpers creating own I/O objects (Console, logger) instead of accepting params hurt testability.
-- **[architecture]** Business-logic regexes copied across modules drift silently; extract to one shared constant.
-- **[security]** Prompt templates should prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
-- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load.
-- **[code-quality]** Helpers creating own I/O objects (Console, logger) instead of accepting params hurt testability.
-- **[architecture]** Business-logic regexes copied across modules drift silently; extract to one shared constant.
-- **[security]** Prompt templates must prohibit suppression-only fixes like `# type: ignore` or `# noqa`.
-- **[code-quality]** Optional config fields assumed non-None without guards crash when defaults are missing; validate at load.
-
 ## Run: run-20260319_230625-dbdcda5b59
 _Date: 2026-03-19 | Feature: can_we_make_colonyos_setup_choice_one_where_an_assistant_set_
 
@@ -138,3 +78,12 @@ _Date: 2026-03-29 | Feature: colonyos_needs_to_be_fully_autonomous_we_deploy_it_
 - **[code-quality]** Utility helpers (e.g., duration formatting) copy-pasted within a file instead of calling existing functions accumulate drift.
 - **[security]** State-mutating operations (add, clear, delete) on persistent files need append-only audit logging for traceability.
 - **[security]** Persistent state files created with default umask need explicit restrictive permissions when scope expands beyond single user.
+
+## Run: run-20260329_213252-42be53518d
+_Date: 2026-03-29 | Feature: when_we_implement_a_new_functionality_from_the_tasks_it_shou_
+
+- **[architecture]** CLI god files (2000+ lines) must be decomposed into per-command modules; monolithic CLIs resist review and testing.
+- **[testing]** Functions returning truthy for empty collections (e.g., `all([])`) silently pass; add explicit empty-input guards.
+- **[architecture]** Feature branches must be scoped to a single PRD; bundling unrelated changes inflates diffs and obscures review.
+- **[security]** Sibling API endpoints (list vs detail) must apply identical output sanitization; inconsistent coverage creates XSS gaps.
+- **[code-quality]** Defined-but-unwired code paths (helpers, config fields, aliases) add maintenance cost; delete or integrate before merge.

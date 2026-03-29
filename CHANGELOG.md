@@ -1,5 +1,25 @@
 # Changelog
 
+## 20260329_235900 — Sequential Task Implementation as Default
+
+Makes sequential task execution the default implement mode, replacing parallel worktree-based
+execution. Tasks now run one-at-a-time in topological order on a single branch, with each
+task committed before the next starts — eliminating merge conflicts from parallel execution
+of dependent tasks. Parallel mode remains available as an explicit opt-in via config.
+
+**Created:**
+- `tests/test_sequential_implement.py` — Comprehensive tests for sequential task runner (ordering, failure isolation, budget division, DAG integration)
+
+**Modified:**
+- `src/colonyos/config.py` — Flipped `ParallelImplementConfig.enabled` default from `True` to `False`
+- `src/colonyos/orchestrator.py` — Added `_run_sequential_implement()` method with per-task agent sessions, topological ordering, failure-skip logic, and per-task budget allocation
+- `tests/test_orchestrator.py` — Updated for sequential default
+- `tests/test_parallel_config.py` — Updated assertions for new default
+- `tests/test_parallel_orchestrator.py` — Updated assertions for new default
+
+**PRD:** `cOS_prds/20260329_213252_prd_when_we_implement_a_new_functionality_from_the_tasks_it_should_not_happen_in_par.md`
+**Tasks:** `cOS_tasks/20260329_213252_tasks_when_we_implement_a_new_functionality_from_the_tasks_it_should_not_happen_in_par.md`
+
 ## 20260329_213000 — Daemon Mode: Fully Autonomous 24/7 Engineering Agent
 
 Adds `colonyos daemon` — a single long-running command that unifies the Slack listener,
