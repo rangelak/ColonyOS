@@ -1,5 +1,33 @@
 # Changelog
 
+## 20260329_213000 — Daemon Mode: Fully Autonomous 24/7 Engineering Agent
+
+Adds `colonyos daemon` — a single long-running command that unifies the Slack listener,
+GitHub Issue poller, CEO idle-fill scheduler, and cleanup scheduler into one supervised
+process. Work from all sources flows into a priority queue (user bugs > features > CEO
+proposals > cleanup) and is executed sequentially through the existing pipeline. Includes
+daily budget enforcement, circuit breaker, crash recovery, atomic state persistence,
+a `/healthz` health endpoint, and Slack kill-switch commands (pause/resume/status).
+
+**Created:**
+- `src/colonyos/daemon.py` — Core daemon orchestration: event loop, schedulers, budget enforcer, circuit breaker, health monitor
+- `src/colonyos/daemon_state.py` — `DaemonState` dataclass with atomic write-then-rename persistence
+- `deploy/colonyos-daemon.service` — systemd unit file with watchdog, sandboxing, and auto-restart
+- `deploy/README.md` — VM deployment guide
+- `tests/test_daemon.py` — Daemon unit tests (startup, scheduling, budget, circuit breaker, kill switch)
+- `tests/test_daemon_state.py` — State persistence and crash recovery tests
+- `tests/test_daemon_models.py` — Priority queue model tests
+
+**Modified:**
+- `src/colonyos/cli.py` — New `colonyos daemon` CLI command with `--max-budget`, `--max-hours`, `--dry-run` flags
+- `src/colonyos/config.py` — Added `DaemonConfig` dataclass with budget, polling, scheduling, and circuit breaker settings
+- `src/colonyos/models.py` — Added `priority` field to `QueueItem` (schema v4), priority-ordered queue selection
+- `src/colonyos/server.py` — Added `/healthz` endpoint returning daemon status, queue depth, spend, and circuit breaker state
+- `src/colonyos/github.py` — Added label filtering support for issue ingestion
+
+**PRD:** `cOS_prds/20260329_155000_prd_colonyos_needs_to_be_fully_autonomous_we_deploy_it_to_a_project_on_a_vm_it_liste.md`
+**Tasks:** `cOS_tasks/20260329_155000_tasks_colonyos_needs_to_be_fully_autonomous_we_deploy_it_to_a_project_on_a_vm_it_liste.md`
+
 ## 20260327_200000 — TUI-Native Auto Mode, CEO Profile Rotation & UX Fixes
 
 Brings the full autonomous loop (CEO → plan → implement → review → deliver) into the TUI
