@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from hashlib import sha1
@@ -720,8 +721,6 @@ def _run_sequential_implement(
 
     Returns a merged PhaseResult or None if the task file cannot be parsed.
     """
-    import time as _time
-
     task_file_path = repo_root / task_rel
     if not task_file_path.exists():
         _log(f"Task file not found: {task_rel}")
@@ -750,9 +749,8 @@ def _run_sequential_implement(
 
     # Extract task descriptions from the file content
     task_descriptions: dict[str, str] = {}
-    import re as _re
     for line in content.splitlines():
-        m = _re.match(r"^-\s*\[[x ]\]\s*(\d+\.\d+)\s+(.*)", line, _re.IGNORECASE)
+        m = re.match(r"^-\s*\[[x ]\]\s*(\d+\.\d+)\s+(.*)", line, re.IGNORECASE)
         if m:
             task_descriptions[m.group(1)] = m.group(2).strip()
 
@@ -789,7 +787,7 @@ def _run_sequential_implement(
             continue
 
         _log(f"Running task {task_id}: {task_desc}")
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
 
         system, user = _build_single_task_implement_prompt(
             config,
@@ -826,7 +824,7 @@ def _run_sequential_implement(
         except Exception as exc:
             _log(f"Task {task_id} raised exception: {exc}")
             failed.add(task_id)
-            elapsed_ms = int((_time.monotonic() - t0) * 1000)
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
             task_results[task_id] = {
                 "status": "FAILED",
                 "error": str(exc),
@@ -836,23 +834,62 @@ def _run_sequential_implement(
             overall_success = False
             continue
 
-        elapsed_ms = int((_time.monotonic() - t0) * 1000)
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
         task_cost = result.cost_usd or 0.0
         total_cost += task_cost
         total_duration_ms += elapsed_ms
 
         if result.success:
-            # Commit the work for this task
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=repo_root,
-                capture_output=True,
-            )
-            commit_result = subprocess.run(
-                ["git", "commit", "-m", f"Implement task {task_id}: {task_desc}"],
+            # Selective staging: get changed files, filter out secrets
+            diff_result = subprocess.run(
+                ["git", "diff", "--name-only"],
                 cwd=repo_root,
                 capture_output=True,
                 text=True,
+                timeout=30,
+            )
+            untracked_result = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            changed_files = [
+                f.strip()
+                for f in (
+                    diff_result.stdout.splitlines()
+                    + untracked_result.stdout.splitlines()
+                )
+                if f.strip()
+            ]
+            # Filter out sensitive files
+            safe_files = [f for f in changed_files if not _is_secret_like_path(f)]
+            secret_files = [f for f in changed_files if _is_secret_like_path(f)]
+            if secret_files:
+                _log(
+                    f"Task {task_id}: skipping {len(secret_files)} "
+                    f"sensitive file(s) from staging: {secret_files}"
+                )
+
+            # Audit trail: log what files this task modified
+            if safe_files:
+                _log(f"Task {task_id} modified {len(safe_files)} file(s): {safe_files}")
+
+            if safe_files:
+                subprocess.run(
+                    ["git", "add", "--"] + safe_files,
+                    cwd=repo_root,
+                    capture_output=True,
+                    timeout=30,
+                )
+            safe_desc = sanitize_untrusted_content(task_desc)
+            commit_result = subprocess.run(
+                ["git", "commit", "-m", f"Implement task {task_id}: {safe_desc}"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             if commit_result.returncode == 0:
                 _log(f"Task {task_id} completed and committed")

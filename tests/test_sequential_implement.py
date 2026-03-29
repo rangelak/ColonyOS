@@ -297,7 +297,9 @@ class TestRunSequentialImplement:
 
         repo, prd_rel, task_rel = self._setup_repo(tmp_path, SIMPLE_TASK_FILE)
         mock_run.return_value = _make_phase_result(success=True, cost=1.0)
-        mock_subprocess.run.return_value = MagicMock(returncode=0)
+        mock_subprocess.run.return_value = MagicMock(
+            returncode=0, stdout="file.py\n",
+        )
 
         log = _make_run_log()
         config = ColonyConfig()
@@ -333,7 +335,7 @@ class TestRunSequentialImplement:
         mock_run.side_effect = [
             _make_phase_result(success=False, cost=0.5),
         ]
-        mock_subprocess.run.return_value = MagicMock(returncode=0)
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
 
         log = _make_run_log()
         config = ColonyConfig()
@@ -373,7 +375,7 @@ class TestRunSequentialImplement:
             _make_phase_result(success=False, cost=0.5),  # 1.0 fails
             _make_phase_result(success=True, cost=1.0),   # 2.0 succeeds
         ]
-        mock_subprocess.run.return_value = MagicMock(returncode=0)
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
 
         log = _make_run_log()
         config = ColonyConfig()
@@ -455,7 +457,7 @@ class TestRunSequentialImplement:
 
         repo, prd_rel, task_rel = self._setup_repo(tmp_path, SIMPLE_TASK_FILE)
         mock_run.return_value = _make_phase_result(success=True, cost=1.0)
-        mock_subprocess.run.return_value = MagicMock(returncode=0)
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
 
         log = _make_run_log()
         config = ColonyConfig()
@@ -487,7 +489,7 @@ class TestRunSequentialImplement:
 
         repo, prd_rel, task_rel = self._setup_repo(tmp_path, SIMPLE_TASK_FILE)
         mock_run.return_value = _make_phase_result(success=True, cost=1.0)
-        mock_subprocess.run.return_value = MagicMock(returncode=0)
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
 
         log = _make_run_log()
         config = ColonyConfig()
@@ -502,9 +504,10 @@ class TestRunSequentialImplement:
             _make_ui=lambda: None,
         )
 
-        # Each successful task triggers git add + git commit = 2 subprocess calls
-        # 3 tasks × 2 = 6 subprocess calls
-        assert mock_subprocess.run.call_count == 6
+        # Each successful task triggers:
+        #   git diff --name-only + git ls-files + git add + git commit = 4 calls
+        # 3 tasks × 4 = 12 subprocess calls
+        assert mock_subprocess.run.call_count == 12
 
     @patch("colonyos.orchestrator.run_phase_sync")
     @patch("colonyos.orchestrator.subprocess")
@@ -515,7 +518,7 @@ class TestRunSequentialImplement:
 
         repo, prd_rel, task_rel = self._setup_repo(tmp_path, SIMPLE_TASK_FILE)
         mock_run.side_effect = RuntimeError("agent crashed")
-        mock_subprocess.run.return_value = MagicMock(returncode=0)
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
 
         log = _make_run_log()
         config = ColonyConfig()
@@ -536,6 +539,205 @@ class TestRunSequentialImplement:
         task_results = result.artifacts["task_results"]
         assert task_results["1.0"]["status"] == "FAILED"
         assert "agent crashed" in task_results["1.0"]["error"]
+
+
+# ---------------------------------------------------------------------------
+# Security — selective staging filters out sensitive files
+# ---------------------------------------------------------------------------
+
+
+class TestSelectiveStagingSecurity:
+    """Tests for the security fix: git add -A replaced with selective staging."""
+
+    def _setup_repo(self, tmp_path: Path, task_content: str) -> tuple[Path, str, str]:
+        """Create a minimal repo structure for testing."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        prd_dir = repo / "cOS_prds"
+        prd_dir.mkdir()
+        (prd_dir / "test.md").write_text("# PRD\nTest feature.")
+
+        task_dir = repo / "cOS_tasks"
+        task_dir.mkdir()
+        (task_dir / "test_tasks.md").write_text(task_content)
+
+        instr_dir = repo / "src" / "colonyos" / "instructions"
+        instr_dir.mkdir(parents=True)
+        (instr_dir / "implement.md").write_text(
+            "Implement feature.\n"
+            "PRD: {prd_path}\nTasks: {task_path}\nBranch: {branch_name}"
+        )
+        (instr_dir / "base.md").write_text("You are a coding assistant.")
+
+        return repo, "cOS_prds/test.md", "cOS_tasks/test_tasks.md"
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    def test_secret_files_excluded_from_staging(
+        self, mock_subprocess: MagicMock, mock_run: MagicMock, tmp_path: Path
+    ) -> None:
+        """Sensitive files like .env must not be staged."""
+        from colonyos.orchestrator import _run_sequential_implement
+
+        single_task = textwrap.dedent("""\
+            # Tasks
+            - [ ] 1.0 Add feature
+              depends_on: []
+        """)
+        repo, prd_rel, task_rel = self._setup_repo(tmp_path, single_task)
+        mock_run.return_value = _make_phase_result(success=True, cost=1.0)
+
+        # git diff returns a mix of safe and secret files
+        diff_mock = MagicMock(returncode=0, stdout="app.py\n.env\ncredentials.json\n")
+        untracked_mock = MagicMock(returncode=0, stdout="new_file.py\nid_rsa\n")
+        commit_mock = MagicMock(returncode=0, stdout="")
+        add_mock = MagicMock(returncode=0, stdout="")
+        mock_subprocess.run.side_effect = [diff_mock, untracked_mock, add_mock, commit_mock]
+
+        log = _make_run_log()
+        config = ColonyConfig()
+
+        result = _run_sequential_implement(
+            log=log,
+            repo_root=repo,
+            config=config,
+            branch_name="test-branch",
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            _make_ui=lambda: None,
+        )
+
+        assert result is not None
+        assert result.success is True
+
+        # Verify git add was called with only safe files (not .env, credentials.json, id_rsa)
+        add_call = mock_subprocess.run.call_args_list[2]
+        staged_cmd = add_call[0][0]
+        assert staged_cmd[0:3] == ["git", "add", "--"]
+        staged_files = staged_cmd[3:]
+        assert "app.py" in staged_files
+        assert "new_file.py" in staged_files
+        assert ".env" not in staged_files
+        assert "credentials.json" not in staged_files
+        assert "id_rsa" not in staged_files
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    def test_no_files_to_stage_skips_git_add(
+        self, mock_subprocess: MagicMock, mock_run: MagicMock, tmp_path: Path
+    ) -> None:
+        """When only secret files are changed, git add should be skipped."""
+        from colonyos.orchestrator import _run_sequential_implement
+
+        single_task = textwrap.dedent("""\
+            # Tasks
+            - [ ] 1.0 Add feature
+              depends_on: []
+        """)
+        repo, prd_rel, task_rel = self._setup_repo(tmp_path, single_task)
+        mock_run.return_value = _make_phase_result(success=True, cost=1.0)
+
+        # Only secret files changed
+        diff_mock = MagicMock(returncode=0, stdout=".env\n")
+        untracked_mock = MagicMock(returncode=0, stdout="")
+        commit_mock = MagicMock(returncode=0, stdout="")
+        mock_subprocess.run.side_effect = [diff_mock, untracked_mock, commit_mock]
+
+        log = _make_run_log()
+        config = ColonyConfig()
+
+        result = _run_sequential_implement(
+            log=log,
+            repo_root=repo,
+            config=config,
+            branch_name="test-branch",
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            _make_ui=lambda: None,
+        )
+
+        assert result is not None
+        # 3 subprocess calls: diff, ls-files, commit (no git add)
+        assert mock_subprocess.run.call_count == 3
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    def test_subprocess_calls_have_timeout(
+        self, mock_subprocess: MagicMock, mock_run: MagicMock, tmp_path: Path
+    ) -> None:
+        """All subprocess calls in the commit step must have timeout=30."""
+        from colonyos.orchestrator import _run_sequential_implement
+
+        single_task = textwrap.dedent("""\
+            # Tasks
+            - [ ] 1.0 Add feature
+              depends_on: []
+        """)
+        repo, prd_rel, task_rel = self._setup_repo(tmp_path, single_task)
+        mock_run.return_value = _make_phase_result(success=True, cost=1.0)
+        mock_subprocess.run.return_value = MagicMock(
+            returncode=0, stdout="file.py\n",
+        )
+
+        log = _make_run_log()
+        config = ColonyConfig()
+
+        _run_sequential_implement(
+            log=log,
+            repo_root=repo,
+            config=config,
+            branch_name="test-branch",
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            _make_ui=lambda: None,
+        )
+
+        for call in mock_subprocess.run.call_args_list:
+            assert call.kwargs.get("timeout") == 30, (
+                f"Missing timeout=30 in subprocess call: {call}"
+            )
+
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    def test_commit_message_sanitizes_task_description(
+        self, mock_subprocess: MagicMock, mock_run: MagicMock, tmp_path: Path
+    ) -> None:
+        """Task descriptions used in commit messages must be sanitized."""
+        from colonyos.orchestrator import _run_sequential_implement
+
+        # Task description with XML-like injection
+        injected_task = textwrap.dedent("""\
+            # Tasks
+            - [ ] 1.0 <script>alert('xss')</script> Add feature
+              depends_on: []
+        """)
+        repo, prd_rel, task_rel = self._setup_repo(tmp_path, injected_task)
+        mock_run.return_value = _make_phase_result(success=True, cost=1.0)
+        mock_subprocess.run.return_value = MagicMock(
+            returncode=0, stdout="file.py\n",
+        )
+
+        log = _make_run_log()
+        config = ColonyConfig()
+
+        _run_sequential_implement(
+            log=log,
+            repo_root=repo,
+            config=config,
+            branch_name="test-branch",
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            _make_ui=lambda: None,
+        )
+
+        # Find the git commit call and check the message is sanitized
+        commit_calls = [
+            c for c in mock_subprocess.run.call_args_list
+            if c[0][0][0:2] == ["git", "commit"]
+        ]
+        assert len(commit_calls) == 1
+        commit_msg = commit_calls[0][0][0][3]  # -m argument
+        assert "<script>" not in commit_msg
 
 
 # ---------------------------------------------------------------------------
