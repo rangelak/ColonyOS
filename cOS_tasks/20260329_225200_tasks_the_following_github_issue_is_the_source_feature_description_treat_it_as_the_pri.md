@@ -51,9 +51,9 @@
   - [x] 4.3 Populate `retry_info` dict on the returned `PhaseResult`: `{"attempts": n, "transient_errors": count, "fallback_model_used": None, "total_retry_delay_seconds": total}`
   - [x] 4.4 Thread `retry_config` parameter through `run_phase_sync()` wrapper
 
-- [ ] 5.0 Implement optional model fallback (FR-6, FR-7)
+- [x] 5.0 Implement optional model fallback (FR-6, FR-7)
   depends_on: [4.0]
-  - [ ] 5.1 Write tests for fallback behavior in `tests/test_agent.py`:
+  - [x] 5.1 Write tests for fallback behavior in `tests/test_agent.py`:
     - Retries exhausted + `fallback_model="sonnet"` → retries again with sonnet, succeeds → `retry_info.fallback_model_used="sonnet"`
     - Retries exhausted + `fallback_model="sonnet"` + phase is `review` (safety-critical) → no fallback, returns failure
     - Retries exhausted + `fallback_model="sonnet"` + phase is `decision` → no fallback
@@ -61,9 +61,9 @@
     - Retries exhausted + `fallback_model=None` → no fallback, returns failure
     - Fallback retries also exhausted → returns failure with `retry_info`
     - Fallback logs clear message: `"Retries exhausted, falling back to {model}..."`
-  - [ ] 5.2 Implement fallback logic: after the retry loop exhausts attempts on a transient error, if `retry_config.fallback_model` is set and the phase is not in `_SAFETY_CRITICAL_PHASES`, re-run the retry loop with `model=fallback_model`. Import `_SAFETY_CRITICAL_PHASES` from `config.py`
-  - [ ] 5.3 Update `retry_info` to record `fallback_model_used` when fallback is triggered
-  - [ ] 5.4 Log fallback activation via UI or `_log()` with message: `"Retries exhausted on {original_model}, falling back to {fallback_model}..."`
+  - [x] 5.2 Implement fallback logic: after the retry loop exhausts attempts on a transient error, if `retry_config.fallback_model` is set and the phase is not in `_SAFETY_CRITICAL_PHASES`, re-run the retry loop with `model=fallback_model`. Import `_SAFETY_CRITICAL_PHASES` from `config.py`
+  - [x] 5.3 Update `retry_info` to record `fallback_model_used` when fallback is triggered
+  - [x] 5.4 Log fallback activation via UI or `_log()` with message: `"Retries exhausted on {original_model}, falling back to {fallback_model}..."`
 
 - [ ] 6.0 Wire retry config through the orchestrator (integration)
   depends_on: [4.0, 5.0]
