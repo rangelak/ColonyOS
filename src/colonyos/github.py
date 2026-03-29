@@ -31,6 +31,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -397,3 +398,5 @@ def fetch_open_issues(
             state=item.get("state", "open").lower(),
         ))
     return issues
+
+

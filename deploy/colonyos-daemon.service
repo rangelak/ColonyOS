@@ -1,0 +1,36 @@
+[Unit]
+Description=ColonyOS Autonomous Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=colonyos
+Group=colonyos
+WorkingDirectory=/opt/colonyos/repo
+ExecStart=/opt/colonyos/venv/bin/colonyos daemon --verbose
+Restart=on-failure
+RestartSec=30
+
+# Security hardening
+ProtectSystem=strict
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+MemoryDenyWriteExecute=no
+ReadWritePaths=/opt/colonyos/repo
+
+# Environment — tokens loaded from drop-in file
+EnvironmentFile=/opt/colonyos/env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=colonyos
+
+[Install]
+WantedBy=multi-user.target

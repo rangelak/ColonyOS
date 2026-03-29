@@ -1,15 +1,6 @@
 # ColonyOS Learnings Ledger
 
 
-## Run: run-20260319_081958-46cf575c9d
-_Date: 2026-03-19 | Feature: every_time_the_pipeline_starts_we_should_look_at_what_branch_
-
-- **[architecture]** CLI god files (>2000 LOC) must be split proactively; extract each subcommand's helpers into dedicated modules.
-- **[security]** Use allowlist serialization (explicit field inclusion) instead of blocklist (pop sensitive fields) to prevent leaking new fields.
-- **[testing]** CLI entry points (flags, import guards, argument parsing) need dedicated unit tests separate from the underlying logic tests.
-- **[code-quality]** Polling intervals using setInterval with stale closures cause subtle bugs; use refs or re-subscribe on dependency changes.
-- **[architecture]** Prompt templates should use concrete glob patterns instead of natural-language directory descriptions to reduce ambiguity.
-
 ## Run: run-20260319_152207-801fef63d9
 _Date: 2026-03-19 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
 
@@ -138,3 +129,12 @@ _Date: 2026-03-27 | Feature: add_support_for_auto_inside_the_tui_the_tui_should_
 - **[architecture]** CI-provider-specific logic (e.g., GitHub Actions state/conclusion values) must document the assumed provider explicitly.
 - **[architecture]** Unbounded collection endpoints (queue add) without configurable size caps risk runaway resource consumption.
 - **[code-quality]** Unused imports left after refactoring signal incomplete cleanup; remove promptly to avoid misleading readers.
+
+## Run: run-20260329_155000-bedecbf76f
+_Date: 2026-03-29 | Feature: colonyos_needs_to_be_fully_autonomous_we_deploy_it_to_a_proj_
+
+- **[architecture]** Config/state must be reloaded between loop iterations; stale config from startup causes silent behavioral drift.
+- **[code-quality]** Deserialization from user-editable files must handle missing/extra keys gracefully, not raise raw KeyError/TypeError.
+- **[code-quality]** Utility helpers (e.g., duration formatting) copy-pasted within a file instead of calling existing functions accumulate drift.
+- **[security]** State-mutating operations (add, clear, delete) on persistent files need append-only audit logging for traceability.
+- **[security]** Persistent state files created with default umask need explicit restrictive permissions when scope expands beyond single user.

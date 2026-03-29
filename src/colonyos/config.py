@@ -82,6 +82,19 @@ DEFAULTS = {
         "max_nuke_attempts": 1,
         "incident_char_cap": 4000,
     },
+    "daemon": {
+        "daily_budget_usd": 50.0,
+        "github_poll_interval_seconds": 120,
+        "ceo_cooldown_minutes": 60,
+        "cleanup_interval_hours": 24,
+        "max_cleanup_items": 3,
+        "heartbeat_interval_minutes": 240,
+        "digest_hour_utc": 14,
+        "max_consecutive_failures": 3,
+        "circuit_breaker_cooldown_minutes": 30,
+        "issue_labels": [],
+        "allowed_control_user_ids": [],
+    },
 }
 
 
@@ -211,6 +224,23 @@ class SlackConfig:
 
 
 @dataclass
+class DaemonConfig:
+    """Configuration for daemon mode (FR-12)."""
+
+    daily_budget_usd: float = 50.0
+    github_poll_interval_seconds: int = 120
+    ceo_cooldown_minutes: int = 60
+    cleanup_interval_hours: int = 24
+    max_cleanup_items: int = 3
+    heartbeat_interval_minutes: int = 240
+    digest_hour_utc: int = 14
+    max_consecutive_failures: int = 3
+    circuit_breaker_cooldown_minutes: int = 30
+    issue_labels: list[str] = field(default_factory=list)
+    allowed_control_user_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ColonyConfig:
     project: ProjectInfo | None = None
     personas: list[Persona] = field(default_factory=list)
@@ -239,6 +269,7 @@ class ColonyConfig:
     sweep: SweepConfig = field(default_factory=SweepConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
+    daemon: DaemonConfig = field(default_factory=DaemonConfig)
     ceo_profiles: list[Persona] = field(default_factory=list)
     max_log_files: int = 50
 
@@ -589,6 +620,77 @@ def _parse_recovery_config(raw: dict) -> RecoveryConfig:
     )
 
 
+def _parse_daemon_config(raw: dict) -> DaemonConfig:
+    """Parse the ``daemon`` section from config.yaml."""
+    if not raw:
+        return DaemonConfig()
+    d = DEFAULTS["daemon"]
+
+    def _int(key: str) -> int:
+        return int(raw.get(key, d[key]))
+
+    def _float(key: str) -> float:
+        return float(raw.get(key, d[key]))
+
+    def _require_positive(name: str, val: float | int) -> None:
+        if val < 1:
+            raise ValueError(
+                f"daemon.{name} must be positive, got {val}"
+            )
+
+    daily_budget_usd = _float("daily_budget_usd")
+    if daily_budget_usd <= 0:
+        raise ValueError(
+            f"daemon.daily_budget_usd must be positive, got {daily_budget_usd}"
+        )
+
+    poll_interval = _int("github_poll_interval_seconds")
+    if poll_interval < 10:
+        raise ValueError(
+            f"daemon.github_poll_interval_seconds must be >= 10, got {poll_interval}"
+        )
+
+    ceo_cooldown = _int("ceo_cooldown_minutes")
+    _require_positive("ceo_cooldown_minutes", ceo_cooldown)
+
+    cleanup_hours = _int("cleanup_interval_hours")
+    _require_positive("cleanup_interval_hours", cleanup_hours)
+
+    max_cleanup = _int("max_cleanup_items")
+    _require_positive("max_cleanup_items", max_cleanup)
+
+    heartbeat_mins = _int("heartbeat_interval_minutes")
+    _require_positive("heartbeat_interval_minutes", heartbeat_mins)
+
+    digest_hour = _int("digest_hour_utc")
+    if digest_hour < 0 or digest_hour > 23:
+        raise ValueError(
+            f"daemon.digest_hour_utc must be 0-23, got {digest_hour}"
+        )
+
+    max_failures = _int("max_consecutive_failures")
+    _require_positive("max_consecutive_failures", max_failures)
+
+    cb_cooldown = _int("circuit_breaker_cooldown_minutes")
+    _require_positive("circuit_breaker_cooldown_minutes", cb_cooldown)
+
+    return DaemonConfig(
+        daily_budget_usd=daily_budget_usd,
+        github_poll_interval_seconds=poll_interval,
+        ceo_cooldown_minutes=ceo_cooldown,
+        cleanup_interval_hours=cleanup_hours,
+        max_cleanup_items=max_cleanup,
+        heartbeat_interval_minutes=heartbeat_mins,
+        digest_hour_utc=digest_hour,
+        max_consecutive_failures=max_failures,
+        circuit_breaker_cooldown_minutes=cb_cooldown,
+        issue_labels=list(raw.get("issue_labels", d["issue_labels"])),
+        allowed_control_user_ids=list(
+            raw.get("allowed_control_user_ids", d["allowed_control_user_ids"])
+        ),
+    )
+
+
 def _parse_sweep_config(raw: dict) -> SweepConfig:
     """Parse the ``sweep`` section from config.yaml."""
     if not raw:
@@ -698,6 +800,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         sweep=_parse_sweep_config(raw.get("sweep", {})),
         memory=_parse_memory_config(raw.get("memory", {})),
         recovery=_parse_recovery_config(raw.get("recovery", {})),
+        daemon=_parse_daemon_config(raw.get("daemon", {})),
         ceo_profiles=_parse_personas(raw.get("ceo_profiles", [])),
         max_log_files=int(raw.get("max_log_files", 50)),
     )
@@ -904,6 +1007,34 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "allow_nuke": config.recovery.allow_nuke,
             "max_nuke_attempts": config.recovery.max_nuke_attempts,
             "incident_char_cap": config.recovery.incident_char_cap,
+        }
+
+    daemon_defaults = DEFAULTS["daemon"]
+    if (
+        config.daemon.daily_budget_usd != daemon_defaults["daily_budget_usd"]
+        or config.daemon.github_poll_interval_seconds != daemon_defaults["github_poll_interval_seconds"]
+        or config.daemon.ceo_cooldown_minutes != daemon_defaults["ceo_cooldown_minutes"]
+        or config.daemon.cleanup_interval_hours != daemon_defaults["cleanup_interval_hours"]
+        or config.daemon.max_cleanup_items != daemon_defaults["max_cleanup_items"]
+        or config.daemon.heartbeat_interval_minutes != daemon_defaults["heartbeat_interval_minutes"]
+        or config.daemon.digest_hour_utc != daemon_defaults["digest_hour_utc"]
+        or config.daemon.max_consecutive_failures != daemon_defaults["max_consecutive_failures"]
+        or config.daemon.circuit_breaker_cooldown_minutes != daemon_defaults["circuit_breaker_cooldown_minutes"]
+        or config.daemon.issue_labels
+        or config.daemon.allowed_control_user_ids
+    ):
+        data["daemon"] = {
+            "daily_budget_usd": config.daemon.daily_budget_usd,
+            "github_poll_interval_seconds": config.daemon.github_poll_interval_seconds,
+            "ceo_cooldown_minutes": config.daemon.ceo_cooldown_minutes,
+            "cleanup_interval_hours": config.daemon.cleanup_interval_hours,
+            "max_cleanup_items": config.daemon.max_cleanup_items,
+            "heartbeat_interval_minutes": config.daemon.heartbeat_interval_minutes,
+            "digest_hour_utc": config.daemon.digest_hour_utc,
+            "max_consecutive_failures": config.daemon.max_consecutive_failures,
+            "circuit_breaker_cooldown_minutes": config.daemon.circuit_breaker_cooldown_minutes,
+            "issue_labels": list(config.daemon.issue_labels),
+            "allowed_control_user_ids": list(config.daemon.allowed_control_user_ids),
         }
 
     if not config.directions_auto_update:
