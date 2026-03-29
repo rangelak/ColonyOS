@@ -1504,12 +1504,14 @@ def _build_ceo_prompt(
     config: ColonyConfig,
     proposal_filename: str,
     repo_root: Path,
+    *,
+    persona: "Persona | None" = None,
 ) -> tuple[str, str]:
     """Build the system prompt and user prompt for the CEO phase."""
     from colonyos.directions import load_directions
 
     ceo_template = _load_instruction("ceo.md")
-    persona = config.ceo_persona or DEFAULT_CEO_PERSONA
+    persona = persona or config.ceo_persona or DEFAULT_CEO_PERSONA
 
     directions = load_directions(repo_root)
     if directions.strip():
@@ -1620,15 +1622,22 @@ def run_ceo(
     config: ColonyConfig,
     *,
     ui: PhaseUI | NullUI | None = None,
+    ceo_persona: "Persona | None" = None,
 ) -> tuple[str, PhaseResult]:
     """Run the CEO phase: analyze the project and propose the next feature.
+
+    Args:
+        repo_root: Path to the repository root.
+        config: Colony configuration.
+        ui: Optional UI adapter for progress reporting.
+        ceo_persona: Optional persona override for CEO profile rotation.
 
     Returns a tuple of (proposed_prompt, phase_result).
     """
     names = proposal_names("ceo_proposal")
     proposal_filename = names.proposal_filename
 
-    system, user = _build_ceo_prompt(config, proposal_filename, repo_root)
+    system, user = _build_ceo_prompt(config, proposal_filename, repo_root, persona=ceo_persona)
 
     if ui is not None:
         ui.phase_header("CEO", config.budget.per_phase, config.get_model(Phase.CEO))

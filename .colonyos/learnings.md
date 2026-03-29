@@ -1,15 +1,6 @@
 # ColonyOS Learnings Ledger
 
 
-## Run: run-20260318_233254-2ac1052a17
-_Date: 2026-03-19 | Feature: the_ui_tests_are_failing_on_the_ci_there_is_no_module_found__
-
-- **[code-quality]** Config loaded once before a long-running loop goes stale; reload configuration at the start of each iteration.
-- **[code-quality]** Deserialization via direct key access (`d["key"]`) crashes on corrupted data; use `.get()` with defaults for resilience.
-- **[security]** CORS allowed-origins must be scoped per environment; leaving dev-server origins in production builds weakens isolation.
-- **[architecture]** Mutable state files (queues, logs) lack append-only audit trails; add forensic logging for add/remove operations.
-- **[code-quality]** Reusable format/parse helpers (e.g. duration formatting) get copy-pasted instead of importing the shared utility.
-
 ## Run: run-20260319_081958-46cf575c9d
 _Date: 2026-03-19 | Feature: every_time_the_pipeline_starts_we_should_look_at_what_branch_
 
@@ -139,3 +130,11 @@ _Date: 2026-03-26 | Feature: add_memory_to_the_system_https_github_com_thedotmac
 - **[code-quality]** Status enums and process exit codes must agree semantically; COMPLETED status with non-zero exit misleads callers.
 - **[security]** Security-sensitive conditions (e.g., author mismatch) should be hard gates requiring `--force`, not silent warnings.
 - **[code-quality]** Redaction blocklist helpers need inline comments listing which fields are excluded and why to prevent silent drift.
+
+## Run: run-20260327_171407-a3191077da
+_Date: 2026-03-27 | Feature: add_support_for_auto_inside_the_tui_the_tui_should_be_the_de_
+
+- **[architecture]** Feature branches bundling unrelated changes (CI/CD, install scripts, versioning) inflate diffs and increase review risk.
+- **[architecture]** CI-provider-specific logic (e.g., GitHub Actions state/conclusion values) must document the assumed provider explicitly.
+- **[architecture]** Unbounded collection endpoints (queue add) without configurable size caps risk runaway resource consumption.
+- **[code-quality]** Unused imports left after refactoring signal incomplete cleanup; remove promptly to avoid misleading readers.

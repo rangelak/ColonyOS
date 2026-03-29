@@ -45,6 +45,8 @@ class StatusBar(Static):
     turn_count: reactive[int] = reactive(0)
     is_running: reactive[bool] = reactive(False)
     error_msg: reactive[str] = reactive("")
+    iteration_current: reactive[int] = reactive(0)
+    iteration_total: reactive[int] = reactive(0)
 
     def __init__(self, **kwargs) -> None:  # noqa: ANN003
         super().__init__(**kwargs)
@@ -160,6 +162,18 @@ class StatusBar(Static):
         self.turn_count = turn_number
         self._render_bar()
 
+    def set_iteration(self, current: int, total: int) -> None:
+        """Set the auto-loop iteration display."""
+        self.iteration_current = current
+        self.iteration_total = total
+        self._render_bar()
+
+    def clear_iteration(self) -> None:
+        """Clear the iteration display."""
+        self.iteration_current = 0
+        self.iteration_total = 0
+        self._render_bar()
+
     # -----------------------------------------------------------------
     # Rendering
     # -----------------------------------------------------------------
@@ -230,6 +244,13 @@ class StatusBar(Static):
         elapsed = self._format_elapsed()
         if elapsed:
             text.append(f"  ·  {elapsed}", style=COLOR_DIM)
+
+        # Iteration display (auto loop)
+        if self.iteration_total > 0:
+            text.append(
+                f"  ·  iter {self.iteration_current}/{self.iteration_total}",
+                style=COLOR_ACCENT,
+            )
 
         self._last_rendered = text.plain
         self.update(text)

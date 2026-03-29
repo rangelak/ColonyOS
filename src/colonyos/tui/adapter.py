@@ -91,6 +91,24 @@ class UserInjectionMsg:
     text: str
 
 
+@dataclass(frozen=True)
+class IterationHeaderMsg:
+    """An auto-loop iteration boundary."""
+
+    iteration: int
+    total: int
+    persona_name: str
+    aggregate_cost: float
+
+
+@dataclass(frozen=True)
+class LoopCompleteMsg:
+    """The auto loop has finished."""
+
+    iterations_completed: int
+    total_cost: float
+
+
 # ---------------------------------------------------------------------------
 # TextualUI – the adapter
 # ---------------------------------------------------------------------------

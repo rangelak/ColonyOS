@@ -1020,7 +1020,7 @@ def _finalize_init(
             )
 
     gitignore = repo_root / ".gitignore"
-    entries_needed = [".colonyos/runs/", ".colonyos/memory.db", "cOS_*/"]
+    entries_needed = [".colonyos/runs/", ".colonyos/memory.db", ".colonyos/logs/", "cOS_*/"]
     if gitignore.exists():
         content = gitignore.read_text(encoding="utf-8")
         additions = [e for e in entries_needed if e not in content]
