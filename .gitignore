@@ -10,6 +10,7 @@ build/
 .colonyos/runs/
 .colonyos/queue.json
 .colonyos/memory.db
+.colonyos/logs/
 web/node_modules/
 src/colonyos/web_dist/
 generated/
