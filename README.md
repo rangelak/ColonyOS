@@ -437,6 +437,18 @@ pr_review:
   circuit_breaker_cooldown_minutes: 15
 ```
 
+### Retry on transient API errors
+
+```yaml
+retry:
+  max_attempts: 3              # total attempts per phase (1 = no retry)
+  base_delay_seconds: 10.0     # base delay for exponential backoff
+  max_delay_seconds: 120.0     # ceiling for backoff delay
+  fallback_model: null          # optional: "sonnet" to retry with a lighter model
+```
+
+When the Anthropic API returns a transient error (HTTP 529 overloaded, 503), phases automatically retry with exponential backoff and jitter. Set `max_attempts: 1` to disable retry. The optional `fallback_model` activates only after all retries are exhausted and is **hard-blocked** on safety-critical phases (`review`, `decision`, `fix`).
+
 ### Cross-run learnings
 
 ```yaml

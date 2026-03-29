@@ -65,14 +65,14 @@
   - [x] 5.3 Update `retry_info` to record `fallback_model_used` when fallback is triggered
   - [x] 5.4 Log fallback activation via UI or `_log()` with message: `"Retries exhausted on {original_model}, falling back to {fallback_model}..."`
 
-- [ ] 6.0 Wire retry config through the orchestrator (integration)
+- [x] 6.0 Wire retry config through the orchestrator (integration)
   depends_on: [4.0, 5.0]
-  - [ ] 6.1 Write integration test: mock SDK to throw 529 on first call, succeed on second → full pipeline completes, `PhaseResult.retry_info` is populated in `RunLog`
-  - [ ] 6.2 Update orchestrator's `run_phase()` call sites to pass `retry_config=config.retry` from the loaded `ColonyConfig`. Identify all call sites in `orchestrator.py` that invoke `run_phase()` or `run_phase_sync()` and thread the config through
-  - [ ] 6.3 Verify that the existing recovery system (`_attempt_phase_recovery`) is NOT triggered when retries succeed — the orchestrator should only see a successful `PhaseResult`
+  - [x] 6.1 Write integration test: mock SDK to throw 529 on first call, succeed on second → full pipeline completes, `PhaseResult.retry_info` is populated in `RunLog`
+  - [x] 6.2 Update orchestrator's `run_phase()` call sites to pass `retry_config=config.retry` from the loaded `ColonyConfig`. Identify all call sites in `orchestrator.py` that invoke `run_phase()` or `run_phase_sync()` and thread the config through
+  - [x] 6.3 Verify that the existing recovery system (`_attempt_phase_recovery`) is NOT triggered when retries succeed — the orchestrator should only see a successful `PhaseResult`
 
-- [ ] 7.0 Documentation and validation
+- [x] 7.0 Documentation and validation
   depends_on: [6.0]
-  - [ ] 7.1 Add `retry` section to the configuration reference in `README.md` following the existing pattern (see lines 411-415 for `verification` as a template)
-  - [ ] 7.2 Run the full test suite (`pytest`) and verify zero regressions
-  - [ ] 7.3 Manual smoke test: set `max_attempts: 1` to disable retry, verify 529 error message is now clear instead of "exited without details"
+  - [x] 7.1 Add `retry` section to the configuration reference in `README.md` following the existing pattern (see lines 411-415 for `verification` as a template)
+  - [x] 7.2 Run the full test suite (`pytest`) and verify zero regressions
+  - [x] 7.3 Manual smoke test: set `max_attempts: 1` to disable retry, verify 529 error message is now clear instead of "exited without details"
