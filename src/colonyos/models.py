@@ -134,6 +134,7 @@ class PhaseResult:
     model: str | None = None
     error: str | None = None
     artifacts: dict[str, str] = field(default_factory=dict)
+    retry_info: dict[str, Any] | None = None
 
 
 @dataclass

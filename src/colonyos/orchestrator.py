@@ -2338,6 +2338,7 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
                         "model": p.model,
                         "error": p.error,
                         "artifacts": p.artifacts,  # FR-10: Include artifacts for task_id tracking
+                        "retry_info": p.retry_info,  # FR-9: Retry metadata
                     }
                     for p in log.phases
                 ],
@@ -2423,6 +2424,7 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
                 model=p.get("model"),
                 error=p.get("error"),
                 artifacts=p.get("artifacts", {}),  # FR-10: Include artifacts for task_id tracking
+                retry_info=p.get("retry_info"),  # FR-9: Retry metadata
             ))
 
         log = RunLog(

@@ -23,11 +23,11 @@
   - [x] 1.5 Add `_parse_retry_config()` function and wire it into `load_config()` parsing logic
   - [x] 1.6 Validate `fallback_model` against `VALID_MODELS` when not None
 
-- [ ] 2.0 Add `retry_info` field to `PhaseResult` model (FR-9)
+- [x] 2.0 Add `retry_info` field to `PhaseResult` model (FR-9)
   depends_on: []
-  - [ ] 2.1 Write tests for `PhaseResult` with `retry_info` in `tests/test_models.py`: serialization round-trip, None default, populated dict
-  - [ ] 2.2 Add `retry_info: dict[str, Any] | None = None` field to `PhaseResult` in `src/colonyos/models.py`
-  - [ ] 2.3 Ensure `retry_info` is included in any existing `to_dict()`/`from_dict()` serialization if present on `PhaseResult`
+  - [x] 2.1 Write tests for `PhaseResult` with `retry_info` in `tests/test_models.py`: serialization round-trip, None default, populated dict
+  - [x] 2.2 Add `retry_info: dict[str, Any] | None = None` field to `PhaseResult` in `src/colonyos/models.py`
+  - [x] 2.3 Ensure `retry_info` is included in any existing `to_dict()`/`from_dict()` serialization if present on `PhaseResult`
 
 - [ ] 3.0 Add error detection helpers to `agent.py` (FR-1, FR-2)
   depends_on: []
