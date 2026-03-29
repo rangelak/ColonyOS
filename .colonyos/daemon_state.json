@@ -1,0 +1,10 @@
+{
+  "daily_spend_usd": 0.0,
+  "daily_reset_date": "2026-03-29",
+  "consecutive_failures": 0,
+  "circuit_breaker_until": null,
+  "total_items_today": 0,
+  "daemon_started_at": "2026-03-29T19:51:53.492379+00:00",
+  "last_heartbeat": "2026-03-29T19:51:54.126146+00:00",
+  "paused": false
+}
