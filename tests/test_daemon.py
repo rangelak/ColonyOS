@@ -210,3 +210,212 @@ class TestHealthReport:
         daemon_instance._state.daily_spend_usd = 100.0
         health = daemon_instance.get_health()
         assert health["status"] == "stopped"
+
+
+class TestSlackKillSwitch:
+    """Tests for FR-11 Slack kill switch (pause/resume/status)."""
+
+    def test_pause_by_authorized_user(self, tmp_repo: Path):
+        config = ColonyConfig(
+            daemon=DaemonConfig(
+                daily_budget_usd=50.0,
+                allowed_control_user_ids=["U12345"],
+            ),
+        )
+        d = Daemon(tmp_repo, config, dry_run=True)
+        result = d._handle_control_command("U12345", "pause")
+        assert result is not None
+        assert "paused" in result.lower() or "Paused" in result
+        assert d._state.paused is True
+
+    def test_resume_by_authorized_user(self, tmp_repo: Path):
+        config = ColonyConfig(
+            daemon=DaemonConfig(
+                daily_budget_usd=50.0,
+                allowed_control_user_ids=["U12345"],
+            ),
+        )
+        d = Daemon(tmp_repo, config, dry_run=True)
+        d._state.paused = True
+        result = d._handle_control_command("U12345", "resume")
+        assert result is not None
+        assert d._state.paused is False
+
+    def test_status_returns_health(self, tmp_repo: Path):
+        config = ColonyConfig(
+            daemon=DaemonConfig(
+                daily_budget_usd=50.0,
+                allowed_control_user_ids=["U12345"],
+            ),
+        )
+        d = Daemon(tmp_repo, config, dry_run=True)
+        result = d._handle_control_command("U12345", "status")
+        assert result is not None
+        assert "Status" in result or "status" in result
+
+    def test_unauthorized_user_rejected(self, tmp_repo: Path):
+        config = ColonyConfig(
+            daemon=DaemonConfig(
+                daily_budget_usd=50.0,
+                allowed_control_user_ids=["U12345"],
+            ),
+        )
+        d = Daemon(tmp_repo, config, dry_run=True)
+        result = d._handle_control_command("U99999", "pause")
+        assert result is None
+        assert d._state.paused is False
+
+    def test_empty_allowed_ids_rejects_all(self, daemon_instance: Daemon):
+        result = daemon_instance._handle_control_command("U12345", "pause")
+        assert result is None
+        assert daemon_instance._state.paused is False
+
+    def test_halt_aliases_pause(self, tmp_repo: Path):
+        config = ColonyConfig(
+            daemon=DaemonConfig(
+                daily_budget_usd=50.0,
+                allowed_control_user_ids=["U12345"],
+            ),
+        )
+        d = Daemon(tmp_repo, config, dry_run=True)
+        result = d._handle_control_command("U12345", "halt")
+        assert d._state.paused is True
+
+    def test_start_aliases_resume(self, tmp_repo: Path):
+        config = ColonyConfig(
+            daemon=DaemonConfig(
+                daily_budget_usd=50.0,
+                allowed_control_user_ids=["U12345"],
+            ),
+        )
+        d = Daemon(tmp_repo, config, dry_run=True)
+        d._state.paused = True
+        d._handle_control_command("U12345", "start")
+        assert d._state.paused is False
+
+
+class TestBudgetAlerts:
+    """Tests for FR-6 budget threshold Slack alerts."""
+
+    def test_80_percent_alert_fires_once(self, daemon_instance: Daemon):
+        daemon_instance._state.daily_spend_usd = 42.0  # 84% of $50
+        daemon_instance._queue_state.items = [
+            QueueItem(
+                id="item",
+                source_type="prompt",
+                source_value="x",
+                status=QueueItemStatus.PENDING,
+                priority=1,
+            ),
+        ]
+        with patch.object(daemon_instance, "_post_slack_message") as mock_slack:
+            daemon_instance._try_execute_next()
+            # Should have posted 80% warning
+            assert mock_slack.called
+            args = mock_slack.call_args_list[0][0][0]
+            assert "80%" in args or "warning" in args.lower()
+
+        assert daemon_instance._budget_80_alerted is True
+
+        # Second call should NOT fire again
+        with patch.object(daemon_instance, "_post_slack_message") as mock_slack2:
+            daemon_instance._try_execute_next()
+            # Should not fire the 80% alert again (already alerted)
+            for call in mock_slack2.call_args_list:
+                assert "80%" not in call[0][0] or "warning" not in call[0][0].lower()
+
+    def test_100_percent_alert_fires(self, daemon_instance: Daemon):
+        daemon_instance._state.daily_spend_usd = 50.0  # 100% of $50
+        daemon_instance._queue_state.items = [
+            QueueItem(
+                id="item",
+                source_type="prompt",
+                source_value="x",
+                status=QueueItemStatus.PENDING,
+                priority=1,
+            ),
+        ]
+        with patch.object(daemon_instance, "_post_slack_message") as mock_slack:
+            daemon_instance._try_execute_next()
+            assert mock_slack.called
+            args = mock_slack.call_args_list[0][0][0]
+            assert "100%" in args or "exhausted" in args.lower()
+
+        assert daemon_instance._budget_100_alerted is True
+
+
+class TestCleanupDedup:
+    """Tests for cleanup dedup fix."""
+
+    def test_cleanup_dedup_uses_path(self, daemon_instance: Daemon):
+        # Add a cleanup item with path as source_value
+        daemon_instance._queue_state.items = [
+            QueueItem(
+                id="cleanup-1",
+                source_type="cleanup",
+                source_value="src/foo.py",
+                status=QueueItemStatus.PENDING,
+                priority=3,
+            ),
+        ]
+        # Should detect duplicate when checking same path
+        assert daemon_instance._is_duplicate("cleanup", "src/foo.py") is True
+        # Formatted string should NOT match
+        assert daemon_instance._is_duplicate(
+            "cleanup", "Refactor src/foo.py (500 lines)"
+        ) is False
+
+
+class TestStarvationPersistence:
+    """Test that starvation promotion persists immediately."""
+
+    def test_promotion_persists_queue(self, daemon_instance: Daemon):
+        old_time = (
+            datetime.now(timezone.utc) - __import__("datetime").timedelta(hours=25)
+        ).isoformat()
+        daemon_instance._queue_state.items = [
+            QueueItem(
+                id="old",
+                source_type="cleanup",
+                source_value="x",
+                status=QueueItemStatus.PENDING,
+                priority=3,
+                added_at=old_time,
+            ),
+        ]
+        with patch.object(daemon_instance, "_persist_queue") as mock_persist:
+            daemon_instance._next_pending_item()
+            # Promotion should trigger a persist call
+            assert mock_persist.called
+
+
+class TestTickIntegration:
+    """Integration test for _tick() scheduling logic."""
+
+    def test_tick_calls_heartbeat_on_interval(self, daemon_instance: Daemon):
+        daemon_instance._last_heartbeat_time = 0.0
+        daemon_instance.daemon_config = DaemonConfig(
+            heartbeat_interval_minutes=0,  # Trigger immediately
+        )
+        with patch.object(daemon_instance, "_post_heartbeat") as mock_hb, \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_schedule_cleanup"):
+            daemon_instance._tick()
+            assert mock_hb.called
+
+    def test_tick_skips_execution_when_pipeline_running(self, daemon_instance: Daemon):
+        daemon_instance._pipeline_running = True
+        with patch.object(daemon_instance, "_try_execute_next") as mock_exec, \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_post_heartbeat"), \
+             patch.object(daemon_instance, "_schedule_cleanup"):
+            daemon_instance._tick()
+            assert not mock_exec.called
+
+    def test_tick_polls_github_on_interval(self, daemon_instance: Daemon):
+        daemon_instance._last_github_poll_time = 0.0
+        with patch.object(daemon_instance, "_poll_github_issues") as mock_poll, \
+             patch.object(daemon_instance, "_post_heartbeat"), \
+             patch.object(daemon_instance, "_schedule_cleanup"):
+            daemon_instance._tick()
+            assert mock_poll.called

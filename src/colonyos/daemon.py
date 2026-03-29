@@ -110,6 +110,10 @@ class Daemon:
         # PID lock file descriptor
         self._pid_fd: int | None = None
 
+        # Budget alert flags (reset on daily budget reset)
+        self._budget_80_alerted: bool = False
+        self._budget_100_alerted: bool = False
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -224,8 +228,31 @@ class Daemon:
             if self._state.paused:
                 return
 
-            # Budget check
+            # Budget check (reset alert flags if daily counters were reset)
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if self._state.daily_reset_date != today:
+                self._budget_80_alerted = False
+                self._budget_100_alerted = False
+
             allowed, remaining = self._state.check_daily_budget(self.daily_budget)
+
+            # Budget threshold alerts
+            spend = self._state.daily_spend_usd
+            if self.daily_budget > 0:
+                pct = spend / self.daily_budget
+                if pct >= 1.0 and not self._budget_100_alerted:
+                    self._budget_100_alerted = True
+                    self._post_slack_message(
+                        f":red_circle: Budget exhausted — ${spend:.2f}/${self.daily_budget:.2f} "
+                        f"(100%). Daemon will not execute further items today."
+                    )
+                elif pct >= 0.8 and not self._budget_80_alerted:
+                    self._budget_80_alerted = True
+                    self._post_slack_message(
+                        f":warning: Budget warning — ${spend:.2f}/${self.daily_budget:.2f} "
+                        f"({pct:.0%} used). Approaching daily limit."
+                    )
+
             if not allowed:
                 logger.info("Daily budget exhausted ($%.2f spent)", self._state.daily_spend_usd)
                 return
@@ -288,6 +315,7 @@ class Daemon:
             return None
 
         # Starvation promotion: items older than 24h get promoted one tier
+        promoted = False
         for item in pending:
             try:
                 added = datetime.fromisoformat(item.added_at)
@@ -295,6 +323,7 @@ class Daemon:
                     added = added.replace(tzinfo=timezone.utc)
                 if (now - added).total_seconds() > 86400 and item.priority > 0:
                     item.priority -= 1
+                    promoted = True
                     logger.info(
                         "Promoted item %s to priority %d (starvation prevention)",
                         item.id,
@@ -302,6 +331,9 @@ class Daemon:
                     )
             except (ValueError, TypeError):
                 pass
+
+        if promoted:
+            self._persist_queue()
 
         # Sort by priority (ascending), then by added_at (ascending = FIFO)
         pending.sort(key=lambda i: (i.priority, i.added_at))
@@ -324,9 +356,9 @@ class Daemon:
         )
 
         # Import here to avoid circular imports — cli.py imports from many modules
-        from colonyos.cli import _run_pipeline_for_queue_item
+        from colonyos.cli import run_pipeline_for_queue_item
 
-        return _run_pipeline_for_queue_item(
+        return run_pipeline_for_queue_item(
             item=item,
             repo_root=self.repo_root,
             config=self.config,
@@ -344,6 +376,8 @@ class Daemon:
 
             issues = fetch_open_issues(self.repo_root)
             label_filter = set(self.daemon_config.issue_labels)
+
+            from colonyos.sanitize import sanitize_untrusted_content
 
             for issue in issues:
                 # Label filtering
@@ -363,7 +397,7 @@ class Daemon:
                     source_value=str(issue.number),
                     status=QueueItemStatus.PENDING,
                     priority=priority,
-                    issue_title=issue.title,
+                    issue_title=sanitize_untrusted_content(issue.title),
                 )
 
                 with self._lock:
@@ -445,8 +479,8 @@ class Daemon:
             enqueued = 0
             max_items = self.daemon_config.max_cleanup_items
             for candidate in candidates[:max_items]:
-                source_val = f"Refactor {candidate.path} ({candidate.line_count} lines, {candidate.function_count} functions)"
-                if self._is_duplicate("cleanup", candidate.path):
+                source_val = str(candidate.path)
+                if self._is_duplicate("cleanup", source_val):
                     continue
 
                 item = QueueItem(
@@ -477,12 +511,25 @@ class Daemon:
         with self._lock:
             self._state.touch_heartbeat()
             self._persist_state()
+            items_today = self._state.total_items_today
+            spend = self._state.daily_spend_usd
 
         logger.info(
             "Heartbeat: %d items today, $%.2f spent",
-            self._state.total_items_today,
-            self._state.daily_spend_usd,
+            items_today,
+            spend,
         )
+
+        pending = sum(
+            1 for i in self._queue_state.items
+            if i.status == QueueItemStatus.PENDING
+        )
+        msg = (
+            f":heartbeat: *ColonyOS Heartbeat*\n"
+            f"Items today: {items_today} | Spend: ${spend:.2f}/${self.daily_budget:.2f} | "
+            f"Queue depth: {pending} | Paused: {self._state.paused}"
+        )
+        self._post_slack_message(msg)
 
     # ------------------------------------------------------------------
     # Crash Recovery (FR-8)
@@ -540,11 +587,95 @@ class Daemon:
         try:
             from colonyos.slack import create_slack_app, start_socket_mode
 
-            slack_app = create_slack_app()
+            slack_app = create_slack_app(self.config.slack)
+            self._register_daemon_commands(slack_app)
             logger.info("Slack listener thread started")
             start_socket_mode(slack_app)
         except Exception:
             logger.exception("Slack listener thread failed")
+
+    def _register_daemon_commands(self, slack_app: Any) -> None:
+        """Register message handler on the Slack app for daemon control commands."""
+        control_keywords = {"pause", "stop", "halt", "resume", "start", "status"}
+
+        @slack_app.event("message")
+        def _handle_message(event: dict, say: Any) -> None:  # noqa: ANN401
+            text = (event.get("text") or "").strip().lower()
+            user_id = event.get("user", "")
+            if text not in control_keywords:
+                return
+            result = self._handle_control_command(user_id, text)
+            if result:
+                say(result)
+
+    # ------------------------------------------------------------------
+    # Slack helpers & kill switch (FR-11)
+    # ------------------------------------------------------------------
+
+    def _post_slack_message(self, text: str) -> None:
+        """Post a message to the first configured Slack channel.
+
+        Uses ``slack_sdk.WebClient`` directly to avoid circular dependencies.
+        Errors are logged and swallowed so Slack failures never block the daemon.
+        """
+        try:
+            token = os.environ.get("COLONYOS_SLACK_BOT_TOKEN")
+            if not token:
+                logger.debug("No COLONYOS_SLACK_BOT_TOKEN set, skipping Slack message")
+                return
+            channels = self.config.slack.channels
+            if not channels:
+                logger.debug("No Slack channels configured, skipping Slack message")
+                return
+            from slack_sdk import WebClient  # imported inline to avoid hard dep
+
+            client = WebClient(token=token)
+            client.chat_postMessage(channel=channels[0], text=text)
+        except Exception:
+            logger.exception("Failed to post Slack message")
+
+    def _handle_control_command(self, user_id: str, text: str) -> str | None:
+        """Handle a Slack kill-switch control command.
+
+        Returns a response string to send back, or None if the user is not
+        authorized or the command is unrecognized.
+        """
+        allowed_ids = self.daemon_config.allowed_control_user_ids
+        if not allowed_ids or user_id not in allowed_ids:
+            logger.warning(
+                "Unauthorized control command '%s' from user %s", text, user_id
+            )
+            return None
+
+        cmd = text.strip().lower()
+
+        if cmd in ("pause", "stop", "halt"):
+            with self._lock:
+                self._state.paused = True
+                self._persist_state()
+            logger.info("Daemon paused via Slack by user %s", user_id)
+            return f"Daemon paused by <@{user_id}>."
+
+        if cmd in ("resume", "start"):
+            with self._lock:
+                self._state.paused = False
+                self._persist_state()
+            logger.info("Daemon resumed via Slack by user %s", user_id)
+            return f"Daemon resumed by <@{user_id}>."
+
+        if cmd == "status":
+            health = self.get_health()
+            return (
+                f"*Daemon Status*\n"
+                f"Status: {health['status']} | Paused: {health['paused']}\n"
+                f"Queue depth: {health['queue_depth']} | Pipeline running: {health['pipeline_running']}\n"
+                f"Spend: ${health['daily_spend_usd']:.2f} "
+                f"(${health['daily_budget_remaining_usd']:.2f} remaining)\n"
+                f"Failures: {health['consecutive_failures']} | "
+                f"Circuit breaker: {health['circuit_breaker_active']}"
+            )
+
+        return None
 
     # ------------------------------------------------------------------
     # Signal handling

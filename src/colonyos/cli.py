@@ -3926,6 +3926,50 @@ def watch(
 
 
 # ---------------------------------------------------------------------------
+# Daemon – queue-item pipeline helper
+# ---------------------------------------------------------------------------
+
+
+def run_pipeline_for_queue_item(
+    *,
+    item: "QueueItem",
+    repo_root: "Path",
+    config: "ColonyConfig",
+    verbose: bool = False,
+) -> float:
+    """Execute a single queue item through the orchestration pipeline.
+
+    Returns the total cost (USD) of the run.  Called by the daemon process
+    to drive items that were enqueued via Slack, GitHub issues, CEO
+    proposals, etc.
+    """
+    from colonyos.github import fetch_issue, format_issue_as_prompt
+
+    # Build prompt and optional issue metadata
+    if item.source_type == "issue":
+        issue = fetch_issue(int(item.source_value), repo_root)
+        prompt_text = format_issue_as_prompt(issue)
+        source_issue: int | None = issue.number
+        source_issue_url: str | None = issue.url
+    else:
+        prompt_text = item.source_value
+        source_issue = None
+        source_issue_url = None
+
+    log = run_orchestrator(
+        prompt_text,
+        repo_root=repo_root,
+        config=config,
+        verbose=verbose,
+        quiet=True,
+        source_issue=source_issue,
+        source_issue_url=source_issue_url,
+    )
+
+    return log.total_cost_usd
+
+
+# ---------------------------------------------------------------------------
 # Daemon
 # ---------------------------------------------------------------------------
 

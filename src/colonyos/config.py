@@ -624,46 +624,70 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
     """Parse the ``daemon`` section from config.yaml."""
     if not raw:
         return DaemonConfig()
-    defaults = DEFAULTS["daemon"]
-    daily_budget_usd = float(raw.get("daily_budget_usd", defaults["daily_budget_usd"]))
+    d = DEFAULTS["daemon"]
+
+    def _int(key: str) -> int:
+        return int(raw.get(key, d[key]))
+
+    def _float(key: str) -> float:
+        return float(raw.get(key, d[key]))
+
+    def _require_positive(name: str, val: float | int) -> None:
+        if val < 1:
+            raise ValueError(
+                f"daemon.{name} must be positive, got {val}"
+            )
+
+    daily_budget_usd = _float("daily_budget_usd")
     if daily_budget_usd <= 0:
-        raise ValueError(f"daemon.daily_budget_usd must be positive, got {daily_budget_usd}")
-    github_poll_interval_seconds = int(raw.get("github_poll_interval_seconds", defaults["github_poll_interval_seconds"]))
-    if github_poll_interval_seconds < 10:
-        raise ValueError(f"daemon.github_poll_interval_seconds must be >= 10, got {github_poll_interval_seconds}")
-    ceo_cooldown_minutes = int(raw.get("ceo_cooldown_minutes", defaults["ceo_cooldown_minutes"]))
-    if ceo_cooldown_minutes < 1:
-        raise ValueError(f"daemon.ceo_cooldown_minutes must be positive, got {ceo_cooldown_minutes}")
-    cleanup_interval_hours = int(raw.get("cleanup_interval_hours", defaults["cleanup_interval_hours"]))
-    if cleanup_interval_hours < 1:
-        raise ValueError(f"daemon.cleanup_interval_hours must be positive, got {cleanup_interval_hours}")
-    max_cleanup_items = int(raw.get("max_cleanup_items", defaults["max_cleanup_items"]))
-    if max_cleanup_items < 1:
-        raise ValueError(f"daemon.max_cleanup_items must be positive, got {max_cleanup_items}")
-    heartbeat_interval_minutes = int(raw.get("heartbeat_interval_minutes", defaults["heartbeat_interval_minutes"]))
-    if heartbeat_interval_minutes < 1:
-        raise ValueError(f"daemon.heartbeat_interval_minutes must be positive, got {heartbeat_interval_minutes}")
-    digest_hour_utc = int(raw.get("digest_hour_utc", defaults["digest_hour_utc"]))
-    if digest_hour_utc < 0 or digest_hour_utc > 23:
-        raise ValueError(f"daemon.digest_hour_utc must be 0-23, got {digest_hour_utc}")
-    max_consecutive_failures = int(raw.get("max_consecutive_failures", defaults["max_consecutive_failures"]))
-    if max_consecutive_failures < 1:
-        raise ValueError(f"daemon.max_consecutive_failures must be positive, got {max_consecutive_failures}")
-    circuit_breaker_cooldown_minutes = int(raw.get("circuit_breaker_cooldown_minutes", defaults["circuit_breaker_cooldown_minutes"]))
-    if circuit_breaker_cooldown_minutes < 1:
-        raise ValueError(f"daemon.circuit_breaker_cooldown_minutes must be positive, got {circuit_breaker_cooldown_minutes}")
+        raise ValueError(
+            f"daemon.daily_budget_usd must be positive, got {daily_budget_usd}"
+        )
+
+    poll_interval = _int("github_poll_interval_seconds")
+    if poll_interval < 10:
+        raise ValueError(
+            f"daemon.github_poll_interval_seconds must be >= 10, got {poll_interval}"
+        )
+
+    ceo_cooldown = _int("ceo_cooldown_minutes")
+    _require_positive("ceo_cooldown_minutes", ceo_cooldown)
+
+    cleanup_hours = _int("cleanup_interval_hours")
+    _require_positive("cleanup_interval_hours", cleanup_hours)
+
+    max_cleanup = _int("max_cleanup_items")
+    _require_positive("max_cleanup_items", max_cleanup)
+
+    heartbeat_mins = _int("heartbeat_interval_minutes")
+    _require_positive("heartbeat_interval_minutes", heartbeat_mins)
+
+    digest_hour = _int("digest_hour_utc")
+    if digest_hour < 0 or digest_hour > 23:
+        raise ValueError(
+            f"daemon.digest_hour_utc must be 0-23, got {digest_hour}"
+        )
+
+    max_failures = _int("max_consecutive_failures")
+    _require_positive("max_consecutive_failures", max_failures)
+
+    cb_cooldown = _int("circuit_breaker_cooldown_minutes")
+    _require_positive("circuit_breaker_cooldown_minutes", cb_cooldown)
+
     return DaemonConfig(
         daily_budget_usd=daily_budget_usd,
-        github_poll_interval_seconds=github_poll_interval_seconds,
-        ceo_cooldown_minutes=ceo_cooldown_minutes,
-        cleanup_interval_hours=cleanup_interval_hours,
-        max_cleanup_items=max_cleanup_items,
-        heartbeat_interval_minutes=heartbeat_interval_minutes,
-        digest_hour_utc=digest_hour_utc,
-        max_consecutive_failures=max_consecutive_failures,
-        circuit_breaker_cooldown_minutes=circuit_breaker_cooldown_minutes,
-        issue_labels=list(raw.get("issue_labels", defaults["issue_labels"])),
-        allowed_control_user_ids=list(raw.get("allowed_control_user_ids", defaults["allowed_control_user_ids"])),
+        github_poll_interval_seconds=poll_interval,
+        ceo_cooldown_minutes=ceo_cooldown,
+        cleanup_interval_hours=cleanup_hours,
+        max_cleanup_items=max_cleanup,
+        heartbeat_interval_minutes=heartbeat_mins,
+        digest_hour_utc=digest_hour,
+        max_consecutive_failures=max_failures,
+        circuit_breaker_cooldown_minutes=cb_cooldown,
+        issue_labels=list(raw.get("issue_labels", d["issue_labels"])),
+        allowed_control_user_ids=list(
+            raw.get("allowed_control_user_ids", d["allowed_control_user_ids"])
+        ),
     )
 
 

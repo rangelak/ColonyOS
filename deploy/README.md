@@ -19,14 +19,21 @@
    ../venv/bin/pip install -e .
    ```
 
-2. **Configure environment** — create `/opt/colonyos/env`:
+2. **Configure environment** — create `/opt/colonyos/env` owned by the
+   `colonyos` user:
    ```bash
    ANTHROPIC_API_KEY=sk-ant-...
-   SLACK_BOT_TOKEN=xoxb-...
-   SLACK_APP_TOKEN=xapp-...
+   COLONYOS_SLACK_BOT_TOKEN=xoxb-...
+   COLONYOS_SLACK_APP_TOKEN=xapp-...
    GITHUB_TOKEN=ghp_...
    ```
-   Secure it: `chmod 600 /opt/colonyos/env`
+   ```bash
+   sudo chown colonyos:colonyos /opt/colonyos/env
+   sudo chmod 600 /opt/colonyos/env
+   ```
+   > **Tip:** For production deployments, consider using `systemd-creds`
+   > or a secrets manager (e.g., HashiCorp Vault, AWS Secrets Manager)
+   > instead of a plaintext env file.
 
 3. **Initialize ColonyOS**:
    ```bash

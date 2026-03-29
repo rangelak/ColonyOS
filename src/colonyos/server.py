@@ -122,9 +122,23 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
     def health() -> dict[str, str]:
         return {"status": "ok", "version": __version__, "write_enabled": str(write_enabled).lower()}
 
+    # Live daemon reference — set by Daemon.start() when running in daemon mode
+    app.state.daemon_instance = None
+
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
-        """Daemon health check endpoint (FR-10)."""
+        """Daemon health check endpoint (FR-10).
+
+        Uses the live daemon instance's in-memory state when available,
+        falling back to reading from disk for standalone server mode.
+        """
+        daemon = app.state.daemon_instance
+        if daemon is not None:
+            body = daemon.get_health()
+            http_status = 200 if body["status"] == "healthy" else 503
+            return JSONResponse(content=body, status_code=http_status)
+
+        # Fallback: read from disk (standalone server, no live daemon)
         from colonyos.daemon_state import load_daemon_state
 
         config = load_config(repo_root)
@@ -152,7 +166,6 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
             except (ValueError, TypeError):
                 pass
 
-        # Count pending queue items
         queue_path = repo_root / ".colonyos" / "queue.json"
         queue_depth = 0
         if queue_path.exists():
