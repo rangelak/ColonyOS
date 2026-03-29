@@ -3364,6 +3364,7 @@ class TestParallelImplementIntegration:
             action_taken="proceed",
         )
         config.recovery.enabled = False
+        config.parallel_implement.enabled = True
         mock_run_phase_sync.return_value = _fake_phase_result(Phase.PLAN)
         mock_parallel_implement.return_value = PhaseResult(
             phase=Phase.IMPLEMENT,

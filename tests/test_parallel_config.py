@@ -24,7 +24,7 @@ class TestParallelImplementConfigDefaults:
 
     def test_default_enabled(self, tmp_repo: Path) -> None:
         config = load_config(tmp_repo)
-        assert config.parallel_implement.enabled is True
+        assert config.parallel_implement.enabled is False
 
     def test_default_max_parallel_agents(self, tmp_repo: Path) -> None:
         config = load_config(tmp_repo)
@@ -220,7 +220,7 @@ class TestParallelImplementDefaults:
     def test_defaults_has_parallel_implement(self) -> None:
         assert "parallel_implement" in DEFAULTS
         pi = DEFAULTS["parallel_implement"]
-        assert pi["enabled"] is True
+        assert pi["enabled"] is False
         assert pi["max_parallel_agents"] == 3
         assert pi["conflict_strategy"] == "auto"
         assert pi["merge_timeout_seconds"] == 60

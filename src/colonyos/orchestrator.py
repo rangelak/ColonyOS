@@ -14,7 +14,7 @@ from claude_agent_sdk import AgentDefinition
 
 from colonyos.agent import run_phase_sync, run_phases_parallel_sync
 from colonyos.config import ColonyConfig, runs_dir_path
-from colonyos.dag import parse_task_file
+from colonyos.dag import TaskDAG, parse_task_file
 from colonyos.models import TaskStatus
 from colonyos.parallel_orchestrator import (
     ParallelOrchestrator,
@@ -592,6 +592,55 @@ def _build_implement_prompt(
     return system, user
 
 
+def _build_single_task_implement_prompt(
+    config: ColonyConfig,
+    task_id: str,
+    task_description: str,
+    prd_path: str,
+    task_path: str,
+    branch_name: str,
+    completed_tasks: list[str],
+    repo_root: Path | None = None,
+) -> tuple[str, str]:
+    """Build system and user prompts scoped to a single task in sequential mode.
+
+    Unlike the parallel prompt, this runs in the main worktree (not a
+    separate git worktree) and includes context about previously completed
+    tasks so the agent can build on prior work.
+    """
+    impl_template = _load_instruction("implement.md")
+
+    system = _format_base(config) + "\n\n" + impl_template.format(
+        prd_path=prd_path,
+        task_path=task_path,
+        branch_name=branch_name,
+    )
+
+    # Add context about completed tasks so the agent knows what's already done
+    if completed_tasks:
+        completed_block = "\n".join(f"  - {t}" for t in completed_tasks)
+        system += (
+            "\n\n## Previously Completed Tasks\n\n"
+            "The following tasks have already been implemented and committed. "
+            "Do NOT re-implement them. Build on the existing code.\n\n"
+            f"{completed_block}"
+        )
+
+    if repo_root is not None:
+        learnings = load_learnings_for_injection(repo_root)
+        if learnings:
+            system += f"\n\n## Learnings from Past Runs\n\n{learnings}"
+
+    user = (
+        f"Implement ONLY task {task_id}: {task_description}\n\n"
+        f"Read the PRD at `{prd_path}` for overall context.\n"
+        f"Read the task list at `{task_path}` for details on this specific task.\n"
+        f"Work on branch `{branch_name}`.\n\n"
+        f"Focus exclusively on task {task_id}. Do not implement other tasks."
+    )
+    return system, user
+
+
 def reviewer_personas(config: ColonyConfig) -> list[Persona]:
     """Return only personas that have reviewer=True."""
     return [p for p in config.personas if p.reviewer]
@@ -650,6 +699,206 @@ def _build_conflict_resolve_prompt(
         f"Analyze both sides of each conflict and merge them correctly."
     )
     return system, user
+
+
+def _run_sequential_implement(
+    *,
+    log: RunLog,
+    repo_root: Path,
+    config: ColonyConfig,
+    branch_name: str,
+    prd_rel: str,
+    task_rel: str,
+    _make_ui,
+) -> PhaseResult | None:
+    """Run sequential implementation: one task at a time in topological order.
+
+    Parses the task file into a DAG, iterates in dependency order, and runs
+    a focused agent session per task.  Each successful task is committed
+    individually.  If a task fails, all transitive dependents are marked
+    BLOCKED and skipped.
+
+    Returns a merged PhaseResult or None if the task file cannot be parsed.
+    """
+    import time as _time
+
+    task_file_path = repo_root / task_rel
+    if not task_file_path.exists():
+        _log(f"Task file not found: {task_rel}")
+        return None
+
+    content = task_file_path.read_text(encoding="utf-8")
+    deps = parse_task_file(content)
+    if not deps:
+        _log("No tasks found in task file, falling back to single-prompt mode")
+        return None
+
+    dag = TaskDAG(dependencies=deps)
+    cycle = dag.detect_cycle()
+    if cycle is not None:
+        _log(f"Circular dependency detected: {' -> '.join(cycle)}")
+        return None
+
+    task_order = dag.topological_sort()
+    task_count = len(task_order)
+    per_task_budget = config.budget.per_phase / max(task_count, 1)
+
+    _log(
+        f"Sequential implement: {task_count} tasks, "
+        f"${per_task_budget:.2f}/task budget"
+    )
+
+    # Extract task descriptions from the file content
+    task_descriptions: dict[str, str] = {}
+    import re as _re
+    for line in content.splitlines():
+        m = _re.match(r"^-\s*\[[x ]\]\s*(\d+\.\d+)\s+(.*)", line, _re.IGNORECASE)
+        if m:
+            task_descriptions[m.group(1)] = m.group(2).strip()
+
+    completed: set[str] = set()
+    failed: set[str] = set()
+    blocked: set[str] = set()
+    task_results: dict[str, dict] = {}
+    total_cost = 0.0
+    total_duration_ms = 0
+    overall_success = True
+
+    for task_id in task_order:
+        task_desc = task_descriptions.get(task_id, f"Task {task_id}")
+
+        # Check if any dependency (direct or transitive) has failed or is blocked
+        task_deps = dag.dependencies.get(task_id, [])
+        blocked_by: list[str] = []
+        for dep in task_deps:
+            if dep in failed or dep in blocked:
+                blocked_by.append(dep)
+
+        if blocked_by:
+            blocked.add(task_id)
+            task_results[task_id] = {
+                "status": "BLOCKED",
+                "blocked_by": blocked_by,
+                "description": task_desc,
+            }
+            _log(
+                f"Task {task_id} BLOCKED (depends on failed/blocked: "
+                f"{', '.join(blocked_by)})"
+            )
+            overall_success = False
+            continue
+
+        _log(f"Running task {task_id}: {task_desc}")
+        t0 = _time.monotonic()
+
+        system, user = _build_single_task_implement_prompt(
+            config,
+            task_id=task_id,
+            task_description=task_desc,
+            prd_path=prd_rel,
+            task_path=task_rel,
+            branch_name=branch_name,
+            completed_tasks=[
+                f"{tid}: {task_descriptions.get(tid, tid)}" for tid in task_order if tid in completed
+            ],
+            repo_root=repo_root,
+        )
+
+        ui = _make_ui()
+        if ui is not None:
+            ui.phase_header(
+                f"Implement [{task_id}]",
+                per_task_budget,
+                config.get_model(Phase.IMPLEMENT),
+                branch_name,
+            )
+
+        try:
+            result = run_phase_sync(
+                Phase.IMPLEMENT,
+                user,
+                cwd=repo_root,
+                system_prompt=system,
+                model=config.get_model(Phase.IMPLEMENT),
+                budget_usd=per_task_budget,
+                ui=ui,
+            )
+        except Exception as exc:
+            _log(f"Task {task_id} raised exception: {exc}")
+            failed.add(task_id)
+            elapsed_ms = int((_time.monotonic() - t0) * 1000)
+            task_results[task_id] = {
+                "status": "FAILED",
+                "error": str(exc),
+                "description": task_desc,
+                "duration_ms": elapsed_ms,
+            }
+            overall_success = False
+            continue
+
+        elapsed_ms = int((_time.monotonic() - t0) * 1000)
+        task_cost = result.cost_usd or 0.0
+        total_cost += task_cost
+        total_duration_ms += elapsed_ms
+
+        if result.success:
+            # Commit the work for this task
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=repo_root,
+                capture_output=True,
+            )
+            commit_result = subprocess.run(
+                ["git", "commit", "-m", f"Implement task {task_id}: {task_desc}"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if commit_result.returncode == 0:
+                _log(f"Task {task_id} completed and committed")
+            else:
+                # Nothing to commit is fine (agent may have already committed)
+                _log(f"Task {task_id} completed (no new changes to commit)")
+
+            completed.add(task_id)
+            task_results[task_id] = {
+                "status": "COMPLETED",
+                "cost_usd": task_cost,
+                "duration_ms": elapsed_ms,
+                "description": task_desc,
+            }
+        else:
+            failed.add(task_id)
+            task_results[task_id] = {
+                "status": "FAILED",
+                "error": result.error or "unknown",
+                "cost_usd": task_cost,
+                "duration_ms": elapsed_ms,
+                "description": task_desc,
+            }
+            overall_success = False
+            _log(f"Task {task_id} failed: {result.error}")
+
+    # Build merged PhaseResult
+    artifacts = {
+        "mode": "sequential",
+        "total_tasks": str(task_count),
+        "completed": str(len(completed)),
+        "failed": str(len(failed)),
+        "blocked": str(len(blocked)),
+        "task_results": task_results,
+    }
+
+    return PhaseResult(
+        phase=Phase.IMPLEMENT,
+        success=overall_success,
+        cost_usd=total_cost,
+        duration_ms=total_duration_ms,
+        artifacts=artifacts,
+        error=None if overall_success else (
+            f"{len(failed)} task(s) failed, {len(blocked)} task(s) blocked"
+        ),
+    )
 
 
 def _run_parallel_implement(
@@ -3670,7 +3919,9 @@ def _run_pipeline(
             def _execute_implement_phase() -> PhaseResult:
                 """Run implement once, preferring parallel mode when enabled."""
                 attempt_result = None
+
                 if config.parallel_implement.enabled:
+                    # Parallel mode (opt-in)
                     attempt_result = _run_parallel_implement(
                         log=log,
                         repo_root=repo_root,
@@ -3685,38 +3936,58 @@ def _run_pipeline(
                             "Parallel implement completed: "
                             f"{attempt_result.artifacts.get('parallelism_ratio', '1.0x')}"
                         )
-
-                if attempt_result is None:
-                    _log("Using sequential implement mode")
-                    system, user = _build_implement_prompt(
-                        config,
-                        prd_rel,
-                        task_rel,
-                        branch_name,
+                        if impl_ui is not None:
+                            if attempt_result.success:
+                                completed_tasks = int(attempt_result.artifacts.get("completed", "0"))
+                                impl_ui.phase_complete(
+                                    attempt_result.cost_usd or 0.0,
+                                    completed_tasks,
+                                    attempt_result.duration_ms,
+                                )
+                            else:
+                                message = attempt_result.error or "Parallel implement phase failed"
+                                impl_ui.phase_error(message)
+                        return attempt_result
+                else:
+                    # Sequential mode (default): one task at a time
+                    _log("Using sequential (per-task) implement mode")
+                    attempt_result = _run_sequential_implement(
+                        log=log,
                         repo_root=repo_root,
+                        config=config,
+                        branch_name=branch_name,
+                        prd_rel=prd_rel,
+                        task_rel=task_rel,
+                        _make_ui=_make_ui,
                     )
-                    system = _inject_memory_block(system, memory_store, "implement", user, config)
-                    user += _drain_injected_context(user_injection_provider)
-                    attempt_result = run_phase_sync(
-                        Phase.IMPLEMENT,
-                        user,
-                        cwd=repo_root,
-                        system_prompt=system,
-                        model=config.get_model(Phase.IMPLEMENT),
-                        budget_usd=config.budget.per_phase,
-                        ui=impl_ui,
-                    )
-                elif impl_ui is not None:
-                    if attempt_result.success:
-                        completed_tasks = int(attempt_result.artifacts.get("completed", "0"))
-                        impl_ui.phase_complete(
-                            attempt_result.cost_usd or 0.0,
-                            completed_tasks,
-                            attempt_result.duration_ms,
+                    if attempt_result is not None:
+                        _log(
+                            f"Sequential implement completed: "
+                            f"{attempt_result.artifacts.get('completed', '0')}/"
+                            f"{attempt_result.artifacts.get('total_tasks', '?')} tasks"
                         )
-                    else:
-                        message = attempt_result.error or "Parallel implement phase failed"
-                        impl_ui.phase_error(message)
+                        return attempt_result
+
+                # Last-resort fallback: single-prompt sequential mode
+                _log("Falling back to single-prompt implement mode")
+                system, user = _build_implement_prompt(
+                    config,
+                    prd_rel,
+                    task_rel,
+                    branch_name,
+                    repo_root=repo_root,
+                )
+                system = _inject_memory_block(system, memory_store, "implement", user, config)
+                user += _drain_injected_context(user_injection_provider)
+                attempt_result = run_phase_sync(
+                    Phase.IMPLEMENT,
+                    user,
+                    cwd=repo_root,
+                    system_prompt=system,
+                    model=config.get_model(Phase.IMPLEMENT),
+                    budget_usd=config.budget.per_phase,
+                    ui=impl_ui,
+                )
                 return attempt_result
 
             impl_result = _execute_implement_phase()
