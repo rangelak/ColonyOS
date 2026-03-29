@@ -34,6 +34,33 @@ def _log(msg: str) -> None:
     print(f"[colonyos] {msg}", file=sys.stderr, flush=True)
 
 
+def _is_transient_error(exc: Exception) -> bool:
+    """Classify whether an exception represents a transient API error worth retrying.
+
+    Checks structured attributes first (status_code), then falls back to string
+    matching on the exception message, stderr, and result fields.
+
+    Note: This is a workaround until the SDK provides structured error types.
+    """
+    # 1. Structured attribute check — most reliable when available
+    status_code = getattr(exc, "status_code", None)
+    if status_code is not None:
+        return status_code in (429, 503, 529)
+
+    # 2. String matching fallback — check all available text fields
+    raw = str(exc)
+    stderr = getattr(exc, "stderr", None) or ""
+    result = getattr(exc, "result", None) or ""
+
+    _TRANSIENT_PATTERNS = ("overloaded", "529", "503")
+    for text in (raw, stderr, result):
+        lower = text.lower()
+        if any(pattern in lower for pattern in _TRANSIENT_PATTERNS):
+            return True
+
+    return False
+
+
 def _friendly_error(exc: Exception) -> str:
     """Extract a human-readable message from SDK exceptions."""
     raw = str(exc)
@@ -55,6 +82,8 @@ def _friendly_error(exc: Exception) -> str:
             return f"Authentication failed — check your API key or Claude login. {text.strip()}"
         if "rate limit" in lower:
             return f"Rate limited by the API. {text.strip()}"
+        if "overloaded" in lower or "529" in lower:
+            return "API is temporarily overloaded (529). Will retry..."
 
     if "exit code 1" in raw and not stderr:
         return (

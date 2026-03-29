@@ -29,12 +29,12 @@
   - [x] 2.2 Add `retry_info: dict[str, Any] | None = None` field to `PhaseResult` in `src/colonyos/models.py`
   - [x] 2.3 Ensure `retry_info` is included in any existing `to_dict()`/`from_dict()` serialization if present on `PhaseResult`
 
-- [ ] 3.0 Add error detection helpers to `agent.py` (FR-1, FR-2)
+- [x] 3.0 Add error detection helpers to `agent.py` (FR-1, FR-2)
   depends_on: []
-  - [ ] 3.1 Write tests for `_is_transient_error()` in `tests/test_agent.py`: 529 overloaded → True, 503 service unavailable → True, auth error → False, credit error → False, generic error → False, structured `status_code` attribute → uses it, string match fallback when no attribute
-  - [ ] 3.2 Write tests for updated `_friendly_error()`: "overloaded" → clear 529 message, "529" → clear message, existing patterns (credit, auth, rate limit) still work
-  - [ ] 3.3 Implement `_is_transient_error(exc: Exception) -> bool` in `agent.py`: check `getattr(exc, "status_code", None)` for 429/503/529 first, then string-match `str(exc)`, `exc.stderr`, `exc.result` for "overloaded"/"529"/"503"
-  - [ ] 3.4 Update `_friendly_error()` to detect "overloaded"/"529" patterns and return `"API is temporarily overloaded (529). Will retry..."` before the catch-all
+  - [x] 3.1 Write tests for `_is_transient_error()` in `tests/test_agent.py`: 529 overloaded → True, 503 service unavailable → True, auth error → False, credit error → False, generic error → False, structured `status_code` attribute → uses it, string match fallback when no attribute
+  - [x] 3.2 Write tests for updated `_friendly_error()`: "overloaded" → clear 529 message, "529" → clear message, existing patterns (credit, auth, rate limit) still work
+  - [x] 3.3 Implement `_is_transient_error(exc: Exception) -> bool` in `agent.py`: check `getattr(exc, "status_code", None)` for 429/503/529 first, then string-match `str(exc)`, `exc.stderr`, `exc.result` for "overloaded"/"529"/"503"
+  - [x] 3.4 Update `_friendly_error()` to detect "overloaded"/"529" patterns and return `"API is temporarily overloaded (529). Will retry..."` before the catch-all
 
 - [ ] 4.0 Implement retry loop in `run_phase()` (FR-3, FR-4, FR-8, FR-10)
   depends_on: [1.0, 2.0, 3.0]

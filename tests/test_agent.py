@@ -476,3 +476,161 @@ class TestRunPhaseResume:
 
         assert result.success is True
         assert result.session_id == "sess-abc123"
+
+
+class TestIsTransientError:
+    """Tests for _is_transient_error() helper (FR-1, FR-2)."""
+
+    def test_529_overloaded_via_status_code(self) -> None:
+        """Exception with status_code=529 is transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("overloaded")
+        exc.status_code = 529  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is True
+
+    def test_503_service_unavailable_via_status_code(self) -> None:
+        """Exception with status_code=503 is transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("service unavailable")
+        exc.status_code = 503  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is True
+
+    def test_429_rate_limit_via_status_code(self) -> None:
+        """Exception with status_code=429 is transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("rate limited")
+        exc.status_code = 429  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is True
+
+    def test_auth_error_not_transient(self) -> None:
+        """Authentication errors are permanent, not transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("authentication failed: invalid API key")
+        assert _is_transient_error(exc) is False
+
+    def test_credit_error_not_transient(self) -> None:
+        """Credit balance errors are permanent, not transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("credit balance is too low")
+        assert _is_transient_error(exc) is False
+
+    def test_generic_error_not_transient(self) -> None:
+        """Generic errors without overloaded/529/503 are not transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("something went wrong")
+        assert _is_transient_error(exc) is False
+
+    def test_string_match_overloaded_in_message(self) -> None:
+        """String 'overloaded' in exception message → transient (no status_code attr)."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("API is overloaded, please try later")
+        assert _is_transient_error(exc) is True
+
+    def test_string_match_529_in_message(self) -> None:
+        """String '529' in exception message → transient (no status_code attr)."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("HTTP error 529")
+        assert _is_transient_error(exc) is True
+
+    def test_string_match_503_in_message(self) -> None:
+        """String '503' in exception message → transient (no status_code attr)."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("HTTP error 503 Service Unavailable")
+        assert _is_transient_error(exc) is True
+
+    def test_string_match_overloaded_in_stderr(self) -> None:
+        """String 'overloaded' in exc.stderr → transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("exit code 1")
+        exc.stderr = "Error: API overloaded"  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is True
+
+    def test_string_match_529_in_result(self) -> None:
+        """String '529' in exc.result → transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("exit code 1")
+        exc.result = "got 529 from server"  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is True
+
+    def test_status_code_takes_priority(self) -> None:
+        """Structured status_code is used even when message looks non-transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("everything is fine")
+        exc.status_code = 529  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is True
+
+    def test_non_transient_status_code(self) -> None:
+        """Status code 401 is not transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("unauthorized")
+        exc.status_code = 401  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is False
+
+
+class TestFriendlyErrorOverloaded:
+    """Tests for _friendly_error() handling of overloaded/529 patterns (FR-1)."""
+
+    def test_overloaded_in_message(self) -> None:
+        """Exception containing 'overloaded' returns clear 529 message."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("API is overloaded")
+        result = _friendly_error(exc)
+        assert "overloaded" in result.lower()
+        assert "529" in result
+
+    def test_529_in_message(self) -> None:
+        """Exception containing '529' returns clear overloaded message."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("got HTTP 529")
+        result = _friendly_error(exc)
+        assert "overloaded" in result.lower()
+        assert "529" in result
+
+    def test_529_in_stderr(self) -> None:
+        """Exception with '529' in stderr returns clear overloaded message."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("exit code 1")
+        exc.stderr = "529 overloaded"  # type: ignore[attr-defined]
+        result = _friendly_error(exc)
+        assert "overloaded" in result.lower()
+        assert "529" in result
+
+    def test_credit_balance_still_works(self) -> None:
+        """Existing credit balance detection is not broken."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("credit balance is too low")
+        result = _friendly_error(exc)
+        assert "credit balance" in result.lower()
+
+    def test_auth_error_still_works(self) -> None:
+        """Existing authentication error detection is not broken."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("authentication failed")
+        result = _friendly_error(exc)
+        assert "authentication" in result.lower()
+
+    def test_rate_limit_still_works(self) -> None:
+        """Existing rate limit detection is not broken."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("rate limit exceeded")
+        result = _friendly_error(exc)
+        assert "rate limit" in result.lower()
