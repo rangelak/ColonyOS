@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -16,6 +17,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import StreamEvent, SystemMessage
 
+from colonyos.config import RetryConfig
 from colonyos.models import Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -107,127 +109,197 @@ async def run_phase(
     permission_mode: str = "bypassPermissions",
     ui: PhaseUI | NullUI | None = None,
     resume: str | None = None,
+    retry_config: RetryConfig | None = None,
 ) -> PhaseResult:
-    """Run a single phase by invoking Claude Code with the given prompt and instructions."""
+    """Run a single phase by invoking Claude Code with the given prompt and instructions.
+
+    Wraps the query call in a retry loop for transient errors (429/503/529) with
+    exponential backoff and full jitter. Permanent errors fail immediately.
+    """
+    if retry_config is None:
+        retry_config = RetryConfig()
+
     if allowed_tools is None:
         allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
         if agents:
             allowed_tools.append("Agent")
 
-    options = ClaudeAgentOptions(
-        cwd=cwd,
-        system_prompt=system_prompt,
-        model=model,
-        max_turns=max_turns,
-        max_budget_usd=budget_usd,
-        permission_mode=permission_mode,
-        allowed_tools=allowed_tools,
-        agents=agents,
-        include_partial_messages=ui is not None,
-        **({"resume": resume, "continue_conversation": True} if resume else {}),
-    )
+    max_attempts = retry_config.max_attempts
+    transient_errors = 0
+    total_retry_delay = 0.0
+    last_exc: Exception | None = None
 
-    if ui is None:
-        _log(f"Starting {phase.value} phase (budget=${budget_usd:.2f})...")
+    for attempt in range(1, max_attempts + 1):
+        options = ClaudeAgentOptions(
+            cwd=cwd,
+            system_prompt=system_prompt,
+            model=model,
+            max_turns=max_turns,
+            max_budget_usd=budget_usd,
+            permission_mode=permission_mode,
+            allowed_tools=allowed_tools,
+            agents=agents,
+            include_partial_messages=ui is not None,
+            **({"resume": resume, "continue_conversation": True} if resume else {}),
+        )
 
-    result_msg: ResultMessage | None = None
-    current_tool: str | None = None
-    auth_shown = False
+        if attempt == 1 and ui is None:
+            _log(f"Starting {phase.value} phase (budget=${budget_usd:.2f})...")
 
-    try:
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, SystemMessage) and not auth_shown:
-                source = message.data.get("apiKeySource")
-                if source:
-                    auth_shown = True
-                    label = _API_KEY_SOURCE_LABELS.get(source, source)
-                    if ui is not None:
-                        ui.on_text_delta(f"  Auth: {label}\n")
-                    else:
-                        _log(f"Auth: {label}")
+        result_msg: ResultMessage | None = None
+        current_tool: str | None = None
+        auth_shown = False
 
-            elif isinstance(message, StreamEvent) and ui is not None:
-                event = message.event
-                etype = event.get("type")
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, SystemMessage) and not auth_shown:
+                    source = message.data.get("apiKeySource")
+                    if source:
+                        auth_shown = True
+                        label = _API_KEY_SOURCE_LABELS.get(source, source)
+                        if ui is not None:
+                            ui.on_text_delta(f"  Auth: {label}\n")
+                        else:
+                            _log(f"Auth: {label}")
 
-                if etype == "content_block_start":
-                    cb = event.get("content_block", {})
-                    if cb.get("type") == "tool_use":
-                        current_tool = cb.get("name", "unknown")
-                        ui.on_tool_start(current_tool)
+                elif isinstance(message, StreamEvent) and ui is not None:
+                    event = message.event
+                    etype = event.get("type")
 
-                elif etype == "content_block_delta":
-                    delta = event.get("delta", {})
-                    dtype = delta.get("type")
-                    if dtype == "text_delta":
-                        ui.on_text_delta(delta.get("text", ""))
-                    elif dtype == "input_json_delta":
-                        ui.on_tool_input_delta(delta.get("partial_json", ""))
+                    if etype == "content_block_start":
+                        cb = event.get("content_block", {})
+                        if cb.get("type") == "tool_use":
+                            current_tool = cb.get("name", "unknown")
+                            ui.on_tool_start(current_tool)
 
-                elif etype == "content_block_stop":
-                    if current_tool:
-                        ui.on_tool_done()
-                        current_tool = None
+                    elif etype == "content_block_delta":
+                        delta = event.get("delta", {})
+                        dtype = delta.get("type")
+                        if dtype == "text_delta":
+                            ui.on_text_delta(delta.get("text", ""))
+                        elif dtype == "input_json_delta":
+                            ui.on_tool_input_delta(delta.get("partial_json", ""))
 
-            elif isinstance(message, AssistantMessage) and ui is not None:
-                ui.on_turn_complete()
+                    elif etype == "content_block_stop":
+                        if current_tool:
+                            ui.on_tool_done()
+                            current_tool = None
 
-            elif isinstance(message, ResultMessage):
-                result_msg = message
+                elif isinstance(message, AssistantMessage) and ui is not None:
+                    ui.on_turn_complete()
 
-    except Exception as exc:
-        friendly = _friendly_error(exc)
-        error_msg = f"Phase {phase.value} failed: {friendly}"
+                elif isinstance(message, ResultMessage):
+                    result_msg = message
+
+        except Exception as exc:
+            last_exc = exc
+
+            if not _is_transient_error(exc) or attempt == max_attempts:
+                # Permanent error or last attempt — fail immediately
+                friendly = _friendly_error(exc)
+                error_msg = f"Phase {phase.value} failed: {friendly}"
+                if ui is not None:
+                    ui.phase_error(error_msg)
+                else:
+                    _log(error_msg)
+                logger.debug("Phase %s raw exception: %r", phase.value, exc)
+                return PhaseResult(
+                    phase=phase,
+                    success=False,
+                    model=model,
+                    error=friendly,
+                    retry_info={
+                        "attempts": attempt,
+                        "transient_errors": transient_errors + (1 if _is_transient_error(exc) else 0),
+                        "fallback_model_used": None,
+                        "total_retry_delay_seconds": total_retry_delay,
+                    },
+                )
+
+            # Transient error with remaining attempts — retry with backoff
+            transient_errors += 1
+            computed_delay = min(
+                retry_config.base_delay_seconds * (2 ** (attempt - 1)),
+                retry_config.max_delay_seconds,
+            )
+            delay = random.uniform(0, computed_delay)
+            total_retry_delay += delay
+
+            retry_msg = (
+                f"API overloaded, retrying in {delay:.0f}s "
+                f"(attempt {attempt}/{max_attempts})..."
+            )
+            if ui is not None:
+                ui.on_text_delta(f"\n⏳ {retry_msg}\n")
+            else:
+                _log(retry_msg)
+
+            await asyncio.sleep(delay)
+            continue
+
+        # No exception — check result
+        retry_info = {
+            "attempts": attempt,
+            "transient_errors": transient_errors,
+            "fallback_model_used": None,
+            "total_retry_delay_seconds": total_retry_delay,
+        }
+
+        if result_msg is None:
+            err = "No result message received from Claude Code"
+            if ui is not None:
+                ui.phase_error(err)
+            else:
+                _log(err)
+            return PhaseResult(
+                phase=phase,
+                success=False,
+                model=model,
+                error=err,
+                retry_info=retry_info,
+            )
+
+        success = not result_msg.is_error
+        cost = result_msg.total_cost_usd or 0
+        turns = result_msg.num_turns
+        duration = result_msg.duration_ms
+
         if ui is not None:
-            ui.phase_error(error_msg)
+            if success:
+                ui.phase_complete(cost, turns, duration)
+            else:
+                ui.phase_error(result_msg.result or "Unknown error")
         else:
-            _log(error_msg)
-        logger.debug("Phase %s raw exception: %r", phase.value, exc)
+            _log(
+                f"Phase {phase.value} {'completed' if success else 'failed'} "
+                f"(cost=${cost:.4f}, turns={turns}, duration={duration}ms)"
+            )
+
         return PhaseResult(
             phase=phase,
-            success=False,
+            success=success,
+            cost_usd=result_msg.total_cost_usd,
+            duration_ms=result_msg.duration_ms,
+            session_id=result_msg.session_id,
             model=model,
-            error=friendly,
+            error=result_msg.result if result_msg.is_error else None,
+            artifacts={"result": result_msg.result or ""},
+            retry_info=retry_info,
         )
 
-    if result_msg is None:
-        err = "No result message received from Claude Code"
-        if ui is not None:
-            ui.phase_error(err)
-        else:
-            _log(err)
-        return PhaseResult(
-            phase=phase,
-            success=False,
-            model=model,
-            error=err,
-        )
-
-    success = not result_msg.is_error
-    cost = result_msg.total_cost_usd or 0
-    turns = result_msg.num_turns
-    duration = result_msg.duration_ms
-
-    if ui is not None:
-        if success:
-            ui.phase_complete(cost, turns, duration)
-        else:
-            ui.phase_error(result_msg.result or "Unknown error")
-    else:
-        _log(
-            f"Phase {phase.value} {'completed' if success else 'failed'} "
-            f"(cost=${cost:.4f}, turns={turns}, duration={duration}ms)"
-        )
-
+    # Should not reach here, but handle defensively
+    friendly = _friendly_error(last_exc) if last_exc else "Unknown error after retries"
     return PhaseResult(
         phase=phase,
-        success=success,
-        cost_usd=result_msg.total_cost_usd,
-        duration_ms=result_msg.duration_ms,
-        session_id=result_msg.session_id,
+        success=False,
         model=model,
-        error=result_msg.result if result_msg.is_error else None,
-        artifacts={"result": result_msg.result or ""},
+        error=friendly,
+        retry_info={
+            "attempts": max_attempts,
+            "transient_errors": transient_errors,
+            "fallback_model_used": None,
+            "total_retry_delay_seconds": total_retry_delay,
+        },
     )
 
 
@@ -245,6 +317,7 @@ def run_phase_sync(
     permission_mode: str = "bypassPermissions",
     ui: PhaseUI | NullUI | None = None,
     resume: str | None = None,
+    retry_config: RetryConfig | None = None,
 ) -> PhaseResult:
     """Synchronous wrapper around run_phase for use in non-async contexts."""
     return asyncio.run(
@@ -261,6 +334,7 @@ def run_phase_sync(
             permission_mode=permission_mode,
             ui=ui,
             resume=resume,
+            retry_config=retry_config,
         )
     )
 

@@ -36,9 +36,9 @@
   - [x] 3.3 Implement `_is_transient_error(exc: Exception) -> bool` in `agent.py`: check `getattr(exc, "status_code", None)` for 429/503/529 first, then string-match `str(exc)`, `exc.stderr`, `exc.result` for "overloaded"/"529"/"503"
   - [x] 3.4 Update `_friendly_error()` to detect "overloaded"/"529" patterns and return `"API is temporarily overloaded (529). Will retry..."` before the catch-all
 
-- [ ] 4.0 Implement retry loop in `run_phase()` (FR-3, FR-4, FR-8, FR-10)
+- [x] 4.0 Implement retry loop in `run_phase()` (FR-3, FR-4, FR-8, FR-10)
   depends_on: [1.0, 2.0, 3.0]
-  - [ ] 4.1 Write tests for retry behavior in `tests/test_agent.py`:
+  - [x] 4.1 Write tests for retry behavior in `tests/test_agent.py`:
     - Transient error succeeds on 2nd attempt → returns success with `retry_info.attempts=2`
     - Transient error exhausts all retries → returns failure with `retry_info`
     - Permanent error (auth) → no retry, immediate failure, `retry_info.attempts=1`
@@ -47,9 +47,9 @@
     - `retry_info` populated on `PhaseResult` with correct counts
     - Backoff delay is within expected range (mock `asyncio.sleep`)
     - `max_attempts=1` (retry disabled) → no retry on transient error
-  - [ ] 4.2 Implement retry loop in `run_phase()`: wrap the existing try/except block (lines 108-162) in a `for attempt in range(max_attempts)` loop. On transient error, compute delay with exponential backoff + full jitter (`random.uniform(0, min(base * 2**attempt, max_delay))`), log status, `await asyncio.sleep(delay)`, continue. On permanent error or last attempt, return failure as before. Accept `retry_config: RetryConfig | None` parameter (defaulting to `RetryConfig()`)
-  - [ ] 4.3 Populate `retry_info` dict on the returned `PhaseResult`: `{"attempts": n, "transient_errors": count, "fallback_model_used": None, "total_retry_delay_seconds": total}`
-  - [ ] 4.4 Thread `retry_config` parameter through `run_phase_sync()` wrapper
+  - [x] 4.2 Implement retry loop in `run_phase()`: wrap the existing try/except block (lines 108-162) in a `for attempt in range(max_attempts)` loop. On transient error, compute delay with exponential backoff + full jitter (`random.uniform(0, min(base * 2**attempt, max_delay))`), log status, `await asyncio.sleep(delay)`, continue. On permanent error or last attempt, return failure as before. Accept `retry_config: RetryConfig | None` parameter (defaulting to `RetryConfig()`)
+  - [x] 4.3 Populate `retry_info` dict on the returned `PhaseResult`: `{"attempts": n, "transient_errors": count, "fallback_model_used": None, "total_retry_delay_seconds": total}`
+  - [x] 4.4 Thread `retry_config` parameter through `run_phase_sync()` wrapper
 
 - [ ] 5.0 Implement optional model fallback (FR-6, FR-7)
   depends_on: [4.0]
