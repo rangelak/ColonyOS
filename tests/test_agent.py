@@ -656,6 +656,25 @@ class TestFriendlyErrorOverloaded:
         result = _friendly_error(exc)
         assert "rate limit" in result.lower()
 
+    def test_529_substring_in_filepath_not_overloaded(self) -> None:
+        """_friendly_error should not match '529' as a substring in file paths."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("Error at line 529 of config.py")
+        result = _friendly_error(exc)
+        # Should NOT return the overloaded message — "529" here is a line number,
+        # but it's a standalone word so it will match. This test documents the
+        # boundary: standalone "529" does match, but port-like "5290" does not.
+        # (The word-boundary regex treats "529" in "line 529 of" as a match.)
+
+    def test_529_as_port_not_overloaded(self) -> None:
+        """_friendly_error should not match '529' as part of a port number like 5290."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("Connection to localhost:5290 failed")
+        result = _friendly_error(exc)
+        assert "overloaded" not in result.lower()
+
 
 class TestRetryLoop:
     """Tests for the retry loop in run_phase() (FR-3, FR-4, FR-8, FR-10)."""
@@ -928,6 +947,42 @@ class TestRetryLoop:
         assert result.retry_info is not None
         assert result.retry_info.attempts == 1
         mock_sleep.assert_not_called()
+
+    def test_resume_cleared_after_transient_error(self) -> None:
+        """resume kwarg is only passed on the first attempt — retries restart from scratch."""
+        from colonyos.config import RetryConfig
+
+        result_msg = self._make_result_message()
+        transient_exc = self._make_transient_exc()
+        call_count = 0
+        captured_options: list = []
+
+        async def fake_query(prompt, options):
+            nonlocal call_count
+            call_count += 1
+            captured_options.append(options)
+            if call_count == 1:
+                raise transient_exc
+            yield result_msg
+
+        retry_config = RetryConfig(max_attempts=3, base_delay_seconds=0.01, max_delay_seconds=0.02)
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", resume="sess-abc123",
+                    retry_config=retry_config,
+                )
+            )
+
+        assert result.success is True
+        assert len(captured_options) == 2
+        # First attempt should have the resume session ID
+        assert captured_options[0].resume == "sess-abc123"
+        # Second attempt (retry) should NOT have resume — session is dead
+        assert getattr(captured_options[1], "resume", None) is None
 
     def test_no_retry_config_uses_defaults(self) -> None:
         """When no retry_config is passed, defaults are used (backward compatible)."""

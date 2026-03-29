@@ -19,7 +19,11 @@ VALID_MODELS: frozenset[str] = frozenset({"opus", "sonnet", "haiku"})
 
 # Phases that serve as safety gates and should not be downgraded to
 # lightweight models without explicit awareness of the trade-off.
-_SAFETY_CRITICAL_PHASES: frozenset[str] = frozenset({"review", "decision", "fix"})
+# Uses Phase enum values so that renaming an enum member causes an AttributeError
+# rather than silently disabling the safety check.
+_SAFETY_CRITICAL_PHASES: frozenset[str] = frozenset(
+    {Phase.REVIEW.value, Phase.DECISION.value, Phase.FIX.value}
+)
 
 DEFAULTS = {
     "model": "opus",

@@ -94,7 +94,7 @@ def _friendly_error(exc: Exception) -> str:
             return f"Authentication failed — check your API key or Claude login. {text.strip()}"
         if "rate limit" in lower:
             return f"Rate limited by the API. {text.strip()}"
-        if "overloaded" in lower or "529" in lower:
+        if any(pattern.search(text) for pattern in _TRANSIENT_PATTERNS):
             return "API is temporarily overloaded (529). Will retry..."
 
     if "exit code 1" in raw and not stderr:
@@ -231,6 +231,9 @@ async def run_phase(
         passes.append((retry_config.fallback_model, max_attempts))
 
     overall_attempt = 0
+    # resume is only valid for the first attempt — after a transient error kills
+    # the query, the session is dead and retries must restart from scratch.
+    current_resume = resume
 
     for pass_idx, (current_model, pass_max) in enumerate(passes):
         for attempt in range(1, pass_max + 1):
@@ -245,7 +248,7 @@ async def run_phase(
                 allowed_tools=allowed_tools,
                 agents=agents,
                 include_partial_messages=ui is not None,
-                **({"resume": resume, "continue_conversation": True} if resume else {}),
+                **({"resume": current_resume, "continue_conversation": True} if current_resume else {}),
             )
 
             attempt_result = await _run_phase_attempt(
@@ -260,12 +263,13 @@ async def run_phase(
             if attempt_result.error is not None:
                 exc = attempt_result.error
                 last_exc = exc
+                is_transient = _is_transient_error(exc)
 
-                if not _is_transient_error(exc) or attempt == pass_max:
+                if not is_transient or attempt == pass_max:
                     # Permanent error or last attempt in this pass
-                    transient_errors += 1 if _is_transient_error(exc) else 0
+                    transient_errors += 1 if is_transient else 0
 
-                    if _is_transient_error(exc) and pass_idx < len(passes) - 1:
+                    if is_transient and pass_idx < len(passes) - 1:
                         # Transient + more passes available → switch to fallback
                         fallback_model_used = passes[pass_idx + 1][0]
                         fallback_msg = (
@@ -301,6 +305,7 @@ async def run_phase(
 
                 # Transient error with remaining attempts — retry with backoff
                 transient_errors += 1
+                current_resume = None  # Session is dead after transient error
                 computed_delay = min(
                     retry_config.base_delay_seconds * (2 ** (attempt - 1)),
                     retry_config.max_delay_seconds,
@@ -370,12 +375,8 @@ async def run_phase(
                 artifacts={"result": result_msg.result or ""},
                 retry_info=retry_info,
             )
-        else:
-            # Inner for-loop completed without break — no more attempts in this pass
-            # This only happens if pass_max is 0 (defensive); continue to next pass
-            continue
-        # Inner loop was broken out of (fallback transition) — continue outer loop
-        continue
+        # Inner loop either completed (all attempts used) or broke out
+        # (fallback transition). Either way, continue to the next pass.
 
     # Should not reach here, but handle defensively
     friendly = _friendly_error(last_exc) if last_exc else "Unknown error after retries"
