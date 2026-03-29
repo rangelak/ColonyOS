@@ -414,6 +414,9 @@ class TestTickIntegration:
 
     def test_tick_polls_github_on_interval(self, daemon_instance: Daemon):
         daemon_instance._last_github_poll_time = 0.0
+        daemon_instance.daemon_config = DaemonConfig(
+            github_poll_interval_seconds=0,  # Trigger immediately
+        )
         with patch.object(daemon_instance, "_poll_github_issues") as mock_poll, \
              patch.object(daemon_instance, "_post_heartbeat"), \
              patch.object(daemon_instance, "_schedule_cleanup"):
