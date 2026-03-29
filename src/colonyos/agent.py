@@ -95,7 +95,7 @@ def _friendly_error(exc: Exception) -> str:
         if "rate limit" in lower:
             return f"Rate limited by the API. {text.strip()}"
         if any(pattern.search(text) for pattern in _TRANSIENT_PATTERNS):
-            return "API is temporarily overloaded (529). Will retry..."
+            return "API is temporarily overloaded. Will retry..."
 
     if "exit code 1" in raw and not stderr:
         return (
@@ -383,7 +383,7 @@ async def run_phase(
     return PhaseResult(
         phase=phase,
         success=False,
-        model=model,
+        model=current_model,
         error=friendly,
         retry_info=RetryInfo(
             attempts=overall_attempt,

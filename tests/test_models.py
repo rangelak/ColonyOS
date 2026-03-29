@@ -847,6 +847,47 @@ class TestPhaseResultRetryInfo:
         with pytest.raises(AttributeError):
             info.attempts = 5  # type: ignore[misc]
 
+    def test_retry_info_from_dict_with_extra_keys(self) -> None:
+        """RetryInfo construction from dict with extra keys should not crash.
+
+        Simulates corrupted or future-version run log JSON containing
+        unexpected fields — the explicit field extraction pattern in
+        _load_run_log should handle this gracefully.
+        """
+        raw = {
+            "attempts": 3,
+            "transient_errors": 1,
+            "fallback_model_used": None,
+            "total_retry_delay_seconds": 5.0,
+            "unexpected_future_field": "should be ignored",
+        }
+        # Explicit extraction (as done in _load_run_log) works fine
+        info = RetryInfo(
+            attempts=raw.get("attempts", 1),
+            transient_errors=raw.get("transient_errors", 0),
+            fallback_model_used=raw.get("fallback_model_used"),
+            total_retry_delay_seconds=raw.get("total_retry_delay_seconds", 0.0),
+        )
+        assert info.attempts == 3
+        assert info.transient_errors == 1
+
+    def test_retry_info_from_dict_with_missing_keys(self) -> None:
+        """RetryInfo construction from dict with missing keys uses defaults.
+
+        Simulates an older run log that doesn't have all RetryInfo fields.
+        """
+        raw = {"attempts": 2}
+        info = RetryInfo(
+            attempts=raw.get("attempts", 1),
+            transient_errors=raw.get("transient_errors", 0),
+            fallback_model_used=raw.get("fallback_model_used"),
+            total_retry_delay_seconds=raw.get("total_retry_delay_seconds", 0.0),
+        )
+        assert info.attempts == 2
+        assert info.transient_errors == 0
+        assert info.fallback_model_used is None
+        assert info.total_retry_delay_seconds == 0.0
+
 
 class TestPhaseQA:
     """Tests for Phase.QA enum value (Task 2.1 - Intent Router Agent)."""

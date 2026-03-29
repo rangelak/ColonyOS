@@ -2438,7 +2438,12 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
                 model=p.get("model"),
                 error=p.get("error"),
                 artifacts=p.get("artifacts", {}),  # FR-10: Include artifacts for task_id tracking
-                retry_info=RetryInfo(**p["retry_info"]) if p.get("retry_info") else None,  # FR-9: Retry metadata
+                retry_info=RetryInfo(  # FR-9: Retry metadata — explicit field extraction for resilience
+                    attempts=p["retry_info"].get("attempts", 1),
+                    transient_errors=p["retry_info"].get("transient_errors", 0),
+                    fallback_model_used=p["retry_info"].get("fallback_model_used"),
+                    total_retry_delay_seconds=p["retry_info"].get("total_retry_delay_seconds", 0.0),
+                ) if p.get("retry_info") else None,
             ))
 
         log = RunLog(

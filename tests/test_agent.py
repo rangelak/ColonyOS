@@ -605,13 +605,13 @@ class TestFriendlyErrorOverloaded:
     """Tests for _friendly_error() handling of overloaded/529 patterns (FR-1)."""
 
     def test_overloaded_in_message(self) -> None:
-        """Exception containing 'overloaded' returns clear 529 message."""
+        """Exception containing 'overloaded' returns clear transient error message."""
         from colonyos.agent import _friendly_error
 
         exc = Exception("API is overloaded")
         result = _friendly_error(exc)
         assert "overloaded" in result.lower()
-        assert "529" in result
+        assert "retry" in result.lower()
 
     def test_529_in_message(self) -> None:
         """Exception containing '529' returns clear overloaded message."""
@@ -620,7 +620,7 @@ class TestFriendlyErrorOverloaded:
         exc = Exception("got HTTP 529")
         result = _friendly_error(exc)
         assert "overloaded" in result.lower()
-        assert "529" in result
+        assert "retry" in result.lower()
 
     def test_529_in_stderr(self) -> None:
         """Exception with '529' in stderr returns clear overloaded message."""
@@ -630,7 +630,7 @@ class TestFriendlyErrorOverloaded:
         exc.stderr = "529 overloaded"  # type: ignore[attr-defined]
         result = _friendly_error(exc)
         assert "overloaded" in result.lower()
-        assert "529" in result
+        assert "retry" in result.lower()
 
     def test_credit_balance_still_works(self) -> None:
         """Existing credit balance detection is not broken."""
@@ -674,6 +674,16 @@ class TestFriendlyErrorOverloaded:
         exc = Exception("Connection to localhost:5290 failed")
         result = _friendly_error(exc)
         assert "overloaded" not in result.lower()
+
+    def test_503_error_not_hardcoded_529(self) -> None:
+        """_friendly_error should return generic 'overloaded' message for 503 errors,
+        not mentioning '529' specifically."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("Error: 503 Service Unavailable")
+        result = _friendly_error(exc)
+        assert "overloaded" in result.lower()
+        assert "529" not in result, "Message should not hardcode '529' for 503 errors"
 
 
 class TestRetryLoop:
@@ -1278,3 +1288,36 @@ class TestModelFallback:
         ui_calls = [str(c) for c in mock_ui.on_text_delta.call_args_list]
         fallback_msgs = [c for c in ui_calls if "falling back" in c.lower()]
         assert len(fallback_msgs) > 0, f"Expected fallback UI message, got: {ui_calls}"
+
+    def test_fallback_failure_reports_current_model(self) -> None:
+        """When all retries (including fallback) are exhausted, the PhaseResult
+        should report the fallback model (current_model), not the original model."""
+        from colonyos.config import RetryConfig
+
+        transient_exc = self._make_transient_exc()
+
+        async def fake_query(prompt, options):
+            raise transient_exc
+            yield  # noqa: E711
+
+        retry_config = RetryConfig(
+            max_attempts=2, base_delay_seconds=0.01,
+            max_delay_seconds=0.02, fallback_model="sonnet",
+        )
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.IMPLEMENT, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", model="opus",
+                    retry_config=retry_config,
+                )
+            )
+
+        assert result.success is False
+        # The model on the PhaseResult should be the fallback model (last used),
+        # not the original "opus" model
+        assert result.model == "sonnet", (
+            f"Expected fallback model 'sonnet' on failure, got '{result.model}'"
+        )
