@@ -623,6 +623,13 @@ def _parse_retry_config(raw: dict) -> RetryConfig:
         raise ValueError(
             f"retry.max_attempts must be positive, got {max_attempts}"
         )
+    if max_attempts > 10:
+        logger.warning(
+            "retry.max_attempts=%d is unusually high (max recommended: 10). "
+            "Combined with fallback, this could result in up to %d total attempts.",
+            max_attempts,
+            max_attempts * 2,
+        )
     base_delay_seconds = float(raw.get("base_delay_seconds", defaults["base_delay_seconds"]))
     if base_delay_seconds < 0:
         raise ValueError(

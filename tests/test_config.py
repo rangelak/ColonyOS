@@ -1335,6 +1335,29 @@ class TestRetryConfig:
             config = load_config(tmp_repo)
             assert config.retry.fallback_model == model
 
+    def test_high_max_attempts_accepted_with_warning(self, tmp_repo: Path):
+        """max_attempts > 10 is accepted (not rejected) but logs a warning."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir(exist_ok=True)
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"retry": {"max_attempts": 20}}),
+            encoding="utf-8",
+        )
+        # Should NOT raise — value is accepted
+        config = load_config(tmp_repo)
+        assert config.retry.max_attempts == 20
+
+    def test_max_attempts_10_no_warning(self, tmp_repo: Path):
+        """max_attempts=10 should not trigger any warning."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir(exist_ok=True)
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"retry": {"max_attempts": 10}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.retry.max_attempts == 10
+
     def test_defaults_dict_has_retry_section(self):
         assert "retry" in DEFAULTS
         assert DEFAULTS["retry"]["max_attempts"] == 3

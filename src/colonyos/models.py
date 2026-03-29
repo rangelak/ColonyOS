@@ -124,6 +124,16 @@ class RepoContext:
     raw_signals: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class RetryInfo:
+    """Structured retry metadata attached to PhaseResult."""
+
+    attempts: int = 1
+    transient_errors: int = 0
+    fallback_model_used: str | None = None
+    total_retry_delay_seconds: float = 0.0
+
+
 @dataclass
 class PhaseResult:
     phase: Phase
@@ -134,7 +144,7 @@ class PhaseResult:
     model: str | None = None
     error: str | None = None
     artifacts: dict[str, str] = field(default_factory=dict)
-    retry_info: dict[str, Any] | None = None
+    retry_info: RetryInfo | None = None
 
 
 @dataclass

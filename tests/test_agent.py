@@ -547,6 +547,27 @@ class TestIsTransientError:
         exc = Exception("HTTP error 503 Service Unavailable")
         assert _is_transient_error(exc) is True
 
+    def test_503_in_file_path_not_transient(self) -> None:
+        """'503' as part of a file path should NOT trigger transient detection."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("Error reading /data/error_503_report.txt")
+        assert _is_transient_error(exc) is False
+
+    def test_529_in_port_number_not_transient(self) -> None:
+        """'529' as part of a port number should NOT trigger transient detection."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("Connection to localhost:5290 failed")
+        assert _is_transient_error(exc) is False
+
+    def test_503_standalone_in_message_is_transient(self) -> None:
+        """'503' as a standalone token in error message is transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("got 503 from upstream")
+        assert _is_transient_error(exc) is True
+
     def test_string_match_overloaded_in_stderr(self) -> None:
         """String 'overloaded' in exc.stderr → transient."""
         from colonyos.agent import _is_transient_error
@@ -692,8 +713,8 @@ class TestRetryLoop:
 
         assert result.success is True
         assert result.retry_info is not None
-        assert result.retry_info["attempts"] == 2
-        assert result.retry_info["transient_errors"] == 1
+        assert result.retry_info.attempts == 2
+        assert result.retry_info.transient_errors == 1
 
     def test_transient_error_exhausts_all_retries(self) -> None:
         """Transient error on every attempt → failure with retry_info."""
@@ -718,8 +739,8 @@ class TestRetryLoop:
 
         assert result.success is False
         assert result.retry_info is not None
-        assert result.retry_info["attempts"] == 3
-        assert result.retry_info["transient_errors"] == 3
+        assert result.retry_info.attempts == 3
+        assert result.retry_info.transient_errors == 3
 
     def test_permanent_error_no_retry(self) -> None:
         """Permanent error (auth) → no retry, immediate failure, retry_info.attempts=1."""
@@ -744,8 +765,8 @@ class TestRetryLoop:
 
         assert result.success is False
         assert result.retry_info is not None
-        assert result.retry_info["attempts"] == 1
-        assert result.retry_info["transient_errors"] == 0
+        assert result.retry_info.attempts == 1
+        assert result.retry_info.transient_errors == 0
         # Should not have slept (no retry)
         mock_sleep.assert_not_called()
 
@@ -843,11 +864,11 @@ class TestRetryLoop:
         assert result.success is True
         info = result.retry_info
         assert info is not None
-        assert info["attempts"] == 3
-        assert info["transient_errors"] == 2
-        assert info["fallback_model_used"] is None
-        assert isinstance(info["total_retry_delay_seconds"], float)
-        assert info["total_retry_delay_seconds"] >= 0
+        assert info.attempts == 3
+        assert info.transient_errors == 2
+        assert info.fallback_model_used is None
+        assert isinstance(info.total_retry_delay_seconds, float)
+        assert info.total_retry_delay_seconds >= 0
 
     def test_backoff_delay_within_expected_range(self) -> None:
         """Backoff delay passed to asyncio.sleep is within expected range."""
@@ -905,7 +926,7 @@ class TestRetryLoop:
 
         assert result.success is False
         assert result.retry_info is not None
-        assert result.retry_info["attempts"] == 1
+        assert result.retry_info.attempts == 1
         mock_sleep.assert_not_called()
 
     def test_no_retry_config_uses_defaults(self) -> None:
@@ -926,8 +947,8 @@ class TestRetryLoop:
         assert result.success is True
         # retry_info should still be populated with attempts=1
         assert result.retry_info is not None
-        assert result.retry_info["attempts"] == 1
-        assert result.retry_info["transient_errors"] == 0
+        assert result.retry_info.attempts == 1
+        assert result.retry_info.transient_errors == 0
 
 
 class TestModelFallback:
@@ -987,7 +1008,7 @@ class TestModelFallback:
 
         assert result.success is True
         assert result.retry_info is not None
-        assert result.retry_info["fallback_model_used"] == "sonnet"
+        assert result.retry_info.fallback_model_used == "sonnet"
         assert captured_models[-1] == "sonnet"
 
     def test_fallback_blocked_on_review_phase(self) -> None:
@@ -1016,7 +1037,7 @@ class TestModelFallback:
 
         assert result.success is False
         assert result.retry_info is not None
-        assert result.retry_info["fallback_model_used"] is None
+        assert result.retry_info.fallback_model_used is None
 
     def test_fallback_blocked_on_decision_phase(self) -> None:
         """Retries exhausted + fallback_model='sonnet' + phase=decision → no fallback."""
@@ -1043,7 +1064,7 @@ class TestModelFallback:
             )
 
         assert result.success is False
-        assert result.retry_info["fallback_model_used"] is None
+        assert result.retry_info.fallback_model_used is None
 
     def test_fallback_blocked_on_fix_phase(self) -> None:
         """Retries exhausted + fallback_model='sonnet' + phase=fix → no fallback."""
@@ -1070,7 +1091,7 @@ class TestModelFallback:
             )
 
         assert result.success is False
-        assert result.retry_info["fallback_model_used"] is None
+        assert result.retry_info.fallback_model_used is None
 
     def test_no_fallback_when_fallback_model_is_none(self) -> None:
         """Retries exhausted + fallback_model=None → no fallback, returns failure."""
@@ -1098,7 +1119,7 @@ class TestModelFallback:
 
         assert result.success is False
         assert result.retry_info is not None
-        assert result.retry_info["fallback_model_used"] is None
+        assert result.retry_info.fallback_model_used is None
 
     def test_fallback_retries_also_exhausted(self) -> None:
         """Fallback retries also exhausted → returns failure with retry_info."""
@@ -1127,9 +1148,9 @@ class TestModelFallback:
 
         assert result.success is False
         assert result.retry_info is not None
-        assert result.retry_info["fallback_model_used"] == "sonnet"
+        assert result.retry_info.fallback_model_used == "sonnet"
         # Total attempts: 2 primary + 2 fallback = 4
-        assert result.retry_info["attempts"] == 4
+        assert result.retry_info.attempts == 4
 
     def test_fallback_logs_clear_message_via_log(self) -> None:
         """Fallback logs: 'Retries exhausted on {model}, falling back to {fallback}...'."""

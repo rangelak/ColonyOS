@@ -29,7 +29,7 @@ from colonyos.learnings import (
     load_learnings_for_injection,
     parse_learnings,
 )
-from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightError, PreflightResult, ResumeState, RunLog, RunStatus
+from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightError, PreflightResult, ResumeState, RetryInfo, RunLog, RunStatus
 from colonyos.naming import (
     decision_artifact_path,
     generate_timestamp,
@@ -2347,7 +2347,12 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
                         "model": p.model,
                         "error": p.error,
                         "artifacts": p.artifacts,  # FR-10: Include artifacts for task_id tracking
-                        "retry_info": p.retry_info,  # FR-9: Retry metadata
+                        "retry_info": {  # FR-9: Retry metadata
+                            "attempts": p.retry_info.attempts,
+                            "transient_errors": p.retry_info.transient_errors,
+                            "fallback_model_used": p.retry_info.fallback_model_used,
+                            "total_retry_delay_seconds": p.retry_info.total_retry_delay_seconds,
+                        } if p.retry_info is not None else None,
                     }
                     for p in log.phases
                 ],
@@ -2433,7 +2438,7 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
                 model=p.get("model"),
                 error=p.get("error"),
                 artifacts=p.get("artifacts", {}),  # FR-10: Include artifacts for task_id tracking
-                retry_info=p.get("retry_info"),  # FR-9: Retry metadata
+                retry_info=RetryInfo(**p["retry_info"]) if p.get("retry_info") else None,  # FR-9: Retry metadata
             ))
 
         log = RunLog(

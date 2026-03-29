@@ -4,7 +4,9 @@ import asyncio
 import logging
 import os
 import random
+import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -18,7 +20,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import StreamEvent, SystemMessage
 
 from colonyos.config import RetryConfig, _SAFETY_CRITICAL_PHASES
-from colonyos.models import Phase, PhaseResult
+from colonyos.models import Phase, PhaseResult, RetryInfo
 
 if TYPE_CHECKING:
     from colonyos.ui import NullUI, PhaseUI
@@ -31,6 +33,15 @@ _API_KEY_SOURCE_LABELS = {
     "config": "Claude config file",
 }
 
+# Patterns for string-matching transient errors when no structured status_code
+# is available. Uses word-boundary-aware regexes to avoid false positives on
+# substrings like port numbers or file paths containing "503"/"529".
+_TRANSIENT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"overloaded", re.IGNORECASE),
+    re.compile(r"\b529\b"),
+    re.compile(r"\b503\b"),
+)
+
 
 def _log(msg: str) -> None:
     print(f"[colonyos] {msg}", file=sys.stderr, flush=True)
@@ -39,8 +50,9 @@ def _log(msg: str) -> None:
 def _is_transient_error(exc: Exception) -> bool:
     """Classify whether an exception represents a transient API error worth retrying.
 
-    Checks structured attributes first (status_code), then falls back to string
-    matching on the exception message, stderr, and result fields.
+    Checks structured attributes first (status_code), then falls back to
+    word-boundary-aware regex matching on the exception message, stderr, and
+    result fields.
 
     Note: This is a workaround until the SDK provides structured error types.
     """
@@ -49,15 +61,13 @@ def _is_transient_error(exc: Exception) -> bool:
     if status_code is not None:
         return status_code in (429, 503, 529)
 
-    # 2. String matching fallback — check all available text fields
+    # 2. Regex fallback — check all available text fields with word boundaries
     raw = str(exc)
     stderr = getattr(exc, "stderr", None) or ""
     result = getattr(exc, "result", None) or ""
 
-    _TRANSIENT_PATTERNS = ("overloaded", "529", "503")
     for text in (raw, stderr, result):
-        lower = text.lower()
-        if any(pattern in lower for pattern in _TRANSIENT_PATTERNS):
+        if any(pattern.search(text) for pattern in _TRANSIENT_PATTERNS):
             return True
 
     return False
@@ -95,6 +105,81 @@ def _friendly_error(exc: Exception) -> str:
     return f"{raw}\n{stderr}".strip()
 
 
+@dataclass
+class _AttemptResult:
+    """Result of a single query attempt inside the retry loop."""
+
+    result_msg: ResultMessage | None = None
+    error: Exception | None = None
+
+
+async def _run_phase_attempt(
+    *,
+    phase: Phase,
+    prompt: str,
+    options: ClaudeAgentOptions,
+    ui: PhaseUI | NullUI | None,
+    is_first_attempt: bool,
+    budget_usd: float,
+) -> _AttemptResult:
+    """Execute a single query attempt, streaming messages to the UI.
+
+    Returns an _AttemptResult containing either a ResultMessage or an exception.
+    """
+    if is_first_attempt and ui is None:
+        _log(f"Starting {phase.value} phase (budget=${budget_usd:.2f})...")
+
+    result_msg: ResultMessage | None = None
+    current_tool: str | None = None
+    auth_shown = False
+
+    try:
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, SystemMessage) and not auth_shown:
+                source = message.data.get("apiKeySource")
+                if source:
+                    auth_shown = True
+                    label = _API_KEY_SOURCE_LABELS.get(source, source)
+                    if ui is not None:
+                        ui.on_text_delta(f"  Auth: {label}\n")
+                    else:
+                        _log(f"Auth: {label}")
+
+            elif isinstance(message, StreamEvent) and ui is not None:
+                event = message.event
+                etype = event.get("type")
+
+                if etype == "content_block_start":
+                    cb = event.get("content_block", {})
+                    if cb.get("type") == "tool_use":
+                        current_tool = cb.get("name", "unknown")
+                        ui.on_tool_start(current_tool)
+
+                elif etype == "content_block_delta":
+                    delta = event.get("delta", {})
+                    dtype = delta.get("type")
+                    if dtype == "text_delta":
+                        ui.on_text_delta(delta.get("text", ""))
+                    elif dtype == "input_json_delta":
+                        ui.on_tool_input_delta(delta.get("partial_json", ""))
+
+                elif etype == "content_block_stop":
+                    if current_tool:
+                        ui.on_tool_done()
+                        current_tool = None
+
+            elif isinstance(message, AssistantMessage) and ui is not None:
+                ui.on_turn_complete()
+
+            elif isinstance(message, ResultMessage):
+                result_msg = message
+
+    except Exception as exc:
+        return _AttemptResult(error=exc)
+
+    return _AttemptResult(result_msg=result_msg)
+
+
 async def run_phase(
     phase: Phase,
     prompt: str,
@@ -115,6 +200,11 @@ async def run_phase(
 
     Wraps the query call in a retry loop for transient errors (429/503/529) with
     exponential backoff and full jitter. Permanent errors fail immediately.
+
+    When a ``fallback_model`` is configured, the primary model gets ``max_attempts``
+    tries and the fallback model gets its own ``max_attempts`` tries, so the total
+    number of attempts can be up to ``2 * max_attempts``. Fallback is disabled for
+    safety-critical phases (review, decision, fix).
     """
     if retry_config is None:
         retry_config = RetryConfig()
@@ -132,6 +222,7 @@ async def run_phase(
 
     # Build the list of (model, max_attempts) passes to try.
     # Pass 1: primary model. Pass 2 (optional): fallback model.
+    # Total attempts can be up to 2 * max_attempts when fallback is configured.
     passes: list[tuple[str | None, int]] = [(model, max_attempts)]
     if (
         retry_config.fallback_model is not None
@@ -157,55 +248,17 @@ async def run_phase(
                 **({"resume": resume, "continue_conversation": True} if resume else {}),
             )
 
-            if overall_attempt == 1 and ui is None:
-                _log(f"Starting {phase.value} phase (budget=${budget_usd:.2f})...")
+            attempt_result = await _run_phase_attempt(
+                phase=phase,
+                prompt=prompt,
+                options=options,
+                ui=ui,
+                is_first_attempt=(overall_attempt == 1),
+                budget_usd=budget_usd,
+            )
 
-            result_msg: ResultMessage | None = None
-            current_tool: str | None = None
-            auth_shown = False
-
-            try:
-                async for message in query(prompt=prompt, options=options):
-                    if isinstance(message, SystemMessage) and not auth_shown:
-                        source = message.data.get("apiKeySource")
-                        if source:
-                            auth_shown = True
-                            label = _API_KEY_SOURCE_LABELS.get(source, source)
-                            if ui is not None:
-                                ui.on_text_delta(f"  Auth: {label}\n")
-                            else:
-                                _log(f"Auth: {label}")
-
-                    elif isinstance(message, StreamEvent) and ui is not None:
-                        event = message.event
-                        etype = event.get("type")
-
-                        if etype == "content_block_start":
-                            cb = event.get("content_block", {})
-                            if cb.get("type") == "tool_use":
-                                current_tool = cb.get("name", "unknown")
-                                ui.on_tool_start(current_tool)
-
-                        elif etype == "content_block_delta":
-                            delta = event.get("delta", {})
-                            dtype = delta.get("type")
-                            if dtype == "text_delta":
-                                ui.on_text_delta(delta.get("text", ""))
-                            elif dtype == "input_json_delta":
-                                ui.on_tool_input_delta(delta.get("partial_json", ""))
-
-                        elif etype == "content_block_stop":
-                            if current_tool:
-                                ui.on_tool_done()
-                                current_tool = None
-
-                    elif isinstance(message, AssistantMessage) and ui is not None:
-                        ui.on_turn_complete()
-
-                    elif isinstance(message, ResultMessage):
-                        result_msg = message
-
-            except Exception as exc:
+            if attempt_result.error is not None:
+                exc = attempt_result.error
                 last_exc = exc
 
                 if not _is_transient_error(exc) or attempt == pass_max:
@@ -238,12 +291,12 @@ async def run_phase(
                         success=False,
                         model=current_model,
                         error=friendly,
-                        retry_info={
-                            "attempts": overall_attempt,
-                            "transient_errors": transient_errors,
-                            "fallback_model_used": fallback_model_used,
-                            "total_retry_delay_seconds": total_retry_delay,
-                        },
+                        retry_info=RetryInfo(
+                            attempts=overall_attempt,
+                            transient_errors=transient_errors,
+                            fallback_model_used=fallback_model_used,
+                            total_retry_delay_seconds=total_retry_delay,
+                        ),
                     )
 
                 # Transient error with remaining attempts — retry with backoff
@@ -268,12 +321,13 @@ async def run_phase(
                 continue
 
             # No exception — check result
-            retry_info = {
-                "attempts": overall_attempt,
-                "transient_errors": transient_errors,
-                "fallback_model_used": fallback_model_used,
-                "total_retry_delay_seconds": total_retry_delay,
-            }
+            result_msg = attempt_result.result_msg
+            retry_info = RetryInfo(
+                attempts=overall_attempt,
+                transient_errors=transient_errors,
+                fallback_model_used=fallback_model_used,
+                total_retry_delay_seconds=total_retry_delay,
+            )
 
             if result_msg is None:
                 err = "No result message received from Claude Code"
@@ -330,12 +384,12 @@ async def run_phase(
         success=False,
         model=model,
         error=friendly,
-        retry_info={
-            "attempts": overall_attempt,
-            "transient_errors": transient_errors,
-            "fallback_model_used": fallback_model_used,
-            "total_retry_delay_seconds": total_retry_delay,
-        },
+        retry_info=RetryInfo(
+            attempts=overall_attempt,
+            transient_errors=transient_errors,
+            fallback_model_used=fallback_model_used,
+            total_retry_delay_seconds=total_retry_delay,
+        ),
     )
 
 

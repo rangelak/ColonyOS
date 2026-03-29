@@ -16,7 +16,7 @@ from colonyos.config import (
     save_config,
 )
 from colonyos.learnings import learnings_path, LearningEntry, append_learnings
-from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightResult, ProjectInfo, ResumeState, RunLog, RunStatus
+from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightResult, ProjectInfo, ResumeState, RetryInfo, RunLog, RunStatus
 from colonyos.orchestrator import (
     run,
     run_thread_fix,
@@ -3609,12 +3609,12 @@ class TestRetryConfigWiring:
         """PhaseResult.retry_info flows through to RunLog when populated."""
         save_config(tmp_git_repo, config)
 
-        retry_info = {
-            "attempts": 2,
-            "transient_errors": 1,
-            "fallback_model_used": None,
-            "total_retry_delay_seconds": 12.5,
-        }
+        retry_info = RetryInfo(
+            attempts=2,
+            transient_errors=1,
+            fallback_model_used=None,
+            total_retry_delay_seconds=12.5,
+        )
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
             PhaseResult(
@@ -3640,7 +3640,7 @@ class TestRetryConfigWiring:
         impl_phases = [p for p in log.phases if p.phase == Phase.IMPLEMENT]
         assert len(impl_phases) >= 1
         assert impl_phases[0].retry_info == retry_info
-        assert impl_phases[0].retry_info["attempts"] == 2
+        assert impl_phases[0].retry_info.attempts == 2
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
@@ -3667,11 +3667,11 @@ class TestRetryConfigWiring:
                 phase=Phase.IMPLEMENT, success=True, cost_usd=0.05,
                 duration_ms=500, session_id="impl",
                 artifacts={"result": "done"},
-                retry_info={
-                    "attempts": 2, "transient_errors": 1,
-                    "fallback_model_used": None,
-                    "total_retry_delay_seconds": 15.0,
-                },
+                retry_info=RetryInfo(
+                    attempts=2, transient_errors=1,
+                    fallback_model_used=None,
+                    total_retry_delay_seconds=15.0,
+                ),
             ),
             PhaseResult(
                 phase=Phase.DECISION, success=True, cost_usd=0.01,
