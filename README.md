@@ -307,6 +307,10 @@ flowchart TD
 
 | Command | Description |
 |---|---|
+| `colonyos daemon` | Start fully autonomous daemon (Slack + GitHub + CEO + cleanup) |
+| `colonyos daemon --max-budget N` | Daily budget cap in USD |
+| `colonyos daemon --max-hours N` | Maximum wall-clock hours before exit |
+| `colonyos daemon --dry-run` | Log what would run without executing |
 | `colonyos watch` | Watch Slack channels and trigger runs from messages |
 | `colonyos watch --dry-run` | Log triggers without executing |
 | `colonyos watch --max-hours N` | Wall-clock limit for the watcher |

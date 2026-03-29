@@ -316,6 +316,37 @@ class LoopState:
         )
 
 
+# Priority tier constants (lower number = higher priority)
+PRIORITY_BUG: int = 0      # P0: User-reported bugs
+PRIORITY_FEATURE: int = 1  # P1: User features / issues
+PRIORITY_CEO: int = 2      # P2: CEO-proposed work
+PRIORITY_CLEANUP: int = 3  # P3: Cleanup / maintenance
+
+_BUG_SIGNAL_WORDS = frozenset({"bug", "fix", "broken", "crash", "error", "regression", "hotfix"})
+
+
+def compute_priority(source_type: str, labels: list[str] | None = None) -> int:
+    """Compute deterministic priority tier from source type and labels.
+
+    Returns P0-P3 integer where lower = higher priority.
+    """
+    labels = labels or []
+    lower_labels = [lbl.lower() for lbl in labels]
+
+    if source_type == "ceo":
+        return PRIORITY_CEO
+    if source_type == "cleanup":
+        return PRIORITY_CLEANUP
+
+    # Check for bug signals in labels
+    for lbl in lower_labels:
+        if any(word in lbl for word in _BUG_SIGNAL_WORDS):
+            return PRIORITY_BUG
+
+    # Default: user feature (slack, issue, prompt)
+    return PRIORITY_FEATURE
+
+
 class QueueItemStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -339,12 +370,14 @@ class QueueItem:
     - "slack": Slack message triggering full pipeline
     - "slack_fix": Slack thread-fix request
     - "pr_review_fix": PR review comment fix request
+    - "ceo": CEO-proposed work
+    - "cleanup": Cleanup / maintenance
     """
 
-    SCHEMA_VERSION: ClassVar[int] = 3  # class-level constant; bump on structural changes
+    SCHEMA_VERSION: ClassVar[int] = 4  # class-level constant; bump on structural changes
 
     id: str
-    source_type: str  # "prompt", "issue", "slack", "slack_fix", or "pr_review_fix"
+    source_type: str  # "prompt", "issue", "slack", "slack_fix", "pr_review_fix", "ceo", or "cleanup"
     source_value: str  # prompt text or issue number
     status: QueueItemStatus
     added_at: str = field(
@@ -365,6 +398,7 @@ class QueueItem:
     head_sha: str | None = None
     raw_prompt: str | None = None
     review_comment_id: str | None = None  # For pr_review_fix source_type
+    priority: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -389,6 +423,7 @@ class QueueItem:
             "head_sha": self.head_sha,
             "raw_prompt": self.raw_prompt,
             "review_comment_id": self.review_comment_id,
+            "priority": self.priority,
         }
 
     @classmethod
@@ -430,6 +465,7 @@ class QueueItem:
             head_sha=data.get("head_sha"),
             raw_prompt=data.get("raw_prompt"),
             review_comment_id=data.get("review_comment_id"),
+            priority=data.get("priority", 1),
         )
 
 

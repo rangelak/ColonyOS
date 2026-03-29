@@ -31,6 +31,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -397,3 +398,62 @@ def fetch_open_issues(
             state=item.get("state", "open").lower(),
         ))
     return issues
+
+
+def poll_new_issues(
+    queue_items: list[Any],
+    repo_root: Path,
+    issue_labels: list[str] | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Poll for new GitHub issues not already in the queue.
+
+    Parameters
+    ----------
+    queue_items:
+        Existing queue items (must have ``source_type`` and ``source_value``
+        attributes) used for deduplication.
+    repo_root:
+        Repository root for ``gh`` CLI calls.
+    issue_labels:
+        If non-empty, only issues with at least one matching label are
+        returned.  Comparison is case-insensitive.
+    limit:
+        Maximum number of issues to fetch.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        List of dicts with keys ``number``, ``title``, ``labels`` for
+        each new (non-duplicate) issue.
+    """
+    issues = fetch_open_issues(repo_root, limit=limit)
+    label_filter = {lbl.lower() for lbl in (issue_labels or [])}
+
+    # Build set of already-known issue numbers
+    known_issues: set[str] = set()
+    for item in queue_items:
+        src_type = getattr(item, "source_type", None)
+        src_val = getattr(item, "source_value", None)
+        if src_type == "issue" and src_val:
+            known_issues.add(str(src_val))
+
+    new_issues: list[dict[str, Any]] = []
+    for issue in issues:
+        # Skip known issues
+        if str(issue.number) in known_issues:
+            continue
+
+        # Label filtering
+        if label_filter:
+            issue_labels_lower = {lbl.lower() for lbl in issue.labels}
+            if not label_filter.intersection(issue_labels_lower):
+                continue
+
+        new_issues.append({
+            "number": issue.number,
+            "title": issue.title,
+            "labels": issue.labels,
+        })
+
+    return new_issues

@@ -122,6 +122,64 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
     def health() -> dict[str, str]:
         return {"status": "ok", "version": __version__, "write_enabled": str(write_enabled).lower()}
 
+    @app.get("/healthz")
+    async def healthz() -> JSONResponse:
+        """Daemon health check endpoint (FR-10)."""
+        from colonyos.daemon_state import load_daemon_state
+
+        config = load_config(repo_root)
+        state = load_daemon_state(repo_root)
+        state._maybe_reset_daily()
+
+        daily_cap = config.daemon.daily_budget_usd
+        allowed, remaining = state.check_daily_budget(daily_cap)
+        cb_active = state.is_circuit_breaker_active()
+
+        if not allowed:
+            status = "stopped"
+        elif cb_active or state.paused:
+            status = "degraded"
+        else:
+            status = "healthy"
+
+        heartbeat_age: float | None = None
+        if state.last_heartbeat:
+            try:
+                hb = datetime.fromisoformat(state.last_heartbeat)
+                if hb.tzinfo is None:
+                    hb = hb.replace(tzinfo=timezone.utc)
+                heartbeat_age = (datetime.now(timezone.utc) - hb).total_seconds()
+            except (ValueError, TypeError):
+                pass
+
+        # Count pending queue items
+        queue_path = repo_root / ".colonyos" / "queue.json"
+        queue_depth = 0
+        if queue_path.exists():
+            try:
+                q_data = json.loads(queue_path.read_text(encoding="utf-8"))
+                queue_depth = sum(
+                    1 for i in q_data.get("items", [])
+                    if i.get("status") == "pending"
+                )
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        body = {
+            "status": status,
+            "heartbeat_age_seconds": heartbeat_age,
+            "queue_depth": queue_depth,
+            "daily_spend_usd": state.daily_spend_usd,
+            "daily_budget_remaining_usd": remaining,
+            "circuit_breaker_active": cb_active,
+            "paused": state.paused,
+            "total_items_today": state.total_items_today,
+            "consecutive_failures": state.consecutive_failures,
+        }
+
+        http_status = 200 if status == "healthy" else 503
+        return JSONResponse(content=body, status_code=http_status)
+
     @app.get("/api/runs")
     def list_runs() -> list[dict[str, Any]]:
         logs = load_run_logs(runs_dir)
