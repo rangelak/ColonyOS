@@ -333,6 +333,11 @@ flowchart TD
 
 Repo runtime exclusivity: ColonyOS allows only one repo-bound runtime per checkout at a time. If `colonyos daemon` is already active for a repository, a separate `watch-slack`, `queue start`, `auto`, or other guarded runtime started against that same repo will fail fast instead of racing on branches, queue state, or Slack intake. The guard writes transient local state to `.colonyos/runtime.lock` and `.colonyos/runtime_processes.json`; both files are generated at runtime and are gitignored.
 
+For dedicated daemon checkouts, `daemon.auto_recover_dirty_worktree: true` enables
+an opt-in preserve-and-reset recovery path when queue execution hits a dirty-worktree
+preflight failure. Leave it off for shared human/dev checkouts, because it may
+stash/reset local edits so queued work can continue.
+
 ### Global flags
 
 | Flag | Applies to | Description |

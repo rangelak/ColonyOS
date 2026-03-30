@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -327,6 +329,86 @@ class TestDirtyWorktreeRecovery:
         mock_preserve.assert_not_called()
         assert item.status == QueueItemStatus.FAILED
         assert daemon_instance._state.consecutive_failures == 1
+
+    def test_run_pipeline_for_item_recovers_real_dirty_git_worktree(self, tmp_repo: Path, config: ColonyConfig):
+        daemon_instance = Daemon(tmp_repo, config, dry_run=False)
+        daemon_instance.daemon_config.auto_recover_dirty_worktree = True
+        tracked = tmp_repo / "src" / "dirty.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("print('clean')\n", encoding="utf-8")
+
+        git_env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test User",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test User",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+        subprocess.run(["git", "init", "-b", "main"], cwd=tmp_repo, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "add", "src/dirty.py"], cwd=tmp_repo, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=tmp_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=git_env,
+        )
+
+        tracked.write_text("print('dirty')\n", encoding="utf-8")
+        item = QueueItem(
+            id="item-4",
+            source_type="prompt",
+            source_value="ship it",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+
+        call_count = 0
+
+        def fake_run_pipeline_for_queue_item(**kwargs: object) -> RunLog:
+            nonlocal call_count
+            call_count += 1
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=tmp_repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            if call_count == 1:
+                raise PreflightError(
+                    "Uncommitted changes detected",
+                    code="dirty_worktree",
+                    details={"dirty_output": status},
+                )
+            visible_dirty = [
+                line for line in status.splitlines()
+                if not line[3:].startswith(".colonyos/")
+            ]
+            assert visible_dirty == []
+            return RunLog(
+                run_id="run-1",
+                prompt=item.source_value,
+                status=RunStatus.COMPLETED,
+                total_cost_usd=0.1,
+            )
+
+        with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=fake_run_pipeline_for_queue_item):
+            log = daemon_instance._run_pipeline_for_item(item)
+
+        assert log.status == RunStatus.COMPLETED
+        assert call_count == 2
+        stash_list = subprocess.run(
+            ["git", "stash", "list"],
+            cwd=tmp_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert "colonyos-nuke-" in stash_list
+        recovery_notes = sorted((tmp_repo / ".colonyos" / "recovery").glob("*.md"))
+        assert recovery_notes
 
 
 class TestDeduplication:
