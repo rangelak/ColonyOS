@@ -92,7 +92,7 @@
 | No Slack messages | Verify `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in env file |
 | Budget paused | Check `.colonyos/daemon_state.json` for `daily_spend_usd` |
 | Circuit breaker active | Check `daemon_state.json` for `circuit_breaker_until` |
-| Multiple instances | Check for stale `.colonyos/daemon.pid` file |
+| Multiple instances | Check `.colonyos/runtime.lock` and `.colonyos/runtime_processes.json` for an active repo runtime before starting another daemon or standalone watcher |
 
 ## Updating
 

@@ -1,5 +1,23 @@
 # Changelog
 
+## 20260330_154500 — Enforce Repo Runtime Exclusivity and Shutdown Cleanup
+
+Hardens ColonyOS against overlapping repo-bound runtimes by introducing a shared runtime lock across daemon, Slack watcher, queue, auto, TUI, and related entrypoints. This prevents concurrent work on the same checkout, improves cancellation cleanup for Ctrl+C and SIGTERM paths, and documents the generated runtime lock artifacts.
+
+**Created:**
+- `src/colonyos/runtime_lock.py` — Shared repo runtime lock, active-process registry, and related process-tree shutdown helpers
+- `tests/test_runtime_lock.py` — Regression coverage for lock acquisition, registry cleanup, and runtime termination
+
+**Modified:**
+- `src/colonyos/cancellation.py` — Shared signal fan-out with preserved SIGTERM exit semantics
+- `src/colonyos/cli.py` — Guard repo-bound runtimes, harden TUI and auto shutdown paths, and align interactive signal handling
+- `src/colonyos/daemon.py` — Move daemon instance locking onto the shared repo runtime guard
+- `src/colonyos/server.py` — Reject dashboard-launched runs when a repo runtime is already active
+- `README.md` — Document repo runtime exclusivity and watcher/daemon mutual exclusion
+- `deploy/README.md` — Document runtime lock files in deployment troubleshooting guidance
+- `.gitignore` — Ignore generated runtime lock and process registry artifacts
+- `tests/test_cancellation.py`, `tests/test_cli.py`, `tests/test_daemon.py`, `tests/test_server.py`, `tests/test_sweep.py`, `tests/tui/test_cli_integration.py` — Add regression coverage for guarded runtimes and interactive signal behavior
+
 ## 20260330_103500 — PR Outcome Tracking System
 
 Closes the feedback loop on ColonyOS-created PRs by tracking their fate (merged/closed/open), feeding outcome data back into the CEO prompt, memory system, and analytics dashboard so the pipeline improves over time.

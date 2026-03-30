@@ -327,6 +327,8 @@ flowchart TD
 | `colonyos ui --port N` | Custom port (default: 7400) |
 | `colonyos ui --no-open` | Don't auto-open the browser |
 
+Repo runtime exclusivity: ColonyOS allows only one repo-bound runtime per checkout at a time. If `colonyos daemon` is already active for a repository, a separate `watch-slack`, `queue start`, `auto`, or other guarded runtime started against that same repo will fail fast instead of racing on branches, queue state, or Slack intake. The guard writes transient local state to `.colonyos/runtime.lock` and `.colonyos/runtime_processes.json`; both files are generated at runtime and are gitignored.
+
 ### Global flags
 
 | Flag | Applies to | Description |
@@ -585,6 +587,8 @@ colonyos watch-slack
 ```
 
 The watcher runs as a long-lived process using Slack Bolt SDK with Socket Mode (no public URL required). When someone mentions `@ColonyOS fix the login bug` in a configured channel, the watcher sanitizes the input, triggers a pipeline run, and posts threaded progress updates back to the Slack thread.
+
+`watch-slack` is mutually exclusive with other repo-bound runtimes for the same checkout. If the daemon is already running and watching Slack, do not start a second standalone watcher for that repo; ColonyOS will reject it with a runtime-busy error instead of letting both processes mutate the same branch or queue.
 
 **Trigger modes:**
 
