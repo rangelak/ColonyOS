@@ -367,11 +367,15 @@ def _preflight_check(
             raise PreflightError(
                 f"Branch '{branch_name}' already exists with open PR #{open_pr_number}: "
                 f"{open_pr_url}\n\n"
-                f"Use --resume to continue existing work, or --force to bypass this check."
+                f"Use --resume to continue existing work, or --force to bypass this check.",
+                code="branch_exists",
+                details={"branch_name": branch_name, "open_pr_number": open_pr_number, "open_pr_url": open_pr_url},
             )
         raise PreflightError(
             f"Branch '{branch_name}' already exists locally.\n\n"
-            "Use --resume to continue existing work, or --force to bypass this check."
+            "Use --resume to continue existing work, or --force to bypass this check.",
+            code="branch_exists",
+            details={"branch_name": branch_name},
         )
 
     # Check if main is behind origin/main

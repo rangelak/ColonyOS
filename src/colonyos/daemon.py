@@ -1187,6 +1187,43 @@ class Daemon:
             and exc.code == "dirty_worktree"
         )
 
+    @staticmethod
+    def _should_auto_recover_existing_branch(exc: Exception) -> bool:
+        if not isinstance(exc, PreflightError) or exc.code != "branch_exists":
+            return False
+        details = exc.details or {}
+        if details.get("open_pr_number") is not None:
+            return False
+        return bool(details.get("branch_name"))
+
+    def _recover_existing_branch_and_retry(
+        self,
+        item: QueueItem,
+        exc: PreflightError,
+    ) -> None:
+        branch_name = (exc.details or {}).get("branch_name", "")
+        logger.warning(
+            "Branch '%s' blocked item %s; deleting stale local branch and retrying",
+            branch_name,
+            item.id,
+        )
+        try:
+            result = subprocess.run(
+                ["git", "branch", "-D", branch_name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=self.repo_root,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"git branch -D {branch_name} failed: {result.stderr.strip()}"
+                )
+            logger.info("Deleted stale branch '%s'; retrying item %s", branch_name, item.id)
+        except Exception:
+            logger.exception("Failed to delete stale branch '%s'", branch_name)
+            raise exc from None
+
     def _recover_dirty_worktree_and_retry(
         self,
         item: QueueItem,
@@ -1261,6 +1298,7 @@ class Daemon:
                 )
 
         attempted_dirty_worktree_recovery = False
+        attempted_branch_exists_recovery = False
         watchdog = threading.Timer(timeout, _timeout_watchdog)
         watchdog.daemon = True
         watchdog.start()
@@ -1290,12 +1328,20 @@ class Daemon:
                     return result
                 except PreflightError as exc:
                     if (
-                        attempted_dirty_worktree_recovery
-                        or not self._should_auto_recover_dirty_worktree(exc)
+                        not attempted_dirty_worktree_recovery
+                        and self._should_auto_recover_dirty_worktree(exc)
                     ):
-                        raise
-                    attempted_dirty_worktree_recovery = True
-                    self._recover_dirty_worktree_and_retry(item, exc)
+                        attempted_dirty_worktree_recovery = True
+                        self._recover_dirty_worktree_and_retry(item, exc)
+                        continue
+                    if (
+                        not attempted_branch_exists_recovery
+                        and self._should_auto_recover_existing_branch(exc)
+                    ):
+                        attempted_branch_exists_recovery = True
+                        self._recover_existing_branch_and_retry(item, exc)
+                        continue
+                    raise
         finally:
             watchdog.cancel()
 

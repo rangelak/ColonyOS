@@ -8,10 +8,9 @@ renderables for color-coded, structured output.
 from __future__ import annotations
 
 import re
-from io import StringIO
 
 from rich import box
-from rich.console import Console, Group
+from rich.console import Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
@@ -267,15 +266,11 @@ class TranscriptView(RichLog):
     def get_plain_text(self) -> str:
         """Return all transcript content as plain text (for transcript export).
 
-        Uses Rich's Console to render each line without markup.
+        ``RichLog.lines`` contains Textual ``Strip`` objects (not Rich
+        renderables), so we extract the plain text via ``Strip.text``
+        which joins the underlying ``Segment.text`` values.
         """
-        parts: list[str] = []
-        for line_entry in self.lines:
-            buf = StringIO()
-            console = Console(file=buf, width=200, no_color=True, highlight=False)
-            console.print(line_entry, end="")
-            parts.append(buf.getvalue())
-        return "\n".join(parts)
+        return "\n".join(strip.text for strip in self.lines)
 
     def re_enable_auto_scroll(self) -> None:
         """Re-enable auto-scroll and jump to the bottom."""
