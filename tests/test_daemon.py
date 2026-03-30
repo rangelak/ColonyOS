@@ -490,3 +490,51 @@ class TestCeoScheduling:
             daemon_instance._schedule_ceo()
 
         assert not any(item.source_type == "ceo" for item in daemon_instance._queue_state.items)
+
+
+class TestOutcomePolling:
+    """Tests for FR-8: automatic PR outcome polling in _tick()."""
+
+    def test_tick_polls_outcomes_on_interval(self, daemon_instance: Daemon):
+        """_tick() calls _poll_pr_outcomes when interval has elapsed."""
+        daemon_instance._last_outcome_poll_time = 0.0
+        daemon_instance.daemon_config = DaemonConfig(
+            outcome_poll_interval_minutes=0,  # Trigger immediately
+        )
+        with patch.object(daemon_instance, "_poll_pr_outcomes") as mock_poll, \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_post_heartbeat"), \
+             patch.object(daemon_instance, "_schedule_cleanup"):
+            daemon_instance._tick()
+            assert mock_poll.called
+
+    def test_tick_skips_outcomes_when_interval_not_elapsed(self, daemon_instance: Daemon):
+        """_tick() does NOT call _poll_pr_outcomes when interval hasn't elapsed."""
+        daemon_instance._last_outcome_poll_time = time.monotonic()
+        daemon_instance.daemon_config = DaemonConfig(
+            outcome_poll_interval_minutes=60,  # Far in the future
+        )
+        with patch.object(daemon_instance, "_poll_pr_outcomes") as mock_poll, \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_post_heartbeat"), \
+             patch.object(daemon_instance, "_schedule_cleanup"):
+            daemon_instance._tick()
+            assert not mock_poll.called
+
+    def test_poll_pr_outcomes_handles_exceptions(self, daemon_instance: Daemon):
+        """_poll_pr_outcomes swallows exceptions so the daemon keeps running."""
+        with patch("colonyos.outcomes.poll_outcomes", side_effect=RuntimeError("gh failed")):
+            # Should not raise
+            daemon_instance._poll_pr_outcomes()
+
+    def test_poll_pr_outcomes_calls_poll_outcomes(self, daemon_instance: Daemon):
+        """_poll_pr_outcomes delegates to outcomes.poll_outcomes."""
+        with patch("colonyos.outcomes.poll_outcomes") as mock_poll:
+            daemon_instance._poll_pr_outcomes()
+            mock_poll.assert_called_once_with(daemon_instance.repo_root)
+
+    def test_configurable_interval(self, tmp_repo: Path):
+        """outcome_poll_interval_minutes from DaemonConfig is respected."""
+        config = ColonyConfig(daemon=DaemonConfig(outcome_poll_interval_minutes=15))
+        d = Daemon(tmp_repo, config, dry_run=True)
+        assert d.daemon_config.outcome_poll_interval_minutes == 15

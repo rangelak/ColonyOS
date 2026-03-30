@@ -2361,6 +2361,147 @@ def memory_stats() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Outcomes command group
+# ---------------------------------------------------------------------------
+
+
+def _render_outcomes_table(outcomes: list) -> None:
+    """Render a Rich table of PR outcome records.
+
+    Accepts a list of sqlite3.Row objects from OutcomeStore.get_outcomes().
+    Columns displayed: PR#, Status (colored), Branch, Age, Reviews, CI, Close Context.
+
+    Parameters
+    ----------
+    outcomes:
+        List of sqlite3.Row objects with pr_outcomes schema.
+    """
+    from datetime import datetime, timezone
+
+    from rich.console import Console
+    from rich.table import Table
+
+    con = Console()
+    table = Table(
+        title="PR Outcomes",
+        show_header=True,
+        header_style="bold",
+        padding=(0, 1),
+    )
+    table.add_column("PR#", style="dim", justify="right")
+    table.add_column("Status")
+    table.add_column("Branch", style="cyan", max_width=40)
+    table.add_column("Age", justify="right")
+    table.add_column("Reviews", justify="right")
+    table.add_column("CI")
+    table.add_column("Close Context", max_width=50)
+
+    # Status → color mapping
+    _status_styles = {
+        "merged": "green",
+        "closed": "red",
+        "open": "yellow",
+    }
+
+    now = datetime.now(timezone.utc)
+    for row in outcomes:
+        status = row["status"]
+        status_style = _status_styles.get(status, "")
+
+        # Compute age from created_at
+        age_str = ""
+        created_at = row["created_at"]
+        if created_at:
+            try:
+                created = datetime.fromisoformat(created_at)
+                delta = now - created
+                hours = delta.total_seconds() / 3600
+                if hours < 1:
+                    age_str = f"{int(delta.total_seconds() / 60)}m"
+                elif hours < 24:
+                    age_str = f"{hours:.1f}h"
+                else:
+                    age_str = f"{delta.days}d"
+            except (ValueError, TypeError):
+                pass
+
+        # CI status display
+        ci_val = row["ci_passed"]
+        if ci_val is None:
+            ci_str = "—"
+        elif ci_val:
+            ci_str = "✓"
+        else:
+            ci_str = "✗"
+
+        # Close context (truncated)
+        close_ctx = row["close_context"] or ""
+        if len(close_ctx) > 50:
+            close_ctx = close_ctx[:47] + "..."
+
+        table.add_row(
+            str(row["pr_number"]),
+            f"[{status_style}]{status}[/{status_style}]" if status_style else status,
+            row["branch_name"],
+            age_str,
+            str(row["review_comment_count"] or 0),
+            ci_str,
+            close_ctx,
+        )
+
+    con.print(table)
+
+
+@app.group(invoke_without_command=True)
+@click.pass_context
+def outcomes(ctx: click.Context) -> None:
+    """View and manage PR outcome tracking."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    # Default action: show the outcomes table
+    from colonyos.outcomes import OutcomeStore
+
+    repo_root = _find_repo_root()
+    with OutcomeStore(repo_root) as store:
+        rows = store.get_outcomes()
+
+    if not rows:
+        click.echo("No tracked PR outcomes yet. PRs are tracked automatically when created by ColonyOS.")
+        return
+
+    _render_outcomes_table(rows)
+
+
+app.add_command(outcomes)
+
+
+@outcomes.command("poll")
+def outcomes_poll() -> None:
+    """Poll GitHub for latest PR statuses, then display the updated table."""
+    from colonyos.outcomes import OutcomeStore, poll_outcomes
+
+    repo_root = _find_repo_root()
+
+    # Poll GitHub for updates
+    try:
+        poll_outcomes(repo_root)
+        click.echo("Polled GitHub for PR status updates.")
+    except Exception as exc:
+        click.echo(f"Warning: polling failed: {exc}", err=True)
+
+    # Display updated table
+    with OutcomeStore(repo_root) as store:
+        rows = store.get_outcomes()
+
+    if not rows:
+        click.echo("No tracked PR outcomes yet.")
+        return
+
+    _render_outcomes_table(rows)
+
+
+# ---------------------------------------------------------------------------
 # Queue command group
 # ---------------------------------------------------------------------------
 
@@ -2696,7 +2837,7 @@ def stats(last: int | None, phase: str | None) -> None:
     from rich.console import Console as RichConsole
 
     console = RichConsole()
-    result = compute_stats(runs, phase_filter=phase)
+    result = compute_stats(runs, phase_filter=phase, repo_root=repo_root)
     render_dashboard(console, result)
 
 

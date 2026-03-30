@@ -1421,3 +1421,52 @@ class TestRetryConfig:
         assert DEFAULTS["retry"]["base_delay_seconds"] == 10.0
         assert DEFAULTS["retry"]["max_delay_seconds"] == 120.0
         assert DEFAULTS["retry"]["fallback_model"] is None
+
+
+class TestDaemonOutcomePollInterval:
+    """Tests for DaemonConfig.outcome_poll_interval_minutes."""
+
+    def test_default_value_is_30(self) -> None:
+        config = DaemonConfig()
+        assert config.outcome_poll_interval_minutes == 30
+
+    def test_defaults_dict_has_outcome_poll_interval(self) -> None:
+        assert DEFAULTS["daemon"]["outcome_poll_interval_minutes"] == 30
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"outcome_poll_interval_minutes": 15}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.outcome_poll_interval_minutes == 15
+
+    def test_validation_zero_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"outcome_poll_interval_minutes": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="outcome_poll_interval_minutes must be positive"):
+            load_config(tmp_repo)
+
+    def test_validation_negative_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"outcome_poll_interval_minutes": -5}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="outcome_poll_interval_minutes must be positive"):
+            load_config(tmp_repo)
+
+    def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            daemon=DaemonConfig(outcome_poll_interval_minutes=45),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.outcome_poll_interval_minutes == 45

@@ -102,6 +102,7 @@ DEFAULTS = {
         "digest_hour_utc": 14,
         "max_consecutive_failures": 3,
         "circuit_breaker_cooldown_minutes": 30,
+        "outcome_poll_interval_minutes": 30,
         "issue_labels": [],
         "allowed_control_user_ids": [],
         "allow_all_control_users": False,
@@ -257,6 +258,7 @@ class DaemonConfig:
     digest_hour_utc: int = 14
     max_consecutive_failures: int = 3
     circuit_breaker_cooldown_minutes: int = 30
+    outcome_poll_interval_minutes: int = 30
     issue_labels: list[str] = field(default_factory=list)
     allowed_control_user_ids: list[str] = field(default_factory=list)
     allow_all_control_users: bool = False
@@ -757,6 +759,9 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
     cb_cooldown = _int("circuit_breaker_cooldown_minutes")
     _require_positive("circuit_breaker_cooldown_minutes", cb_cooldown)
 
+    outcome_poll = _int("outcome_poll_interval_minutes")
+    _require_positive("outcome_poll_interval_minutes", outcome_poll)
+
     return DaemonConfig(
         daily_budget_usd=daily_budget_usd,
         github_poll_interval_seconds=poll_interval,
@@ -767,6 +772,7 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
         digest_hour_utc=digest_hour,
         max_consecutive_failures=max_failures,
         circuit_breaker_cooldown_minutes=cb_cooldown,
+        outcome_poll_interval_minutes=outcome_poll,
         issue_labels=list(raw.get("issue_labels", d["issue_labels"])),
         allowed_control_user_ids=list(
             raw.get("allowed_control_user_ids", d["allowed_control_user_ids"])
@@ -1117,6 +1123,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         or config.daemon.digest_hour_utc != daemon_defaults["digest_hour_utc"]
         or config.daemon.max_consecutive_failures != daemon_defaults["max_consecutive_failures"]
         or config.daemon.circuit_breaker_cooldown_minutes != daemon_defaults["circuit_breaker_cooldown_minutes"]
+        or config.daemon.outcome_poll_interval_minutes != daemon_defaults["outcome_poll_interval_minutes"]
         or config.daemon.issue_labels
         or config.daemon.allowed_control_user_ids
         or config.daemon.allow_all_control_users
@@ -1131,6 +1138,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "digest_hour_utc": config.daemon.digest_hour_utc,
             "max_consecutive_failures": config.daemon.max_consecutive_failures,
             "circuit_breaker_cooldown_minutes": config.daemon.circuit_breaker_cooldown_minutes,
+            "outcome_poll_interval_minutes": config.daemon.outcome_poll_interval_minutes,
             "issue_labels": list(config.daemon.issue_labels),
             "allowed_control_user_ids": list(config.daemon.allowed_control_user_ids),
             "allow_all_control_users": config.daemon.allow_all_control_users,
