@@ -20,6 +20,7 @@ import janus
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 
+from colonyos.cancellation import request_cancel
 from colonyos.models import PreflightError
 from colonyos.tui.adapter import (
     CommandOutputMsg,
@@ -273,9 +274,12 @@ class AssistantApp(App):
             raise SystemExit(1)
         self._last_cancel_at = now
 
-        # First press — graceful stop: signal the auto loop to break between
-        # iterations and cancel running workers, but keep the TUI alive.
+        # First press — graceful stop: signal the daemon or orchestrator first so
+        # worker cancellation does not block on a still-running child process.
         self._stop_event.set()
+        request_cancel("Cancelled by user from TUI")
+        if self._cancel_callback is not None:
+            self._cancel_callback()
         self.workers.cancel_all()
         status_bar = self.query_one(StatusBar)
         status_bar.set_error("Cancelled by user")
@@ -283,8 +287,6 @@ class AssistantApp(App):
         transcript.append_notice("Run cancelled by user (press Ctrl+C again within 2s to exit TUI)")
         self._run_active = False
         self._auto_loop_active = False
-        if self._cancel_callback is not None:
-            self._cancel_callback()
 
     def action_clear_transcript(self) -> None:
         """Clear all entries from the transcript."""

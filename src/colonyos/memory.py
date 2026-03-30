@@ -193,6 +193,8 @@ class MemoryStore:
             (now, category.value, phase, run_id, sanitized_text, tags_str),
         )
         entry_id = cur.lastrowid
+        if entry_id is None:
+            raise RuntimeError("failed to persist memory entry id")
 
         # Enforce max_entries cap within the same transaction
         self._prune_if_needed(cur)

@@ -66,6 +66,12 @@ class TestDaemonState:
         assert state.daily_spend_usd == 0.0
         assert state.total_items_today == 0
 
+    def test_check_daily_budget_unlimited(self):
+        state = DaemonState(daily_spend_usd=123.45)
+        allowed, remaining = state.check_daily_budget(None)
+        assert allowed is True
+        assert remaining is None
+
     def test_record_spend(self):
         state = DaemonState()
         state.record_spend(5.0)

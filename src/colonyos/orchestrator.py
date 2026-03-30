@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -54,6 +55,8 @@ from colonyos.recovery import (
 from colonyos.sanitize import sanitize_untrusted_content
 from colonyos.slack import is_valid_git_ref
 from colonyos.ui import NullUI, ParallelProgressLine, PhaseUI, make_reviewer_prefix, print_reviewer_legend
+
+logger = logging.getLogger(__name__)
 
 
 def _touch_heartbeat(repo_root: Path) -> None:
@@ -1054,8 +1057,8 @@ def _run_parallel_implement(
             conflict_files: list[str],
             task_id: str,
             working_dir: Path,
-            prd_path_arg: str,
-            task_file_path_arg: str,
+            prd_path: str,
+            task_file_path: str,
             budget_usd: float,
         ) -> PhaseResult:
             system, user = _build_conflict_resolve_prompt(
@@ -2526,6 +2529,9 @@ def _compute_next_phase(last_successful_phase: str | None) -> str | None:
 
     Returns the next phase name, or None if nothing to resume.
     """
+    if last_successful_phase is None:
+        return None
+
     mapping = {
         "plan": "implement",
         "implement": "review",

@@ -71,13 +71,15 @@ class DaemonState:
             paused=bool(data.get("paused", False)),
         )
 
-    def check_daily_budget(self, cap: float) -> tuple[bool, float]:
+    def check_daily_budget(self, cap: float | None) -> tuple[bool, float | None]:
         """Check if a new run is allowed under the daily budget.
 
         Returns (allowed, remaining_usd). Automatically resets counters
         if the UTC date has rolled over.
         """
         self._maybe_reset_daily()
+        if cap is None:
+            return True, None
         remaining = cap - self.daily_spend_usd
         return remaining > 0, max(remaining, 0.0)
 

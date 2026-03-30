@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 import uuid
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +20,10 @@ from typing import Any, cast
 import click
 
 from colonyos import __version__
+from colonyos.cancellation import (
+    cancellation_scope,
+    install_signal_cancel_handlers,
+)
 from colonyos.config import ColonyConfig, load_config, save_config, runs_dir_path
 from colonyos.doctor import run_doctor_checks
 from colonyos.init import run_ai_init, run_init
@@ -234,6 +238,63 @@ def _show_welcome() -> None:
         )
     )
     console.print()
+
+
+def _format_budget_cap(cap: float | None) -> str:
+    """Format a daemon budget cap for display."""
+    if cap is None:
+        return "unlimited"
+    return f"${cap:.2f}/day"
+
+
+def _print_daemon_banner(
+    *,
+    repo_root: Path,
+    config: ColonyConfig,
+    budget_cap: float | None,
+    max_hours: float | None,
+    dry_run: bool,
+    allow_all_control_users: bool,
+) -> None:
+    """Render a compact startup banner for daemon mode."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    con = Console()
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold green")
+    table.add_column()
+    table.add_row("mode", "daemon")
+    table.add_row("repo", str(repo_root))
+    table.add_row("budget", _format_budget_cap(budget_cap))
+    table.add_row("max hours", "unlimited" if max_hours is None else f"{max_hours:.1f}h")
+    table.add_row("slack", "enabled" if config.slack.enabled else "disabled")
+    table.add_row(
+        "control",
+        "all Slack users"
+        if allow_all_control_users
+        else ", ".join(config.daemon.allowed_control_user_ids) or "allowlist empty",
+    )
+    table.add_row("dry run", "yes" if dry_run else "no")
+
+    title = Text()
+    title.append(" ColonyOS Daemon ", style="bold")
+    title.append(f"v{__version__}", style="dim")
+
+    con.print()
+    con.print(
+        Panel(
+            table,
+            title=title,
+            title_align="left",
+            border_style="bright_black",
+            padding=(1, 2),
+            expand=True,
+        )
+    )
+    con.print()
 
 
 REPL_HISTORY_PATH = Path.home() / ".colonyos_history"
@@ -1131,120 +1192,125 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
         _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
         return
 
-    if resume_run_id:
-        resume_state = prepare_resume(repo_root, resume_run_id)
+    try:
+        with install_signal_cancel_handlers():
+            if resume_run_id:
+                resume_state = prepare_resume(repo_root, resume_run_id)
 
-        log = run_orchestrator(
-            resume_state.log.prompt,
-            repo_root=repo_root,
-            config=config,
-            resume_from=resume_state,
-            verbose=verbose,
-            quiet=quiet,
-            force=force,
-        )
-        _print_run_summary(log)
-    else:
-        source_issue: int | None = None
-        source_issue_url: str | None = None
-
-        if issue_ref:
-            from colonyos.github import (
-                fetch_issue,
-                format_issue_as_prompt,
-                parse_issue_ref,
-            )
-
-            number = parse_issue_ref(issue_ref)
-            issue = fetch_issue(number, repo_root)
-            source_issue = issue.number
-            source_issue_url = issue.url
-
-            issue_prompt = format_issue_as_prompt(issue)
-            if prompt:
-                effective_prompt = issue_prompt + f"\n\n## Additional Context\n\n{prompt}"
-            else:
-                effective_prompt = issue_prompt
-        else:
-            effective_prompt = prompt or f"Implement the PRD at {from_prd}"
-
-        # Intent routing: classify the prompt before running the full pipeline
-        # Skip routing when: --no-triage flag, --from-prd, --issue, or router disabled
-        should_route = (
-            config.router.enabled
-            and not no_triage
-            and not from_prd
-            and not issue_ref
-            and prompt  # Only route freeform prompts
-        )
-
-        skip_planning = False
-        if should_route:
-            try:
-                route_outcome = _route_prompt(
-                    effective_prompt, config, repo_root, source="cli", quiet=quiet,
+                log = run_orchestrator(
+                    resume_state.log.prompt,
+                    repo_root=repo_root,
+                    config=config,
+                    resume_from=resume_state,
+                    verbose=verbose,
+                    quiet=quiet,
+                    force=force,
                 )
-            except KeyboardInterrupt:
-                click.echo(click.style("\nInterrupted.", dim=True))
-                return
-            _announce_mode_cli(route_outcome.announcement, quiet=quiet)
-            if route_outcome.display_text is not None:
-                click.echo()
-                click.echo(route_outcome.display_text)
-                return
-            if route_outcome.mode == "direct_agent":
-                from colonyos.ui import PhaseUI
+                _print_run_summary(log)
+            else:
+                source_issue: int | None = None
+                source_issue_url: str | None = None
 
-                success, _session_id = _run_direct_agent(
+                if issue_ref:
+                    from colonyos.github import (
+                        fetch_issue,
+                        format_issue_as_prompt,
+                        parse_issue_ref,
+                    )
+
+                    number = parse_issue_ref(issue_ref)
+                    issue = fetch_issue(number, repo_root)
+                    source_issue = issue.number
+                    source_issue_url = issue.url
+
+                    issue_prompt = format_issue_as_prompt(issue)
+                    if prompt:
+                        effective_prompt = issue_prompt + f"\n\n## Additional Context\n\n{prompt}"
+                    else:
+                        effective_prompt = issue_prompt
+                else:
+                    effective_prompt = prompt or f"Implement the PRD at {from_prd}"
+
+                # Intent routing: classify the prompt before running the full pipeline
+                # Skip routing when: --no-triage flag, --from-prd, --issue, or router disabled
+                should_route = (
+                    config.router.enabled
+                    and not no_triage
+                    and not from_prd
+                    and not issue_ref
+                    and prompt  # Only route freeform prompts
+                )
+
+                skip_planning = False
+                if should_route:
+                    try:
+                        route_outcome = _route_prompt(
+                            effective_prompt, config, repo_root, source="cli", quiet=quiet,
+                        )
+                    except KeyboardInterrupt:
+                        click.echo(click.style("\nInterrupted.", dim=True))
+                        return
+                    _announce_mode_cli(route_outcome.announcement, quiet=quiet)
+                    if route_outcome.display_text is not None:
+                        click.echo()
+                        click.echo(route_outcome.display_text)
+                        return
+                    if route_outcome.mode == "direct_agent":
+                        from colonyos.ui import PhaseUI
+
+                        success, _session_id = _run_direct_agent(
+                            effective_prompt,
+                            repo_root=repo_root,
+                            config=config,
+                            ui=None if quiet else PhaseUI(verbose=verbose),
+                        )
+                        if not success:
+                            sys.exit(1)
+                        return
+                    if route_outcome.mode == "review_only":
+                        try:
+                            approved = _run_review_only_flow(
+                                repo_root=repo_root,
+                                config=config,
+                                verbose=verbose,
+                                quiet=quiet,
+                            )
+                        except click.ClickException as exc:
+                            click.echo(f"Error: {exc.format_message()}", err=True)
+                            sys.exit(1)
+                        if not approved:
+                            sys.exit(1)
+                        return
+                    if route_outcome.mode == "cleanup_loop":
+                        _run_cleanup_loop()
+                        return
+                    if route_outcome.mode == "implement_only":
+                        try:
+                            from_prd = _resolve_latest_prd_path(repo_root, config)
+                        except click.ClickException as exc:
+                            click.echo(f"Error: {exc.format_message()}", err=True)
+                            sys.exit(1)
+                        click.echo(click.style(f"Using latest PRD: {from_prd}", dim=True))
+                    skip_planning = route_outcome.skip_planning
+
+                log = run_orchestrator(
                     effective_prompt,
                     repo_root=repo_root,
                     config=config,
-                    ui=None if quiet else PhaseUI(verbose=verbose),
+                    plan_only=plan_only,
+                    skip_planning=skip_planning,
+                    from_prd=from_prd,
+                    verbose=verbose,
+                    quiet=quiet,
+                    source_issue=source_issue,
+                    source_issue_url=source_issue_url,
+                    offline=offline,
+                    force=force,
                 )
-                if not success:
-                    sys.exit(1)
-                return
-            if route_outcome.mode == "review_only":
-                try:
-                    approved = _run_review_only_flow(
-                        repo_root=repo_root,
-                        config=config,
-                        verbose=verbose,
-                        quiet=quiet,
-                    )
-                except click.ClickException as exc:
-                    click.echo(f"Error: {exc.format_message()}", err=True)
-                    sys.exit(1)
-                if not approved:
-                    sys.exit(1)
-                return
-            if route_outcome.mode == "cleanup_loop":
-                _run_cleanup_loop()
-                return
-            if route_outcome.mode == "implement_only":
-                try:
-                    from_prd = _resolve_latest_prd_path(repo_root, config)
-                except click.ClickException as exc:
-                    click.echo(f"Error: {exc.format_message()}", err=True)
-                    sys.exit(1)
-                click.echo(click.style(f"Using latest PRD: {from_prd}", dim=True))
-            skip_planning = route_outcome.skip_planning
-
-        log = run_orchestrator(
-            effective_prompt,
-            repo_root=repo_root,
-            config=config,
-            plan_only=plan_only,
-            skip_planning=skip_planning,
-            from_prd=from_prd,
-            verbose=verbose,
-            quiet=quiet,
-            source_issue=source_issue,
-            source_issue_url=source_issue_url,
-            offline=offline,
-            force=force,
-        )
-        _print_run_summary(log)
+                _print_run_summary(log)
+    except KeyboardInterrupt:
+        click.echo(click.style("\nInterrupted.", dim=True))
+        sys.exit(130)
 
     if log.status == RunStatus.FAILED:
         sys.exit(1)
@@ -1875,85 +1941,91 @@ def auto(
 
     completed_iterations = 0
 
-    for iteration in range(start_iteration, loop_count + 1):
-        # --- Time cap check (total elapsed across all sessions) ---
-        elapsed_hours = _compute_elapsed_hours(loop_state)
-        if elapsed_hours >= effective_max_hours:
-            click.echo(
-                f"\nTime limit reached ({elapsed_hours:.1f}h / {effective_max_hours:.1f}h). "
-                f"Duration cap hit. Stopping autonomous loop."
-            )
-            loop_state.status = LoopStatus.INTERRUPTED
-            _save_loop_state(repo_root, loop_state)
-            break
+    try:
+        with install_signal_cancel_handlers():
+            for iteration in range(start_iteration, loop_count + 1):
+                # --- Time cap check (total elapsed across all sessions) ---
+                elapsed_hours = _compute_elapsed_hours(loop_state)
+                if elapsed_hours >= effective_max_hours:
+                    click.echo(
+                        f"\nTime limit reached ({elapsed_hours:.1f}h / {effective_max_hours:.1f}h). "
+                        f"Duration cap hit. Stopping autonomous loop."
+                    )
+                    loop_state.status = LoopStatus.INTERRUPTED
+                    _save_loop_state(repo_root, loop_state)
+                    break
 
-        # --- Budget cap check ---
-        if aggregate_cost >= effective_max_budget:
-            click.echo(
-                f"\nBudget limit reached (${aggregate_cost:.2f} / ${effective_max_budget:.2f}). "
-                f"Stopping autonomous loop.",
-                err=True,
-            )
-            loop_state.status = LoopStatus.INTERRUPTED
-            _save_loop_state(repo_root, loop_state)
-            break
+                # --- Budget cap check ---
+                if aggregate_cost >= effective_max_budget:
+                    click.echo(
+                        f"\nBudget limit reached (${aggregate_cost:.2f} / ${effective_max_budget:.2f}). "
+                        f"Stopping autonomous loop.",
+                        err=True,
+                    )
+                    loop_state.status = LoopStatus.INTERRUPTED
+                    _save_loop_state(repo_root, loop_state)
+                    break
 
-        if loop_count > 1:
-            from rich.console import Console
-            from rich.panel import Panel
-            from rich.text import Text
+                if loop_count > 1:
+                    from rich.console import Console
+                    from rich.panel import Panel
+                    from rich.text import Text
 
-            _iter_console = Console()
-            label = Text()
-            label.append("  Iteration ", style="dim")
-            label.append(f"{iteration}", style="bold bright_cyan")
-            label.append(f" / {loop_count}", style="dim")
-            _iter_console.print()
-            _iter_console.print(
-                Panel(
-                    label,
-                    title="[bold bright_cyan]Autonomous Loop[/bold bright_cyan]",
-                    title_align="left",
-                    border_style="bright_black",
-                    padding=(0, 2),
-                    expand=True,
+                    _iter_console = Console()
+                    label = Text()
+                    label.append("  Iteration ", style="dim")
+                    label.append(f"{iteration}", style="bold bright_cyan")
+                    label.append(f" / {loop_count}", style="dim")
+                    _iter_console.print()
+                    _iter_console.print(
+                        Panel(
+                            label,
+                            title="[bold bright_cyan]Autonomous Loop[/bold bright_cyan]",
+                            title_align="left",
+                            border_style="bright_black",
+                            padding=(0, 2),
+                            expand=True,
+                        )
+                    )
+
+                if iteration > 1:
+                    config = load_config(repo_root)
+
+                aggregate_cost, completed = _run_single_iteration(
+                    iteration=iteration,
+                    repo_root=repo_root,
+                    config=config,
+                    loop_state=loop_state,
+                    aggregate_cost=aggregate_cost,
+                    no_confirm=no_confirm,
+                    propose_only=propose_only,
+                    verbose=verbose,
+                    quiet=quiet,
+                    offline=offline,
                 )
-            )
 
-        if iteration > 1:
-            config = load_config(repo_root)
+                if completed:
+                    completed_iterations += 1
 
-        aggregate_cost, completed = _run_single_iteration(
-            iteration=iteration,
-            repo_root=repo_root,
-            config=config,
-            loop_state=loop_state,
-            aggregate_cost=aggregate_cost,
-            no_confirm=no_confirm,
-            propose_only=propose_only,
-            verbose=verbose,
-            quiet=quiet,
-            offline=offline,
-        )
-
-        if completed:
-            completed_iterations += 1
-
-        # --- Post-iteration budget cap check ---
-        if aggregate_cost >= effective_max_budget:
-            click.echo(
-                f"\nBudget limit reached (${aggregate_cost:.2f} / ${effective_max_budget:.2f}). "
-                f"Stopping autonomous loop.",
-                err=True,
-            )
-            loop_state.status = LoopStatus.INTERRUPTED
-            _save_loop_state(repo_root, loop_state)
-            break
-
-    # Mark loop completed if we finished all iterations
-    if loop_state.current_iteration >= loop_count and loop_state.status == LoopStatus.RUNNING:
-        loop_state.status = LoopStatus.COMPLETED
-    _save_loop_state(repo_root, loop_state)
+                # --- Post-iteration budget cap check ---
+                if aggregate_cost >= effective_max_budget:
+                    click.echo(
+                        f"\nBudget limit reached (${aggregate_cost:.2f} / ${effective_max_budget:.2f}). "
+                        f"Stopping autonomous loop.",
+                        err=True,
+                    )
+                    loop_state.status = LoopStatus.INTERRUPTED
+                    _save_loop_state(repo_root, loop_state)
+                    break
+    except KeyboardInterrupt:
+        click.echo("\nAutonomous loop interrupted.")
+        loop_state.status = LoopStatus.INTERRUPTED
+        _save_loop_state(repo_root, loop_state)
+    finally:
+        # Mark loop completed if we finished all iterations
+        if loop_state.current_iteration >= loop_count and loop_state.status == LoopStatus.RUNNING:
+            loop_state.status = LoopStatus.COMPLETED
+        _save_loop_state(repo_root, loop_state)
 
     if loop_count > 1:
         click.echo(
@@ -2781,7 +2853,6 @@ def watch(
     dry_run: bool,
 ) -> None:
     """Watch Slack channels and trigger pipeline runs from messages."""
-    import signal
     import threading
 
     repo_root = _find_repo_root()
@@ -3141,6 +3212,8 @@ def watch(
 
         # --- Triage phase (runs in background thread to avoid Slack ack timeout) ---
         def _triage_and_enqueue() -> None:
+            if shutdown_event.is_set():
+                return
             triage_kwargs: dict[str, str] = {}
             if config.project:
                 triage_kwargs["project_name"] = config.project.name
@@ -3165,9 +3238,19 @@ def watch(
                     logger.debug("Failed to post triage failure message", exc_info=True)
                 return
 
+            if shutdown_event.is_set():
+                logger.info(
+                    "Watcher shutdown in progress; dropping triaged message %s:%s before enqueue",
+                    channel,
+                    ts,
+                )
+                return
+
             if not triage_result.actionable:
                 # If the router answered a question, post the answer back
                 if triage_result.answer:
+                    if shutdown_event.is_set():
+                        return
                     try:
                         client.chat_postMessage(  # type: ignore[union-attr]
                             channel=channel,
@@ -3193,6 +3276,8 @@ def watch(
 
             # --- Insert into queue ---
             with state_lock:
+                if shutdown_event.is_set():
+                    return
                 queue_item = QueueItem(
                     id=run_id,
                     source_type="slack",
@@ -3222,6 +3307,8 @@ def watch(
             )
 
             needs_approval = not config.slack.auto_approve
+            if shutdown_event.is_set():
+                return
             try:
                 post_triage_acknowledgment(
                     client,  # type: ignore[arg-type]
@@ -3240,9 +3327,10 @@ def watch(
         # This is an acceptable trade-off for v1; the window is very small.
         # Recovery: on startup, processed messages with no matching queue item
         # are logged at WARNING level so operators can detect orphans.
-        threading.Thread(
-            target=_triage_and_enqueue, daemon=True, name=f"triage-{ts}",
-        ).start()
+        if not shutdown_event.is_set():
+            threading.Thread(
+                target=_triage_and_enqueue, daemon=True, name=f"triage-{ts}",
+            ).start()
 
     class _DualUI:
         """Forwards UI calls to both terminal and Slack UIs.
@@ -3830,21 +3918,12 @@ def watch(
 
         bolt_app.event("reaction_added")(_handle_reaction)
 
-    # Graceful shutdown
-    def _signal_handler(signum: int, frame: object) -> None:
-        click.echo("\nShutting down Slack watcher...")
-        # Persist state eagerly in case the process is killed before the
-        # finally block runs (e.g. a subsequent SIGKILL).
-        try:
-            with state_lock:
-                _save_queue_state(repo_root, queue_state)
-                save_watch_state(repo_root, watch_state)
-        except Exception:
-            logger.debug("Failed to save state in signal handler", exc_info=True)
-        shutdown_event.set()
+    shutdown_reason: dict[str, str | None] = {"value": None}
 
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
+    def _request_shutdown(reason: str) -> None:
+        if shutdown_reason["value"] is None:
+            shutdown_reason["value"] = reason
+        shutdown_event.set()
 
     from rich.console import Console
     from rich.panel import Panel
@@ -3895,30 +3974,38 @@ def watch(
     executor_thread = threading.Thread(target=queue_executor.run, daemon=True, name="queue-executor")
     executor_thread.start()
 
+    handler = None
     try:
-        handler = start_socket_mode(bolt_app)
-        handler.connect()
-        while not shutdown_event.is_set():
-            if _check_time_exceeded():
-                click.echo("Max hours reached. Shutting down watcher.")
-                break
-            if _check_budget_exceeded():
-                click.echo("Max budget reached. Shutting down watcher.")
-                break
-            if _check_daily_budget_exceeded():
-                click.echo("Daily budget reached. Queue executor will skip items until next UTC day.")
-            shutdown_event.wait(timeout=5.0)
-        handler.close()
+        with cancellation_scope(_request_shutdown), install_signal_cancel_handlers(
+            include_sighup=True,
+        ):
+            handler = start_socket_mode(bolt_app)
+            handler.connect()
+            while not shutdown_event.is_set():
+                if _check_time_exceeded():
+                    click.echo("Max hours reached. Shutting down watcher.")
+                    break
+                if _check_budget_exceeded():
+                    click.echo("Max budget reached. Shutting down watcher.")
+                    break
+                if _check_daily_budget_exceeded():
+                    click.echo("Daily budget reached. Queue executor will skip items until next UTC day.")
+                shutdown_event.wait(timeout=5.0)
     except ImportError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
-    except KeyboardInterrupt:
-        click.echo("\nShutting down Slack watcher...")
     except Exception as exc:
         click.echo(f"Slack watcher error: {exc}", err=True)
         sys.exit(1)
     finally:
         shutdown_event.set()
+        if shutdown_reason["value"] is not None:
+            click.echo(f"\nShutting down Slack watcher... ({shutdown_reason['value']})")
+        if handler is not None:
+            try:
+                handler.close()
+            except Exception:
+                logger.debug("Failed to close Slack socket handler", exc_info=True)
         executor_thread.join(timeout=60)
         with state_lock:
             _save_queue_state(repo_root, queue_state)
@@ -3961,12 +4048,171 @@ def run_pipeline_for_queue_item(
         repo_root=repo_root,
         config=config,
         verbose=verbose,
-        quiet=True,
+        quiet=False,
         source_issue=source_issue,
         source_issue_url=source_issue_url,
     )
 
     return log.total_cost_usd
+
+
+def _launch_daemon_tui(
+    repo_root: Path,
+    config: ColonyConfig,
+    *,
+    max_budget: float | None,
+    unlimited_budget: bool,
+    max_hours: float | None,
+    allow_all_control_users: bool,
+    verbose: bool,
+    dry_run: bool,
+) -> None:
+    """Launch daemon mode inside the existing Textual shell."""
+    import colonyos.tui  # noqa: F401
+    import threading
+
+    from colonyos.tui.app import AssistantApp
+    from colonyos.tui.adapter import CommandOutputMsg
+    from colonyos.tui.log_writer import TranscriptLogWriter
+    from colonyos.tui.widgets.transcript import TranscriptView
+
+    class _DaemonApp(AssistantApp):
+        async def on_mount(self) -> None:
+            await super().on_mount()
+            transcript = self.query_one(TranscriptView)
+            transcript.append_notice(
+                "Daemon monitor mode. Ctrl+C requests shutdown. The composer is monitor-only for now."
+            )
+            self._start_run("daemon-monitor")
+
+    run_id = datetime.now(timezone.utc).strftime("daemon_%Y%m%d_%H%M%S")
+    logs_dir = repo_root / ".colonyos" / "logs"
+    log_writer = TranscriptLogWriter(
+        logs_dir, run_id, max_log_files=config.max_log_files,
+    )
+
+    process_ref: dict[str, subprocess.Popen[str]] = {}
+    process_lock = threading.Lock()
+
+    def _emit_monitor_notice(text: str) -> None:
+        queue = getattr(getattr(app_instance, "event_queue", None), "sync_q", None)
+        if queue is not None:
+            queue.put(CommandOutputMsg(text=text))
+
+    def _terminate_daemon_process(*, reason: str, force: bool = False) -> None:
+        with process_lock:
+            process = process_ref.get("instance")
+        if process is None or process.poll() is not None:
+            return
+
+        sig = signal.SIGKILL if force else signal.SIGTERM
+        try:
+            _emit_monitor_notice(f"{reason}; sending {signal.Signals(sig).name} to daemon subprocess")
+            os.killpg(process.pid, sig)
+            if not force:
+                process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _emit_monitor_notice("Daemon did not exit after SIGTERM; sending SIGKILL")
+            with suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(process.pid, signal.SIGKILL)
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=2)
+        except (ProcessLookupError, PermissionError, OSError) as exc:
+            logger.debug("Failed to stop daemon subprocess cleanly: %s", exc)
+        finally:
+            with suppress(Exception):
+                stream = process.stdout
+                if stream is not None:
+                    stream.close()
+
+    def _run_callback(_text: str) -> None:
+        queue = app_instance.event_queue.sync_q
+        command = [sys.executable, "-m", "colonyos", "daemon", "--no-tui"]
+        if max_budget is not None:
+            command.extend(["--max-budget", str(max_budget)])
+        if unlimited_budget:
+            command.append("--unlimited-budget")
+        if max_hours is not None:
+            command.extend(["--max-hours", str(max_hours)])
+        if allow_all_control_users:
+            command.append("--allow-all-control-users")
+        if verbose:
+            command.append("--verbose")
+        if dry_run:
+            command.append("--dry-run")
+
+        process = subprocess.Popen(
+            command,
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        with process_lock:
+            process_ref["instance"] = process
+        queue.put(CommandOutputMsg(text=f"Launching daemon subprocess: {' '.join(command)}"))
+
+        def _pump_output() -> None:
+            stream = process.stdout
+            if stream is None:
+                return
+            for line in stream:
+                text = line.rstrip()
+                if text:
+                    queue.put(CommandOutputMsg(text=text))
+
+        pump_thread = threading.Thread(
+            target=_pump_output,
+            name="daemon-tui-output",
+            daemon=True,
+        )
+        pump_thread.start()
+
+        return_code = process.wait()
+        pump_thread.join(timeout=2)
+        queue.put(CommandOutputMsg(text=f"Daemon exited with code {return_code}"))
+
+    def _cancel_callback() -> None:
+        _terminate_daemon_process(reason="Shutdown requested from TUI")
+
+    app_instance = _DaemonApp(
+        run_callback=_run_callback,
+        cancel_callback=_cancel_callback,
+        command_hints=["Ctrl+C stop daemon", "Ctrl+L clear transcript"],
+        log_writer=log_writer,
+    )
+
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sighup = signal.getsignal(signal.SIGHUP) if hasattr(signal, "SIGHUP") else None
+
+    def _sigint_handler(signum, frame) -> None:  # noqa: ANN001
+        try:
+            app_instance.call_from_thread(app_instance.action_cancel_run)
+        except Exception:
+            _terminate_daemon_process(reason="SIGINT received before TUI was ready")
+
+    def _terminate_handler(signum, frame) -> None:  # noqa: ANN001
+        _terminate_daemon_process(
+            reason=f"Parent received {signal.Signals(signum).name}",
+            force=False,
+        )
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+    signal.signal(signal.SIGTERM, _terminate_handler)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _terminate_handler)
+    try:
+        app_instance.run()
+    finally:
+        _terminate_daemon_process(reason="TUI exited while daemon subprocess was still running")
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        if previous_sighup is not None and hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, previous_sighup)
 
 
 # ---------------------------------------------------------------------------
@@ -3976,29 +4222,100 @@ def run_pipeline_for_queue_item(
 
 @app.command()
 @click.option("--max-budget", type=float, default=None, help="Daily budget cap in USD (overrides config).")
+@click.option("--unlimited-budget", is_flag=True, help="Disable the daily daemon budget cap for this session.")
 @click.option("--max-hours", type=float, default=None, help="Maximum wall-clock hours before daemon exits.")
+@click.option("--allow-all-control-users", is_flag=True, help="Allow Slack control commands from any user for this session.")
+@click.option("--tui/--no-tui", default=None, help="Run daemon inside the Textual UI when available.")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose logging.")
 @click.option("--dry-run", is_flag=True, help="Log what would run without executing pipelines.")
-def daemon(max_budget: float | None, max_hours: float | None, verbose: bool, dry_run: bool) -> None:
+def daemon(
+    max_budget: float | None,
+    unlimited_budget: bool,
+    max_hours: float | None,
+    allow_all_control_users: bool,
+    tui: bool | None,
+    verbose: bool,
+    dry_run: bool,
+) -> None:
     """Start the autonomous daemon — Slack + GitHub + CEO + cleanup in one process."""
     import logging as _logging
+
+    from rich.logging import RichHandler
 
     from colonyos.config import load_config
     from colonyos.daemon import Daemon, DaemonError
 
-    if verbose:
-        _logging.basicConfig(level=_logging.DEBUG, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    use_tui = tui if tui is not None else (_interactive_stdio() and _tui_available())
+    log_level = _logging.DEBUG if verbose else _logging.INFO
+    if use_tui:
+        _logging.basicConfig(
+            level=log_level,
+            handlers=[_logging.NullHandler()],
+            force=True,
+        )
     else:
-        _logging.basicConfig(level=_logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+        _logging.basicConfig(
+            level=log_level,
+            format="%(message)s",
+            datefmt="[%X]",
+            handlers=[
+                RichHandler(
+                    rich_tracebacks=True,
+                    markup=True,
+                    show_path=verbose,
+                    show_time=True,
+                )
+            ],
+            force=True,
+        )
 
     repo_root = Path.cwd()
     config = load_config(repo_root)
+    effective_allow_all = allow_all_control_users or config.daemon.allow_all_control_users
+    effective_budget = (
+        None
+        if unlimited_budget
+        else max_budget if max_budget is not None else config.daemon.daily_budget_usd
+    )
+    if allow_all_control_users:
+        config.daemon.allow_all_control_users = True
 
     # Validate daemon prerequisites
     if not config.slack.enabled:
         click.echo("Warning: Slack is not enabled in config. Daemon will run without Slack listener.", err=True)
 
-    if config.daemon.allowed_control_user_ids:
+    if use_tui:
+        try:
+            _launch_daemon_tui(
+                repo_root,
+                config,
+                max_budget=max_budget,
+                unlimited_budget=unlimited_budget,
+                max_hours=max_hours,
+                allow_all_control_users=allow_all_control_users,
+                verbose=verbose,
+                dry_run=dry_run,
+            )
+            return
+        except ImportError as exc:
+            click.echo(
+                f"Error: {exc}\n\nInstall the TUI extra: pip install colonyos[tui]",
+                err=True,
+            )
+            sys.exit(1)
+
+    _print_daemon_banner(
+        repo_root=repo_root,
+        config=config,
+        budget_cap=effective_budget,
+        max_hours=max_hours,
+        dry_run=dry_run,
+        allow_all_control_users=effective_allow_all,
+    )
+
+    if effective_allow_all:
+        click.echo("Control users: all Slack users")
+    elif config.daemon.allowed_control_user_ids:
         click.echo(f"Control users: {', '.join(config.daemon.allowed_control_user_ids)}")
     else:
         click.echo(
@@ -4011,6 +4328,7 @@ def daemon(max_budget: float | None, max_hours: float | None, verbose: bool, dry
         repo_root=repo_root,
         config=config,
         max_budget=max_budget,
+        unlimited_budget=unlimited_budget,
         max_hours=max_hours,
         dry_run=dry_run,
         verbose=verbose,

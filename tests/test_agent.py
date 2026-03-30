@@ -2,13 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from typing import Callable
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
-from colonyos.agent import run_phase, run_phase_sync
+from colonyos.agent import (
+    request_active_phase_cancel,
+    run_phase,
+    run_phase_sync,
+)
 from colonyos.models import Phase, PhaseResult
 
 
@@ -476,6 +481,77 @@ class TestRunPhaseResume:
 
         assert result.success is True
         assert result.session_id == "sess-abc123"
+
+
+class TestCancellation:
+    def test_run_phase_sync_cancels_active_phase(self) -> None:
+        cancelled = threading.Event()
+
+        async def blocking_run_phase(*args, **kwargs) -> PhaseResult:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        def _cancel_soon() -> None:
+            cancelled_count = 0
+            while cancelled_count == 0:
+                cancelled_count = request_active_phase_cancel("test cancel")
+
+        cancel_thread = threading.Thread(target=_cancel_soon, daemon=True)
+        cancel_thread.start()
+
+        with patch("colonyos.agent.run_phase", side_effect=blocking_run_phase):
+            with pytest.raises(KeyboardInterrupt, match="test cancel"):
+                run_phase_sync(
+                    Phase.REVIEW,
+                    "test prompt",
+                    cwd=Path("/tmp"),
+                    system_prompt="sys",
+                )
+
+        cancel_thread.join(timeout=1)
+        assert cancelled.is_set()
+
+    def test_run_phases_parallel_sync_cancels_pending_tasks(self) -> None:
+        from colonyos.agent import run_phases_parallel_sync
+
+        cancellations: list[str] = []
+
+        async def blocking_run_phase(
+            phase: Phase,
+            prompt: str,
+            *,
+            cwd: object,
+            system_prompt: str,
+            **kwargs: object,
+        ) -> PhaseResult:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellations.append(prompt)
+                raise
+
+        def _cancel_soon() -> None:
+            cancelled_count = 0
+            while cancelled_count == 0:
+                cancelled_count = request_active_phase_cancel("parallel cancel")
+
+        cancel_thread = threading.Thread(target=_cancel_soon, daemon=True)
+        cancel_thread.start()
+
+        calls = [
+            {"phase": Phase.REVIEW, "prompt": f"prompt {i}", "cwd": "/tmp", "system_prompt": "sys"}
+            for i in range(2)
+        ]
+
+        with patch("colonyos.agent.run_phase", side_effect=blocking_run_phase):
+            with pytest.raises(KeyboardInterrupt, match="parallel cancel"):
+                run_phases_parallel_sync(calls)
+
+        cancel_thread.join(timeout=1)
+        assert sorted(cancellations) == ["prompt 0", "prompt 1"]
 
 
 class TestIsTransientError:

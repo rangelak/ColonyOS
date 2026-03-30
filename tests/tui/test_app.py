@@ -8,6 +8,7 @@ messages in the transcript.
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import patch
 
 import pytest
 
@@ -450,7 +451,8 @@ class TestKeybindings:
         async with app.run_test() as pilot:
             await pilot.pause()
             # Trigger cancel action directly (Ctrl+C binding may be intercepted by test harness)
-            app.action_cancel_run()
+            with patch("colonyos.tui.app.request_cancel") as mock_cancel:
+                app.action_cancel_run()
             await pilot.pause()
             status = app.query_one(StatusBar)
             transcript = app.query_one(TranscriptView)
@@ -458,6 +460,7 @@ class TestKeybindings:
             assert "cancel" in status.error_msg.lower()
             # Transcript should have the cancel message
             assert len(transcript.lines) > 0
+            mock_cancel.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_queue_user_injection_renders(self) -> None:

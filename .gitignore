@@ -11,6 +11,8 @@ build/
 .colonyos/queue.json
 .colonyos/memory.db
 .colonyos/daemon_state.json
+.colonyos/logs/
+.colonyos/recovery/
 web/node_modules/
 src/colonyos/web_dist/
 generated/

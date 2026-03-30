@@ -93,7 +93,7 @@ DEFAULTS = {
         "incident_char_cap": 4000,
     },
     "daemon": {
-        "daily_budget_usd": 50.0,
+        "daily_budget_usd": 500.0,
         "github_poll_interval_seconds": 120,
         "ceo_cooldown_minutes": 60,
         "cleanup_interval_hours": 24,
@@ -104,6 +104,7 @@ DEFAULTS = {
         "circuit_breaker_cooldown_minutes": 30,
         "issue_labels": [],
         "allowed_control_user_ids": [],
+        "allow_all_control_users": False,
     },
 }
 
@@ -247,7 +248,7 @@ class SlackConfig:
 class DaemonConfig:
     """Configuration for daemon mode (FR-12)."""
 
-    daily_budget_usd: float = 50.0
+    daily_budget_usd: float | None = 500.0
     github_poll_interval_seconds: int = 120
     ceo_cooldown_minutes: int = 60
     cleanup_interval_hours: int = 24
@@ -258,6 +259,7 @@ class DaemonConfig:
     circuit_breaker_cooldown_minutes: int = 30
     issue_labels: list[str] = field(default_factory=list)
     allowed_control_user_ids: list[str] = field(default_factory=list)
+    allow_all_control_users: bool = False
 
 
 @dataclass
@@ -702,17 +704,25 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
     def _int(key: str) -> int:
         return int(raw.get(key, d[key]))
 
-    def _float(key: str) -> float:
-        return float(raw.get(key, d[key]))
-
     def _require_positive(name: str, val: float | int) -> None:
         if val < 1:
             raise ValueError(
                 f"daemon.{name} must be positive, got {val}"
             )
 
-    daily_budget_usd = _float("daily_budget_usd")
-    if daily_budget_usd <= 0:
+    daily_budget_raw = raw.get("daily_budget_usd", d["daily_budget_usd"])
+    daily_budget_usd: float | None
+    if daily_budget_raw is None:
+        daily_budget_usd = None
+    elif isinstance(daily_budget_raw, str):
+        normalized = daily_budget_raw.strip().lower()
+        if normalized in {"unlimited", "none", "null", "infinite", "inf"}:
+            daily_budget_usd = None
+        else:
+            daily_budget_usd = float(daily_budget_raw)
+    else:
+        daily_budget_usd = float(daily_budget_raw)
+    if daily_budget_usd is not None and daily_budget_usd <= 0:
         raise ValueError(
             f"daemon.daily_budget_usd must be positive, got {daily_budget_usd}"
         )
@@ -760,6 +770,9 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
         issue_labels=list(raw.get("issue_labels", d["issue_labels"])),
         allowed_control_user_ids=list(
             raw.get("allowed_control_user_ids", d["allowed_control_user_ids"])
+        ),
+        allow_all_control_users=bool(
+            raw.get("allow_all_control_users", d["allow_all_control_users"])
         ),
     )
 
@@ -886,6 +899,14 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
 
     data: dict = {}
 
+    def _persona_to_dict(persona: Persona) -> dict[str, Any]:
+        return {
+            "role": persona.role,
+            "expertise": persona.expertise,
+            "perspective": persona.perspective,
+            "reviewer": persona.reviewer,
+        }
+
     if config.project:
         data["project"] = {
             "name": config.project.name,
@@ -894,15 +915,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         }
 
     if config.personas:
-        data["personas"] = [
-            {
-                "role": p.role,
-                "expertise": p.expertise,
-                "perspective": p.perspective,
-                "reviewer": p.reviewer,
-            }
-            for p in config.personas
-        ]
+        data["personas"] = [_persona_to_dict(p) for p in config.personas]
 
     data["model"] = config.model
     if config.phase_models:
@@ -991,10 +1004,20 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         }
 
     if config.ceo_persona:
-        data["ceo_persona"] = {
-            "role": config.ceo_persona.role,
-            "expertise": config.ceo_persona.expertise,
-            "perspective": config.ceo_persona.perspective,
+        data["ceo_persona"] = _persona_to_dict(config.ceo_persona)
+
+    retry_defaults = DEFAULTS["retry"]
+    if (
+        config.retry.max_attempts != retry_defaults["max_attempts"]
+        or config.retry.base_delay_seconds != retry_defaults["base_delay_seconds"]
+        or config.retry.max_delay_seconds != retry_defaults["max_delay_seconds"]
+        or config.retry.fallback_model != retry_defaults["fallback_model"]
+    ):
+        data["retry"] = {
+            "max_attempts": config.retry.max_attempts,
+            "base_delay_seconds": config.retry.base_delay_seconds,
+            "max_delay_seconds": config.retry.max_delay_seconds,
+            "fallback_model": config.retry.fallback_model,
         }
 
     if config.vision:
@@ -1096,6 +1119,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         or config.daemon.circuit_breaker_cooldown_minutes != daemon_defaults["circuit_breaker_cooldown_minutes"]
         or config.daemon.issue_labels
         or config.daemon.allowed_control_user_ids
+        or config.daemon.allow_all_control_users
     ):
         data["daemon"] = {
             "daily_budget_usd": config.daemon.daily_budget_usd,
@@ -1109,10 +1133,17 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "circuit_breaker_cooldown_minutes": config.daemon.circuit_breaker_cooldown_minutes,
             "issue_labels": list(config.daemon.issue_labels),
             "allowed_control_user_ids": list(config.daemon.allowed_control_user_ids),
+            "allow_all_control_users": config.daemon.allow_all_control_users,
         }
 
     if not config.directions_auto_update:
         data["directions_auto_update"] = False
+
+    if config.ceo_profiles:
+        data["ceo_profiles"] = [_persona_to_dict(profile) for profile in config.ceo_profiles]
+
+    if config.max_log_files != 50:
+        data["max_log_files"] = config.max_log_files
 
     config_path = config_dir / CONFIG_FILE
     config_path.write_text(

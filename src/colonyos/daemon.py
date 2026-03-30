@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from colonyos.cancellation import cancellation_scope, request_cancel
 from colonyos.config import ColonyConfig, load_config
 from colonyos.daemon_state import (
     DaemonState,
@@ -77,6 +78,7 @@ class Daemon:
         config: ColonyConfig | None = None,
         *,
         max_budget: float | None = None,
+        unlimited_budget: bool = False,
         max_hours: float | None = None,
         dry_run: bool = False,
         verbose: bool = False,
@@ -88,7 +90,11 @@ class Daemon:
         self.verbose = verbose
 
         # CLI overrides
-        self.daily_budget = max_budget or self.daemon_config.daily_budget_usd
+        self.daily_budget = (
+            None
+            if unlimited_budget
+            else max_budget if max_budget is not None else self.daemon_config.daily_budget_usd
+        )
         self.max_hours = max_hours
 
         # Shared mutable state — protected by _lock
@@ -113,6 +119,7 @@ class Daemon:
         # Budget alert flags (reset on daily budget reset)
         self._budget_80_alerted: bool = False
         self._budget_100_alerted: bool = False
+        self._last_budget_incident_date: str | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -127,32 +134,36 @@ class Daemon:
         signal is received.
         """
         self._acquire_pid_lock()
-        try:
-            self._recover_from_crash()
-            self._install_signal_handlers()
-            self._state.daemon_started_at = datetime.now(timezone.utc).isoformat()
-            self._persist_state()
+        with cancellation_scope(lambda _reason: self.stop()):
+            try:
+                self._recover_from_crash()
+                self._install_signal_handlers()
+                self._state.daemon_started_at = datetime.now(timezone.utc).isoformat()
+                self._persist_state()
 
-            logger.info(
-                "ColonyOS daemon started (budget=$%.2f/day, dry_run=%s)",
-                self.daily_budget,
-                self.dry_run,
-            )
+                logger.info(
+                    "ColonyOS daemon started (budget=%s, dry_run=%s)",
+                    self._budget_cap_label(),
+                    self.dry_run,
+                )
 
-            # Start background threads
-            threads = self._start_threads()
+                # Start background threads
+                threads = self._start_threads()
 
-            # Main scheduling loop
-            self._main_loop()
+                # Main scheduling loop
+                try:
+                    self._main_loop()
+                except KeyboardInterrupt:
+                    logger.warning("Daemon interrupted, shutting down immediately")
 
-            # Wait for threads to finish
-            self._stop_event.set()
-            for t in threads:
-                t.join(timeout=10)
+                # Wait for threads to finish
+                self._stop_event.set()
+                for t in threads:
+                    t.join(timeout=10)
 
-        finally:
-            self._release_pid_lock()
-            logger.info("ColonyOS daemon stopped")
+            finally:
+                self._release_pid_lock()
+                logger.info("ColonyOS daemon stopped")
 
     def stop(self) -> None:
         """Request graceful shutdown."""
@@ -233,12 +244,13 @@ class Daemon:
             if self._state.daily_reset_date != today:
                 self._budget_80_alerted = False
                 self._budget_100_alerted = False
+                self._last_budget_incident_date = None
 
             allowed, remaining = self._state.check_daily_budget(self.daily_budget)
 
             # Budget threshold alerts
             spend = self._state.daily_spend_usd
-            if self.daily_budget > 0:
+            if self.daily_budget is not None and self.daily_budget > 0:
                 pct = spend / self.daily_budget
                 if pct >= 1.0 and not self._budget_100_alerted:
                     self._budget_100_alerted = True
@@ -254,7 +266,20 @@ class Daemon:
                     )
 
             if not allowed:
-                logger.info("Daily budget exhausted ($%.2f spent)", self._state.daily_spend_usd)
+                pending = sum(
+                    1
+                    for queued_item in self._queue_state.items
+                    if queued_item.status == QueueItemStatus.PENDING
+                )
+                incident_path = self._maybe_record_budget_incident(today=today, pending=pending)
+                guidance = self._budget_exhaustion_guidance(incident_path=incident_path)
+                logger.warning(
+                    "Daily budget exhausted; queue remains idle (spent=$%.2f, cap=%s, pending=%d). %s",
+                    self._state.daily_spend_usd,
+                    self._budget_cap_label(),
+                    pending,
+                    guidance,
+                )
                 return
 
             # Circuit breaker check
@@ -282,11 +307,54 @@ class Daemon:
                 self._pipeline_running = False
                 self._persist_state()
                 self._persist_queue()
-        except Exception as exc:
-            logger.exception("Pipeline failed for item %s", item.id)
+                logger.info(
+                    "Completed item %s (cost=$%.4f, spend=%s, pending=%d)",
+                    item.id,
+                    cost,
+                    self._spent_summary(),
+                    sum(
+                        1
+                        for queued_item in self._queue_state.items
+                        if queued_item.status == QueueItemStatus.PENDING
+                    ),
+                )
+        except KeyboardInterrupt:
+            logger.warning("Run interrupted while executing item %s", item.id)
             with self._lock:
                 item.status = QueueItemStatus.FAILED
-                item.error = str(exc)[:500]
+                item.error = "Run interrupted by user (Ctrl+C)"
+                self._pipeline_running = False
+                self._persist_state()
+                self._persist_queue()
+            raise
+        except Exception as exc:
+            logger.exception("Pipeline failed for item %s", item.id)
+            failure_message = self._failure_summary(exc)
+            incident_path = self._record_runtime_incident(
+                label_prefix=f"daemon-item-{item.source_type}",
+                summary=(
+                    f"Queue item {item.id} failed while executing in daemon mode.\n\n"
+                    f"Source type: {item.source_type}\n"
+                    f"Source value: {item.source_value[:500]}\n"
+                    f"Failure: {failure_message}\n"
+                    f"Hint: {self._failure_guidance(exc)}"
+                ),
+                metadata={
+                    "item_id": item.id,
+                    "source_type": item.source_type,
+                    "source_value": item.source_value[:500],
+                    "error": failure_message,
+                    "daily_spend_usd": self._state.daily_spend_usd,
+                    "daily_budget": self.daily_budget,
+                },
+            )
+            operator_hint = self._failure_guidance(exc)
+            with self._lock:
+                item.status = QueueItemStatus.FAILED
+                item.error = self._format_item_error(
+                    failure_message,
+                    incident_path=incident_path,
+                )
                 failures = self._state.record_failure()
                 if failures >= self.daemon_config.max_consecutive_failures:
                     self._state.activate_circuit_breaker(
@@ -299,6 +367,12 @@ class Daemon:
                 self._pipeline_running = False
                 self._persist_state()
                 self._persist_queue()
+            logger.error(
+                "Daemon item %s failed: %s. %s",
+                item.id,
+                failure_message,
+                operator_hint,
+            )
 
     def _next_pending_item(self) -> QueueItem | None:
         """Return the highest-priority pending item (lowest priority number, FIFO within tier).
@@ -426,29 +500,36 @@ class Daemon:
 
         try:
             logger.info("Running CEO idle-fill cycle")
-            # CEO proposal would be generated here and enqueued
-            # For now, we create a placeholder that will be filled by the
-            # actual CEO run when the queue executor picks it up
             from colonyos.orchestrator import run_ceo
+            from colonyos.ui import PhaseUI
 
-            proposal = run_ceo(
+            proposal_prompt, phase_result = run_ceo(
                 repo_root=self.repo_root,
                 config=self.config,
-                no_confirm=True,
+                ui=PhaseUI(verbose=self.verbose, prefix="CEO "),
             )
 
-            if proposal:
+            if not phase_result.success:
+                logger.warning(
+                    "CEO idle-fill failed: %s",
+                    phase_result.error or "unknown CEO error",
+                )
+                return
+
+            if proposal_prompt:
                 item = QueueItem(
                     id=f"ceo-{int(time.time())}",
                     source_type="ceo",
-                    source_value=proposal,
+                    source_value=proposal_prompt,
                     status=QueueItemStatus.PENDING,
                     priority=PRIORITY_CEO,
                 )
                 with self._lock:
                     self._queue_state.items.append(item)
                     self._persist_queue()
-                logger.info("CEO proposed work enqueued (P%d)", PRIORITY_CEO)
+                logger.info("CEO proposed work enqueued (P%d): %s", PRIORITY_CEO, proposal_prompt[:120])
+            else:
+                logger.info("CEO idle-fill produced no actionable proposal")
 
         except Exception:
             logger.exception("Error in CEO idle-fill cycle")
@@ -515,18 +596,27 @@ class Daemon:
             spend = self._state.daily_spend_usd
 
         logger.info(
-            "Heartbeat: %d items today, $%.2f spent",
+            "Heartbeat: %d items today, %s, pending=%d",
             items_today,
-            spend,
+            self._spent_summary(spend=spend),
+            sum(
+                1 for i in self._queue_state.items
+                if i.status == QueueItemStatus.PENDING
+            ),
         )
 
         pending = sum(
             1 for i in self._queue_state.items
             if i.status == QueueItemStatus.PENDING
         )
+        spend_label = (
+            f"${spend:.2f}/unlimited"
+            if self.daily_budget is None
+            else f"${spend:.2f}/${self.daily_budget:.2f}"
+        )
         msg = (
             f":heartbeat: *ColonyOS Heartbeat*\n"
-            f"Items today: {items_today} | Spend: ${spend:.2f}/${self.daily_budget:.2f} | "
+            f"Items today: {items_today} | Spend: {spend_label} | "
             f"Queue depth: {pending} | Paused: {self._state.paused}"
         )
         self._post_slack_message(msg)
@@ -558,7 +648,31 @@ class Daemon:
             dirty = git_status_porcelain(self.repo_root)
             if dirty.strip():
                 logger.warning("Dirty git state on startup, preserving and resetting")
-                preserve_and_reset_worktree(self.repo_root, "daemon_crash_recovery")
+                preserve_result = preserve_and_reset_worktree(
+                    self.repo_root,
+                    "daemon_crash_recovery",
+                )
+                incident_path = self._record_runtime_incident(
+                    label_prefix="daemon-startup-recovery",
+                    summary=(
+                        "Daemon startup found a dirty worktree and preserved it before reset.\n\n"
+                        f"Preservation mode: {preserve_result.preservation_mode}\n"
+                        f"Snapshot dir: {preserve_result.snapshot_dir}\n"
+                        f"Stash message: {preserve_result.stash_message or '(none)'}\n"
+                        "Inspect the snapshot and incident file before replaying lost work."
+                    ),
+                    metadata={
+                        "preservation_mode": preserve_result.preservation_mode,
+                        "snapshot_dir": str(preserve_result.snapshot_dir),
+                        "stash_message": preserve_result.stash_message,
+                        "dirty_output": dirty,
+                    },
+                )
+                logger.warning(
+                    "Startup recovery preserved dirty worktree state at %s (mode=%s)",
+                    incident_path,
+                    preserve_result.preservation_mode,
+                )
         except Exception:
             logger.exception("Error during git state recovery")
 
@@ -641,7 +755,9 @@ class Daemon:
         authorized or the command is unrecognized.
         """
         allowed_ids = self.daemon_config.allowed_control_user_ids
-        if not allowed_ids or user_id not in allowed_ids:
+        if not self.daemon_config.allow_all_control_users and (
+            not allowed_ids or user_id not in allowed_ids
+        ):
             logger.warning(
                 "Unauthorized control command '%s' from user %s", text, user_id
             )
@@ -665,12 +781,18 @@ class Daemon:
 
         if cmd == "status":
             health = self.get_health()
+            remaining = health["daily_budget_remaining_usd"]
+            spend_line = (
+                f"Spend: ${health['daily_spend_usd']:.2f} (unlimited budget)\n"
+                if remaining is None
+                else f"Spend: ${health['daily_spend_usd']:.2f} "
+                f"(${remaining:.2f} remaining)\n"
+            )
             return (
                 f"*Daemon Status*\n"
                 f"Status: {health['status']} | Paused: {health['paused']}\n"
                 f"Queue depth: {health['queue_depth']} | Pipeline running: {health['pipeline_running']}\n"
-                f"Spend: ${health['daily_spend_usd']:.2f} "
-                f"(${health['daily_budget_remaining_usd']:.2f} remaining)\n"
+                f"{spend_line}"
                 f"Failures: {health['consecutive_failures']} | "
                 f"Circuit breaker: {health['circuit_breaker_active']}"
             )
@@ -686,7 +808,16 @@ class Daemon:
         def _handler(signum: int, frame: Any) -> None:
             sig_name = signal.Signals(signum).name
             logger.info("Received %s, initiating shutdown", sig_name)
-            self.stop()
+            cancelled = request_cancel(f"Interrupted active work because {sig_name} was received")
+            if self._pipeline_running:
+                if cancelled:
+                    logger.warning(
+                        "Requested shared cancellation for %d active task(s) due to %s",
+                        cancelled,
+                        sig_name,
+                    )
+                logger.warning("Interrupting active pipeline due to %s", sig_name)
+                raise KeyboardInterrupt(f"{sig_name} received")
 
         signal.signal(signal.SIGINT, _handler)
         signal.signal(signal.SIGTERM, _handler)
@@ -816,3 +947,110 @@ class Daemon:
                 "total_items_today": self._state.total_items_today,
                 "consecutive_failures": self._state.consecutive_failures,
             }
+
+    def _budget_cap_label(self) -> str:
+        """Return a user-facing budget cap label."""
+        if self.daily_budget is None:
+            return "unlimited"
+        return f"${self.daily_budget:.2f}/day"
+
+    def _spent_summary(self, *, spend: float | None = None) -> str:
+        """Return a spend summary string for logs and status output."""
+        current_spend = self._state.daily_spend_usd if spend is None else spend
+        if self.daily_budget is None:
+            return f"${current_spend:.2f}/unlimited"
+        return f"${current_spend:.2f}/${self.daily_budget:.2f}"
+
+    def _record_runtime_incident(
+        self,
+        *,
+        label_prefix: str,
+        summary: str,
+        metadata: dict[str, object],
+    ) -> Path | None:
+        """Write an actionable recovery incident summary for daemon failures."""
+        try:
+            from colonyos.recovery import incident_slug, write_incident_summary
+
+            label = incident_slug(label_prefix)
+            return write_incident_summary(
+                self.repo_root,
+                label,
+                summary=summary,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.exception("Failed to write daemon recovery incident")
+            return None
+
+    def _maybe_record_budget_incident(self, *, today: str, pending: int) -> Path | None:
+        """Write at most one budget-exhaustion incident per UTC day."""
+        if self._last_budget_incident_date == today:
+            return None
+        incident_path = self._record_runtime_incident(
+            label_prefix="daemon-budget-exhausted",
+            summary=(
+                "The daemon stopped pulling new queue items because the daily budget was exhausted.\n\n"
+                f"Spend: {self._spent_summary()}\n"
+                f"Pending items: {pending}\n"
+                "Wait for the next UTC day, raise daemon.daily_budget_usd, or restart with "
+                "--unlimited-budget if this run should ignore the cap."
+            ),
+            metadata={
+                "daily_spend_usd": self._state.daily_spend_usd,
+                "daily_budget": self.daily_budget,
+                "pending_items": pending,
+            },
+        )
+        if incident_path is not None:
+            self._last_budget_incident_date = today
+        return incident_path
+
+    def _budget_exhaustion_guidance(self, *, incident_path: Path | None) -> str:
+        """Return actionable operator guidance for budget exhaustion."""
+        guidance = (
+            "Wait for the next UTC reset, increase daemon.daily_budget_usd, "
+            "or restart with --unlimited-budget."
+        )
+        if incident_path is not None:
+            return f"{guidance} Incident summary: {incident_path}"
+        return guidance
+
+    def _failure_summary(self, exc: Exception) -> str:
+        """Return a concise failure summary for queue item state and logs."""
+        text = str(exc).strip() or exc.__class__.__name__
+        return text[:500]
+
+    def _failure_guidance(self, exc: Exception) -> str:
+        """Return actionable remediation guidance for common daemon failures."""
+        text = self._failure_summary(exc).lower()
+        if "credit balance is too low" in text:
+            return (
+                "Claude could not run because the active account has no credits. "
+                "Top up credits, or unset ANTHROPIC_API_KEY if you meant to use a Claude subscription."
+            )
+        if "authentication failed" in text or "unauthorized" in text:
+            return (
+                "Check Claude authentication. Run `claude -p \"hello\"` in this repo and verify "
+                "whether ANTHROPIC_API_KEY is set intentionally."
+            )
+        if "claude cli exited without details" in text or "exit code 1" in text:
+            return (
+                "Claude CLI exited without a useful error. Run `claude -p \"hello\"` manually, "
+                "inspect local auth/env config, and review the incident summary for queue context."
+            )
+        if "temporarily overloaded" in text or "rate limited" in text or "overloaded" in text:
+            return (
+                "The Claude API is overloaded or rate limited. Retry later, reduce concurrency elsewhere, "
+                "or configure retry fallback behavior if this keeps happening."
+            )
+        return (
+            "Review the incident summary and daemon logs for full context, then rerun once the underlying "
+            "repo or Claude CLI issue is fixed."
+        )
+
+    def _format_item_error(self, message: str, *, incident_path: Path | None) -> str:
+        """Format a queue item error with an optional incident reference."""
+        if incident_path is None:
+            return message[:500]
+        return f"{message[:350]} (incident: {incident_path})"[:500]

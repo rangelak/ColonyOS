@@ -4,6 +4,7 @@ import json
 import logging
 import signal
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -49,12 +50,8 @@ MODEL_PRESETS: dict[str, dict[str, str | dict[str, str]]] = {
         "phase_models": {},
     },
     "Cost-optimized": {
-        "model": "sonnet",
-        "phase_models": {
-            "implement": "opus",
-            "learn": "haiku",
-            "deliver": "haiku",
-        },
+        "model": "opus",
+        "phase_models": {},
     },
 }
 
@@ -529,7 +526,8 @@ def run_ai_init(
     preset = MODEL_PRESETS[parsed["preset_name"]]
     existing = load_config(repo_root)
 
-    config = ColonyConfig(
+    config = replace(
+        existing,
         project=ProjectInfo(
             name=parsed["project_name"],
             description=parsed["project_description"],
@@ -538,18 +536,6 @@ def run_ai_init(
         personas=list(pack.personas),
         model=preset["model"],
         phase_models=dict(preset["phase_models"]),
-        budget=BudgetConfig(
-            per_phase=DEFAULTS["budget"]["per_phase"],
-            per_run=DEFAULTS["budget"]["per_run"],
-            max_duration_hours=DEFAULTS["budget"]["max_duration_hours"],
-            max_total_usd=DEFAULTS["budget"]["max_total_usd"],
-        ),
-        phases=PhasesConfig(),
-        branch_prefix=existing.branch_prefix,
-        prds_dir=existing.prds_dir,
-        tasks_dir=existing.tasks_dir,
-        reviews_dir=existing.reviews_dir,
-        proposals_dir=existing.proposals_dir,
         vision=parsed.get("vision", ""),
     )
 
@@ -888,41 +874,17 @@ def run_init(
         personas = list(PACKS[0].personas)
 
         cost_preset = MODEL_PRESETS["Cost-optimized"]
-        config = ColonyConfig(
+        config = replace(
+            existing,
             project=project,
             personas=personas,
             model=cost_preset["model"],
             phase_models=dict(cost_preset["phase_models"]),
-            budget=BudgetConfig(
-                per_phase=DEFAULTS["budget"]["per_phase"],
-                per_run=DEFAULTS["budget"]["per_run"],
-                max_duration_hours=DEFAULTS["budget"]["max_duration_hours"],
-                max_total_usd=DEFAULTS["budget"]["max_total_usd"],
-            ),
-            phases=PhasesConfig(),
-            branch_prefix=existing.branch_prefix,
-            prds_dir=existing.prds_dir,
-            tasks_dir=existing.tasks_dir,
-            reviews_dir=existing.reviews_dir,
-            proposals_dir=existing.proposals_dir,
         )
 
     elif personas_only:
         personas = _collect_personas_with_packs(existing.personas)
-        config = ColonyConfig(
-            project=existing.project,
-            personas=personas,
-            model=existing.model,
-            budget=existing.budget,
-            phases=existing.phases,
-            branch_prefix=existing.branch_prefix,
-            prds_dir=existing.prds_dir,
-            tasks_dir=existing.tasks_dir,
-            reviews_dir=existing.reviews_dir,
-            proposals_dir=existing.proposals_dir,
-            ceo_persona=existing.ceo_persona,
-            vision=existing.vision,
-        )
+        config = replace(existing, personas=personas)
     else:
         project = collect_project_info(defaults=defaults)
         personas = _collect_personas_with_packs(
@@ -964,19 +926,13 @@ def run_init(
             prompt_suffix=" ",
         )
 
-        config = ColonyConfig(
+        config = replace(
+            existing,
             project=project,
             personas=personas,
             model=model,
             phase_models=phase_models,
-            budget=BudgetConfig(per_phase=budget_phase, per_run=budget_run),
-            phases=PhasesConfig(),
-            branch_prefix=existing.branch_prefix,
-            prds_dir=existing.prds_dir,
-            tasks_dir=existing.tasks_dir,
-            reviews_dir=existing.reviews_dir,
-            proposals_dir=existing.proposals_dir,
-            ceo_persona=existing.ceo_persona,
+            budget=replace(existing.budget, per_phase=budget_phase, per_run=budget_run),
             vision=vision,
         )
 
@@ -1020,7 +976,14 @@ def _finalize_init(
             )
 
     gitignore = repo_root / ".gitignore"
-    entries_needed = [".colonyos/runs/", ".colonyos/memory.db", ".colonyos/logs/", "cOS_*/"]
+    entries_needed = [
+        ".colonyos/runs/",
+        ".colonyos/queue.json",
+        ".colonyos/memory.db",
+        ".colonyos/daemon_state.json",
+        ".colonyos/logs/",
+        ".colonyos/recovery/",
+    ]
     if gitignore.exists():
         content = gitignore.read_text(encoding="utf-8")
         additions = [e for e in entries_needed if e not in content]
