@@ -34,6 +34,7 @@ from colonyos.models import (
     PreflightError, ProjectInfo, RunLog, RunStatus,
 )
 from colonyos.persona_packs import PACKS
+from colonyos.tui.adapter import NoticeMsg, PhaseHeaderMsg, TextBlockMsg
 
 
 @pytest.fixture(autouse=True)
@@ -422,7 +423,7 @@ class TestCleanupLoop:
         fail_result_2 = PhaseResult(
             phase=Phase.QA,
             success=False,
-            session_id=None,
+            session_id="",
             error="another error",
             artifacts={"result": ""},
         )
@@ -678,23 +679,38 @@ class TestDaemonCommand:
         assert result.exit_code == 0
         mock_start.assert_called_once()
 
+    def test_daemon_monitor_mode_skips_banner(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch.dict("os.environ", {"COLONYOS_DAEMON_MONITOR": "1"}), \
+             patch("colonyos.cli._print_daemon_banner") as mock_banner, \
+             patch("colonyos.daemon.Daemon.start") as mock_start:
+            result = runner.invoke(app, ["daemon", "--no-tui"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        mock_start.assert_called_once()
+        mock_banner.assert_not_called()
+
     def test_launch_daemon_tui_spawns_subprocess(self, tmp_path: Path):
         config = _make_config(tmp_path)
+        messages: list[object] = []
 
         class FakeApp:
             def __init__(self, **kwargs):
                 self.run_callback = kwargs["run_callback"]
                 self.cancel_callback = kwargs["cancel_callback"]
-                self.messages: list[object] = []
                 self.event_queue = SimpleNamespace(
-                    sync_q=SimpleNamespace(put=self.messages.append),
+                    sync_q=SimpleNamespace(put=messages.append),
                 )
 
             def run(self):
                 self.run_callback("daemon-monitor")
 
         fake_proc = MagicMock()
-        fake_proc.stdout = iter(["line one\n", "line two\n"])
+        fake_proc.stdout = iter([
+            "──────────── Phase: Plan  $10.00 budget · opus · 7 persona subagents ────────────\n",
+            "[colonyos] starting daemon work\n",
+            "line two\n",
+        ])
         fake_proc.wait.return_value = 0
         fake_proc.pid = 12345
         fake_proc.poll.return_value = 0
@@ -716,10 +732,15 @@ class TestDaemonCommand:
             )
 
         command = mock_popen.call_args.args[0]
+        env = mock_popen.call_args.kwargs["env"]
         assert "--no-tui" in command
         assert "--allow-all-control-users" in command
         assert "--dry-run" in command
         assert "--verbose" in command
+        assert env["COLONYOS_DAEMON_MONITOR"] == "1"
+        assert any(isinstance(msg, NoticeMsg) for msg in messages)
+        assert any(isinstance(msg, PhaseHeaderMsg) for msg in messages)
+        assert any(isinstance(msg, TextBlockMsg) for msg in messages)
 
     def test_launch_daemon_tui_stops_running_subprocess_on_exit(self, tmp_path: Path):
         config = _make_config(tmp_path)

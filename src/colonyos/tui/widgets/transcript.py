@@ -194,28 +194,7 @@ class TranscriptView(RichLog):
     def append_welcome_banner(self) -> None:
         """Render the initial welcome card on first launch."""
         self.write(Text())
-        logo_lines_raw = [
-            " ██████╗  ██████╗  ██╗      ██████╗  ███╗   ██╗ ██╗   ██╗  ██████╗  ███████╗",
-            "██╔════╝ ██╔═══██╗ ██║     ██╔═══██╗ ████╗  ██║ ╚██╗ ██╔╝ ██╔═══██╗ ██╔════╝",
-            "██║      ██║   ██║ ██║     ██║   ██║ ██╔██╗ ██║  ╚████╔╝  ██║   ██║ ███████╗",
-            "██║      ██║   ██║ ██║     ██║   ██║ ██║╚██╗██║   ╚██╔╝   ██║   ██║ ╚════██║",
-            "╚██████╗ ╚██████╔╝ ███████╗╚██████╔╝ ██║ ╚████║    ██║    ╚██████╔╝ ███████║",
-            " ╚═════╝  ╚═════╝  ╚══════╝ ╚═════╝  ╚═╝  ╚═══╝    ╚═╝     ╚═════╝  ╚══════╝",
-        ]
-        logo_lines: list[Text] = []
-        split_at = 58
-        for raw_line in logo_lines_raw:
-            line = Text(justify="center")
-            for index, char in enumerate(raw_line):
-                if char == " ":
-                    line.append(char)
-                elif index < split_at:
-                    line.append(char, style="bold #c8d1dc")
-                else:
-                    line.append(char, style="bold #f0a030")
-            logo_lines.append(line)
-
-        logo_group = Group(*logo_lines, Text(""))
+        logo_group = _colony_logo_group()
         prompt = Text(
             "Enter a prompt below to dispatch work",
             style=COLOR_DIM,
@@ -233,6 +212,28 @@ class TranscriptView(RichLog):
             padding=(1, 2),
             title="Ready",
             subtitle="workers standing by",
+            expand=True,
+        )
+        self.write(panel, expand=True)
+        self.write(Text())
+        self._scroll_to_end()
+
+    def append_daemon_monitor_banner(self) -> None:
+        """Render the daemon monitor banner used by TUI daemon mode."""
+        self.write(Text())
+        summary = Text("Monitoring the autonomous daemon and its active work.", style=COLOR_DIM, justify="center")
+        shortcuts = Text(
+            "Ctrl+C stop daemon   Ctrl+L clear transcript   Ctrl+S export",
+            style=COLOR_DIM,
+            justify="center",
+        )
+        panel = Panel(
+            Group(_colony_logo_group(), summary, shortcuts),
+            border_style=COLOR_COLONY,
+            box=box.ROUNDED,
+            padding=(1, 2),
+            title="Daemon Monitor",
+            subtitle="workers active",
             expand=True,
         )
         self.write(panel, expand=True)
@@ -275,3 +276,28 @@ _MD_PATTERN = re.compile(
 def _looks_like_markdown(text: str) -> bool:
     """Return True if text contains markdown formatting worth rendering."""
     return bool(_MD_PATTERN.search(text))
+
+
+def _colony_logo_group() -> Group:
+    """Return the shared ColonyOS ASCII logo renderable."""
+    logo_lines_raw = [
+        " ██████╗  ██████╗  ██╗      ██████╗  ███╗   ██╗ ██╗   ██╗  ██████╗  ███████╗",
+        "██╔════╝ ██╔═══██╗ ██║     ██╔═══██╗ ████╗  ██║ ╚██╗ ██╔╝ ██╔═══██╗ ██╔════╝",
+        "██║      ██║   ██║ ██║     ██║   ██║ ██╔██╗ ██║  ╚████╔╝  ██║   ██║ ███████╗",
+        "██║      ██║   ██║ ██║     ██║   ██║ ██║╚██╗██║   ╚██╔╝   ██║   ██║ ╚════██║",
+        "╚██████╗ ╚██████╔╝ ███████╗╚██████╔╝ ██║ ╚████║    ██║    ╚██████╔╝ ███████║",
+        " ╚═════╝  ╚═════╝  ╚══════╝ ╚═════╝  ╚═╝  ╚═══╝    ╚═╝     ╚═════╝  ╚══════╝",
+    ]
+    logo_lines: list[Text] = []
+    split_at = 58
+    for raw_line in logo_lines_raw:
+        line = Text(justify="center")
+        for index, char in enumerate(raw_line):
+            if char == " ":
+                line.append(char)
+            elif index < split_at:
+                line.append(char, style="bold #c8d1dc")
+            else:
+                line.append(char, style="bold #f0a030")
+        logo_lines.append(line)
+    return Group(*logo_lines, Text(""))

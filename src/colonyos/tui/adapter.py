@@ -78,6 +78,13 @@ class CommandOutputMsg:
 
 
 @dataclass(frozen=True)
+class NoticeMsg:
+    """A neutral notice rendered with transcript notice styling."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class TurnCompleteMsg:
     """A turn has completed (for status bar turn counting)."""
 

@@ -53,6 +53,7 @@ from colonyos.orchestrator import (
 )
 
 logger = logging.getLogger(__name__)
+_DAEMON_MONITOR_ENV = "COLONYOS_DAEMON_MONITOR"
 
 
 @dataclass(frozen=True)
@@ -4072,7 +4073,7 @@ def _launch_daemon_tui(
     import threading
 
     from colonyos.tui.app import AssistantApp
-    from colonyos.tui.adapter import CommandOutputMsg
+    from colonyos.tui.adapter import NoticeMsg, PhaseHeaderMsg, TextBlockMsg
     from colonyos.tui.log_writer import TranscriptLogWriter
     from colonyos.tui.widgets.transcript import TranscriptView
 
@@ -4080,8 +4081,9 @@ def _launch_daemon_tui(
         async def on_mount(self) -> None:
             await super().on_mount()
             transcript = self.query_one(TranscriptView)
+            transcript.append_daemon_monitor_banner()
             transcript.append_notice(
-                "Daemon monitor mode. Ctrl+C requests shutdown. The composer is monitor-only for now."
+                "Daemon monitor mode. Ctrl+C requests shutdown."
             )
             self._start_run("daemon-monitor")
 
@@ -4097,7 +4099,30 @@ def _launch_daemon_tui(
     def _emit_monitor_notice(text: str) -> None:
         queue = getattr(getattr(app_instance, "event_queue", None), "sync_q", None)
         if queue is not None:
-            queue.put(CommandOutputMsg(text=text))
+            queue.put(NoticeMsg(text=text))
+
+    def _message_for_daemon_output(text: str) -> object | None:
+        stripped = text.strip()
+        if not stripped:
+            return None
+        if set(stripped) <= {"─", " "}:
+            return None
+        if "Phase:" in stripped and "budget" in stripped:
+            match = re.search(
+                r"Phase:\s*(?P<name>.*?)\s+\$(?P<budget>\d+(?:\.\d+)?)\s+budget\s+·\s+(?P<model>[^·]+?)(?:\s+·\s+(?P<extra>.*?))?(?:\s*─+)?$",
+                stripped,
+            )
+            if match:
+                extra = (match.group("extra") or "").strip()
+                return PhaseHeaderMsg(
+                    phase_name=match.group("name").strip(),
+                    budget=float(match.group("budget")),
+                    model=match.group("model").strip(),
+                    extra=extra,
+                )
+        if stripped.startswith("[colonyos]"):
+            return NoticeMsg(text=stripped.removeprefix("[colonyos]").strip())
+        return TextBlockMsg(text=text)
 
     def _terminate_daemon_process(*, reason: str, force: bool = False) -> None:
         with process_lock:
@@ -4128,6 +4153,8 @@ def _launch_daemon_tui(
     def _run_callback(_text: str) -> None:
         queue = app_instance.event_queue.sync_q
         command = [sys.executable, "-m", "colonyos", "daemon", "--no-tui"]
+        daemon_env = os.environ.copy()
+        daemon_env[_DAEMON_MONITOR_ENV] = "1"
         if max_budget is not None:
             command.extend(["--max-budget", str(max_budget)])
         if unlimited_budget:
@@ -4144,6 +4171,7 @@ def _launch_daemon_tui(
         process = subprocess.Popen(
             command,
             cwd=repo_root,
+            env=daemon_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -4152,7 +4180,7 @@ def _launch_daemon_tui(
         )
         with process_lock:
             process_ref["instance"] = process
-        queue.put(CommandOutputMsg(text=f"Launching daemon subprocess: {' '.join(command)}"))
+        queue.put(NoticeMsg(text=f"Launching daemon subprocess: {' '.join(command)}"))
 
         def _pump_output() -> None:
             stream = process.stdout
@@ -4161,7 +4189,9 @@ def _launch_daemon_tui(
             for line in stream:
                 text = line.rstrip()
                 if text:
-                    queue.put(CommandOutputMsg(text=text))
+                    msg = _message_for_daemon_output(text)
+                    if msg is not None:
+                        queue.put(msg)
 
         pump_thread = threading.Thread(
             target=_pump_output,
@@ -4172,7 +4202,7 @@ def _launch_daemon_tui(
 
         return_code = process.wait()
         pump_thread.join(timeout=2)
-        queue.put(CommandOutputMsg(text=f"Daemon exited with code {return_code}"))
+        queue.put(NoticeMsg(text=f"Daemon exited with code {return_code}"))
 
     def _cancel_callback() -> None:
         _terminate_daemon_process(reason="Shutdown requested from TUI")
@@ -4180,7 +4210,7 @@ def _launch_daemon_tui(
     app_instance = _DaemonApp(
         run_callback=_run_callback,
         cancel_callback=_cancel_callback,
-        command_hints=["Ctrl+C stop daemon", "Ctrl+L clear transcript"],
+        monitor_mode=True,
         log_writer=log_writer,
     )
 
@@ -4246,11 +4276,19 @@ def daemon(
     from colonyos.daemon import Daemon, DaemonError
 
     use_tui = tui if tui is not None else (_interactive_stdio() and _tui_available())
+    monitor_mode = os.environ.get(_DAEMON_MONITOR_ENV) == "1"
     log_level = _logging.DEBUG if verbose else _logging.INFO
     if use_tui:
         _logging.basicConfig(
             level=log_level,
             handlers=[_logging.NullHandler()],
+            force=True,
+        )
+    elif monitor_mode:
+        _logging.basicConfig(
+            level=log_level,
+            format="%(message)s",
+            handlers=[_logging.StreamHandler(sys.stdout)],
             force=True,
         )
     else:
@@ -4304,25 +4342,25 @@ def daemon(
             )
             sys.exit(1)
 
-    _print_daemon_banner(
-        repo_root=repo_root,
-        config=config,
-        budget_cap=effective_budget,
-        max_hours=max_hours,
-        dry_run=dry_run,
-        allow_all_control_users=effective_allow_all,
-    )
-
-    if effective_allow_all:
-        click.echo("Control users: all Slack users")
-    elif config.daemon.allowed_control_user_ids:
-        click.echo(f"Control users: {', '.join(config.daemon.allowed_control_user_ids)}")
-    else:
-        click.echo(
-            "Warning: No allowed_control_user_ids configured. "
-            "Slack kill switch (pause/resume) will not be available.",
-            err=True,
+    if not monitor_mode:
+        _print_daemon_banner(
+            repo_root=repo_root,
+            config=config,
+            budget_cap=effective_budget,
+            max_hours=max_hours,
+            dry_run=dry_run,
+            allow_all_control_users=effective_allow_all,
         )
+        if effective_allow_all:
+            click.echo("Control users: all Slack users")
+        elif config.daemon.allowed_control_user_ids:
+            click.echo(f"Control users: {', '.join(config.daemon.allowed_control_user_ids)}")
+        else:
+            click.echo(
+                "Warning: No allowed_control_user_ids configured. "
+                "Slack kill switch (pause/resume) will not be available.",
+                err=True,
+            )
 
     d = Daemon(
         repo_root=repo_root,
