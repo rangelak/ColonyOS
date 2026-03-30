@@ -62,9 +62,9 @@
   - [x] 7.1 Write tests for memory capture: verify that when poll_outcomes detects open→closed transition, a MemoryEntry with category FAILURE is created with sanitized close_context, verify no memory is created for merged PRs, verify no memory for PRs closed without any reviewer comment
   - [x] 7.2 In `poll_outcomes()`, after detecting a status change from open to closed (not merged), call `MemoryStore.add_memory()` with category=FAILURE, phase="deliver", text="PR #{number} closed without merge. Reviewer feedback: {close_context}". Use existing `MemoryStore` from `memory.py`.
 
-- [ ] 8.0 Daemon integration — automatic outcome polling in _tick()
+- [x] 8.0 Daemon integration — automatic outcome polling in _tick()
   depends_on: [1.0, 2.0]
-  - [ ] 8.1 Write tests for daemon outcome polling: test that `_tick()` calls `_poll_pr_outcomes()` when interval elapsed, test it skips when interval not yet elapsed, test it handles exceptions gracefully (log and continue), test configurable interval from DaemonConfig
-  - [ ] 8.2 Add `_last_outcome_poll_time: float = 0.0` to `Daemon.__init__`
-  - [ ] 8.3 Add step 6 in `_tick()` after heartbeat: check `outcome_poll_interval_minutes`, call `_poll_pr_outcomes()` if elapsed, update timestamp. Follow the exact pattern of lines 204-208 (GitHub polling).
-  - [ ] 8.4 Implement `_poll_pr_outcomes()` method: wraps `poll_outcomes(self.repo_root)` in try/except, logs warning on failure, no retry
+  - [x] 8.1 Write tests for daemon outcome polling: test that `_tick()` calls `_poll_pr_outcomes()` when interval elapsed, test it skips when interval not yet elapsed, test it handles exceptions gracefully (log and continue), test configurable interval from DaemonConfig
+  - [x] 8.2 Add `_last_outcome_poll_time: float = 0.0` to `Daemon.__init__`
+  - [x] 8.3 Add step 6 in `_tick()` after heartbeat: check `outcome_poll_interval_minutes`, call `_poll_pr_outcomes()` if elapsed, update timestamp. Follow the exact pattern of lines 204-208 (GitHub polling).
+  - [x] 8.4 Implement `_poll_pr_outcomes()` method: wraps `poll_outcomes(self.repo_root)` in try/except, logs warning on failure, no retry

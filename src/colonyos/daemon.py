@@ -116,6 +116,9 @@ class Daemon:
         # PID lock file descriptor
         self._pid_fd: int | None = None
 
+        # Outcome polling timestamp
+        self._last_outcome_poll_time: float = 0.0
+
         # Budget alert flags (reset on daily budget reset)
         self._budget_80_alerted: bool = False
         self._budget_100_alerted: bool = False
@@ -228,6 +231,12 @@ class Daemon:
         if now - self._last_heartbeat_time >= heartbeat_interval:
             self._post_heartbeat()
             self._last_heartbeat_time = now
+
+        # 6. PR outcome polling
+        outcome_interval = self.daemon_config.outcome_poll_interval_minutes * 60
+        if now - self._last_outcome_poll_time >= outcome_interval:
+            self._poll_pr_outcomes()
+            self._last_outcome_poll_time = now
 
     # ------------------------------------------------------------------
     # Queue execution
@@ -487,6 +496,21 @@ class Daemon:
 
         except Exception:
             logger.exception("Error polling GitHub issues")
+
+    def _poll_pr_outcomes(self) -> None:
+        """Poll GitHub for PR outcome updates.
+
+        Wraps :func:`~colonyos.outcomes.poll_outcomes` in try/except so
+        a failure never crashes the daemon.  The next scheduled poll is
+        the implicit retry — no explicit retry logic.
+        """
+        try:
+            from colonyos.outcomes import poll_outcomes
+
+            poll_outcomes(self.repo_root)
+            logger.debug("PR outcome poll completed")
+        except Exception:
+            logger.warning("Error polling PR outcomes", exc_info=True)
 
     # ------------------------------------------------------------------
     # CEO Idle-Fill (FR-4)
