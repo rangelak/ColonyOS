@@ -96,3 +96,12 @@ _Date: 2026-03-30 | Feature: the_following_github_issue_is_the_source_feature_de
 - **[architecture]** Rich console renderers should accept a `Console` instance, not create their own, to enable test output capture.
 - **[testing]** `useEffect` polling with stale closures (state in dependency array) causes interval churn; use `useRef` for latest value.
 - **[security]** CORS allow-origin for dev hosts (e.g., localhost:5173) must be conditional on a dev/debug flag, not unconditional.
+
+## Run: run-20260330_091744-320de775ff
+_Date: 2026-03-30 | Feature: add_a_pr_outcome_tracking_system_that_monitors_the_fate_of_p_
+
+- **[code-quality]** Duplicated logic (e.g., verdict regexes, duration formatting) across modules causes silent divergence; extract to shared utils.
+- **[architecture]** Prompt templates using natural-language directory descriptions are fragile for LLMs; use explicit glob patterns and concrete paths.
+- **[code-quality]** `from_dict()`/deserialization helpers that raise raw KeyError on malformed input need try/except with fallback defaults.
+- **[testing]** Rich console renderers that create their own `Console()` instance break test output capture; accept console as a parameter.
+- **[security]** External API string fields interpolated into XML/prompt structural attributes (not just body) must be escaped separately.
