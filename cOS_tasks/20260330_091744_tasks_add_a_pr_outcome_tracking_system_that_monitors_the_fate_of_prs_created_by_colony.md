@@ -44,11 +44,11 @@
   - [x] 4.1 Write tests for CEO prompt injection: verify outcome summary section appears in CEO prompt when outcomes exist, verify it is skipped when no outcomes, verify exception handling (format_outcome_summary failure doesn't break CEO prompt)
   - [x] 4.2 In `_build_ceo_prompt()` (~line 1920, after the prs_section block), add an `outcomes_section` block that calls `format_outcome_summary(repo_root)`, wraps it in `## PR Outcome History`, and appends to the user prompt. Follow the same try/except pattern as issues_section and prs_section.
 
-- [ ] 5.0 CLI commands — `colonyos outcomes` and `colonyos outcomes poll`
+- [x] 5.0 CLI commands — `colonyos outcomes` and `colonyos outcomes poll`
   depends_on: [1.0]
-  - [ ] 5.1 Write tests for CLI commands: test `outcomes` command displays a Rich table with correct columns, test `outcomes poll` calls poll_outcomes then displays table, test empty outcomes shows a helpful message, test error handling
-  - [ ] 5.2 Add `outcomes` command group to `cli.py`: `@app.group()` with `outcomes` name. Default command (no subcommand) shows the outcome table using Rich Table with columns: PR#, Status (colored), Branch, Age, Reviews, CI, Close Context. Use `OutcomeStore` to fetch records.
-  - [ ] 5.3 Add `outcomes poll` subcommand: calls `poll_outcomes(repo_root)`, then displays the updated table
+  - [x] 5.1 Write tests for CLI commands: test `outcomes` command displays a Rich table with correct columns, test `outcomes poll` calls poll_outcomes then displays table, test empty outcomes shows a helpful message, test error handling
+  - [x] 5.2 Add `outcomes` command group to `cli.py`: `@app.group()` with `outcomes` name. Default command (no subcommand) shows the outcome table using Rich Table with columns: PR#, Status (colored), Branch, Age, Reviews, CI, Close Context. Use `OutcomeStore` to fetch records.
+  - [x] 5.3 Add `outcomes poll` subcommand: calls `poll_outcomes(repo_root)`, then displays the updated table
 
 - [ ] 6.0 Stats integration — Delivery Outcomes section in dashboard
   depends_on: [1.0]

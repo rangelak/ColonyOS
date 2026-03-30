@@ -445,3 +445,103 @@ class TestRegisterPrOutcome:
                 pr_url="https://github.com/org/repo/pull/99",
                 branch_name="colonyos/my-feature",
             )
+
+
+# ---------------------------------------------------------------------------
+# 5.1 CLI command tests
+# ---------------------------------------------------------------------------
+
+from click.testing import CliRunner
+from colonyos.cli import app
+
+
+@pytest.fixture
+def cli_runner():
+    return CliRunner()
+
+
+class TestOutcomesCLI:
+    """Tests for `colonyos outcomes` and `colonyos outcomes poll` commands."""
+
+    def test_outcomes_displays_table(self, cli_runner: CliRunner, tmp_repo: Path):
+        """outcomes command displays a Rich table with correct columns."""
+        # Seed some data
+        with OutcomeStore(tmp_repo) as store:
+            store.track_pr("run-1", 42, "https://github.com/o/r/pull/42", "feat/x")
+            store.track_pr("run-2", 43, "https://github.com/o/r/pull/43", "feat/y")
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_repo):
+            result = cli_runner.invoke(app, ["outcomes"])
+
+        assert result.exit_code == 0
+        # Check column headers are present
+        assert "PR#" in result.output or "PR" in result.output
+        assert "Status" in result.output
+        assert "Branch" in result.output
+        # Check data rows are present
+        assert "42" in result.output
+        assert "43" in result.output
+        assert "feat/x" in result.output
+
+    def test_outcomes_empty_shows_message(self, cli_runner: CliRunner, tmp_repo: Path):
+        """Empty outcomes shows a helpful message instead of an empty table."""
+        # Ensure .colonyos dir exists for OutcomeStore
+        (tmp_repo / ".colonyos").mkdir(exist_ok=True)
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_repo):
+            result = cli_runner.invoke(app, ["outcomes"])
+
+        assert result.exit_code == 0
+        assert "no tracked" in result.output.lower() or "no pr" in result.output.lower()
+
+    def test_outcomes_status_colored(self, cli_runner: CliRunner, tmp_repo: Path):
+        """Status values appear in the output (color applied via Rich)."""
+        with OutcomeStore(tmp_repo) as store:
+            store.track_pr("run-1", 42, "url1", "feat/x")
+            store.update_outcome(pr_number=42, status="merged")
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_repo):
+            result = cli_runner.invoke(app, ["outcomes"])
+
+        assert result.exit_code == 0
+        assert "merged" in result.output.lower()
+
+    def test_outcomes_poll_calls_poll_and_displays(self, cli_runner: CliRunner, tmp_repo: Path):
+        """outcomes poll triggers poll_outcomes() then shows the updated table."""
+        with OutcomeStore(tmp_repo) as store:
+            store.track_pr("run-1", 42, "url1", "feat/x")
+
+        with (
+            patch("colonyos.cli._find_repo_root", return_value=tmp_repo),
+            patch("colonyos.outcomes.poll_outcomes") as mock_poll,
+        ):
+            result = cli_runner.invoke(app, ["outcomes", "poll"])
+
+        assert result.exit_code == 0
+        mock_poll.assert_called_once_with(tmp_repo)
+        # Table should still be displayed after polling
+        assert "42" in result.output
+
+    def test_outcomes_poll_handles_error(self, cli_runner: CliRunner, tmp_repo: Path):
+        """outcomes poll handles poll_outcomes failures gracefully."""
+        (tmp_repo / ".colonyos").mkdir(exist_ok=True)
+
+        with (
+            patch("colonyos.cli._find_repo_root", return_value=tmp_repo),
+            patch("colonyos.outcomes.poll_outcomes", side_effect=Exception("gh not found")),
+        ):
+            result = cli_runner.invoke(app, ["outcomes", "poll"])
+
+        # Should not crash — should show warning and still try to display table
+        assert result.exit_code == 0
+
+    def test_outcomes_no_subcommand_shows_table(self, cli_runner: CliRunner, tmp_repo: Path):
+        """Bare `colonyos outcomes` (no subcommand) shows the table."""
+        with OutcomeStore(tmp_repo) as store:
+            store.track_pr("run-1", 42, "url1", "feat/x")
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_repo):
+            result = cli_runner.invoke(app, ["outcomes"])
+
+        assert result.exit_code == 0
+        assert "42" in result.output
