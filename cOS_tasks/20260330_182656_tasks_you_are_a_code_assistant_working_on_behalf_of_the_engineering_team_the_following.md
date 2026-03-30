@@ -43,14 +43,14 @@
   - [x] 2.3 Document the one-time setup steps: creating the PAT, adding it as a repo secret, creating the tap repo
   - [x] 2.4 Add the Homebrew install command to the GitHub Release notes template in the `release` job
 
-- [ ] 3.0 Add install-method detection to `colonyos doctor`
+- [x] 3.0 Add install-method detection to `colonyos doctor`
   depends_on: []
-  - [ ] 3.1 Write tests for install-method detection: mock Homebrew Cellar path, pipx metadata, pip scenarios; verify correct upgrade instructions are returned
-  - [ ] 3.2 Implement install-method detection in `src/colonyos/doctor.py`:
+  - [x] 3.1 Write tests for install-method detection: mock Homebrew Cellar path, pipx metadata, pip scenarios; verify correct upgrade instructions are returned
+  - [x] 3.2 Implement install-method detection in `src/colonyos/doctor.py`:
     - Check if `colonyos` binary is under Homebrew Cellar → "Installed via Homebrew"
     - Check if installed in a pipx venv → "Installed via pipx"
     - Fallback → "Installed via pip"
-  - [ ] 3.3 Update doctor output to show install-specific upgrade instructions:
+  - [x] 3.3 Update doctor output to show install-specific upgrade instructions:
     - Homebrew: `brew upgrade colonyos`
     - pipx: `pipx upgrade colonyos`
     - pip: `pip install --upgrade colonyos`
