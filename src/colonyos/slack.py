@@ -1185,6 +1185,53 @@ def resolve_channel_names(client: SlackClient, names: list[str]) -> list[Resolve
     return resolved
 
 
+def _slack_import_diagnostics() -> str:
+    details: list[str] = [f"python={sys.version_info.major}.{sys.version_info.minor}"]
+    for module_name in (
+        "slack_bolt",
+        "slack_sdk",
+        "slack_bolt.adapter.socket_mode",
+    ):
+        try:
+            spec = importlib.util.find_spec(module_name)
+        except Exception as exc:  # pragma: no cover - defensive only
+            details.append(f"{module_name}=error:{exc.__class__.__name__}")
+            continue
+        if spec is None:
+            details.append(f"{module_name}=missing")
+        else:
+            origin = spec.origin or "namespace"
+            details.append(f"{module_name}={origin}")
+    return ", ".join(details)
+
+
+def _raise_slack_dependency_error(exc: Exception, *, operation: str) -> None:
+    if isinstance(exc, ImportError):
+        logger.debug(
+            "Slack dependency import failed during %s (%s)",
+            operation,
+            _slack_import_diagnostics(),
+            exc_info=True,
+        )
+        raise ImportError(
+            "Slack dependencies are unavailable. Install or reinstall them with: "
+            "pip install 'colonyos[slack]'. Then run `colonyos doctor` to verify "
+            "your environment."
+        ) from exc
+
+    logger.debug(
+        "Slack dependency import crashed unexpectedly during %s (%s)",
+        operation,
+        _slack_import_diagnostics(),
+        exc_info=True,
+    )
+    raise RuntimeError(
+        "Slack dependencies failed to import cleanly. Reinstall them with: "
+        "pip install 'colonyos[slack]'. If this persists, run `colonyos doctor` "
+        "and prefer Python 3.11-3.13 for Slack-enabled deployments."
+    ) from exc
+
+
 def create_slack_app(config: SlackConfig) -> Any:
     """Create and configure a Slack Bolt app with Socket Mode.
 
@@ -1194,45 +1241,11 @@ def create_slack_app(config: SlackConfig) -> Any:
     The *config* parameter is stored on the app instance as ``_colonyos_config``
     so that event handlers can reference channel allowlists and trigger settings.
     """
-    def _import_diagnostics() -> str:
-        details: list[str] = [f"python={sys.version_info.major}.{sys.version_info.minor}"]
-        for module_name in ("slack_bolt", "slack_sdk"):
-            try:
-                spec = importlib.util.find_spec(module_name)
-            except Exception as exc:  # pragma: no cover - defensive only
-                details.append(f"{module_name}=error:{exc.__class__.__name__}")
-                continue
-            if spec is None:
-                details.append(f"{module_name}=missing")
-            else:
-                origin = spec.origin or "namespace"
-                details.append(f"{module_name}={origin}")
-        return ", ".join(details)
 
     try:
         from slack_bolt import App
-    except ImportError as exc:
-        logger.debug(
-            "Slack dependency import failed (%s)",
-            _import_diagnostics(),
-            exc_info=True,
-        )
-        raise ImportError(
-            "Slack dependencies are unavailable. Install or reinstall them with: "
-            "pip install 'colonyos[slack]'. Then run `colonyos doctor` to verify "
-            "your environment."
-        ) from exc
     except Exception as exc:
-        logger.debug(
-            "Slack dependency import crashed unexpectedly (%s)",
-            _import_diagnostics(),
-            exc_info=True,
-        )
-        raise RuntimeError(
-            "Slack dependencies failed to import cleanly. Reinstall them with: "
-            "pip install 'colonyos[slack]'. If this persists, run `colonyos doctor` "
-            "and prefer Python 3.11-3.13 for Slack-enabled deployments."
-        ) from exc
+        _raise_slack_dependency_error(exc, operation="app startup")
 
     bot_token = os.environ.get("COLONYOS_SLACK_BOT_TOKEN", "").strip()
     app_token = os.environ.get("COLONYOS_SLACK_APP_TOKEN", "").strip()
@@ -1263,7 +1276,10 @@ def start_socket_mode(app: Any) -> Any:
     caching it on the app instance (to avoid exposing it to agent
     introspection).
     """
-    from slack_bolt.adapter.socket_mode import SocketModeHandler
+    try:
+        from slack_bolt.adapter.socket_mode import SocketModeHandler
+    except Exception as exc:
+        _raise_slack_dependency_error(exc, operation="socket mode startup")
 
     app_token = os.environ.get("COLONYOS_SLACK_APP_TOKEN", "").strip()
     handler = SocketModeHandler(app, app_token)

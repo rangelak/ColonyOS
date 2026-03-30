@@ -32,6 +32,7 @@ from colonyos.slack import (
     sanitize_slack_content,
     save_watch_state,
     should_process_message,
+    start_socket_mode,
     triage_message,
     wait_for_approval,
 )
@@ -158,6 +159,22 @@ class TestCreateSlackApp:
         assert "Slack dependency import crashed unexpectedly" in caplog.text
         assert "python=" in caplog.text
         assert "slack_sdk=" in caplog.text
+
+    def test_socket_mode_import_failure_surfaces_actionable_runtime_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        original_import = __import__
+
+        def fake_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
+            if name == "slack_bolt.adapter.socket_mode":
+                raise KeyError("slack_sdk")
+            return original_import(name, globals, locals, fromlist, level)
+
+        caplog.set_level("DEBUG", logger="colonyos.slack")
+        with patch("builtins.__import__", side_effect=fake_import):
+            with pytest.raises(RuntimeError, match="Slack dependencies failed to import cleanly"):
+                start_socket_mode(MagicMock())
+
+        assert "socket mode startup" in caplog.text
+        assert "slack_bolt.adapter.socket_mode=" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +545,28 @@ class TestDoctorSlackCheck:
         results = run_doctor_checks(tmp_repo)
         slack_checks = [n for n, _, _ in results if n == "Slack tokens"]
         assert len(slack_checks) == 0
+
+    def test_slack_dependency_check_reports_import_failure(self, tmp_repo: Path, mock_doctor_subprocess: object) -> None:
+        import yaml
+        from colonyos.doctor import run_doctor_checks
+
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"enabled": True}}),
+            encoding="utf-8",
+        )
+
+        with patch.dict("os.environ", {
+            "COLONYOS_SLACK_BOT_TOKEN": "xoxb-fake",
+            "COLONYOS_SLACK_APP_TOKEN": "xapp-fake",
+        }), patch("colonyos.doctor.importlib.import_module", side_effect=KeyError("slack_sdk")):
+            results = run_doctor_checks(tmp_repo)
+
+        dependency_checks = [(n, p, h) for n, p, h in results if n == "Slack dependencies"]
+        assert len(dependency_checks) == 1
+        assert dependency_checks[0][1] is False
+        assert "Slack SDK import failed" in dependency_checks[0][2]
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -17,6 +19,7 @@ from colonyos.daemon_state import DaemonState, save_daemon_state
 from colonyos.models import (
     Phase,
     PhaseResult,
+    PreflightError,
     QueueItem,
     QueueItemStatus,
     QueueState,
@@ -227,6 +230,185 @@ class TestCircuitBreaker:
         ]
         daemon_instance._try_execute_next()
         assert daemon_instance._queue_state.items[0].status == QueueItemStatus.PENDING
+
+
+class TestDirtyWorktreeRecovery:
+    def test_try_execute_next_preserves_dirty_worktree_and_retries_once(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        daemon_instance.daemon_config.auto_recover_dirty_worktree = True
+        item = QueueItem(
+            id="item-1",
+            source_type="prompt",
+            source_value="ship it",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+        dirty_error = PreflightError(
+            "Uncommitted changes detected",
+            code="dirty_worktree",
+            details={"dirty_output": " M src/dirty.py"},
+        )
+        preserve_result = PreservationResult(
+            snapshot_dir=daemon_instance.repo_root / ".colonyos" / "recovery" / "dirty-retry",
+            preservation_mode="stash",
+            stash_message="stash-msg",
+        )
+        fake_log = RunLog(
+            run_id="run-1",
+            prompt=item.source_value,
+            status=RunStatus.COMPLETED,
+            total_cost_usd=0.1,
+        )
+
+        with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=[dirty_error, fake_log]) as mock_run, \
+             patch("colonyos.recovery.preserve_and_reset_worktree", return_value=preserve_result) as mock_preserve:
+            assert daemon_instance._try_execute_next() is True
+
+        assert mock_run.call_count == 2
+        mock_preserve.assert_called_once()
+        assert item.status == QueueItemStatus.COMPLETED
+        assert daemon_instance._state.consecutive_failures == 0
+        assert daemon_instance._pipeline_running is False
+
+    def test_try_execute_next_fails_after_single_dirty_worktree_retry(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        daemon_instance.daemon_config.auto_recover_dirty_worktree = True
+        item = QueueItem(
+            id="item-2",
+            source_type="prompt",
+            source_value="ship it",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+        dirty_error = PreflightError(
+            "Uncommitted changes detected",
+            code="dirty_worktree",
+            details={"dirty_output": " M src/dirty.py"},
+        )
+        preserve_result = PreservationResult(
+            snapshot_dir=daemon_instance.repo_root / ".colonyos" / "recovery" / "dirty-retry",
+            preservation_mode="stash",
+            stash_message="stash-msg",
+        )
+
+        with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=[dirty_error, dirty_error]) as mock_run, \
+             patch("colonyos.recovery.preserve_and_reset_worktree", return_value=preserve_result) as mock_preserve, \
+             patch.object(daemon_instance, "_post_execution_failure"):
+            assert daemon_instance._try_execute_next() is True
+
+        assert mock_run.call_count == 2
+        mock_preserve.assert_called_once()
+        assert item.status == QueueItemStatus.FAILED
+        assert "Uncommitted changes detected" in (item.error or "")
+        assert daemon_instance._state.consecutive_failures == 1
+        assert daemon_instance._pipeline_running is False
+
+    def test_try_execute_next_does_not_auto_recover_when_disabled(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        item = QueueItem(
+            id="item-3",
+            source_type="prompt",
+            source_value="ship it",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+        dirty_error = PreflightError(
+            "Uncommitted changes detected",
+            code="dirty_worktree",
+            details={"dirty_output": " M src/dirty.py"},
+        )
+
+        with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=dirty_error), \
+             patch("colonyos.recovery.preserve_and_reset_worktree") as mock_preserve, \
+             patch.object(daemon_instance, "_post_execution_failure"):
+            assert daemon_instance._try_execute_next() is True
+
+        mock_preserve.assert_not_called()
+        assert item.status == QueueItemStatus.FAILED
+        assert daemon_instance._state.consecutive_failures == 1
+
+    def test_run_pipeline_for_item_recovers_real_dirty_git_worktree(self, tmp_repo: Path, config: ColonyConfig):
+        daemon_instance = Daemon(tmp_repo, config, dry_run=False)
+        daemon_instance.daemon_config.auto_recover_dirty_worktree = True
+        tracked = tmp_repo / "src" / "dirty.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("print('clean')\n", encoding="utf-8")
+
+        git_env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test User",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test User",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+        subprocess.run(["git", "init", "-b", "main"], cwd=tmp_repo, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "add", "src/dirty.py"], cwd=tmp_repo, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=tmp_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=git_env,
+        )
+
+        tracked.write_text("print('dirty')\n", encoding="utf-8")
+        item = QueueItem(
+            id="item-4",
+            source_type="prompt",
+            source_value="ship it",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+
+        call_count = 0
+
+        def fake_run_pipeline_for_queue_item(**kwargs: object) -> RunLog:
+            nonlocal call_count
+            call_count += 1
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=tmp_repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            if call_count == 1:
+                raise PreflightError(
+                    "Uncommitted changes detected",
+                    code="dirty_worktree",
+                    details={"dirty_output": status},
+                )
+            visible_dirty = [
+                line for line in status.splitlines()
+                if not line[3:].startswith(".colonyos/")
+            ]
+            assert visible_dirty == []
+            return RunLog(
+                run_id="run-1",
+                prompt=item.source_value,
+                status=RunStatus.COMPLETED,
+                total_cost_usd=0.1,
+            )
+
+        with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=fake_run_pipeline_for_queue_item):
+            log = daemon_instance._run_pipeline_for_item(item)
+
+        assert log.status == RunStatus.COMPLETED
+        assert call_count == 2
+        stash_list = subprocess.run(
+            ["git", "stash", "list"],
+            cwd=tmp_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert "colonyos-nuke-" in stash_list
+        recovery_notes = sorted((tmp_repo / ".colonyos" / "recovery").glob("*.md"))
+        assert recovery_notes
 
 
 class TestDeduplication:
@@ -638,6 +820,47 @@ class TestSlackNotifications:
         ]
         assert ("C1", "111.1") in start_targets
         assert ("C2", "222.2") in start_targets
+
+    def test_execute_item_does_not_duplicate_start_message_on_dirty_worktree_retry(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        daemon_instance.daemon_config.auto_recover_dirty_worktree = True
+        daemon_instance._slack_client = MagicMock()
+        item = QueueItem(
+            id="slack-1",
+            source_type="slack",
+            source_value="Add brew install support",
+            summary="Add brew install support",
+            slack_channel="C1",
+            slack_ts="111.1",
+            notification_channel="C1",
+            status=QueueItemStatus.PENDING,
+        )
+        dirty_error = PreflightError(
+            "Uncommitted changes detected",
+            code="dirty_worktree",
+            details={"dirty_output": " M src/dirty.py"},
+        )
+        fake_log = RunLog(
+            run_id="run-1",
+            prompt="brew",
+            status=RunStatus.COMPLETED,
+            total_cost_usd=0.1,
+        )
+        preserve_result = PreservationResult(
+            snapshot_dir=daemon_instance.repo_root / ".colonyos" / "recovery" / "dirty-retry",
+            preservation_mode="stash",
+            stash_message="stash-msg",
+        )
+
+        with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=[dirty_error, fake_log]) as mock_run, \
+             patch("colonyos.recovery.preserve_and_reset_worktree", return_value=preserve_result), \
+             patch("colonyos.slack.post_message", return_value={"ts": "1234.5"}) as mock_post, \
+             patch("colonyos.slack.post_run_summary"):
+            log = daemon_instance._execute_item(item)
+
+        assert log is fake_log
+        assert mock_run.call_count == 2
+        assert mock_post.call_count == 2
 
     def test_try_execute_next_posts_failure_to_slack_thread(self, daemon_instance: Daemon):
         daemon_instance.dry_run = False

@@ -46,6 +46,7 @@
    daemon:
      daily_budget_usd: 500.0
      allow_all_control_users: true
+     auto_recover_dirty_worktree: true
      github_poll_interval_seconds: 120
      ceo_cooldown_minutes: 60
    slack:
@@ -62,6 +63,11 @@
    Slack pause/resume commands. Set `daemon.allow_all_control_users: true` if you
    want every Slack user in the configured channels to be able to send daemon
    control commands too.
+
+   `daemon.auto_recover_dirty_worktree: true` is recommended only for a dedicated
+   daemon checkout. It lets the daemon preserve dirty state to recovery/stash,
+   reset the repo, and retry once when queue execution is blocked by a dirty
+   worktree preflight failure.
 
 5. **Install and start the service**:
    ```bash

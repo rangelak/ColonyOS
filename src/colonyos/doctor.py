@@ -5,6 +5,7 @@ Extracted into its own module to avoid circular imports between
 """
 from __future__ import annotations
 
+import importlib
 import os
 import subprocess
 import sys
@@ -127,6 +128,19 @@ def run_doctor_checks(repo_root: Path) -> list[tuple[str, bool, str]]:
                 False,
                 f"Missing environment variables: {', '.join(missing)}. "
                 "Set them before running `colonyos watch`.",
+            ))
+
+        try:
+            importlib.import_module("slack_bolt")
+            importlib.import_module("slack_bolt.adapter.socket_mode")
+            results.append(("Slack dependencies", True, ""))
+        except Exception as exc:
+            results.append((
+                "Slack dependencies",
+                False,
+                f"Slack SDK import failed ({exc.__class__.__name__}). "
+                "Reinstall with `pip install 'colonyos[slack]'` and prefer "
+                "Python 3.11-3.13 for Slack-enabled deployments.",
             ))
 
     return results

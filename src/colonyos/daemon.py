@@ -31,6 +31,7 @@ from colonyos.daemon_state import (
     save_daemon_state,
 )
 from colonyos.models import (
+    PreflightError,
     QueueItem,
     QueueItemStatus,
     QueueState,
@@ -651,7 +652,7 @@ class Daemon:
         )
 
         # Import here to avoid circular imports — cli.py imports from many modules
-        from colonyos.cli import _queue_item_branch_name_override, run_pipeline_for_queue_item
+        from colonyos.cli import _queue_item_branch_name_override
         from colonyos.slack import FanoutSlackUI, SlackUI, post_message, post_run_summary
 
         branch_override = _queue_item_branch_name_override(item, self.config)
@@ -698,16 +699,7 @@ class Daemon:
         elif self._monitor_mode:
             ui_factory = self._make_monitor_ui
 
-        with self._agent_lock:
-            log = run_pipeline_for_queue_item(
-                item=item,
-                repo_root=self.repo_root,
-                config=self.config,
-                verbose=self.verbose,
-                quiet=False,
-                ui_factory=ui_factory,
-                queue_state=self._queue_state,
-            )
+        log = self._run_pipeline_for_item(item, ui_factory=ui_factory)
         item.run_id = log.run_id
         item.pr_url = log.pr_url
         if log.branch_name:
@@ -1127,6 +1119,86 @@ class Daemon:
                 )
         except Exception:
             logger.exception("Error during git state recovery")
+
+    def _should_auto_recover_dirty_worktree(self, exc: Exception) -> bool:
+        return (
+            self.daemon_config.auto_recover_dirty_worktree
+            and isinstance(exc, PreflightError)
+            and exc.code == "dirty_worktree"
+        )
+
+    def _recover_dirty_worktree_and_retry(
+        self,
+        item: QueueItem,
+        exc: PreflightError,
+    ) -> None:
+        from colonyos.recovery import incident_slug, preserve_and_reset_worktree
+
+        dirty_output = str(exc.details.get("dirty_output", "")).strip()
+        recovery_label = incident_slug(f"daemon-dirty-worktree-{item.id}")
+        logger.warning(
+            "Dirty worktree blocked item %s; preserving state and retrying once",
+            item.id,
+        )
+        preserve_result = preserve_and_reset_worktree(self.repo_root, recovery_label)
+        incident_path = self._record_runtime_incident(
+            label_prefix="daemon-dirty-worktree-recovery",
+            summary=(
+                "Daemon queue execution hit a dirty-worktree preflight failure and "
+                "automatically preserved state before retrying.\n\n"
+                f"Item: {item.id}\n"
+                f"Source type: {item.source_type}\n"
+                f"Preservation mode: {preserve_result.preservation_mode}\n"
+                f"Snapshot dir: {preserve_result.snapshot_dir}\n"
+                f"Stash message: {preserve_result.stash_message or '(none)'}\n"
+                "The daemon will retry this item once on the cleaned worktree."
+            ),
+            metadata={
+                "item_id": item.id,
+                "source_type": item.source_type,
+                "source_value": item.source_value[:500],
+                "preservation_mode": preserve_result.preservation_mode,
+                "snapshot_dir": str(preserve_result.snapshot_dir),
+                "stash_message": preserve_result.stash_message,
+                "dirty_output": dirty_output,
+            },
+        )
+        logger.warning(
+            "Dirty worktree recovery preserved item %s state at %s (mode=%s); retrying",
+            item.id,
+            incident_path,
+            preserve_result.preservation_mode,
+        )
+
+    def _run_pipeline_for_item(
+        self,
+        item: QueueItem,
+        *,
+        ui_factory: Any = None,
+    ) -> RunLog:
+        from colonyos.cli import run_pipeline_for_queue_item
+
+        attempted_dirty_worktree_recovery = False
+        while True:
+            try:
+                with self._agent_lock:
+                    return run_pipeline_for_queue_item(
+                        item=item,
+                        repo_root=self.repo_root,
+                        config=self.config,
+                        verbose=self.verbose,
+                        quiet=False,
+                        ui_factory=ui_factory,
+                        queue_state=self._queue_state,
+                    )
+            except PreflightError as exc:
+                if (
+                    attempted_dirty_worktree_recovery
+                    or not self._should_auto_recover_dirty_worktree(exc)
+                ):
+                    raise
+                attempted_dirty_worktree_recovery = True
+                self._recover_dirty_worktree_and_retry(item, exc)
 
     # ------------------------------------------------------------------
     # Background threads
