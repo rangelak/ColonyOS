@@ -1,5 +1,25 @@
 # Changelog
 
+## 20260330_003000 — Refactor `cli.py` into a `cli/` Package
+
+Decomposes the 5,603-line monolithic `cli.py` into a well-organized `cli/` package with ~20 focused sub-modules, each under 600 lines. Preserves the `colonyos.cli:app` entry point and all existing behavior while dramatically improving navigability, testability, and contributor experience.
+
+**Created:**
+- `src/colonyos/cli/__init__.py` — Package init; re-exports `app` and all public/test-facing symbols
+- `src/colonyos/cli/_app.py` — Click group definition, root command, welcome banner
+- `src/colonyos/cli/_helpers.py` — Shared utilities
+- `src/colonyos/cli/_display.py` — Rich output helpers
+- `src/colonyos/cli/_routing.py` — Prompt routing logic
+- `src/colonyos/cli/_run.py`, `_review.py`, `_auto.py`, `_queue.py`, `_watch.py` — Core command modules
+- `src/colonyos/cli/_memory.py`, `_status.py`, `_simple_commands.py`, `_daemon.py`, `_ci_fix.py`, `_cleanup_cmd.py`, `_sweep.py`, `_pr_review.py`, `_legacy.py` — Additional command modules
+- `tests/test_cli_package.py` — Structural tests for package integrity and module size limits
+
+**Deleted:**
+- `src/colonyos/cli.py` — The original 5,603-line monolith
+
+**PRD:** `cOS_prds/20260330_000618_prd_colonyos_cli_py.md`
+**Tasks:** `cOS_tasks/20260330_000618_tasks_colonyos_cli_py.md`
+
 ## 20260330_002500 — Handle 529 Overloaded Errors with Retry and Optional Model Fallback
 
 Adds a transport-level retry layer with exponential backoff and jitter inside `run_phase()` so that transient API 529/503 errors are handled transparently without triggering the orchestrator's heavyweight recovery. Includes optional model fallback (hard-blocked on safety-critical phases), full observability via `PhaseResult.retry_info`, and configurable `RetryConfig` in `config.yaml`.
