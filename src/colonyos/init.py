@@ -28,6 +28,18 @@ from colonyos.ui import console
 
 logger = logging.getLogger(__name__)
 
+def is_git_repo(path: Path) -> bool:
+    """Return True if *path* is inside a git repository.
+
+    Walks from *path* up to the filesystem root looking for a ``.git``
+    directory or file (submodules use a ``.git`` file).
+    """
+    for parent in [path, *path.parents]:
+        if (parent / ".git").exists():
+            return True
+    return False
+
+
 _MANIFEST_FILES: list[tuple[str, str]] = [
     ("README.md", ""),
     ("README.rst", ""),

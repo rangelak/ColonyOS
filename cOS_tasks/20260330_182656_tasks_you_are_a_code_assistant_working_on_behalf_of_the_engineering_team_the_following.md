@@ -55,10 +55,10 @@
     - pipx: `pipx upgrade colonyos`
     - pip: `pip install --upgrade colonyos`
 
-- [ ] 4.0 Add non-git-repo guard to `colonyos init`
+- [x] 4.0 Add non-git-repo guard to `colonyos init`
   depends_on: []
-  - [ ] 4.1 Write tests: verify init warns when cwd is not a git repo, verify init proceeds normally in a git repo
-  - [ ] 4.2 Add guard to `src/colonyos/init.py`: when cwd has no `.git` directory (walking up), print a warning like "Warning: Not inside a git repository. ColonyOS works per-project — please cd into a git repo." and prompt for confirmation before proceeding
+  - [x] 4.1 Write tests: verify init warns when cwd is not a git repo, verify init proceeds normally in a git repo
+  - [x] 4.2 Add guard to `src/colonyos/init.py`: when cwd has no `.git` directory (walking up), print a warning like "Warning: Not inside a git repository. ColonyOS works per-project — please cd into a git repo." and prompt for confirmation before proceeding
 
 - [ ] 5.0 Create VM provisioning script
   depends_on: []

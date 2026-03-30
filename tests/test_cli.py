@@ -1316,6 +1316,7 @@ class TestInitWithPacks:
         ])
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.doctor.subprocess.run", return_value=MagicMock(returncode=0)), \
              patch("colonyos.doctor.sys.version_info", type("V", (), {"major": 3, "minor": 12})()), \
              patch("colonyos.init._collect_strategic_goals", return_value=""):
@@ -1340,6 +1341,7 @@ class TestInitCliRouting:
 
     def test_default_calls_ai_init(self, runner: CliRunner, tmp_path: Path):
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.cli.run_ai_init") as mock_ai:
             mock_ai.return_value = ColonyConfig()
             result = runner.invoke(app, ["init"])
@@ -1348,6 +1350,7 @@ class TestInitCliRouting:
 
     def test_manual_calls_run_init(self, runner: CliRunner, tmp_path: Path):
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.cli.run_init") as mock_manual:
             mock_manual.return_value = ColonyConfig()
             result = runner.invoke(app, ["init", "--manual"], input="n\n")
@@ -1356,6 +1359,7 @@ class TestInitCliRouting:
 
     def test_quick_calls_run_init(self, runner: CliRunner, tmp_path: Path):
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.cli.run_init") as mock_manual:
             mock_manual.return_value = ColonyConfig()
             result = runner.invoke(app, ["init", "--quick", "--name", "Test"])
@@ -1366,6 +1370,7 @@ class TestInitCliRouting:
 
     def test_personas_calls_run_init(self, runner: CliRunner, tmp_path: Path):
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.cli.run_init") as mock_manual:
             mock_manual.return_value = ColonyConfig()
             result = runner.invoke(app, ["init", "--personas"], input="1\ny\nn\n")
@@ -2134,6 +2139,7 @@ class TestInitDoctorPreCheck:
             ]
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.doctor.run_doctor_checks", fake_checks):
             result = runner.invoke(app, ["init", "--quick", "--name", "Test"])
 
@@ -2153,6 +2159,7 @@ class TestInitDoctorPreCheck:
             ]
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.doctor.run_doctor_checks", fake_checks):
             result = runner.invoke(app, [
                 "init", "--quick", "--name", "Test",
