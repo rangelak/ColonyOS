@@ -117,6 +117,27 @@ class ParallelismStatsRow:
 
 
 @dataclass
+class DeliveryOutcomeStats:
+    """FR-6.1: Aggregate PR outcome metrics for the stats dashboard.
+
+    Fields:
+        total_tracked: Total number of PRs tracked by outcome system
+        merged_count: Number of merged PRs
+        closed_count: Number of closed (not merged) PRs
+        open_count: Number of still-open PRs
+        merge_rate: Fraction merged out of resolved (merged + closed), 0.0 if none resolved
+        avg_time_to_merge_hours: Average hours from creation to merge, 0.0 if none merged
+    """
+
+    total_tracked: int = 0
+    merged_count: int = 0
+    closed_count: int = 0
+    open_count: int = 0
+    merge_rate: float = 0.0
+    avg_time_to_merge_hours: float = 0.0
+
+
+@dataclass
 class StatsResult:
     """Top-level container for all computed stats sections."""
 
@@ -130,6 +151,7 @@ class StatsResult:
     phase_filter: str | None = None
     model_usage: list[ModelUsageRow] = field(default_factory=list)
     parallelism_stats: list[ParallelismStatsRow] = field(default_factory=list)
+    delivery_outcomes: DeliveryOutcomeStats = field(default_factory=DeliveryOutcomeStats)
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +449,32 @@ def compute_parallelism_stats(runs: list[dict]) -> list[ParallelismStatsRow]:
     return rows
 
 
+def compute_delivery_outcomes(repo_root: Path) -> DeliveryOutcomeStats:
+    """FR-6.3: Read from OutcomeStore and return DeliveryOutcomeStats.
+
+    Returns a zero-valued dataclass if no outcomes are tracked or if
+    the outcome store is unavailable (e.g. no memory.db yet).
+    """
+    try:
+        from colonyos.outcomes import compute_outcome_stats
+    except ImportError:
+        return DeliveryOutcomeStats()
+
+    try:
+        raw = compute_outcome_stats(repo_root)
+    except Exception:
+        return DeliveryOutcomeStats()
+
+    return DeliveryOutcomeStats(
+        total_tracked=raw.get("total_tracked", 0),
+        merged_count=raw.get("merged_count", 0),
+        closed_count=raw.get("closed_count", 0),
+        open_count=raw.get("open_count", 0),
+        merge_rate=raw.get("merge_rate", 0.0),
+        avg_time_to_merge_hours=raw.get("avg_time_to_merge_hours", 0.0),
+    )
+
+
 def compute_stats(
     runs: list[dict], phase_filter: str | None = None
 ) -> StatsResult:
@@ -620,6 +668,25 @@ def render_parallelism_stats(console: Console, rows: list[ParallelismStatsRow]) 
     console.print(table)
 
 
+def render_delivery_outcomes(console: Console, stats: DeliveryOutcomeStats) -> None:
+    """FR-6.4: Render delivery outcome stats as a Rich Panel."""
+    if stats.total_tracked == 0:
+        console.print(
+            Panel("No PRs tracked yet.", title="Delivery Outcomes", border_style="magenta")
+        )
+        return
+
+    lines = [
+        f"Total Tracked: {stats.total_tracked}",
+        f"Merged:        {stats.merged_count}",
+        f"Closed:        {stats.closed_count}",
+        f"Open:          {stats.open_count}",
+        f"Merge Rate:    {stats.merge_rate * 100:.1f}%",
+        f"Avg Time to Merge: {stats.avg_time_to_merge_hours:.1f}h",
+    ]
+    console.print(Panel("\n".join(lines), title="Delivery Outcomes", border_style="magenta"))
+
+
 def render_dashboard(console: Console, result: StatsResult) -> None:
     """Orchestrate rendering of all dashboard sections."""
     render_run_summary(console, result.summary)
@@ -646,6 +713,10 @@ def render_dashboard(console: Console, result: StatsResult) -> None:
     if result.parallelism_stats:
         console.print()
         render_parallelism_stats(console, result.parallelism_stats)
+
+    if result.delivery_outcomes and result.delivery_outcomes.total_tracked > 0:
+        console.print()
+        render_delivery_outcomes(console, result.delivery_outcomes)
 
     if result.phase_filter and result.phase_detail:
         console.print()

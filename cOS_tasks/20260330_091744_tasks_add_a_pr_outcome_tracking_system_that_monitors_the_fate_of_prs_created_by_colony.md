@@ -50,12 +50,12 @@
   - [x] 5.2 Add `outcomes` command group to `cli.py`: `@app.group()` with `outcomes` name. Default command (no subcommand) shows the outcome table using Rich Table with columns: PR#, Status (colored), Branch, Age, Reviews, CI, Close Context. Use `OutcomeStore` to fetch records.
   - [x] 5.3 Add `outcomes poll` subcommand: calls `poll_outcomes(repo_root)`, then displays the updated table
 
-- [ ] 6.0 Stats integration — Delivery Outcomes section in dashboard
+- [x] 6.0 Stats integration — Delivery Outcomes section in dashboard
   depends_on: [1.0]
-  - [ ] 6.1 Write tests for stats integration: test `DeliveryOutcomeStats` dataclass, test `render_delivery_outcomes` produces expected Rich Panel output, test integration with `render_dashboard`
-  - [ ] 6.2 Add `DeliveryOutcomeStats` dataclass to `stats.py` with fields: total_tracked, merged_count, closed_count, open_count, merge_rate, avg_time_to_merge_hours
-  - [ ] 6.3 Add `compute_delivery_outcomes()` function that reads from `OutcomeStore` and returns `DeliveryOutcomeStats`
-  - [ ] 6.4 Add `render_delivery_outcomes()` function that renders the stats as a Rich Panel, and call it from `render_dashboard()` after the parallelism section
+  - [x] 6.1 Write tests for stats integration: test `DeliveryOutcomeStats` dataclass, test `render_delivery_outcomes` produces expected Rich Panel output, test integration with `render_dashboard`
+  - [x] 6.2 Add `DeliveryOutcomeStats` dataclass to `stats.py` with fields: total_tracked, merged_count, closed_count, open_count, merge_rate, avg_time_to_merge_hours
+  - [x] 6.3 Add `compute_delivery_outcomes()` function that reads from `OutcomeStore` and returns `DeliveryOutcomeStats`
+  - [x] 6.4 Add `render_delivery_outcomes()` function that renders the stats as a Rich Panel, and call it from `render_dashboard()` after the parallelism section
 
 - [ ] 7.0 Memory capture — store feedback from closed PRs as memory entries
   depends_on: [1.0]
