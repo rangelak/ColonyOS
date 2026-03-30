@@ -75,15 +75,15 @@
   - [x] 5.3 Update `deploy/README.md` to reference `provision.sh` as the primary setup method
   - [x] 5.4 Add shellcheck linting for `deploy/provision.sh` to CI workflow (`.github/workflows/ci.yml`)
 
-- [ ] 6.0 Update README and documentation
+- [x] 6.0 Update README and documentation
   depends_on: [1.0, 3.0]
-  - [ ] 6.1 Add Homebrew as first install option in README (macOS section):
+  - [x] 6.1 Add Homebrew as first install option in README (macOS section):
     ```
     brew install rangelak/colonyos/colonyos
     ```
-  - [ ] 6.2 Keep curl installer as cross-platform option
-  - [ ] 6.3 Add VM deployment quickstart section pointing to `deploy/provision.sh`
-  - [ ] 6.4 Remove stale references to `colonyos/tap` (update to `rangelak/colonyos`)
+  - [x] 6.2 Keep curl installer as cross-platform option
+  - [x] 6.3 Add VM deployment quickstart section pointing to `deploy/provision.sh`
+  - [x] 6.4 Remove stale references to `colonyos/tap` (update to `rangelak/colonyos`)
 
 - [ ] 7.0 End-to-end validation
   depends_on: [2.0, 3.0, 4.0, 5.0, 6.0]
