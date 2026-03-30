@@ -1,5 +1,31 @@
 # Changelog
 
+## 20260330_193500 — Homebrew Global Installation & VM-Ready Deployment
+
+Adds a working Homebrew distribution channel (`brew install rangelak/colonyos/colonyos`) and a single-command VM provisioning script for Ubuntu 22.04+. The release workflow now auto-updates the tap formula on every tagged release, and `colonyos doctor` detects the install method to show correct upgrade instructions.
+
+**Created:**
+- `scripts/generate-homebrew-formula.sh` — Generates a complete Homebrew formula with all Python dependency resource blocks
+- `docs/homebrew-tap-setup.md` — Setup guide for the `rangelak/homebrew-colonyos` tap repository
+- `deploy/provision.sh` — Single-command VM provisioning script (Ubuntu 22.04+)
+- `.github/workflows/release.yml` — Release workflow with auto-updating Homebrew tap job
+- `tests/test_e2e_validation.py` — End-to-end validation tests for Homebrew install and VM deploy
+- `tests/test_generate_formula.sh` — Shell tests for formula generation script
+- `tests/test_doctor.py` — Tests for install-method detection in doctor command
+
+**Modified:**
+- `Formula/colonyos.rb` — Updated formula with proper dependency resources and test block
+- `src/colonyos/doctor.py` — Install-method detection (brew/pipx/pip/dev)
+- `src/colonyos/cli.py` — Doctor command integration updates
+- `src/colonyos/init.py` — Non-git-repo guard for `colonyos init`
+- `README.md` — Homebrew install and VM deployment quickstart sections
+- `deploy/README.md` — Updated with provisioning script documentation
+- `.github/workflows/ci.yml` — CI updates for new test coverage
+- `tests/test_ci_workflows.py` — Additional CI workflow tests
+
+**PRD:** `cOS_prds/20260330_182656_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260330_182656_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260330_154500 — Enforce Repo Runtime Exclusivity and Shutdown Cleanup
 
 Hardens ColonyOS against overlapping repo-bound runtimes by introducing a shared runtime lock across daemon, Slack watcher, queue, auto, TUI, and related entrypoints. This prevents concurrent work on the same checkout, improves cancellation cleanup for Ctrl+C and SIGTERM paths, and documents the generated runtime lock artifacts.

@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation">Installation</a> · <a href="#quickstart">Quickstart</a> · <a href="#how-it-works">How It Works</a> · <a href="#cli-reference">CLI</a> · <a href="#configuration-reference">Config</a> · <a href="#slack-integration">Slack</a> · <a href="#web-dashboard">Dashboard</a> · <a href="#architecture">Architecture</a>
+  <a href="#installation">Installation</a> · <a href="#quickstart">Quickstart</a> · <a href="#how-it-works">How It Works</a> · <a href="#cli-reference">CLI</a> · <a href="#configuration-reference">Config</a> · <a href="#slack-integration">Slack</a> · <a href="#web-dashboard">Dashboard</a> · <a href="#vm-deployment">VM Deploy</a> · <a href="#architecture">Architecture</a>
 </p>
 
 ---
@@ -44,12 +44,20 @@ Under the hood it orchestrates [Claude](https://www.anthropic.com/claude) agent 
 
 ### Install ColonyOS
 
+**macOS (Homebrew)**:
+
 ```bash
-# Recommended — handles everything (installs pipx if needed, then colonyos)
+brew install rangelak/colonyos/colonyos
+```
+
+**Cross-platform (curl installer)**:
+
+```bash
+# Handles everything — installs pipx if needed, then colonyos
 curl -sSL https://raw.githubusercontent.com/rangelak/ColonyOS/main/install.sh | sh
 ```
 
-Or install directly if you already have pip:
+**pip** (if you already have it):
 
 ```bash
 pip install colonyos
@@ -749,6 +757,20 @@ git tag v0.2.0
 git push origin v0.2.0
 # CI automatically: runs tests → builds → publishes to PyPI → creates GitHub Release
 ```
+
+---
+
+## VM Deployment
+
+Deploy ColonyOS as an always-on daemon on a fresh Ubuntu 22.04+ VM:
+
+```bash
+git clone https://github.com/rangelak/ColonyOS.git /tmp/colonyos-setup
+cd /tmp/colonyos-setup
+sudo bash deploy/provision.sh
+```
+
+The provisioning script installs all dependencies (Python 3.11+, Node.js, GitHub CLI, pipx), creates a `colonyos` system user, configures the systemd service, and runs `colonyos doctor` to verify the setup. See [`deploy/README.md`](deploy/README.md) for full options including `--dry-run`, `--slack`, and non-interactive mode.
 
 ---
 

@@ -1,14 +1,43 @@
 # ColonyOS Daemon — VM Deployment Guide
 
-## Prerequisites
+## Automated Provisioning (Recommended)
 
+The fastest way to set up ColonyOS on a fresh Ubuntu 22.04+ VM:
+
+```bash
+# Clone the repo
+git clone https://github.com/rangelak/ColonyOS.git /tmp/colonyos-setup
+cd /tmp/colonyos-setup
+
+# Run the provisioning script
+sudo bash deploy/provision.sh
+
+# With Slack support:
+sudo bash deploy/provision.sh --slack
+
+# Non-interactive (reads ANTHROPIC_API_KEY and GITHUB_TOKEN from env):
+sudo ANTHROPIC_API_KEY=sk-ant-... GITHUB_TOKEN=ghp_... bash deploy/provision.sh --yes
+
+# Preview what would be done:
+sudo bash deploy/provision.sh --dry-run
+```
+
+The script handles everything: Python 3.11+, Node.js, GitHub CLI, pipx,
+ColonyOS, systemd service, and environment file creation.
+
+## Manual Setup
+
+If you prefer manual control, follow these steps:
+
+### Prerequisites
+
+- Ubuntu 22.04+ (or similar Linux with systemd)
 - Python 3.11-3.13 recommended
 - Git with `gh` CLI authenticated
 - Slack Bot Token (`COLONYOS_SLACK_BOT_TOKEN`) and App Token (`COLONYOS_SLACK_APP_TOKEN`)
 - Anthropic API Key (`ANTHROPIC_API_KEY`)
-- systemd (Linux)
 
-## Quick Start
+### Steps
 
 1. **Clone and install**:
    ```bash
