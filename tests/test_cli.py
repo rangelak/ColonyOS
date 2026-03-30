@@ -821,6 +821,17 @@ class TestDaemonCommand:
             )
 
 
+class TestWatchSlackCommand:
+    def test_watch_alias_calls_watch_slack(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._watch_slack_impl") as mock_watch:
+            result = runner.invoke(app, ["watch"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert "deprecated" in result.output.lower()
+        mock_watch.assert_called_once()
+
+
 class TestAuto:
     def test_no_config(self, runner: CliRunner, tmp_path: Path):
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path):

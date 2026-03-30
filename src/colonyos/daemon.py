@@ -31,13 +31,23 @@ from colonyos.daemon_state import (
     save_daemon_state,
 )
 from colonyos.models import (
-    PRIORITY_CEO,
-    PRIORITY_CLEANUP,
     QueueItem,
     QueueItemStatus,
     QueueState,
     QueueStatus,
+    RunLog,
+    RunStatus,
     compute_priority,
+)
+from colonyos.queue_runtime import (
+    archive_terminal_queue_items,
+    attach_demand_signal,
+    find_related_history_items,
+    find_similar_queue_item,
+    pending_queue_snapshot,
+    reprioritize_queue,
+    reprioritize_queue_item,
+    select_next_pending_item,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,17 +122,23 @@ class Daemon:
         self._last_cleanup_time: float = 0.0
         self._last_heartbeat_time: float = 0.0
         self._last_github_poll_time: float = 0.0
+        self._last_reprioritize_time: float = 0.0
 
         # PID lock file descriptor
         self._pid_fd: int | None = None
 
         # Outcome polling timestamp
         self._last_outcome_poll_time: float = 0.0
+        self._last_digest_date: str | None = None
 
         # Budget alert flags (reset on daily budget reset)
         self._budget_80_alerted: bool = False
         self._budget_100_alerted: bool = False
         self._last_budget_incident_date: str | None = None
+
+        self._slack_watch_state: Any | None = None
+        self._slack_client: Any | None = None
+        self._slack_client_ready = threading.Event()
 
     # ------------------------------------------------------------------
     # Public API
@@ -172,6 +188,24 @@ class Daemon:
         """Request graceful shutdown."""
         logger.info("Daemon shutdown requested")
         self._stop_event.set()
+
+    def _check_time_exceeded(self) -> bool:
+        if not self.max_hours:
+            return False
+        elapsed = (time.monotonic() - self._started_at) / 3600
+        return elapsed >= self.max_hours
+
+    def _check_budget_exceeded(self) -> bool:
+        allowed, _remaining = self._state.check_daily_budget(self.daily_budget)
+        return not allowed
+
+    def _check_daily_budget_exceeded(self) -> bool:
+        if self.config.slack.daily_budget_usd is None:
+            return False
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._state.daily_reset_date != today:
+            return False
+        return self._state.daily_spend_usd >= self.config.slack.daily_budget_usd
 
     # ------------------------------------------------------------------
     # Main loop
@@ -226,11 +260,17 @@ class Daemon:
             self._schedule_cleanup()
             self._last_cleanup_time = now
 
+        # 4.5 Active reprioritization
+        if now - self._last_reprioritize_time >= 900:
+            self._reprioritize_queue()
+            self._last_reprioritize_time = now
+
         # 5. Heartbeat
         heartbeat_interval = self.daemon_config.heartbeat_interval_minutes * 60
         if now - self._last_heartbeat_time >= heartbeat_interval:
             self._post_heartbeat()
             self._last_heartbeat_time = now
+        self._post_daily_digest_if_due()
 
         # 6. PR outcome polling
         outcome_interval = self.daemon_config.outcome_poll_interval_minutes * 60
@@ -307,19 +347,34 @@ class Daemon:
 
         # Execute outside the lock
         try:
-            cost = self._execute_item(item)
+            log = self._execute_item(item)
             with self._lock:
-                item.status = QueueItemStatus.COMPLETED
-                item.cost_usd = cost
-                self._state.record_spend(cost)
-                self._state.record_success()
+                item.run_id = log.run_id
+                item.cost_usd = log.total_cost_usd
+                item.pr_url = log.pr_url
+                if log.branch_name:
+                    item.branch_name = log.branch_name
+                if log.preflight and log.preflight.head_sha:
+                    item.head_sha = log.preflight.head_sha
+                if log.status == RunStatus.COMPLETED:
+                    item.status = QueueItemStatus.COMPLETED
+                    self._state.record_success()
+                else:
+                    item.status = QueueItemStatus.FAILED
+                    item.error = (
+                        log.phases[-1].error[:200]
+                        if log.phases and log.phases[-1].error
+                        else "Pipeline failed"
+                    )
+                self._state.record_spend(log.total_cost_usd)
                 self._pipeline_running = False
                 self._persist_state()
                 self._persist_queue()
                 logger.info(
-                    "Completed item %s (cost=$%.4f, spend=%s, pending=%d)",
+                    "Finished item %s (status=%s, cost=$%.4f, spend=%s, pending=%d)",
                     item.id,
-                    cost,
+                    item.status.value,
+                    log.total_cost_usd,
                     self._spent_summary(),
                     sum(
                         1
@@ -384,52 +439,22 @@ class Daemon:
             )
 
     def _next_pending_item(self) -> QueueItem | None:
-        """Return the highest-priority pending item (lowest priority number, FIFO within tier).
-
-        Also applies starvation promotion: items pending >24h get promoted one tier.
-        """
-        now = datetime.now(timezone.utc)
-        pending = [
-            item
-            for item in self._queue_state.items
-            if item.status == QueueItemStatus.PENDING
-        ]
-        if not pending:
-            return None
-
-        # Starvation promotion: items older than 24h get promoted one tier
-        promoted = False
-        for item in pending:
-            try:
-                added = datetime.fromisoformat(item.added_at)
-                if added.tzinfo is None:
-                    added = added.replace(tzinfo=timezone.utc)
-                if (now - added).total_seconds() > 86400 and item.priority > 0:
-                    item.priority -= 1
-                    promoted = True
-                    logger.info(
-                        "Promoted item %s to priority %d (starvation prevention)",
-                        item.id,
-                        item.priority,
-                    )
-            except (ValueError, TypeError):
-                pass
-
-        if promoted:
+        """Return the highest-priority pending item (lowest priority number, FIFO within tier)."""
+        item = select_next_pending_item(self._queue_state)
+        if item is not None:
             self._persist_queue()
+        return item
 
-        # Sort by priority (ascending), then by added_at (ascending = FIFO)
-        pending.sort(key=lambda i: (i.priority, i.added_at))
-        return pending[0]
-
-    def _execute_item(self, item: QueueItem) -> float:
+    def _execute_item(self, item: QueueItem) -> RunLog:
         """Execute a single queue item through the pipeline.
 
-        Returns the cost in USD.
+        Returns the full run log.
         """
         if self.dry_run:
             logger.info("[DRY RUN] Would execute item %s: %s", item.id, item.source_value[:100])
-            return 0.0
+            log = RunLog(run_id=item.id, prompt=item.source_value, status=RunStatus.COMPLETED)
+            log.mark_finished()
+            return log
 
         logger.info(
             "Executing item %s (type=%s, priority=%d)",
@@ -440,13 +465,67 @@ class Daemon:
 
         # Import here to avoid circular imports — cli.py imports from many modules
         from colonyos.cli import run_pipeline_for_queue_item
+        from colonyos.slack import SlackUI, post_message, post_run_summary
 
-        return run_pipeline_for_queue_item(
+        notification = self._ensure_notification_thread(
+            item,
+            f":gear: *Starting {item.source_type} work*\n{item.summary or item.source_value[:160]}",
+        )
+        ui_factory = None
+        if notification is not None:
+            client, channel, thread_ts = notification
+
+            def _slack_ui_factory(prefix: str = "") -> SlackUI:
+                return SlackUI(client, channel, thread_ts)
+
+            ui_factory = _slack_ui_factory
+            try:
+                post_message(
+                    client,
+                    channel,
+                    (
+                        f":rocket: Working on *{item.source_type}* request\n"
+                        f"{item.summary or item.issue_title or item.source_value[:200]}"
+                    ),
+                    thread_ts=thread_ts,
+                )
+            except Exception:
+                logger.debug("Failed to post queue execution start", exc_info=True)
+
+        log = run_pipeline_for_queue_item(
             item=item,
             repo_root=self.repo_root,
             config=self.config,
             verbose=self.verbose,
+            quiet=False,
+            ui_factory=ui_factory,
+            queue_state=self._queue_state,
         )
+        item.run_id = log.run_id
+        item.pr_url = log.pr_url
+        if log.branch_name:
+            item.branch_name = log.branch_name
+        if log.preflight and log.preflight.head_sha:
+            item.head_sha = log.preflight.head_sha
+
+        if notification is not None:
+            client, channel, thread_ts = notification
+            try:
+                post_run_summary(
+                    client,
+                    channel,
+                    thread_ts,
+                    status=log.status.value,
+                    total_cost=log.total_cost_usd,
+                    branch_name=log.branch_name,
+                    pr_url=log.pr_url,
+                    summary=item.summary,
+                    phase_breakdown=self._format_phase_breakdown(log),
+                    demand_count=item.demand_count,
+                )
+            except Exception:
+                logger.debug("Failed to post final queue summary", exc_info=True)
+        return log
 
     # ------------------------------------------------------------------
     # GitHub Issue Polling (FR-2)
@@ -472,6 +551,27 @@ class Daemon:
                 # Dedup check
                 if self._is_duplicate("issue", str(issue.number)):
                     continue
+                similar = find_similar_queue_item(
+                    self._queue_state,
+                    source_type="issue",
+                    prompt_text=issue.title,
+                )
+                if similar is not None:
+                    with self._lock:
+                        attach_demand_signal(
+                            similar.item,
+                            source_type="issue",
+                            source_value=str(issue.number),
+                            summary=issue.title,
+                        )
+                        reprioritize_queue_item(similar.item)
+                        self._persist_queue()
+                    logger.info(
+                        "Merged GitHub issue #%d into existing queue item %s",
+                        issue.number,
+                        similar.item.id,
+                    )
+                    continue
 
                 priority = compute_priority("issue", issue.labels)
                 item = QueueItem(
@@ -481,11 +581,23 @@ class Daemon:
                     status=QueueItemStatus.PENDING,
                     priority=priority,
                     issue_title=sanitize_untrusted_content(issue.title),
+                    summary=sanitize_untrusted_content(issue.title),
+                    priority_reason="base:issue",
+                    notification_channel=self._default_notification_channel(),
+                    related_item_ids=[
+                        related.id
+                        for related in find_related_history_items(
+                            self._queue_state,
+                            prompt_text=issue.title,
+                        )
+                    ],
                 )
+                reprioritize_queue_item(item)
 
                 with self._lock:
                     self._queue_state.items.append(item)
                     self._persist_queue()
+                    self._post_queue_enqueued(item)
 
                 logger.info(
                     "Enqueued GitHub issue #%d (P%d): %s",
@@ -541,17 +653,49 @@ class Daemon:
                 return
 
             if proposal_prompt:
+                similar = find_similar_queue_item(
+                    self._queue_state,
+                    source_type="ceo",
+                    prompt_text=proposal_prompt,
+                )
+                if similar is not None:
+                    with self._lock:
+                        attach_demand_signal(
+                            similar.item,
+                            source_type="ceo",
+                            source_value=proposal_prompt,
+                            summary=proposal_prompt.splitlines()[0][:180],
+                        )
+                        reprioritize_queue_item(similar.item)
+                        self._persist_queue()
+                    logger.info(
+                        "Merged CEO proposal into existing queue item %s",
+                        similar.item.id,
+                    )
+                    return
                 item = QueueItem(
                     id=f"ceo-{int(time.time())}",
                     source_type="ceo",
                     source_value=proposal_prompt,
                     status=QueueItemStatus.PENDING,
-                    priority=PRIORITY_CEO,
+                    priority=compute_priority("ceo"),
+                    summary=proposal_prompt.splitlines()[0][:180],
+                    priority_reason="base:ceo",
+                    notification_channel=self._default_notification_channel(),
+                    related_item_ids=[
+                        related.id
+                        for related in find_related_history_items(
+                            self._queue_state,
+                            prompt_text=proposal_prompt,
+                        )
+                    ],
                 )
+                reprioritize_queue_item(item)
                 with self._lock:
                     self._queue_state.items.append(item)
                     self._persist_queue()
-                logger.info("CEO proposed work enqueued (P%d): %s", PRIORITY_CEO, proposal_prompt[:120])
+                    self._post_queue_enqueued(item)
+                logger.info("CEO proposed work enqueued (P%d): %s", item.priority, proposal_prompt[:120])
             else:
                 logger.info("CEO idle-fill produced no actionable proposal")
 
@@ -593,8 +737,12 @@ class Daemon:
                     source_type="cleanup",
                     source_value=source_val,
                     status=QueueItemStatus.PENDING,
-                    priority=PRIORITY_CLEANUP,
+                    priority=compute_priority("cleanup"),
+                    summary=f"Cleanup/refactor {candidate.path.name}",
+                    priority_reason="base:cleanup",
+                    notification_channel=self._default_notification_channel(),
                 )
+                reprioritize_queue_item(item)
                 with self._lock:
                     self._queue_state.items.append(item)
                     enqueued += 1
@@ -602,6 +750,9 @@ class Daemon:
             if enqueued:
                 with self._lock:
                     self._persist_queue()
+                    for item in self._queue_state.items:
+                        if item.source_type == "cleanup" and item.status == QueueItemStatus.PENDING and not item.notification_thread_ts:
+                            self._post_queue_enqueued(item)
                 logger.info("Enqueued %d cleanup items", enqueued)
 
         except Exception:
@@ -610,6 +761,63 @@ class Daemon:
     # ------------------------------------------------------------------
     # Health & Observability (FR-10)
     # ------------------------------------------------------------------
+
+    def _reprioritize_queue(self) -> None:
+        try:
+            from colonyos.prioritizer import reprioritize_queue_with_agent
+
+            with self._lock:
+                changed = reprioritize_queue_with_agent(
+                    self.repo_root,
+                    self.config,
+                    self._queue_state,
+                )
+                if changed:
+                    self._persist_queue()
+        except Exception:
+            logger.warning("Queue reprioritization failed", exc_info=True)
+
+    def _post_daily_digest_if_due(self) -> None:
+        now = datetime.now(timezone.utc)
+        today = now.strftime("%Y-%m-%d")
+        if now.hour < self.daemon_config.digest_hour_utc:
+            return
+        if self._last_digest_date == today:
+            return
+
+        top_items = pending_queue_snapshot(self._queue_state, limit=3)
+        pending = sum(
+            1 for item in self._queue_state.items
+            if item.status == QueueItemStatus.PENDING
+        )
+        recent_completed = [
+            item for item in reversed(self._queue_state.items)
+            if item.status == QueueItemStatus.COMPLETED
+        ][:3]
+        lines = [
+            ":spiral_note_pad: *Daily ColonyOS Queue Digest*",
+            f"Queue depth: {pending}",
+            "Top 3 pending:",
+        ]
+        if top_items:
+            for item in top_items:
+                lines.append(
+                    f"- P{item.priority} {item.source_type}: "
+                    f"{item.summary or item.issue_title or item.source_value[:140]}"
+                )
+                if item.priority_reason:
+                    lines.append(f"  reason: {item.priority_reason}")
+        else:
+            lines.append("- No pending work.")
+        if recent_completed:
+            lines.append("Recent completions:")
+            for item in recent_completed:
+                lines.append(
+                    f"- {item.source_type}: {item.summary or item.issue_title or item.source_value[:100]}"
+                )
+        lines.append(f"Daily spend: {self._spent_summary()}")
+        self._post_slack_message("\n".join(lines))
+        self._last_digest_date = today
 
     def _post_heartbeat(self) -> None:
         """Post heartbeat to Slack and update state."""
@@ -723,12 +931,62 @@ class Daemon:
     def _slack_listener_thread(self) -> None:
         """Run Slack Socket Mode listener."""
         try:
-            from colonyos.slack import create_slack_app, start_socket_mode
+            from colonyos.slack import (
+                SlackWatchState,
+                create_slack_app,
+                resolve_channel_names,
+                save_watch_state,
+                start_socket_mode,
+            )
+            from colonyos.slack_queue import SlackQueueEngine
 
+            watch_id = datetime.now(timezone.utc).strftime("daemon-watch-%Y%m%d_%H%M%S")
+            self._slack_watch_state = SlackWatchState(watch_id=watch_id)
             slack_app = create_slack_app(self.config.slack)
-            self._register_daemon_commands(slack_app)
+            auth_response = slack_app.client.auth_test()
+            bot_user_id = auth_response["user_id"]
+            resolved_channels = resolve_channel_names(
+                slack_app.client,
+                self.config.slack.channels,
+            )
+            self.config.slack.channels = [ch.id for ch in resolved_channels]
+
+            def _persist_watch_state() -> None:
+                assert self._slack_watch_state is not None
+                save_watch_state(self.repo_root, self._slack_watch_state)
+
+            def _publish_client(client: Any) -> None:
+                self._slack_client = client
+
+            slack_engine = SlackQueueEngine(
+                repo_root=self.repo_root,
+                config=self.config,
+                queue_state=self._queue_state,
+                watch_state=self._slack_watch_state,
+                state_lock=self._lock,
+                shutdown_event=self._stop_event,
+                bot_user_id=bot_user_id,
+                slack_client_ready=self._slack_client_ready,
+                publish_client=_publish_client,
+                persist_queue=self._persist_queue,
+                persist_watch_state=_persist_watch_state,
+                is_time_exceeded=self._check_time_exceeded,
+                is_budget_exceeded=self._check_budget_exceeded,
+                is_daily_budget_exceeded=self._check_daily_budget_exceeded,
+                dry_run=self.dry_run,
+            )
             logger.info("Slack listener thread started")
-            start_socket_mode(slack_app)
+            self._register_daemon_commands(slack_app)
+            slack_engine.register(slack_app)
+            _persist_watch_state()
+            handler = start_socket_mode(slack_app)
+            handler.connect()
+            while not self._stop_event.is_set():
+                self._stop_event.wait(timeout=5.0)
+            try:
+                handler.close()
+            except Exception:
+                logger.debug("Failed to close daemon Slack handler", exc_info=True)
         except Exception:
             logger.exception("Slack listener thread failed")
 
@@ -771,6 +1029,65 @@ class Daemon:
             client.chat_postMessage(channel=channels[0], text=text)
         except Exception:
             logger.exception("Failed to post Slack message")
+
+    def _default_notification_channel(self) -> str | None:
+        channels = self.config.slack.channels
+        return channels[0] if channels else None
+
+    def _get_notification_client(self) -> Any | None:
+        if self._slack_client is not None:
+            return self._slack_client
+        token = os.environ.get("COLONYOS_SLACK_BOT_TOKEN")
+        if not token:
+            return None
+        try:
+            from slack_sdk import WebClient
+
+            return WebClient(token=token)
+        except Exception:
+            logger.debug("Failed to create Slack WebClient", exc_info=True)
+            return None
+
+    def _ensure_notification_thread(self, item: QueueItem, intro_text: str) -> tuple[Any, str, str] | None:
+        client = self._get_notification_client()
+        channel = item.notification_channel or self._default_notification_channel()
+        if client is None or not channel:
+            return None
+        if item.notification_thread_ts:
+            return client, channel, item.notification_thread_ts
+        try:
+            from colonyos.slack import post_message
+
+            response = post_message(client, channel, intro_text)
+            thread_ts = response.get("ts")
+            if not thread_ts:
+                return None
+            item.notification_channel = channel
+            item.notification_thread_ts = thread_ts
+            self._persist_queue()
+            return client, channel, thread_ts
+        except Exception:
+            logger.debug("Failed to create notification thread", exc_info=True)
+            return None
+
+    def _format_phase_breakdown(self, log: Any) -> list[str]:
+        lines: list[str] = []
+        for phase in log.phases:
+            phase_cost = phase.cost_usd or 0.0
+            status = "ok" if phase.success else "failed"
+            lines.append(f"- {phase.phase.value}: {status}, ${phase_cost:.4f}")
+        return lines
+
+    def _post_queue_enqueued(self, item: QueueItem) -> None:
+        if item.notification_thread_ts:
+            return
+        summary = item.summary or item.issue_title or item.source_value[:160]
+        intro = (
+            f":inbox_tray: *Queued {item.source_type} work*\n"
+            f"{summary}\n"
+            f"Priority: P{item.priority}"
+        )
+        self._ensure_notification_thread(item, intro)
 
     def _handle_control_command(self, user_id: str, text: str) -> str | None:
         """Handle a Slack kill-switch control command.
@@ -895,6 +1212,7 @@ class Daemon:
     def _persist_queue(self) -> None:
         """Persist queue state atomically."""
         queue_path = self.repo_root / ".colonyos" / "queue.json"
+        archive_terminal_queue_items(self.repo_root, self._queue_state)
         atomic_write_json(queue_path, self._queue_state.to_dict())
 
     def _load_or_create_queue(self) -> QueueState:

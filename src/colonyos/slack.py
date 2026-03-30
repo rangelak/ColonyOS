@@ -40,7 +40,7 @@ class SlackClient(Protocol):
     """
 
     def chat_postMessage(
-        self, *, channel: str, thread_ts: str, text: str, **kwargs: Any
+        self, *, channel: str, text: str, thread_ts: str | None = None, **kwargs: Any
     ) -> dict[str, Any]: ...
 
     def reactions_add(
@@ -52,6 +52,8 @@ class SlackClient(Protocol):
     ) -> dict[str, Any]: ...
 
     def conversations_list(self, **kwargs: Any) -> dict[str, Any]: ...
+
+    def conversations_history(self, **kwargs: Any) -> dict[str, Any]: ...
 
 # Strict allowlist for git branch ref characters (matches git-check-ref-format rules).
 _VALID_GIT_REF_RE = re.compile(r"^[a-zA-Z0-9._/\-]+$")
@@ -283,16 +285,26 @@ def format_run_summary(
     total_cost: float,
     branch_name: str | None = None,
     pr_url: str | None = None,
+    summary: str | None = None,
+    phase_breakdown: list[str] | None = None,
+    demand_count: int = 1,
 ) -> str:
     """Format the final run summary for a Slack thread."""
     parts: list[str] = []
     icon = ":white_check_mark:" if status == "completed" else ":x:"
     parts.append(f"{icon} *Pipeline {status}*")
+    if summary:
+        parts.append(summary)
     parts.append(f"Total cost: ${total_cost:.4f}")
+    if demand_count > 1:
+        parts.append(f"Demand signals merged: {demand_count}")
     if branch_name:
         parts.append(f"Branch: `{branch_name}`")
     if pr_url:
         parts.append(f"PR: {pr_url}")
+    if phase_breakdown:
+        parts.append("*Phase breakdown*")
+        parts.extend(phase_breakdown)
     return "\n".join(parts)
 
 
@@ -314,6 +326,20 @@ def format_fix_error(error_type: str, detail: str) -> str:
     return f":x: *{error_type}*: {detail}"
 
 
+def post_message(
+    client: SlackClient,
+    channel: str,
+    text: str,
+    *,
+    thread_ts: str | None = None,
+) -> dict[str, Any]:
+    """Post a Slack message, optionally into an existing thread."""
+    kwargs: dict[str, Any] = {"channel": channel, "text": text}
+    if thread_ts:
+        kwargs["thread_ts"] = thread_ts
+    return client.chat_postMessage(**kwargs)
+
+
 def post_acknowledgment(
     client: SlackClient,
     channel: str,
@@ -321,11 +347,7 @@ def post_acknowledgment(
     prompt: str,
 ) -> None:
     """Post a threaded reply acknowledging pipeline start."""
-    client.chat_postMessage(
-        channel=channel,
-        thread_ts=thread_ts,
-        text=format_acknowledgment(prompt),
-    )
+    post_message(client, channel, format_acknowledgment(prompt), thread_ts=thread_ts)
 
 
 def post_phase_update(
@@ -337,10 +359,11 @@ def post_phase_update(
     cost: float,
 ) -> None:
     """Post a phase completion update as a threaded reply."""
-    client.chat_postMessage(
-        channel=channel,
+    post_message(
+        client,
+        channel,
+        format_phase_update(phase, success, cost),
         thread_ts=thread_ts,
-        text=format_phase_update(phase, success, cost),
     )
 
 
@@ -352,12 +375,24 @@ def post_run_summary(
     total_cost: float,
     branch_name: str | None = None,
     pr_url: str | None = None,
+    summary: str | None = None,
+    phase_breakdown: list[str] | None = None,
+    demand_count: int = 1,
 ) -> None:
     """Post the final run summary as a threaded reply."""
-    client.chat_postMessage(
-        channel=channel,
+    post_message(
+        client,
+        channel,
+        format_run_summary(
+            status,
+            total_cost,
+            branch_name,
+            pr_url,
+            summary,
+            phase_breakdown,
+            demand_count,
+        ),
         thread_ts=thread_ts,
-        text=format_run_summary(status, total_cost, branch_name, pr_url),
     )
 
 
