@@ -1311,6 +1311,7 @@ def create_slack_app(config: SlackConfig) -> Any:
     """
 
     try:
+        import slack_sdk  # noqa: F401 — force full load before slack_bolt to avoid KeyError race in threads
         from slack_bolt import App
     except Exception as exc:
         _raise_slack_dependency_error(exc, operation="app startup")
@@ -1345,6 +1346,7 @@ def start_socket_mode(app: Any) -> Any:
     introspection).
     """
     try:
+        import slack_sdk  # noqa: F401 — same thread-safety guard as create_slack_app
         from slack_bolt.adapter.socket_mode import SocketModeHandler
     except Exception as exc:
         _raise_slack_dependency_error(exc, operation="socket mode startup")
