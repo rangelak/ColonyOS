@@ -1919,6 +1919,24 @@ def _build_ceo_prompt(
             "Failed to fetch open PRs for CEO context, proceeding without."
         )
 
+    # Inject PR outcome history so the CEO can calibrate based on merge rate (non-blocking)
+    outcomes_section = ""
+    try:
+        from colonyos.outcomes import format_outcome_summary
+
+        outcome_summary = format_outcome_summary(repo_root)
+        if outcome_summary:
+            outcomes_section = (
+                "## PR Outcome History\n\n"
+                f"{outcome_summary}\n\n"
+            )
+    except Exception:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "Failed to compute PR outcome summary for CEO context, proceeding without."
+        )
+
     user = (
         "## Development History\n\n"
         "Below is the complete changelog of features already built. "
@@ -1926,6 +1944,7 @@ def _build_ceo_prompt(
         "Your proposal MUST build upon or complement existing work.\n\n"
         f"{changelog}\n\n---\n\n"
         f"{prs_section}"
+        f"{outcomes_section}"
         f"{issues_section}"
         "Analyze this project and propose the single most impactful feature to build next. "
         "Output your proposal in the format described in the instructions."

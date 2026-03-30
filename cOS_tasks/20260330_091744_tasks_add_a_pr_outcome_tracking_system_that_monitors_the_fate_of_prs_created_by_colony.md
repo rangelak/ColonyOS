@@ -39,10 +39,10 @@
   - [x] 3.1 Write tests for deliver phase integration: mock `track_pr()`, verify it is called with correct args after successful deliver in `run()`, verify it is NOT called when deliver fails, verify it handles track_pr exceptions gracefully (log and continue)
   - [x] 3.2 In `orchestrator.py` `run()` function (~line 4342-4344), after `pr_url` is extracted from deliver artifacts, call `track_pr()` with the run_id, PR number (extracted via regex from pr_url), pr_url, and branch_name. Wrap in try/except to avoid blocking the pipeline on tracking failures.
 
-- [ ] 4.0 CEO prompt injection — inject outcome summary
+- [x] 4.0 CEO prompt injection — inject outcome summary
   depends_on: [1.0]
-  - [ ] 4.1 Write tests for CEO prompt injection: verify outcome summary section appears in CEO prompt when outcomes exist, verify it is skipped when no outcomes, verify exception handling (format_outcome_summary failure doesn't break CEO prompt)
-  - [ ] 4.2 In `_build_ceo_prompt()` (~line 1920, after the prs_section block), add an `outcomes_section` block that calls `format_outcome_summary(repo_root)`, wraps it in `## PR Outcome History`, and appends to the user prompt. Follow the same try/except pattern as issues_section and prs_section.
+  - [x] 4.1 Write tests for CEO prompt injection: verify outcome summary section appears in CEO prompt when outcomes exist, verify it is skipped when no outcomes, verify exception handling (format_outcome_summary failure doesn't break CEO prompt)
+  - [x] 4.2 In `_build_ceo_prompt()` (~line 1920, after the prs_section block), add an `outcomes_section` block that calls `format_outcome_summary(repo_root)`, wraps it in `## PR Outcome History`, and appends to the user prompt. Follow the same try/except pattern as issues_section and prs_section.
 
 - [ ] 5.0 CLI commands — `colonyos outcomes` and `colonyos outcomes poll`
   depends_on: [1.0]
