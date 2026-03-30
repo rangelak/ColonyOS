@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import queue as queue_module
 import threading
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -64,13 +65,44 @@ class SlackQueueEngine:
     is_daily_budget_exceeded: Callable[[], bool]
     dry_run: bool = False
     agent_lock: threading.Lock | None = None
+    triage_queue_maxsize: int = 64
+    _triage_queue: queue_module.Queue[dict[str, Any]] = field(init=False, repr=False)
+    _triage_worker_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _triage_worker_started: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._triage_queue = queue_module.Queue(maxsize=self.triage_queue_maxsize)
 
     def register(self, bolt_app: Any) -> None:
+        self._ensure_triage_worker()
         bolt_app.event("app_mention")(self._handle_event)
         if self.config.slack.trigger_mode not in ("reaction", "all"):
             bolt_app.event("reaction_added")(lambda event, client: None)
             return
         bolt_app.event("reaction_added")(self._handle_reaction)
+
+    def _ensure_triage_worker(self) -> None:
+        with self._triage_worker_lock:
+            if self._triage_worker_started:
+                return
+            worker = threading.Thread(
+                target=self._triage_worker_loop,
+                daemon=True,
+                name="slack-triage-worker",
+            )
+            worker.start()
+            self._triage_worker_started = True
+
+    def _triage_worker_loop(self) -> None:
+        while not self.shutdown_event.is_set():
+            try:
+                task = self._triage_queue.get(timeout=0.5)
+            except queue_module.Empty:
+                continue
+            try:
+                self._triage_and_enqueue(**task)
+            finally:
+                self._triage_queue.task_done()
 
     def _handle_reaction(self, event: dict[str, Any], client: SlackClient) -> None:
         item = event.get("item", {})
@@ -152,18 +184,26 @@ class SlackQueueEngine:
         except Exception:
             logger.debug("Failed to add :eyes: reaction", exc_info=True)
 
-        threading.Thread(
-            target=self._triage_and_enqueue,
-            kwargs={
+        self._ensure_triage_worker()
+        try:
+            self._triage_queue.put_nowait({
                 "client": client,
                 "channel": channel,
                 "ts": ts,
                 "user": user,
                 "prompt_text": prompt_text,
-            },
-            daemon=True,
-            name=f"triage-{ts}",
-        ).start()
+            })
+        except queue_module.Full:
+            logger.warning("Slack triage queue full, rejecting %s:%s", channel, ts)
+            try:
+                post_message(
+                    client,
+                    channel,
+                    ":warning: Triage backlog is full right now. Try again in a minute.",
+                    thread_ts=ts,
+                )
+            except Exception:
+                logger.debug("Failed to post triage backlog message", exc_info=True)
 
     def _triage_and_enqueue(
         self,

@@ -44,6 +44,7 @@ from colonyos.tui.adapter import (
     TextBlockMsg,
     ToolLineMsg,
 )
+from colonyos.tui.monitor_protocol import encode_monitor_event
 
 
 @pytest.fixture(autouse=True)
@@ -670,6 +671,18 @@ def _make_config(tmp_path: Path) -> ColonyConfig:
 
 
 class TestDaemonCommand:
+    def test_parse_daemon_tui_output_line_recognizes_structured_monitor_event(self):
+        msg = _parse_daemon_tui_output_line(encode_monitor_event({
+            "type": "tool_line",
+            "tool_name": "Read",
+            "arg": "src/app.py",
+            "style": "cyan",
+        }))
+        assert isinstance(msg, ToolLineMsg)
+        assert msg.tool_name == "Read"
+        assert msg.arg == "src/app.py"
+        assert msg.style == "cyan"
+
     def test_parse_daemon_tui_output_line_recognizes_tool_lines(self):
         msg = _parse_daemon_tui_output_line("  [3.0] ● Read src/app.py")
         assert isinstance(msg, ToolLineMsg)
@@ -735,9 +748,25 @@ class TestDaemonCommand:
 
         fake_proc = MagicMock()
         fake_proc.stdout = iter([
-            "──────────── Phase: Plan  $10.00 budget · opus · 7 persona subagents ────────────\n",
-            "  ● Read src/colonyos/daemon.py\n",
-            "  ✓ Phase completed  $0.12 · 2 turns · 14s\n",
+            encode_monitor_event({
+                "type": "phase_header",
+                "phase_name": "Plan",
+                "budget": 10.0,
+                "model": "opus",
+                "extra": "7 persona subagents",
+            }) + "\n",
+            encode_monitor_event({
+                "type": "tool_line",
+                "tool_name": "Read",
+                "arg": "src/colonyos/daemon.py",
+                "style": "cyan",
+            }) + "\n",
+            encode_monitor_event({
+                "type": "phase_complete",
+                "cost": 0.12,
+                "turns": 2,
+                "duration_ms": 14000,
+            }) + "\n",
             "[colonyos] starting daemon work\n",
             "line two\n",
         ])
@@ -799,7 +828,7 @@ class TestQueuePipelineExecution:
 
         assert result is fake_log
         assert mock_run.call_args.kwargs["branch_name_override"] == (
-            f"{config.branch_prefix}add_homebrew_formula_support"
+            f"{config.branch_prefix}add_homebrew_formula_support_slack_1"
         )
 
     def test_launch_daemon_tui_stops_running_subprocess_on_exit(self, tmp_path: Path):

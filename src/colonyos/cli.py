@@ -337,7 +337,12 @@ def _parse_daemon_tui_output_line(text: str) -> object | None:
         TextBlockMsg,
         ToolLineMsg,
     )
+    from colonyos.tui.monitor_protocol import decode_monitor_event_line
     from colonyos.ui import DEFAULT_TOOL_STYLE, TOOL_STYLE
+
+    structured = decode_monitor_event_line(text)
+    if structured is not None:
+        return structured
 
     stripped = text.strip()
     if not stripped:
@@ -392,6 +397,22 @@ def _parse_daemon_tui_output_line(text: str) -> object | None:
         return PhaseErrorMsg(error=error_match.group("error"))
 
     return TextBlockMsg(text=text)
+
+
+def _queue_item_branch_name_override(
+    item: "QueueItem",
+    config: "ColonyConfig",
+) -> str | None:
+    """Build a stable, unique branch override for queue-driven work."""
+    if item.source_type != "slack":
+        return item.branch_name
+    if item.branch_name:
+        return item.branch_name
+    if not item.raw_prompt:
+        return None
+    prompt_slug = slugify(item.raw_prompt, max_len=48)
+    suffix = slugify(item.id, max_len=12)
+    return f"{config.branch_prefix}{prompt_slug}_{suffix}"
 
 
 REPL_HISTORY_PATH = Path.home() / ".colonyos_history"
@@ -4430,9 +4451,7 @@ def run_pipeline_for_queue_item(
             f"{related_context}"
         )
 
-    branch_name_override = None
-    if item.source_type == "slack" and item.raw_prompt:
-        branch_name_override = f"{config.branch_prefix}{slugify(item.raw_prompt)}"
+    branch_name_override = _queue_item_branch_name_override(item, config)
 
     log = run_orchestrator(
         prompt_text,

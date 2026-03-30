@@ -16,6 +16,7 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -50,6 +51,7 @@ from colonyos.queue_runtime import (
     reprioritize_queue_item,
     select_next_pending_item,
 )
+from colonyos.tui.monitor_protocol import encode_monitor_event
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +111,127 @@ class _CombinedUI:
     def on_turn_complete(self) -> None:
         self._primary.on_turn_complete()
         self._secondary_call("on_turn_complete")
+
+
+class _DaemonMonitorEventUI:
+    """Emit structured TUI events over stdout for the daemon monitor."""
+
+    def __init__(self, prefix: str = "") -> None:
+        self._prefix = prefix
+        self._tool_name: str | None = None
+        self._tool_json = ""
+        self._tool_displayed = False
+        self._text_buf = ""
+        self._in_tool = False
+        self._turn_count = 0
+
+    def _emit(self, payload: dict[str, Any]) -> None:
+        sys.stdout.write(encode_monitor_event(payload) + "\n")
+        sys.stdout.flush()
+
+    def phase_header(
+        self,
+        phase_name: str,
+        budget: float,
+        model: str,
+        extra: str = "",
+    ) -> None:
+        self._turn_count = 0
+        self._emit({
+            "type": "phase_header",
+            "phase_name": phase_name,
+            "budget": budget,
+            "model": model,
+            "extra": extra,
+        })
+
+    def phase_complete(self, cost: float, turns: int, duration_ms: int) -> None:
+        self._flush_text()
+        self._emit({
+            "type": "phase_complete",
+            "cost": cost,
+            "turns": turns,
+            "duration_ms": duration_ms,
+        })
+
+    def phase_error(self, error: str) -> None:
+        self._flush_text()
+        self._emit({"type": "phase_error", "error": error})
+
+    def on_tool_start(self, tool_name: str) -> None:
+        self._flush_text()
+        self._in_tool = True
+        self._tool_name = tool_name
+        self._tool_json = ""
+        self._tool_displayed = False
+
+    def on_tool_input_delta(self, partial_json: str) -> None:
+        self._tool_json += partial_json
+        if not self._tool_displayed:
+            arg = self._try_extract_arg()
+            if arg is not None:
+                self._emit_tool_line(arg)
+                self._tool_displayed = True
+
+    def on_tool_done(self) -> None:
+        if self._tool_name and not self._tool_displayed:
+            arg = self._try_extract_arg() or ""
+            self._emit_tool_line(arg)
+        self._tool_name = None
+        self._tool_json = ""
+        self._tool_displayed = False
+        self._in_tool = False
+
+    def on_text_delta(self, text: str) -> None:
+        if self._in_tool:
+            return
+        self._text_buf += text
+
+    def on_turn_complete(self) -> None:
+        self._flush_text()
+        self._turn_count += 1
+        self._emit({"type": "turn_complete", "turn_number": self._turn_count})
+
+    def _flush_text(self) -> None:
+        raw = self._text_buf.strip()
+        self._text_buf = ""
+        if not raw:
+            return
+        self._emit({"type": "text_block", "text": raw})
+
+    def _emit_tool_line(self, arg: str) -> None:
+        from colonyos.ui import DEFAULT_TOOL_STYLE, TOOL_ARG_KEYS, TOOL_STYLE, _first_meaningful_line, _truncate
+
+        name = self._tool_name or "?"
+        style = TOOL_STYLE.get(name, DEFAULT_TOOL_STYLE)
+        display_arg = arg
+        if name in {"Agent", "Dispatch", "Task"} and display_arg:
+            display_arg = _first_meaningful_line(display_arg)
+        display_arg = _truncate(display_arg, 80) if display_arg else ""
+        self._emit({
+            "type": "tool_line",
+            "tool_name": f"{self._prefix}{name}".strip(),
+            "arg": display_arg,
+            "style": style,
+        })
+
+    def _try_extract_arg(self) -> str | None:
+        from colonyos.ui import TOOL_ARG_KEYS
+
+        if not self._tool_name:
+            return None
+        keys = TOOL_ARG_KEYS.get(self._tool_name)
+        if not keys:
+            return None
+        try:
+            data = json.loads(self._tool_json)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        for key in keys:
+            value = data.get(key)
+            if value:
+                return str(value)
+        return None
 
 
 class Daemon:
@@ -283,11 +406,11 @@ class Daemon:
     def _tick(self) -> None:
         """Single iteration of the main scheduling loop."""
         now = time.monotonic()
+        executed_item = False
 
         # 1. Try to execute next queue item
         if not self._pipeline_running:
-            if self._try_execute_next():
-                return
+            executed_item = self._try_execute_next()
 
         # 2. GitHub polling
         poll_interval = self.daemon_config.github_poll_interval_seconds
@@ -298,6 +421,8 @@ class Daemon:
         # 3. CEO idle-fill (only when queue is empty and no pipeline running)
         ceo_cooldown = self.daemon_config.ceo_cooldown_minutes * 60
         if (
+            not executed_item
+            and
             not self._pipeline_running
             and self._pending_count() == 0
             and now - self._last_ceo_time >= ceo_cooldown
@@ -498,9 +623,7 @@ class Daemon:
     def _make_monitor_ui(self, prefix: str = "") -> Any | None:
         if not self._monitor_mode:
             return None
-        from colonyos.ui import PhaseUI
-
-        return PhaseUI(verbose=self.verbose, prefix=prefix)
+        return _DaemonMonitorEventUI(prefix=prefix)
 
     def _next_pending_item(self) -> QueueItem | None:
         """Return the highest-priority pending item (lowest priority number, FIFO within tier)."""
@@ -528,8 +651,14 @@ class Daemon:
         )
 
         # Import here to avoid circular imports — cli.py imports from many modules
-        from colonyos.cli import run_pipeline_for_queue_item
+        from colonyos.cli import _queue_item_branch_name_override, run_pipeline_for_queue_item
         from colonyos.slack import FanoutSlackUI, SlackUI, post_message, post_run_summary
+
+        branch_override = _queue_item_branch_name_override(item, self.config)
+        if branch_override and item.branch_name != branch_override:
+            with self._lock:
+                item.branch_name = branch_override
+                self._persist_queue()
 
         notification = self._ensure_notification_thread(
             item,
