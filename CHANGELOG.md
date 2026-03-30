@@ -1,5 +1,24 @@
 # Changelog
 
+## 20260330_091900 — Harden Daemon Monitor UI and Slack Control Defaults
+
+Improves the autonomous daemon experience by cleaning up the TUI monitor, restoring a single daemon-specific banner, removing misleading interactive controls in monitor mode, and translating daemon phase headers into native TUI events instead of dumping raw headless CLI layout into the transcript. This release also finishes the shared cancellation/control plumbing, documents open Slack queue access, and removes tracked runtime log artifacts from git.
+
+**Created:**
+- `src/colonyos/cancellation.py` — Shared cancellation bus for daemon, CLI, TUI, and active phase runs
+- `tests/test_cancellation.py` — Regression coverage for signal fan-out into shared cancellation
+
+**Modified:**
+- `src/colonyos/agent.py` — Make sync phase wrappers cancellable and tighten typing around streamed tool names/results
+- `src/colonyos/cli.py` — Add daemon monitor subprocess handling, monitor-mode logging, and native TUI event mapping for daemon output
+- `src/colonyos/config.py` — Preserve daemon/retry fields and allow all Slack control users via config
+- `src/colonyos/daemon.py` — Improve shutdown handling, diagnostics, and budget/recovery reporting
+- `src/colonyos/init.py` — Preserve existing config on re-init and align runtime-state `.gitignore` entries
+- `src/colonyos/tui/app.py` — Add dedicated monitor mode and clean daemon cancel ordering
+- `src/colonyos/tui/widgets/transcript.py` — Add dedicated daemon monitor banner and cleaner transcript spacing
+- `deploy/README.md` — Document daemon Slack allowlist behavior and open queue submission semantics
+- `tests/test_agent.py`, `tests/test_cli.py`, `tests/test_config.py`, `tests/test_daemon.py`, `tests/test_init.py`, `tests/tui/test_app.py` — Add regression coverage for cancellation, daemon monitor UX, config round-tripping, and init preservation
+
 ## 20260330_002500 — Handle 529 Overloaded Errors with Retry and Optional Model Fallback
 
 Adds a transport-level retry layer with exponential backoff and jitter inside `run_phase()` so that transient API 529/503 errors are handled transparently without triggering the orchestrator's heavyweight recovery. Includes optional model fallback (hard-blocked on safety-critical phases), full observability via `PhaseResult.retry_info`, and configurable `RetryConfig` in `config.yaml`.
