@@ -1,5 +1,26 @@
 # Changelog
 
+## 20260330_103500 — PR Outcome Tracking System
+
+Closes the feedback loop on ColonyOS-created PRs by tracking their fate (merged/closed/open), feeding outcome data back into the CEO prompt, memory system, and analytics dashboard so the pipeline improves over time.
+
+**Created:**
+- `src/colonyos/outcomes.py` — Core outcomes module with SQLite persistence, GitHub polling via `gh`, and aggregate stats
+- `tests/test_outcomes.py` — Comprehensive test coverage for outcome tracking, polling, and stats
+- `tests/test_ceo.py` — Tests for CEO prompt injection of outcome history
+- `tests/test_stats.py` — Tests for delivery outcomes section in stats dashboard
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `colonyos outcomes` and `colonyos outcomes poll` CLI commands
+- `src/colonyos/config.py` — Added `outcome_poll_interval_minutes` to DaemonConfig
+- `src/colonyos/daemon.py` — Automatic PR outcome polling in daemon `_tick()`
+- `src/colonyos/orchestrator.py` — Deliver phase integration to track PRs at creation time
+- `src/colonyos/stats.py` — Delivery Outcomes section in stats dashboard
+- `README.md` — Updated with outcome tracking documentation
+
+**PRD:** `cOS_prds/20260330_091744_prd_add_a_pr_outcome_tracking_system_that_monitors_the_fate_of_prs_created_by_colony.md`
+**Tasks:** `cOS_tasks/20260330_091744_tasks_add_a_pr_outcome_tracking_system_that_monitors_the_fate_of_prs_created_by_colony.md`
+
 ## 20260330_091900 — Harden Daemon Monitor UI and Slack Control Defaults
 
 Improves the autonomous daemon experience by cleaning up the TUI monitor, restoring a single daemon-specific banner, removing misleading interactive controls in monitor mode, and translating daemon phase headers into native TUI events instead of dumping raw headless CLI layout into the transcript. This release also finishes the shared cancellation/control plumbing, documents open Slack queue access, and removes tracked runtime log artifacts from git.
