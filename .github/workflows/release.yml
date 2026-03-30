@@ -229,7 +229,7 @@ jobs:
       - name: Open issue on tap update failure
         if: failure()
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.meta.outputs.version }}"
           gh issue create \

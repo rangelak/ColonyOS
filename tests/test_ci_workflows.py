@@ -303,6 +303,32 @@ class TestReleaseWorkflow:
             "update-homebrew must have an if: failure() step for alerting"
         )
 
+    def test_failure_notification_uses_github_token(self):
+        """Failure notification step must use GITHUB_TOKEN, not HOMEBREW_TAP_TOKEN.
+
+        The issue is created on the current repo (rangelak/ColonyOS), so GITHUB_TOKEN
+        is sufficient and guaranteed to have issue-write scope. The PAT (HOMEBREW_TAP_TOKEN)
+        may not have issue-write scope on this repo.
+        """
+        job = self.workflow["jobs"]["update-homebrew"]
+        steps = job.get("steps", [])
+        failure_steps = [
+            s for s in steps if "failure()" in str(s.get("if", ""))
+        ]
+        assert failure_steps, "Expected at least one failure() step"
+        for step in failure_steps:
+            env = step.get("env", {})
+            gh_token = str(env.get("GH_TOKEN", ""))
+            assert "GITHUB_TOKEN" in gh_token, (
+                f"Failure notification step '{step.get('name', '')}' must use "
+                "GITHUB_TOKEN (not HOMEBREW_TAP_TOKEN) for GH_TOKEN — "
+                "GITHUB_TOKEN is guaranteed to have issue-write scope on the current repo"
+            )
+            assert "HOMEBREW_TAP_TOKEN" not in gh_token, (
+                f"Failure notification step '{step.get('name', '')}' must not use "
+                "HOMEBREW_TAP_TOKEN for issue creation"
+            )
+
     def test_update_homebrew_has_concurrency_group(self):
         """update-homebrew must have its own concurrency group to prevent race conditions."""
         job = self.workflow["jobs"]["update-homebrew"]
