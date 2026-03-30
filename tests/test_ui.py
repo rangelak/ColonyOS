@@ -12,6 +12,7 @@ from colonyos.models import Phase, PhaseResult
 from colonyos.ui import (
     REVIEWER_COLORS,
     make_task_prefix,
+    make_reviewer_badge,
     print_task_legend,
     PhaseUI,
 )
@@ -112,6 +113,16 @@ class TestTaskColors:
             assert color in REVIEWER_COLORS
 
 
+class TestReviewerBadges:
+    """Tests for stable reviewer badge generation."""
+
+    def test_make_reviewer_badge_uses_expected_label_and_color(self) -> None:
+        badge = make_reviewer_badge(1)
+        assert badge.text == "R2"
+        assert badge.style == REVIEWER_COLORS[1]
+        assert "R2" in badge.markup
+
+
 # ---------------------------------------------------------------------------
 # ParallelProgressLine (review progress tracker)
 # ---------------------------------------------------------------------------
@@ -197,6 +208,7 @@ class TestParallelProgressLine:
         assert mock_console.print.called
         call_args = str(mock_console.print.call_args)
         assert "R1" in call_args or "Reviewer" in call_args
+        assert make_reviewer_badge(0).markup in call_args
 
     def test_render_non_tty_multiple_completions_out_of_order(self) -> None:
         from colonyos.ui import ParallelProgressLine
@@ -214,10 +226,10 @@ class TestParallelProgressLine:
 
         printed_lines = [str(call) for call in mock_console.print.call_args_list]
 
-        r1_calls = [line for line in printed_lines if "R1 " in line]
-        r2_calls = [line for line in printed_lines if "R2 " in line]
-        r3_calls = [line for line in printed_lines if "R3 " in line]
-        r4_calls = [line for line in printed_lines if "R4 " in line]
+        r1_calls = [line for line in printed_lines if make_reviewer_badge(0).markup in line]
+        r2_calls = [line for line in printed_lines if make_reviewer_badge(1).markup in line]
+        r3_calls = [line for line in printed_lines if make_reviewer_badge(2).markup in line]
+        r4_calls = [line for line in printed_lines if make_reviewer_badge(3).markup in line]
 
         assert len(r1_calls) == 1, f"R1 should appear once, got {len(r1_calls)}"
         assert len(r2_calls) == 1, f"R2 should appear once, got {len(r2_calls)}"

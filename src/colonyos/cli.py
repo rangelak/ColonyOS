@@ -3232,6 +3232,7 @@ def _watch_slack_impl(
         extract_prompt_from_mention,
         extract_raw_from_formatted_prompt,
         find_parent_queue_item,
+        format_phase_breakdown_line,
         is_valid_git_ref,
         format_fix_acknowledgment,
         format_fix_error,
@@ -3696,6 +3697,10 @@ def _watch_slack_impl(
             self._terminal.phase_error(*a, **kw)  # type: ignore[union-attr]
             self._safe_slack_call("phase_error", *a, **kw)
 
+        def phase_note(self, *a: object, **kw: object) -> None:
+            self._terminal.phase_note(*a, **kw)  # type: ignore[union-attr]
+            self._safe_slack_call("phase_note", *a, **kw)
+
         def on_tool_start(self, *a: object) -> None:
             self._terminal.on_tool_start(*a)  # type: ignore[union-attr]
 
@@ -3919,16 +3924,34 @@ def _watch_slack_impl(
 
                 def _dual_ui_factory(
                     prefix: str = "",
+                    *,
+                    badge: object | None = None,
+                    task_id: str | None = None,
                 ) -> object:
+                    is_nested_stream = badge is not None or task_id is not None or bool(prefix)
                     slack_ui_targets = [SlackUI(client, channel, thread_ts) for channel, thread_ts in slack_targets]
                     slack_ui: SlackUI | FanoutSlackUI
                     if len(slack_ui_targets) == 1:
                         slack_ui = slack_ui_targets[0]
                     else:
                         slack_ui = FanoutSlackUI(*slack_ui_targets)
+                    if is_nested_stream:
+                        if self._quiet:
+                            return NullUI()
+                        return PhaseUI(
+                            verbose=self._verbose,
+                            prefix=prefix,
+                            task_id=task_id,
+                            badge=badge,  # type: ignore[arg-type]
+                        )
                     if self._quiet:
                         return slack_ui
-                    terminal_ui = PhaseUI(verbose=self._verbose, prefix=prefix)
+                    terminal_ui = PhaseUI(
+                        verbose=self._verbose,
+                        prefix=prefix,
+                        task_id=task_id,
+                        badge=badge,  # type: ignore[arg-type]
+                    )
                     return _DualUI(terminal_ui, slack_ui)
 
                 ui_factory = _dual_ui_factory
@@ -3998,10 +4021,7 @@ def _watch_slack_impl(
                     total_cost=log.total_cost_usd,
                     branch_name=log.branch_name,
                     pr_url=log.pr_url,
-                    phase_breakdown=[
-                        f"- {phase.phase.value}: {'ok' if phase.success else 'failed'}, ${(phase.cost_usd or 0.0):.4f}"
-                        for phase in log.phases
-                    ],
+                    phase_breakdown=[format_phase_breakdown_line(phase) for phase in log.phases],
                 )
 
             # Check consecutive failure circuit breaker
@@ -4112,16 +4132,34 @@ def _watch_slack_impl(
 
                 def _fix_ui_factory(
                     prefix: str = "",
+                    *,
+                    badge: object | None = None,
+                    task_id: str | None = None,
                 ) -> object:
+                    is_nested_stream = badge is not None or task_id is not None or bool(prefix)
                     slack_ui_targets = [SlackUI(client, channel, thread_ts) for channel, thread_ts in slack_targets]
                     slack_ui: SlackUI | FanoutSlackUI
                     if len(slack_ui_targets) == 1:
                         slack_ui = slack_ui_targets[0]
                     else:
                         slack_ui = FanoutSlackUI(*slack_ui_targets)
+                    if is_nested_stream:
+                        if self._quiet:
+                            return NullUI()
+                        return PhaseUI(
+                            verbose=self._verbose,
+                            prefix=prefix,
+                            task_id=task_id,
+                            badge=badge,  # type: ignore[arg-type]
+                        )
                     if self._quiet:
                         return slack_ui
-                    terminal_ui = PhaseUI(verbose=self._verbose, prefix=prefix)
+                    terminal_ui = PhaseUI(
+                        verbose=self._verbose,
+                        prefix=prefix,
+                        task_id=task_id,
+                        badge=badge,  # type: ignore[arg-type]
+                    )
                     return _DualUI(terminal_ui, slack_ui)
 
                 ui_factory = _fix_ui_factory
@@ -4237,10 +4275,7 @@ def _watch_slack_impl(
                     total_cost=log.total_cost_usd,
                     branch_name=log.branch_name,
                     pr_url=log.pr_url,
-                    phase_breakdown=[
-                        f"- {phase.phase.value}: {'ok' if phase.success else 'failed'}, ${(phase.cost_usd or 0.0):.4f}"
-                        for phase in log.phases
-                    ],
+                    phase_breakdown=[format_phase_breakdown_line(phase) for phase in log.phases],
                 )
 
     queue_executor = QueueExecutor(
@@ -6070,8 +6105,19 @@ def _launch_tui(
         adapter = TextualUI(queue.sync_q)
         current_adapter = adapter
 
-        def _ui_factory(prefix: str = "") -> TextualUI:
-            return adapter
+        def _ui_factory(
+            prefix: str = "",
+            *,
+            badge: object | None = None,
+            task_id: str | None = None,
+        ) -> TextualUI:
+            if badge is None and task_id is None and not prefix:
+                return adapter
+            return TextualUI(
+                queue.sync_q,
+                badge=badge,  # type: ignore[arg-type]
+                task_id=task_id,
+            )
 
         route_outcome = _route_prompt(
             text,
@@ -6311,8 +6357,19 @@ def _launch_tui(
                 adapter2 = TextualUI(queue.sync_q)
                 current_adapter = adapter2
 
-                def _ui_factory(prefix: str = "") -> TextualUI:
-                    return adapter2
+                def _ui_factory(
+                    prefix: str = "",
+                    *,
+                    badge: object | None = None,
+                    task_id: str | None = None,
+                ) -> TextualUI:
+                    if badge is None and task_id is None and not prefix:
+                        return adapter2
+                    return TextualUI(
+                        queue.sync_q,
+                        badge=badge,  # type: ignore[arg-type]
+                        task_id=task_id,
+                    )
 
                 try:
                     log = run_orchestrator(

@@ -75,7 +75,7 @@ def parse_task_file(content: str) -> dict[str, list[str]]:
                 continue
             current_task_id = task_id
             # Initialize with empty dependencies (may be overwritten)
-            dependencies[current_task_id] = []
+            dependencies[task_id] = []
             continue
 
         # Check if this line has a depends_on annotation

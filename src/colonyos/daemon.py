@@ -93,6 +93,10 @@ class _CombinedUI:
         self._primary.phase_error(*args, **kwargs)
         self._secondary_call("phase_error", *args, **kwargs)
 
+    def phase_note(self, *args: object, **kwargs: object) -> None:
+        self._primary.phase_note(*args, **kwargs)
+        self._secondary_call("phase_note", *args, **kwargs)
+
     def on_tool_start(self, *args: object) -> None:
         self._primary.on_tool_start(*args)
         self._secondary_call("on_tool_start", *args)
@@ -117,8 +121,16 @@ class _CombinedUI:
 class _DaemonMonitorEventUI:
     """Emit structured TUI events over stdout for the daemon monitor."""
 
-    def __init__(self, prefix: str = "") -> None:
+    def __init__(
+        self,
+        prefix: str = "",
+        *,
+        badge_text: str = "",
+        badge_style: str = "",
+    ) -> None:
         self._prefix = prefix
+        self._badge_text = badge_text
+        self._badge_style = badge_style
         self._tool_name: str | None = None
         self._tool_json = ""
         self._tool_displayed = False
@@ -159,6 +171,12 @@ class _DaemonMonitorEventUI:
         self._flush_text()
         self._emit({"type": "phase_error", "error": error})
 
+    def phase_note(self, text: str) -> None:
+        note = text.strip()
+        if not note:
+            return
+        self._emit({"type": "notice", "text": note})
+
     def on_tool_start(self, tool_name: str) -> None:
         self._flush_text()
         self._in_tool = True
@@ -198,7 +216,12 @@ class _DaemonMonitorEventUI:
         self._text_buf = ""
         if not raw:
             return
-        self._emit({"type": "text_block", "text": raw})
+        self._emit({
+            "type": "text_block",
+            "text": raw,
+            "badge_text": self._badge_text,
+            "badge_style": self._badge_style,
+        })
 
     def _emit_tool_line(self, arg: str) -> None:
         from colonyos.ui import DEFAULT_TOOL_STYLE, TOOL_ARG_KEYS, TOOL_STYLE, _first_meaningful_line, _truncate
@@ -211,9 +234,11 @@ class _DaemonMonitorEventUI:
         display_arg = _truncate(display_arg, 80) if display_arg else ""
         self._emit({
             "type": "tool_line",
-            "tool_name": f"{self._prefix}{name}".strip(),
+            "tool_name": name,
             "arg": display_arg,
             "style": style,
+            "badge_text": self._badge_text,
+            "badge_style": self._badge_style,
         })
 
     def _try_extract_arg(self) -> str | None:
@@ -621,10 +646,24 @@ class Daemon:
             )
         return True
 
-    def _make_monitor_ui(self, prefix: str = "") -> Any | None:
+    def _make_monitor_ui(
+        self,
+        prefix: str = "",
+        *,
+        badge: Any | None = None,
+        task_id: str | None = None,
+    ) -> Any | None:
         if not self._monitor_mode:
             return None
-        return _DaemonMonitorEventUI(prefix=prefix)
+        if badge is None and task_id is not None:
+            from colonyos.ui import make_task_badge
+
+            badge = make_task_badge(task_id)
+        return _DaemonMonitorEventUI(
+            prefix=prefix,
+            badge_text=getattr(badge, "text", ""),
+            badge_style=getattr(badge, "style", ""),
+        )
 
     def _next_pending_item(self) -> QueueItem | None:
         """Return the highest-priority pending item (lowest priority number, FIFO within tier)."""
@@ -653,7 +692,14 @@ class Daemon:
 
         # Import here to avoid circular imports — cli.py imports from many modules
         from colonyos.cli import _queue_item_branch_name_override
-        from colonyos.slack import FanoutSlackUI, SlackUI, post_message, post_run_summary
+        from colonyos.slack import (
+            FanoutSlackUI,
+            SlackUI,
+            format_phase_breakdown_line,
+            post_message,
+            post_run_summary,
+        )
+        from colonyos.ui import NullUI
 
         branch_override = _queue_item_branch_name_override(item, self.config)
         if branch_override and item.branch_name != branch_override:
@@ -670,14 +716,22 @@ class Daemon:
         if notification is not None and targets:
             client, channel, thread_ts = notification
 
-            def _slack_ui_factory(prefix: str = "") -> Any:
+            def _slack_ui_factory(
+                prefix: str = "",
+                *,
+                badge: Any | None = None,
+                task_id: str | None = None,
+            ) -> Any:
+                is_nested_stream = badge is not None or task_id is not None or bool(prefix)
                 slack_targets = [SlackUI(client, target_channel, target_ts) for target_channel, target_ts in targets]
                 slack_ui: Any
                 if len(slack_targets) == 1:
                     slack_ui = slack_targets[0]
                 else:
                     slack_ui = FanoutSlackUI(*slack_targets)
-                monitor_ui = self._make_monitor_ui(prefix)
+                monitor_ui = self._make_monitor_ui(prefix, badge=badge, task_id=task_id)
+                if is_nested_stream:
+                    return monitor_ui if monitor_ui is not None else NullUI()
                 if monitor_ui is not None:
                     return _CombinedUI(monitor_ui, slack_ui)
                 return slack_ui
@@ -720,7 +774,7 @@ class Daemon:
                         branch_name=log.branch_name,
                         pr_url=log.pr_url,
                         summary=item.summary,
-                        phase_breakdown=self._format_phase_breakdown(log),
+                        phase_breakdown=[format_phase_breakdown_line(phase) for phase in log.phases],
                         demand_count=item.demand_count,
                     )
             except Exception:
@@ -1373,12 +1427,9 @@ class Daemon:
             return None
 
     def _format_phase_breakdown(self, log: Any) -> list[str]:
-        lines: list[str] = []
-        for phase in log.phases:
-            phase_cost = phase.cost_usd or 0.0
-            status = "ok" if phase.success else "failed"
-            lines.append(f"- {phase.phase.value}: {status}, ${phase_cost:.4f}")
-        return lines
+        from colonyos.slack import format_phase_breakdown_line
+
+        return [format_phase_breakdown_line(phase) for phase in log.phases]
 
     def _post_execution_failure(
         self,

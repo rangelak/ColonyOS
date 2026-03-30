@@ -6,7 +6,7 @@ import signal
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import click
 from rich.table import Table
@@ -44,7 +44,12 @@ _MANIFEST_FILES: list[tuple[str, str]] = [
 _MANIFEST_TRUNCATE_CHARS = 2000
 
 
-MODEL_PRESETS: dict[str, dict[str, str | dict[str, str]]] = {
+class ModelPreset(TypedDict):
+    model: str
+    phase_models: dict[str, str]
+
+
+MODEL_PRESETS: dict[str, ModelPreset] = {
     "Quality-first": {
         "model": "opus",
         "phase_models": {},
@@ -195,12 +200,12 @@ def scan_repo_context(repo_root: Path) -> RepoContext:
     stack = ", ".join(stack_parts) if stack_parts else ""
 
     return RepoContext(
-        name=name,
-        description=description,
-        stack=stack,
-        readme_excerpt=readme_excerpt,
-        manifest_type=manifest_type,
-        raw_signals=raw_signals,
+        name,
+        description,
+        stack,
+        readme_excerpt,
+        manifest_type,
+        raw_signals,
     )
 
 
@@ -471,6 +476,7 @@ def run_ai_init(
     try:
         # Install a SIGALRM-based timeout on platforms that support it
         _has_alarm = hasattr(signal, "SIGALRM")
+        old_handler: object | None = None
         if _has_alarm:
             old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
             signal.alarm(_AI_INIT_TIMEOUT_SECONDS)
@@ -488,7 +494,7 @@ def run_ai_init(
                 permission_mode="default",
             )
         finally:
-            if _has_alarm:
+            if _has_alarm and old_handler is not None:
                 signal.alarm(0)
                 signal.signal(signal.SIGALRM, old_handler)
     except Exception as exc:

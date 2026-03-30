@@ -143,7 +143,7 @@ class PhaseResult:
     session_id: str = ""
     model: str | None = None
     error: str | None = None
-    artifacts: dict[str, str] = field(default_factory=dict)
+    artifacts: dict[str, Any] = field(default_factory=dict)
     retry_info: RetryInfo | None = None
 
 

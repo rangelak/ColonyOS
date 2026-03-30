@@ -29,6 +29,8 @@ from colonyos.models import (
 from colonyos.recovery import PreservationResult
 from colonyos.runtime_lock import RuntimeBusyError
 from colonyos.slack import SlackWatchState, save_watch_state
+from colonyos.tui.adapter import ToolLineMsg
+from colonyos.tui.monitor_protocol import decode_monitor_event_line
 
 
 @pytest.fixture
@@ -887,6 +889,27 @@ class TestSlackNotifications:
             "execution failed" in str(call)
             for call in mock_post.call_args_list
         )
+
+
+class TestMonitorUi:
+    def test_make_monitor_ui_uses_task_badge_for_parallel_tasks(
+        self, tmp_repo: Path, config: ColonyConfig, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+        daemon._monitor_mode = True
+
+        ui = daemon._make_monitor_ui(task_id="2.0")
+
+        assert ui is not None
+        ui.on_tool_start("Read")
+        ui.on_tool_input_delta('{"path":"src/main.py"}')
+        ui.on_tool_done()
+
+        output = capsys.readouterr().out.strip().splitlines()[-1]
+        message = decode_monitor_event_line(output)
+
+        assert isinstance(message, ToolLineMsg)
+        assert message.badge_text == "[2.0]"
 
     def test_daily_digest_posts_top_three(self, daemon_instance: Daemon):
         daemon_instance.daemon_config = DaemonConfig(digest_hour_utc=0)

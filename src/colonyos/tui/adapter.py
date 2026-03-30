@@ -15,7 +15,15 @@ from threading import Lock
 from typing import TYPE_CHECKING
 
 from colonyos.sanitize import sanitize_display_text, sanitize_untrusted_content
-from colonyos.ui import TOOL_ARG_KEYS, TOOL_STYLE, DEFAULT_TOOL_STYLE, _first_meaningful_line, _truncate
+from colonyos.ui import (
+    DEFAULT_TOOL_STYLE,
+    TOOL_ARG_KEYS,
+    TOOL_STYLE,
+    StreamBadge,
+    _first_meaningful_line,
+    _truncate,
+    make_task_badge,
+)
 
 if TYPE_CHECKING:
     import janus
@@ -61,6 +69,8 @@ class ToolLineMsg:
     tool_name: str
     arg: str
     style: str
+    badge_text: str = ""
+    badge_style: str = ""
 
 
 @dataclass(frozen=True)
@@ -68,6 +78,8 @@ class TextBlockMsg:
     """A block of agent text (flushed on turn_complete)."""
 
     text: str
+    badge_text: str = ""
+    badge_style: str = ""
 
 
 @dataclass(frozen=True)
@@ -139,8 +151,17 @@ class TextualUI:
     All text is sanitized via ``sanitize_display_text()`` before queuing.
     """
 
-    def __init__(self, sync_queue: janus.SyncQueue[object]) -> None:
+    def __init__(
+        self,
+        sync_queue: janus.SyncQueue[object],
+        *,
+        badge: StreamBadge | None = None,
+        task_id: str | None = None,
+    ) -> None:
         self._queue = sync_queue
+        if badge is None and task_id is not None:
+            badge = make_task_badge(task_id)
+        self._badge = badge
         self._tool_name: str | None = None
         self._tool_json: str = ""
         self._tool_displayed: bool = False
@@ -185,6 +206,12 @@ class TextualUI:
         self._queue.put(PhaseErrorMsg(
             error=sanitize_display_text(error),
         ))
+
+    def phase_note(self, text: str) -> None:
+        note = sanitize_display_text(text).strip()
+        if not note:
+            return
+        self._queue.put(NoticeMsg(text=note))
 
     # -- streaming callbacks ------------------------------------------------
 
@@ -246,7 +273,11 @@ class TextualUI:
         self._text_buf = ""
         if not raw:
             return
-        self._queue.put(TextBlockMsg(text=sanitize_display_text(raw)))
+        self._queue.put(TextBlockMsg(
+            text=sanitize_display_text(raw),
+            badge_text=self._badge.text if self._badge else "",
+            badge_style=self._badge.style if self._badge else "",
+        ))
 
     def _emit_tool_line(self, arg: str) -> None:
         name = self._tool_name or "?"
@@ -256,6 +287,8 @@ class TextualUI:
             tool_name=name,
             arg=sanitized_arg,
             style=style,
+            badge_text=self._badge.text if self._badge else "",
+            badge_style=self._badge.style if self._badge else "",
         ))
 
     def _try_extract_arg(self) -> str | None:

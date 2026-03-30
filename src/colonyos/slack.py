@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, runtime_checkable
 
 from colonyos.config import RouterConfig, SlackConfig, load_config, runs_dir_path
 from colonyos.sanitize import sanitize_untrusted_content, strip_slack_links
@@ -310,6 +310,49 @@ def format_run_summary(
     return "\n".join(parts)
 
 
+def _extract_phase_verdict(phase_name: str, artifacts: dict[str, Any]) -> str | None:
+    result_text = str(artifacts.get("result", "") or "")
+    if phase_name == "review":
+        match = re.search(r"VERDICT:\s*(approve|request-changes)", result_text, re.IGNORECASE)
+        if match:
+            return match.group(1).lower()
+    if phase_name == "decision":
+        match = re.search(r"VERDICT:\s*(GO|NO-GO)", result_text, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+    return None
+
+
+def format_phase_breakdown_line(phase: Any) -> str:
+    """Format a richer final-summary breakdown line for one PhaseResult-like object."""
+    phase_obj = getattr(phase, "phase", "")
+    phase_name = getattr(phase_obj, "value", str(phase_obj))
+    success = bool(getattr(phase, "success", False))
+    cost = float(getattr(phase, "cost_usd", 0.0) or 0.0)
+    artifacts = getattr(phase, "artifacts", {}) or {}
+    details: list[str] = []
+
+    if phase_name == "implement":
+        completed = artifacts.get("completed")
+        total = artifacts.get("total_tasks") or artifacts.get("parallel_tasks")
+        failed = artifacts.get("failed")
+        blocked = artifacts.get("blocked")
+        if total is not None and completed is not None:
+            details.append(f"tasks {completed}/{total}")
+        if str(failed or "0") != "0":
+            details.append(f"{failed} failed")
+        if str(blocked or "0") != "0":
+            details.append(f"{blocked} blocked")
+
+    verdict = _extract_phase_verdict(phase_name, artifacts)
+    if verdict:
+        details.append(verdict)
+
+    detail_suffix = f", {', '.join(details)}" if details else ""
+    status = "ok" if success else "failed"
+    return f"- {phase_name}: {status}, ${cost:.4f}{detail_suffix}"
+
+
 def format_fix_acknowledgment(branch_name: str) -> str:
     """Format the acknowledgment message posted when a thread-fix starts."""
     return f":wrench: Working on fix for `{branch_name}` — implementing your changes."
@@ -489,6 +532,7 @@ class SlackUI:
         self._client = client
         self._channel = channel
         self._thread_ts = thread_ts
+        self._current_phase: str | None = None
 
     def phase_header(
         self,
@@ -497,6 +541,7 @@ class SlackUI:
         model: str,
         extra: str = "",
     ) -> None:
+        self._current_phase = phase_name
         msg = f":gear: Starting *{phase_name}* phase (${budget:.2f} budget, {model})"
         if extra:
             msg += f" — {extra}"
@@ -508,19 +553,31 @@ class SlackUI:
 
     def phase_complete(self, cost: float, turns: int, duration_ms: int) -> None:
         secs = duration_ms // 1000
+        phase_name = self._current_phase or "Phase"
         self._client.chat_postMessage(
             channel=self._channel,
             thread_ts=self._thread_ts,
-            text=f":white_check_mark: Phase completed — ${cost:.2f}, {turns} turns, {secs}s",
+            text=f":white_check_mark: *{phase_name}* completed — ${cost:.2f}, {turns} turns, {secs}s",
         )
 
     def phase_error(self, error: str) -> None:
         """Post a generic error message — internal details are logged, not posted."""
         logger.error("SlackUI phase error: %s", error)
+        phase_name = self._current_phase or "Phase"
         self._client.chat_postMessage(
             channel=self._channel,
             thread_ts=self._thread_ts,
-            text=":x: Phase failed. Check server logs for details.",
+            text=f":x: *{phase_name}* failed. Check server logs for details.",
+        )
+
+    def phase_note(self, text: str) -> None:
+        note = text.strip()
+        if not note:
+            return
+        self._client.chat_postMessage(
+            channel=self._channel,
+            thread_ts=self._thread_ts,
+            text=note,
         )
 
     def on_tool_start(self, *a: object) -> None:
@@ -562,6 +619,10 @@ class FanoutSlackUI:
     def phase_error(self, error: str) -> None:
         for target in self._targets:
             target.phase_error(error)
+
+    def phase_note(self, text: str) -> None:
+        for target in self._targets:
+            target.phase_note(text)
 
     def on_tool_start(self, *a: object) -> None:
         for target in self._targets:
@@ -1205,7 +1266,7 @@ def _slack_import_diagnostics() -> str:
     return ", ".join(details)
 
 
-def _raise_slack_dependency_error(exc: Exception, *, operation: str) -> None:
+def _raise_slack_dependency_error(exc: Exception, *, operation: str) -> NoReturn:
     if isinstance(exc, ImportError):
         logger.debug(
             "Slack dependency import failed during %s (%s)",

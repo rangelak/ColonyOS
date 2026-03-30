@@ -19,6 +19,7 @@ from colonyos.tui.adapter import (
     TurnCompleteMsg,
     UserInjectionMsg,
 )
+from colonyos.ui import StreamBadge
 
 
 class FakeSyncQueue:
@@ -240,6 +241,27 @@ class TestToolCallbacks:
         msgs = fake_queue.drain()
         tool_msgs = [m for m in msgs if isinstance(m, ToolLineMsg)]
         assert "\x1b" not in tool_msgs[0].arg
+
+    def test_nested_badge_propagates_to_tool_and_text_blocks(self, fake_queue: FakeSyncQueue) -> None:
+        ui = TextualUI(
+            sync_queue=fake_queue,  # type: ignore[arg-type]
+            badge=StreamBadge(text="R1", style="bright_cyan"),
+        )
+
+        ui.on_text_delta("Reviewer note")
+        ui.on_turn_complete()
+        ui.on_tool_start("Read")
+        ui.on_tool_input_delta(json.dumps({"path": "src/main.py"}))
+        ui.on_tool_done()
+
+        msgs = fake_queue.drain()
+        text_msg = next(m for m in msgs if isinstance(m, TextBlockMsg))
+        tool_msg = next(m for m in msgs if isinstance(m, ToolLineMsg))
+
+        assert text_msg.badge_text == "R1"
+        assert text_msg.badge_style == "bright_cyan"
+        assert tool_msg.badge_text == "R1"
+        assert tool_msg.badge_style == "bright_cyan"
 
 
 # ---------------------------------------------------------------------------
