@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from colonyos.cleanup import ComplexityCategory, FileComplexity
 from colonyos.config import ColonyConfig, DaemonConfig
 from colonyos.daemon import Daemon, DaemonError
 from colonyos.daemon_state import DaemonState, save_daemon_state
@@ -447,6 +448,28 @@ class TestCleanupDedup:
         assert daemon_instance._is_duplicate(
             "cleanup", "Refactor src/foo.py (500 lines)"
         ) is False
+
+    def test_schedule_cleanup_uses_string_path_basename(self, daemon_instance: Daemon):
+        candidate = FileComplexity(
+            path="nested/foo.py",
+            line_count=900,
+            function_count=30,
+            category=ComplexityCategory.LARGE,
+        )
+
+        with patch("colonyos.cleanup.list_merged_branches", return_value=[]), \
+             patch("colonyos.cleanup.scan_directory", return_value=[candidate]), \
+             patch.object(daemon_instance, "_persist_queue"), \
+             patch.object(daemon_instance, "_post_queue_enqueued"):
+            daemon_instance._schedule_cleanup()
+
+        cleanup_items = [
+            item for item in daemon_instance._queue_state.items
+            if item.source_type == "cleanup"
+        ]
+        assert len(cleanup_items) == 1
+        assert cleanup_items[0].source_value == "nested/foo.py"
+        assert cleanup_items[0].summary == "Cleanup/refactor foo.py"
 
 
 class TestStarvationPersistence:

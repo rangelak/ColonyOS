@@ -10,6 +10,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 
 from colonyos.agent import (
+    _SyncRunController,
     request_active_phase_cancel,
     run_phase,
     run_phase_sync,
@@ -484,6 +485,19 @@ class TestRunPhaseResume:
 
 
 class TestCancellation:
+    def test_controller_cancel_ignores_closed_loop_race(self) -> None:
+        controller = _SyncRunController(label="test")
+        loop = MagicMock()
+        loop.is_closed.return_value = False
+        loop.call_soon_threadsafe.side_effect = RuntimeError("Event loop is closed")
+        task = MagicMock()
+        task.done.return_value = False
+        controller.attach(loop, task)
+
+        controller.cancel("test cancel")
+
+        loop.call_soon_threadsafe.assert_called_once_with(task.cancel)
+
     def test_run_phase_sync_cancels_active_phase(self) -> None:
         cancelled = threading.Event()
 

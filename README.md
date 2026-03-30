@@ -68,6 +68,10 @@ pip install "colonyos[ui]"
 pip install "colonyos[dev]"
 ```
 
+Slack-enabled deployments are best on Python 3.11-3.13. The core package supports
+newer Python versions, but third-party Slack dependencies may lag new interpreter
+releases.
+
 ### Verify your environment
 
 ```bash
@@ -585,6 +589,9 @@ pip install "colonyos[slack]"
 # Start watching
 colonyos watch-slack
 ```
+
+If Slack imports fail on startup, run `colonyos doctor`, reinstall the Slack extra,
+and prefer Python 3.11-3.13 for the watcher or daemon process.
 
 The watcher runs as a long-lived process using Slack Bolt SDK with Socket Mode (no public URL required). When someone mentions `@ColonyOS fix the login bug` in a configured channel, the watcher sanitizes the input, triggers a pipeline run, and posts threaded progress updates back to the Slack thread.
 
