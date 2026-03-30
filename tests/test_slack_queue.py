@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from colonyos.config import ColonyConfig, SlackConfig
 from colonyos.models import QueueItem, QueueItemStatus, QueueState
 from colonyos.slack import SlackWatchState, TriageResult
-from colonyos.slack_queue import SlackQueueEngine
+from colonyos.slack_queue import SlackQueueEngine, _generate_id
 
 
 def _make_engine(
@@ -148,3 +149,101 @@ def test_triage_waits_for_agent_lock_before_calling_agent(tmp_path: Path) -> Non
 
     assert finished.is_set()
     assert len(queue_state.items) == 1
+
+
+def test_generate_id_is_unique_with_same_timestamp() -> None:
+    fixed_now = datetime(2026, 3, 30, 12, 0, 0, 123456, tzinfo=timezone.utc)
+
+    with patch("colonyos.slack_queue.datetime") as mock_datetime:
+        mock_datetime.now.return_value = fixed_now
+        first = _generate_id("slack")
+        second = _generate_id("slack")
+
+    assert first != second
+    assert first.startswith("slack-20260330_120000_123456-")
+    assert second.startswith("slack-20260330_120000_123456-")
+
+
+def test_handle_event_rejects_duplicate_while_pending(tmp_path: Path) -> None:
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+    event = {
+        "channel": "C1",
+        "ts": "1.0",
+        "user": "U1",
+        "text": "<@UBOT> Add brew installation support",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.extract_prompt_from_mention", return_value="Add brew installation support"), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message") as mock_react:
+        engine._handle_event(event, client)
+        engine._handle_event(event, client)
+
+    assert engine._triage_queue.qsize() == 1
+    assert mock_react.call_count == 1
+    assert watch_state.is_processed("C1", "1.0") is False
+    assert engine.watch_state.message_key("C1", "1.0") in engine._pending_messages
+
+
+def test_triage_worker_survives_unhandled_exception(tmp_path: Path) -> None:
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    processed_second_task = threading.Event()
+    calls: list[str] = []
+
+    engine._triage_queue.put({
+        "client": MagicMock(),
+        "channel": "C1",
+        "ts": "1.0",
+        "user": "U1",
+        "prompt_text": "first",
+    })
+    engine._triage_queue.put({
+        "client": MagicMock(),
+        "channel": "C1",
+        "ts": "2.0",
+        "user": "U1",
+        "prompt_text": "second",
+    })
+
+    def _triage_side_effect(**task):
+        calls.append(task["ts"])
+        if task["ts"] == "1.0":
+            raise RuntimeError("boom")
+        processed_second_task.set()
+        engine.shutdown_event.set()
+
+    with patch.object(engine, "_triage_and_enqueue", side_effect=_triage_side_effect):
+        worker = threading.Thread(target=engine._triage_worker_loop, daemon=True)
+        worker.start()
+        assert processed_second_task.wait(timeout=1)
+        worker.join(timeout=1)
+
+    assert calls == ["1.0", "2.0"]
+
+
+def test_ensure_triage_worker_restarts_if_previous_thread_died(tmp_path: Path) -> None:
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    dead_worker = MagicMock()
+    dead_worker.is_alive.return_value = False
+    replacement_worker = MagicMock()
+    engine._triage_worker = dead_worker
+
+    with patch("colonyos.slack_queue.threading.Thread", return_value=replacement_worker) as mock_thread:
+        engine._ensure_triage_worker()
+
+    mock_thread.assert_called_once_with(
+        target=engine._triage_worker_loop,
+        daemon=True,
+        name="slack-triage-worker",
+    )
+    replacement_worker.start.assert_called_once()
+    assert engine._triage_worker is replacement_worker

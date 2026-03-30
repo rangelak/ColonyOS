@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -411,7 +412,7 @@ def _queue_item_branch_name_override(
     if not item.raw_prompt:
         return None
     prompt_slug = slugify(item.raw_prompt, max_len=48)
-    suffix = slugify(item.id, max_len=12)
+    suffix = hashlib.sha1(item.id.encode("utf-8")).hexdigest()[:10]
     return f"{config.branch_prefix}{prompt_slug}_{suffix}"
 
 

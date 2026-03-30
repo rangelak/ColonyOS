@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import signal
@@ -828,8 +829,37 @@ class TestQueuePipelineExecution:
 
         assert result is fake_log
         assert mock_run.call_args.kwargs["branch_name_override"] == (
-            f"{config.branch_prefix}add_homebrew_formula_support_slack_1"
+            f"{config.branch_prefix}add_homebrew_formula_support_"
+            f"{hashlib.sha1(item.id.encode('utf-8')).hexdigest()[:10]}"
         )
+
+    def test_slack_queue_items_get_distinct_branch_overrides(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        item_a = QueueItem(
+            id="slack-20260330_120000_123456-a1b2c3d4",
+            source_type="slack",
+            source_value="wrapped prompt",
+            raw_prompt="Add Homebrew formula support",
+            status=QueueItemStatus.PENDING,
+        )
+        item_b = QueueItem(
+            id="slack-20260330_120000_123456-e5f6a7b8",
+            source_type="slack",
+            source_value="wrapped prompt",
+            raw_prompt="Add Homebrew formula support",
+            status=QueueItemStatus.PENDING,
+        )
+        fake_log = RunLog(run_id="run-1", prompt="x", status=RunStatus.COMPLETED, phases=[])
+
+        with patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            run_pipeline_for_queue_item(item=item_a, repo_root=tmp_path, config=config)
+            override_a = mock_run.call_args.kwargs["branch_name_override"]
+            run_pipeline_for_queue_item(item=item_b, repo_root=tmp_path, config=config)
+            override_b = mock_run.call_args.kwargs["branch_name_override"]
+
+        assert override_a != override_b
+        assert override_a.startswith(f"{config.branch_prefix}add_homebrew_formula_support_")
+        assert override_b.startswith(f"{config.branch_prefix}add_homebrew_formula_support_")
 
     def test_launch_daemon_tui_stops_running_subprocess_on_exit(self, tmp_path: Path):
         config = _make_config(tmp_path)
