@@ -40,7 +40,7 @@ from colonyos.models import (
     RunStatus,
     compute_priority,
 )
-from colonyos.naming import generate_timestamp
+from colonyos.naming import generate_timestamp, slugify
 from colonyos.orchestrator import (
     _touch_heartbeat,
     validate_branch_exists,
@@ -4430,6 +4430,10 @@ def run_pipeline_for_queue_item(
             f"{related_context}"
         )
 
+    branch_name_override = None
+    if item.source_type == "slack" and item.raw_prompt:
+        branch_name_override = f"{config.branch_prefix}{slugify(item.raw_prompt)}"
+
     log = run_orchestrator(
         prompt_text,
         repo_root=repo_root,
@@ -4438,6 +4442,7 @@ def run_pipeline_for_queue_item(
         quiet=quiet,
         ui_factory=ui_factory,
         base_branch=item.base_branch,
+        branch_name_override=branch_name_override,
         source_issue=source_issue,
         source_issue_url=source_issue_url,
     )

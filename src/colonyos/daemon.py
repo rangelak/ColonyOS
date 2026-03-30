@@ -65,6 +65,52 @@ class DaemonError(RuntimeError):
     """Raised for unrecoverable daemon errors."""
 
 
+class _CombinedUI:
+    """Forward phase UI events to a terminal UI and a secondary mirror UI."""
+
+    def __init__(self, primary: Any, secondary: Any) -> None:
+        self._primary = primary
+        self._secondary = secondary
+
+    def _secondary_call(self, method: str, *args: object, **kwargs: object) -> None:
+        try:
+            getattr(self._secondary, method)(*args, **kwargs)
+        except Exception:
+            logger.debug("Secondary UI call %s failed", method, exc_info=True)
+
+    def phase_header(self, *args: object, **kwargs: object) -> None:
+        self._primary.phase_header(*args, **kwargs)
+        self._secondary_call("phase_header", *args, **kwargs)
+
+    def phase_complete(self, *args: object, **kwargs: object) -> None:
+        self._primary.phase_complete(*args, **kwargs)
+        self._secondary_call("phase_complete", *args, **kwargs)
+
+    def phase_error(self, *args: object, **kwargs: object) -> None:
+        self._primary.phase_error(*args, **kwargs)
+        self._secondary_call("phase_error", *args, **kwargs)
+
+    def on_tool_start(self, *args: object) -> None:
+        self._primary.on_tool_start(*args)
+        self._secondary_call("on_tool_start", *args)
+
+    def on_tool_input_delta(self, *args: object) -> None:
+        self._primary.on_tool_input_delta(*args)
+        self._secondary_call("on_tool_input_delta", *args)
+
+    def on_tool_done(self) -> None:
+        self._primary.on_tool_done()
+        self._secondary_call("on_tool_done")
+
+    def on_text_delta(self, *args: object) -> None:
+        self._primary.on_text_delta(*args)
+        self._secondary_call("on_text_delta", *args)
+
+    def on_turn_complete(self) -> None:
+        self._primary.on_turn_complete()
+        self._secondary_call("on_turn_complete")
+
+
 class Daemon:
     """Core daemon orchestrator.
 
@@ -100,6 +146,8 @@ class Daemon:
         self.daemon_config = self.config.daemon
         self.dry_run = dry_run
         self.verbose = verbose
+        self._monitor_mode = os.environ.get("COLONYOS_DAEMON_MONITOR") == "1"
+        self._agent_lock = threading.Lock()
 
         # CLI overrides
         self.daily_budget = (
@@ -238,7 +286,8 @@ class Daemon:
 
         # 1. Try to execute next queue item
         if not self._pipeline_running:
-            self._try_execute_next()
+            if self._try_execute_next():
+                return
 
         # 2. GitHub polling
         poll_interval = self.daemon_config.github_poll_interval_seconds
@@ -284,11 +333,11 @@ class Daemon:
     # Queue execution
     # ------------------------------------------------------------------
 
-    def _try_execute_next(self) -> None:
+    def _try_execute_next(self) -> bool:
         """Pop the highest-priority pending item and execute it."""
         with self._lock:
             if self._state.paused:
-                return
+                return False
 
             # Budget check (reset alert flags if daily counters were reset)
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -331,17 +380,17 @@ class Daemon:
                     pending,
                     guidance,
                 )
-                return
+                return False
 
             # Circuit breaker check
             if self._state.is_circuit_breaker_active():
                 logger.debug("Circuit breaker active, skipping execution")
-                return
+                return False
 
             # Find highest-priority pending item
             item = self._next_pending_item()
             if item is None:
-                return
+                return False
 
             item.status = QueueItemStatus.RUNNING
             self._pipeline_running = True
@@ -444,6 +493,14 @@ class Daemon:
                 failure_message=failure_message,
                 incident_path=str(incident_path) if incident_path is not None else None,
             )
+        return True
+
+    def _make_monitor_ui(self, prefix: str = "") -> Any | None:
+        if not self._monitor_mode:
+            return None
+        from colonyos.ui import PhaseUI
+
+        return PhaseUI(verbose=self.verbose, prefix=prefix)
 
     def _next_pending_item(self) -> QueueItem | None:
         """Return the highest-priority pending item (lowest priority number, FIFO within tier)."""
@@ -483,11 +540,17 @@ class Daemon:
         if notification is not None and targets:
             client, channel, thread_ts = notification
 
-            def _slack_ui_factory(prefix: str = "") -> SlackUI | FanoutSlackUI:
+            def _slack_ui_factory(prefix: str = "") -> Any:
                 slack_targets = [SlackUI(client, target_channel, target_ts) for target_channel, target_ts in targets]
+                slack_ui: Any
                 if len(slack_targets) == 1:
-                    return slack_targets[0]
-                return FanoutSlackUI(*slack_targets)
+                    slack_ui = slack_targets[0]
+                else:
+                    slack_ui = FanoutSlackUI(*slack_targets)
+                monitor_ui = self._make_monitor_ui(prefix)
+                if monitor_ui is not None:
+                    return _CombinedUI(monitor_ui, slack_ui)
+                return slack_ui
 
             ui_factory = _slack_ui_factory
             try:
@@ -503,16 +566,19 @@ class Daemon:
                     )
             except Exception:
                 logger.debug("Failed to post queue execution start", exc_info=True)
+        elif self._monitor_mode:
+            ui_factory = self._make_monitor_ui
 
-        log = run_pipeline_for_queue_item(
-            item=item,
-            repo_root=self.repo_root,
-            config=self.config,
-            verbose=self.verbose,
-            quiet=False,
-            ui_factory=ui_factory,
-            queue_state=self._queue_state,
-        )
+        with self._agent_lock:
+            log = run_pipeline_for_queue_item(
+                item=item,
+                repo_root=self.repo_root,
+                config=self.config,
+                verbose=self.verbose,
+                quiet=False,
+                ui_factory=ui_factory,
+                queue_state=self._queue_state,
+            )
         item.run_id = log.run_id
         item.pr_url = log.pr_url
         if log.branch_name:
@@ -650,13 +716,17 @@ class Daemon:
         try:
             logger.info("Running CEO idle-fill cycle")
             from colonyos.orchestrator import run_ceo
-            from colonyos.ui import PhaseUI
+            ui = self._make_monitor_ui("CEO ")
+            if ui is None:
+                from colonyos.ui import PhaseUI
+                ui = PhaseUI(verbose=self.verbose, prefix="CEO ")
 
-            proposal_prompt, phase_result = run_ceo(
-                repo_root=self.repo_root,
-                config=self.config,
-                ui=PhaseUI(verbose=self.verbose, prefix="CEO "),
-            )
+            with self._agent_lock:
+                proposal_prompt, phase_result = run_ceo(
+                    repo_root=self.repo_root,
+                    config=self.config,
+                    ui=ui,
+                )
 
             if not phase_result.success:
                 logger.warning(
@@ -782,11 +852,13 @@ class Daemon:
 
             with self._lock:
                 snapshot = QueueState.from_dict(self._queue_state.to_dict())
-            decisions = score_queue_with_agent(
-                self.repo_root,
-                self.config,
-                snapshot,
-            )
+            with self._agent_lock:
+                decisions = score_queue_with_agent(
+                    self.repo_root,
+                    self.config,
+                    snapshot,
+                    ui=self._make_monitor_ui("Priority "),
+                )
             if not decisions:
                 return
             with self._lock:
@@ -992,6 +1064,7 @@ class Daemon:
                 is_budget_exceeded=self._check_budget_exceeded,
                 is_daily_budget_exceeded=self._check_daily_budget_exceeded,
                 dry_run=self.dry_run,
+                agent_lock=self._agent_lock,
             )
             logger.info("Slack listener thread started")
             self._register_daemon_commands(slack_app)

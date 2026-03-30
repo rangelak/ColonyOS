@@ -157,6 +157,17 @@ class TestPriorityQueue:
         assert item is not None
         assert item.priority == 1  # Cleanup defaults to P2, age promotes it to P1
 
+    def test_tick_does_not_schedule_ceo_after_executing_item(self, daemon_instance: Daemon):
+        daemon_instance._pipeline_running = False
+        with patch.object(daemon_instance, "_try_execute_next", return_value=True) as mock_execute, \
+             patch.object(daemon_instance, "_schedule_ceo") as mock_ceo, \
+             patch.object(daemon_instance, "_poll_github_issues") as mock_poll:
+            daemon_instance._tick()
+
+        mock_execute.assert_called_once()
+        mock_ceo.assert_not_called()
+        mock_poll.assert_not_called()
+
 
 class TestBudgetEnforcement:
     def test_skips_execution_when_budget_exhausted(self, daemon_instance: Daemon):

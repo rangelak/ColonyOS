@@ -10,7 +10,13 @@ from colonyos.slack import SlackWatchState, TriageResult
 from colonyos.slack_queue import SlackQueueEngine
 
 
-def _make_engine(tmp_path: Path, queue_state: QueueState, watch_state: SlackWatchState) -> SlackQueueEngine:
+def _make_engine(
+    tmp_path: Path,
+    queue_state: QueueState,
+    watch_state: SlackWatchState,
+    *,
+    agent_lock: threading.Lock | None = None,
+) -> SlackQueueEngine:
     config = ColonyConfig(slack=SlackConfig(enabled=True, channels=["C1"], auto_approve=True))
     return SlackQueueEngine(
         repo_root=tmp_path,
@@ -27,6 +33,7 @@ def _make_engine(tmp_path: Path, queue_state: QueueState, watch_state: SlackWatc
         is_time_exceeded=lambda: False,
         is_budget_exceeded=lambda: False,
         is_daily_budget_exceeded=lambda: False,
+        agent_lock=agent_lock,
     )
 
 
@@ -100,3 +107,44 @@ def test_triage_merges_similar_request_into_existing_item(tmp_path: Path) -> Non
     assert existing.demand_count == 2
     assert watch_state.is_processed("C1", "2.0")
     assert client.chat_postMessage.called
+
+
+def test_triage_waits_for_agent_lock_before_calling_agent(tmp_path: Path) -> None:
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    agent_lock = threading.Lock()
+    engine = _make_engine(tmp_path, queue_state, watch_state, agent_lock=agent_lock)
+    client = MagicMock()
+    started = threading.Event()
+    finished = threading.Event()
+
+    def _triage(*args, **kwargs):
+        started.set()
+        finished.set()
+        return TriageResult(
+            actionable=True,
+            confidence=0.95,
+            summary="Add brew install support",
+            base_branch=None,
+            reasoning="clear feature request",
+        )
+
+    agent_lock.acquire()
+    worker = threading.Thread(
+        target=engine._triage_and_enqueue,
+        kwargs={
+            "client": client,
+            "channel": "C1",
+            "ts": "3.0",
+            "user": "U1",
+            "prompt_text": "Add brew installation support",
+        },
+    )
+    with patch("colonyos.slack_queue.triage_message", side_effect=_triage):
+        worker.start()
+        assert not started.wait(timeout=0.1)
+        agent_lock.release()
+        worker.join(timeout=1)
+
+    assert finished.is_set()
+    assert len(queue_state.items) == 1

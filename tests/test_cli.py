@@ -26,13 +26,14 @@ from colonyos.cli import (
     _run_direct_agent,
     _run_cleanup_loop,
     _resolve_latest_prd_path,
+    run_pipeline_for_queue_item,
     _save_loop_state,
     _resolve_latest_prd_path,
 )
 from colonyos.config import ColonyConfig, BudgetConfig, save_config
 from colonyos.models import (
     LoopState, LoopStatus, Persona, Phase, PhaseResult,
-    PreflightError, ProjectInfo, RunLog, RunStatus,
+    PreflightError, ProjectInfo, QueueItem, QueueItemStatus, RunLog, RunStatus,
 )
 from colonyos.persona_packs import PACKS
 from colonyos.tui.adapter import (
@@ -772,6 +773,34 @@ class TestDaemonCommand:
         assert any(isinstance(msg, ToolLineMsg) for msg in messages)
         assert any(isinstance(msg, PhaseCompleteMsg) for msg in messages)
         assert any(isinstance(msg, TextBlockMsg) for msg in messages)
+
+
+class TestQueuePipelineExecution:
+    def test_slack_queue_item_uses_raw_prompt_for_branch_override(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        item = QueueItem(
+            id="slack-1",
+            source_type="slack",
+            source_value=(
+                "You are a code assistant working on behalf of the engineering team.\n"
+                "<slack_message>\nwrapped prompt\n</slack_message>"
+            ),
+            raw_prompt="Add Homebrew formula support",
+            status=QueueItemStatus.PENDING,
+        )
+        fake_log = RunLog(run_id="run-1", prompt="x", status=RunStatus.COMPLETED, phases=[])
+
+        with patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            result = run_pipeline_for_queue_item(
+                item=item,
+                repo_root=tmp_path,
+                config=config,
+            )
+
+        assert result is fake_log
+        assert mock_run.call_args.kwargs["branch_name_override"] == (
+            f"{config.branch_prefix}add_homebrew_formula_support"
+        )
 
     def test_launch_daemon_tui_stops_running_subprocess_on_exit(self, tmp_path: Path):
         config = _make_config(tmp_path)

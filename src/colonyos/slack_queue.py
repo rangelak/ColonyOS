@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,6 +63,7 @@ class SlackQueueEngine:
     is_budget_exceeded: Callable[[], bool]
     is_daily_budget_exceeded: Callable[[], bool]
     dry_run: bool = False
+    agent_lock: threading.Lock | None = None
 
     def register(self, bolt_app: Any) -> None:
         bolt_app.event("app_mention")(self._handle_event)
@@ -186,11 +188,12 @@ class SlackQueueEngine:
             triage_kwargs["triage_scope"] = self.config.slack.triage_scope
 
         try:
-            triage_result = triage_message(
-                prompt_text,
-                repo_root=self.repo_root,
-                **triage_kwargs,
-            )
+            with self.agent_lock or nullcontext():
+                triage_result = triage_message(
+                    prompt_text,
+                    repo_root=self.repo_root,
+                    **triage_kwargs,
+                )
         except Exception:
             logger.exception("Triage failed for message %s:%s", channel, ts)
             try:
