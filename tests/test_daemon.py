@@ -159,11 +159,11 @@ class TestPriorityQueue:
 
     def test_tick_does_not_schedule_ceo_after_executing_item(self, daemon_instance: Daemon):
         daemon_instance._pipeline_running = False
-        daemon_instance._last_github_poll_time = 0.0
-        daemon_instance._last_cleanup_time = 0.0
-        daemon_instance._last_reprioritize_time = 0.0
-        daemon_instance._last_heartbeat_time = 0.0
-        daemon_instance._last_outcome_poll_time = 0.0
+        daemon_instance._last_github_poll_time = -1e9
+        daemon_instance._last_cleanup_time = -1e9
+        daemon_instance._last_reprioritize_time = -1e9
+        daemon_instance._last_heartbeat_time = -1e9
+        daemon_instance._last_outcome_poll_time = -1e9
         with patch.object(daemon_instance, "_try_execute_next", return_value=True) as mock_execute, \
              patch.object(daemon_instance, "_schedule_ceo") as mock_ceo, \
              patch.object(daemon_instance, "_poll_github_issues") as mock_poll, \
