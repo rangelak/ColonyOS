@@ -85,11 +85,11 @@
   - [x] 6.3 Add VM deployment quickstart section pointing to `deploy/provision.sh`
   - [x] 6.4 Remove stale references to `colonyos/tap` (update to `rangelak/colonyos`)
 
-- [ ] 7.0 End-to-end validation
+- [x] 7.0 End-to-end validation
   depends_on: [2.0, 3.0, 4.0, 5.0, 6.0]
-  - [ ] 7.1 Verify `scripts/generate-homebrew-formula.sh` produces a valid formula with all resource blocks
-  - [ ] 7.2 Verify `brew install --build-from-source Formula/colonyos.rb` succeeds locally (or in CI)
-  - [ ] 7.3 Verify `colonyos doctor` shows correct install method and upgrade instructions for each install type
-  - [ ] 7.4 Verify `colonyos init` warns when run outside a git repo
-  - [ ] 7.5 Verify `deploy/provision.sh --dry-run` completes without errors on Ubuntu
-  - [ ] 7.6 Verify release workflow dry-run: simulate a tag push and confirm the `update-homebrew` job logic is correct
+  - [x] 7.1 Verify `scripts/generate-homebrew-formula.sh` produces a valid formula with all resource blocks
+  - [x] 7.2 Verify `brew install --build-from-source Formula/colonyos.rb` succeeds locally (or in CI)
+  - [x] 7.3 Verify `colonyos doctor` shows correct install method and upgrade instructions for each install type
+  - [x] 7.4 Verify `colonyos init` warns when run outside a git repo
+  - [x] 7.5 Verify `deploy/provision.sh --dry-run` completes without errors on Ubuntu
+  - [x] 7.6 Verify release workflow dry-run: simulate a tag push and confirm the `update-homebrew` job logic is correct
