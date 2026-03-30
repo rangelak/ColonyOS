@@ -77,6 +77,7 @@ class Daemon:
         config: ColonyConfig | None = None,
         *,
         max_budget: float | None = None,
+        unlimited_budget: bool = False,
         max_hours: float | None = None,
         dry_run: bool = False,
         verbose: bool = False,
@@ -88,7 +89,11 @@ class Daemon:
         self.verbose = verbose
 
         # CLI overrides
-        self.daily_budget = max_budget or self.daemon_config.daily_budget_usd
+        self.daily_budget = (
+            None
+            if unlimited_budget
+            else max_budget if max_budget is not None else self.daemon_config.daily_budget_usd
+        )
         self.max_hours = max_hours
 
         # Shared mutable state — protected by _lock
@@ -134,8 +139,8 @@ class Daemon:
             self._persist_state()
 
             logger.info(
-                "ColonyOS daemon started (budget=$%.2f/day, dry_run=%s)",
-                self.daily_budget,
+                "ColonyOS daemon started (budget=%s, dry_run=%s)",
+                self._budget_cap_label(),
                 self.dry_run,
             )
 
@@ -143,7 +148,10 @@ class Daemon:
             threads = self._start_threads()
 
             # Main scheduling loop
-            self._main_loop()
+            try:
+                self._main_loop()
+            except KeyboardInterrupt:
+                logger.warning("Daemon interrupted, shutting down immediately")
 
             # Wait for threads to finish
             self._stop_event.set()
@@ -238,7 +246,7 @@ class Daemon:
 
             # Budget threshold alerts
             spend = self._state.daily_spend_usd
-            if self.daily_budget > 0:
+            if self.daily_budget is not None and self.daily_budget > 0:
                 pct = spend / self.daily_budget
                 if pct >= 1.0 and not self._budget_100_alerted:
                     self._budget_100_alerted = True
@@ -254,7 +262,16 @@ class Daemon:
                     )
 
             if not allowed:
-                logger.info("Daily budget exhausted ($%.2f spent)", self._state.daily_spend_usd)
+                logger.warning(
+                    "Daily budget exhausted; queue remains idle (spent=$%.2f, cap=%s, pending=%d)",
+                    self._state.daily_spend_usd,
+                    self._budget_cap_label(),
+                    sum(
+                        1
+                        for queued_item in self._queue_state.items
+                        if queued_item.status == QueueItemStatus.PENDING
+                    ),
+                )
                 return
 
             # Circuit breaker check
@@ -282,6 +299,26 @@ class Daemon:
                 self._pipeline_running = False
                 self._persist_state()
                 self._persist_queue()
+                logger.info(
+                    "Completed item %s (cost=$%.4f, spend=%s, pending=%d)",
+                    item.id,
+                    cost,
+                    self._spent_summary(),
+                    sum(
+                        1
+                        for queued_item in self._queue_state.items
+                        if queued_item.status == QueueItemStatus.PENDING
+                    ),
+                )
+        except KeyboardInterrupt:
+            logger.warning("Run interrupted while executing item %s", item.id)
+            with self._lock:
+                item.status = QueueItemStatus.FAILED
+                item.error = "Run interrupted by user (Ctrl+C)"
+                self._pipeline_running = False
+                self._persist_state()
+                self._persist_queue()
+            raise
         except Exception as exc:
             logger.exception("Pipeline failed for item %s", item.id)
             with self._lock:
@@ -426,29 +463,36 @@ class Daemon:
 
         try:
             logger.info("Running CEO idle-fill cycle")
-            # CEO proposal would be generated here and enqueued
-            # For now, we create a placeholder that will be filled by the
-            # actual CEO run when the queue executor picks it up
             from colonyos.orchestrator import run_ceo
+            from colonyos.ui import PhaseUI
 
-            proposal = run_ceo(
+            proposal_prompt, phase_result = run_ceo(
                 repo_root=self.repo_root,
                 config=self.config,
-                no_confirm=True,
+                ui=PhaseUI(verbose=self.verbose, prefix="CEO "),
             )
 
-            if proposal:
+            if not phase_result.success:
+                logger.warning(
+                    "CEO idle-fill failed: %s",
+                    phase_result.error or "unknown CEO error",
+                )
+                return
+
+            if proposal_prompt:
                 item = QueueItem(
                     id=f"ceo-{int(time.time())}",
                     source_type="ceo",
-                    source_value=proposal,
+                    source_value=proposal_prompt,
                     status=QueueItemStatus.PENDING,
                     priority=PRIORITY_CEO,
                 )
                 with self._lock:
                     self._queue_state.items.append(item)
                     self._persist_queue()
-                logger.info("CEO proposed work enqueued (P%d)", PRIORITY_CEO)
+                logger.info("CEO proposed work enqueued (P%d): %s", PRIORITY_CEO, proposal_prompt[:120])
+            else:
+                logger.info("CEO idle-fill produced no actionable proposal")
 
         except Exception:
             logger.exception("Error in CEO idle-fill cycle")
@@ -515,18 +559,27 @@ class Daemon:
             spend = self._state.daily_spend_usd
 
         logger.info(
-            "Heartbeat: %d items today, $%.2f spent",
+            "Heartbeat: %d items today, %s, pending=%d",
             items_today,
-            spend,
+            self._spent_summary(spend=spend),
+            sum(
+                1 for i in self._queue_state.items
+                if i.status == QueueItemStatus.PENDING
+            ),
         )
 
         pending = sum(
             1 for i in self._queue_state.items
             if i.status == QueueItemStatus.PENDING
         )
+        spend_label = (
+            f"${spend:.2f}/unlimited"
+            if self.daily_budget is None
+            else f"${spend:.2f}/${self.daily_budget:.2f}"
+        )
         msg = (
             f":heartbeat: *ColonyOS Heartbeat*\n"
-            f"Items today: {items_today} | Spend: ${spend:.2f}/${self.daily_budget:.2f} | "
+            f"Items today: {items_today} | Spend: {spend_label} | "
             f"Queue depth: {pending} | Paused: {self._state.paused}"
         )
         self._post_slack_message(msg)
@@ -641,7 +694,9 @@ class Daemon:
         authorized or the command is unrecognized.
         """
         allowed_ids = self.daemon_config.allowed_control_user_ids
-        if not allowed_ids or user_id not in allowed_ids:
+        if not self.daemon_config.allow_all_control_users and (
+            not allowed_ids or user_id not in allowed_ids
+        ):
             logger.warning(
                 "Unauthorized control command '%s' from user %s", text, user_id
             )
@@ -665,12 +720,18 @@ class Daemon:
 
         if cmd == "status":
             health = self.get_health()
+            remaining = health["daily_budget_remaining_usd"]
+            spend_line = (
+                f"Spend: ${health['daily_spend_usd']:.2f} (unlimited budget)\n"
+                if remaining is None
+                else f"Spend: ${health['daily_spend_usd']:.2f} "
+                f"(${remaining:.2f} remaining)\n"
+            )
             return (
                 f"*Daemon Status*\n"
                 f"Status: {health['status']} | Paused: {health['paused']}\n"
                 f"Queue depth: {health['queue_depth']} | Pipeline running: {health['pipeline_running']}\n"
-                f"Spend: ${health['daily_spend_usd']:.2f} "
-                f"(${health['daily_budget_remaining_usd']:.2f} remaining)\n"
+                f"{spend_line}"
                 f"Failures: {health['consecutive_failures']} | "
                 f"Circuit breaker: {health['circuit_breaker_active']}"
             )
@@ -687,6 +748,9 @@ class Daemon:
             sig_name = signal.Signals(signum).name
             logger.info("Received %s, initiating shutdown", sig_name)
             self.stop()
+            if self._pipeline_running:
+                logger.warning("Interrupting active pipeline due to %s", sig_name)
+                raise KeyboardInterrupt(f"{sig_name} received")
 
         signal.signal(signal.SIGINT, _handler)
         signal.signal(signal.SIGTERM, _handler)
@@ -816,3 +880,16 @@ class Daemon:
                 "total_items_today": self._state.total_items_today,
                 "consecutive_failures": self._state.consecutive_failures,
             }
+
+    def _budget_cap_label(self) -> str:
+        """Return a user-facing budget cap label."""
+        if self.daily_budget is None:
+            return "unlimited"
+        return f"${self.daily_budget:.2f}/day"
+
+    def _spent_summary(self, *, spend: float | None = None) -> str:
+        """Return a spend summary string for logs and status output."""
+        current_spend = self._state.daily_spend_usd if spend is None else spend
+        if self.daily_budget is None:
+            return f"${current_spend:.2f}/unlimited"
+        return f"${current_spend:.2f}/${self.daily_budget:.2f}"

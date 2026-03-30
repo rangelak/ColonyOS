@@ -100,3 +100,6 @@ router:
   confidence_threshold: 0.7
   small_fix_threshold: 0.85
   qa_budget: 0.5
+daemon:
+  daily_budget_usd: 500.0
+  allow_all_control_users: true

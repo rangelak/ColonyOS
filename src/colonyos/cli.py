@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 import uuid
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -234,6 +234,63 @@ def _show_welcome() -> None:
         )
     )
     console.print()
+
+
+def _format_budget_cap(cap: float | None) -> str:
+    """Format a daemon budget cap for display."""
+    if cap is None:
+        return "unlimited"
+    return f"${cap:.2f}/day"
+
+
+def _print_daemon_banner(
+    *,
+    repo_root: Path,
+    config: ColonyConfig,
+    budget_cap: float | None,
+    max_hours: float | None,
+    dry_run: bool,
+    allow_all_control_users: bool,
+) -> None:
+    """Render a compact startup banner for daemon mode."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    con = Console()
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold green")
+    table.add_column()
+    table.add_row("mode", "daemon")
+    table.add_row("repo", str(repo_root))
+    table.add_row("budget", _format_budget_cap(budget_cap))
+    table.add_row("max hours", "unlimited" if max_hours is None else f"{max_hours:.1f}h")
+    table.add_row("slack", "enabled" if config.slack.enabled else "disabled")
+    table.add_row(
+        "control",
+        "all Slack users"
+        if allow_all_control_users
+        else ", ".join(config.daemon.allowed_control_user_ids) or "allowlist empty",
+    )
+    table.add_row("dry run", "yes" if dry_run else "no")
+
+    title = Text()
+    title.append(" ColonyOS Daemon ", style="bold")
+    title.append(f"v{__version__}", style="dim")
+
+    con.print()
+    con.print(
+        Panel(
+            table,
+            title=title,
+            title_align="left",
+            border_style="bright_black",
+            padding=(1, 2),
+            expand=True,
+        )
+    )
+    con.print()
 
 
 REPL_HISTORY_PATH = Path.home() / ".colonyos_history"
@@ -3961,12 +4018,171 @@ def run_pipeline_for_queue_item(
         repo_root=repo_root,
         config=config,
         verbose=verbose,
-        quiet=True,
+        quiet=False,
         source_issue=source_issue,
         source_issue_url=source_issue_url,
     )
 
     return log.total_cost_usd
+
+
+def _launch_daemon_tui(
+    repo_root: Path,
+    config: ColonyConfig,
+    *,
+    max_budget: float | None,
+    unlimited_budget: bool,
+    max_hours: float | None,
+    allow_all_control_users: bool,
+    verbose: bool,
+    dry_run: bool,
+) -> None:
+    """Launch daemon mode inside the existing Textual shell."""
+    import colonyos.tui  # noqa: F401
+    import threading
+
+    from colonyos.tui.app import AssistantApp
+    from colonyos.tui.adapter import CommandOutputMsg
+    from colonyos.tui.log_writer import TranscriptLogWriter
+    from colonyos.tui.widgets.transcript import TranscriptView
+
+    class _DaemonApp(AssistantApp):
+        async def on_mount(self) -> None:
+            await super().on_mount()
+            transcript = self.query_one(TranscriptView)
+            transcript.append_notice(
+                "Daemon monitor mode. Ctrl+C requests shutdown. The composer is monitor-only for now."
+            )
+            self._start_run("daemon-monitor")
+
+    run_id = datetime.now(timezone.utc).strftime("daemon_%Y%m%d_%H%M%S")
+    logs_dir = repo_root / ".colonyos" / "logs"
+    log_writer = TranscriptLogWriter(
+        logs_dir, run_id, max_log_files=config.max_log_files,
+    )
+
+    process_ref: dict[str, subprocess.Popen[str]] = {}
+    process_lock = threading.Lock()
+
+    def _emit_monitor_notice(text: str) -> None:
+        queue = getattr(getattr(app_instance, "event_queue", None), "sync_q", None)
+        if queue is not None:
+            queue.put(CommandOutputMsg(text=text))
+
+    def _terminate_daemon_process(*, reason: str, force: bool = False) -> None:
+        with process_lock:
+            process = process_ref.get("instance")
+        if process is None or process.poll() is not None:
+            return
+
+        sig = signal.SIGKILL if force else signal.SIGTERM
+        try:
+            _emit_monitor_notice(f"{reason}; sending {signal.Signals(sig).name} to daemon subprocess")
+            os.killpg(process.pid, sig)
+            if not force:
+                process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _emit_monitor_notice("Daemon did not exit after SIGTERM; sending SIGKILL")
+            with suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(process.pid, signal.SIGKILL)
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=2)
+        except (ProcessLookupError, PermissionError, OSError) as exc:
+            logger.debug("Failed to stop daemon subprocess cleanly: %s", exc)
+        finally:
+            with suppress(Exception):
+                stream = process.stdout
+                if stream is not None:
+                    stream.close()
+
+    def _run_callback(_text: str) -> None:
+        queue = app_instance.event_queue.sync_q
+        command = [sys.executable, "-m", "colonyos", "daemon", "--no-tui"]
+        if max_budget is not None:
+            command.extend(["--max-budget", str(max_budget)])
+        if unlimited_budget:
+            command.append("--unlimited-budget")
+        if max_hours is not None:
+            command.extend(["--max-hours", str(max_hours)])
+        if allow_all_control_users:
+            command.append("--allow-all-control-users")
+        if verbose:
+            command.append("--verbose")
+        if dry_run:
+            command.append("--dry-run")
+
+        process = subprocess.Popen(
+            command,
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        with process_lock:
+            process_ref["instance"] = process
+        queue.put(CommandOutputMsg(text=f"Launching daemon subprocess: {' '.join(command)}"))
+
+        def _pump_output() -> None:
+            stream = process.stdout
+            if stream is None:
+                return
+            for line in stream:
+                text = line.rstrip()
+                if text:
+                    queue.put(CommandOutputMsg(text=text))
+
+        pump_thread = threading.Thread(
+            target=_pump_output,
+            name="daemon-tui-output",
+            daemon=True,
+        )
+        pump_thread.start()
+
+        return_code = process.wait()
+        pump_thread.join(timeout=2)
+        queue.put(CommandOutputMsg(text=f"Daemon exited with code {return_code}"))
+
+    def _cancel_callback() -> None:
+        _terminate_daemon_process(reason="Shutdown requested from TUI")
+
+    app_instance = _DaemonApp(
+        run_callback=_run_callback,
+        cancel_callback=_cancel_callback,
+        command_hints=["Ctrl+C stop daemon", "Ctrl+L clear transcript"],
+        log_writer=log_writer,
+    )
+
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sighup = signal.getsignal(signal.SIGHUP) if hasattr(signal, "SIGHUP") else None
+
+    def _sigint_handler(signum, frame) -> None:  # noqa: ANN001
+        try:
+            app_instance.call_from_thread(app_instance.action_cancel_run)
+        except Exception:
+            _terminate_daemon_process(reason="SIGINT received before TUI was ready")
+
+    def _terminate_handler(signum, frame) -> None:  # noqa: ANN001
+        _terminate_daemon_process(
+            reason=f"Parent received {signal.Signals(signum).name}",
+            force=False,
+        )
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+    signal.signal(signal.SIGTERM, _terminate_handler)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _terminate_handler)
+    try:
+        app_instance.run()
+    finally:
+        _terminate_daemon_process(reason="TUI exited while daemon subprocess was still running")
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        if previous_sighup is not None and hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, previous_sighup)
 
 
 # ---------------------------------------------------------------------------
@@ -3976,29 +4192,100 @@ def run_pipeline_for_queue_item(
 
 @app.command()
 @click.option("--max-budget", type=float, default=None, help="Daily budget cap in USD (overrides config).")
+@click.option("--unlimited-budget", is_flag=True, help="Disable the daily daemon budget cap for this session.")
 @click.option("--max-hours", type=float, default=None, help="Maximum wall-clock hours before daemon exits.")
+@click.option("--allow-all-control-users", is_flag=True, help="Allow Slack control commands from any user for this session.")
+@click.option("--tui/--no-tui", default=None, help="Run daemon inside the Textual UI when available.")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose logging.")
 @click.option("--dry-run", is_flag=True, help="Log what would run without executing pipelines.")
-def daemon(max_budget: float | None, max_hours: float | None, verbose: bool, dry_run: bool) -> None:
+def daemon(
+    max_budget: float | None,
+    unlimited_budget: bool,
+    max_hours: float | None,
+    allow_all_control_users: bool,
+    tui: bool | None,
+    verbose: bool,
+    dry_run: bool,
+) -> None:
     """Start the autonomous daemon — Slack + GitHub + CEO + cleanup in one process."""
     import logging as _logging
+
+    from rich.logging import RichHandler
 
     from colonyos.config import load_config
     from colonyos.daemon import Daemon, DaemonError
 
-    if verbose:
-        _logging.basicConfig(level=_logging.DEBUG, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    use_tui = tui if tui is not None else (_interactive_stdio() and _tui_available())
+    log_level = _logging.DEBUG if verbose else _logging.INFO
+    if use_tui:
+        _logging.basicConfig(
+            level=log_level,
+            handlers=[_logging.NullHandler()],
+            force=True,
+        )
     else:
-        _logging.basicConfig(level=_logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+        _logging.basicConfig(
+            level=log_level,
+            format="%(message)s",
+            datefmt="[%X]",
+            handlers=[
+                RichHandler(
+                    rich_tracebacks=True,
+                    markup=True,
+                    show_path=verbose,
+                    show_time=True,
+                )
+            ],
+            force=True,
+        )
 
     repo_root = Path.cwd()
     config = load_config(repo_root)
+    effective_allow_all = allow_all_control_users or config.daemon.allow_all_control_users
+    effective_budget = (
+        None
+        if unlimited_budget
+        else max_budget if max_budget is not None else config.daemon.daily_budget_usd
+    )
+    if allow_all_control_users:
+        config.daemon.allow_all_control_users = True
 
     # Validate daemon prerequisites
     if not config.slack.enabled:
         click.echo("Warning: Slack is not enabled in config. Daemon will run without Slack listener.", err=True)
 
-    if config.daemon.allowed_control_user_ids:
+    if use_tui:
+        try:
+            _launch_daemon_tui(
+                repo_root,
+                config,
+                max_budget=max_budget,
+                unlimited_budget=unlimited_budget,
+                max_hours=max_hours,
+                allow_all_control_users=allow_all_control_users,
+                verbose=verbose,
+                dry_run=dry_run,
+            )
+            return
+        except ImportError as exc:
+            click.echo(
+                f"Error: {exc}\n\nInstall the TUI extra: pip install colonyos[tui]",
+                err=True,
+            )
+            sys.exit(1)
+
+    _print_daemon_banner(
+        repo_root=repo_root,
+        config=config,
+        budget_cap=effective_budget,
+        max_hours=max_hours,
+        dry_run=dry_run,
+        allow_all_control_users=effective_allow_all,
+    )
+
+    if effective_allow_all:
+        click.echo("Control users: all Slack users")
+    elif config.daemon.allowed_control_user_ids:
         click.echo(f"Control users: {', '.join(config.daemon.allowed_control_user_ids)}")
     else:
         click.echo(
@@ -4011,6 +4298,7 @@ def daemon(max_budget: float | None, max_hours: float | None, verbose: bool, dry
         repo_root=repo_root,
         config=config,
         max_budget=max_budget,
+        unlimited_budget=unlimited_budget,
         max_hours=max_hours,
         dry_run=dry_run,
         verbose=verbose,

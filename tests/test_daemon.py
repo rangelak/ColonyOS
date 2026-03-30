@@ -43,6 +43,10 @@ class TestDaemonInit:
         d = Daemon(tmp_repo, config, max_budget=25.0)
         assert d.daily_budget == 25.0
 
+    def test_unlimited_budget_override(self, tmp_repo: Path, config: ColonyConfig):
+        d = Daemon(tmp_repo, config, unlimited_budget=True)
+        assert d.daily_budget is None
+
     def test_cli_max_hours(self, tmp_repo: Path, config: ColonyConfig):
         d = Daemon(tmp_repo, config, max_hours=8.0)
         assert d.max_hours == 8.0
@@ -270,6 +274,18 @@ class TestSlackKillSwitch:
         assert result is None
         assert daemon_instance._state.paused is False
 
+    def test_allow_all_control_users_accepts_without_allowlist(self, tmp_repo: Path):
+        config = ColonyConfig(
+            daemon=DaemonConfig(
+                daily_budget_usd=50.0,
+                allow_all_control_users=True,
+            ),
+        )
+        d = Daemon(tmp_repo, config, dry_run=True)
+        result = d._handle_control_command("U-anyone", "pause")
+        assert result is not None
+        assert d._state.paused is True
+
     def test_halt_aliases_pause(self, tmp_repo: Path):
         config = ColonyConfig(
             daemon=DaemonConfig(
@@ -422,3 +438,22 @@ class TestTickIntegration:
              patch.object(daemon_instance, "_schedule_cleanup"):
             daemon_instance._tick()
             assert mock_poll.called
+
+
+class TestCeoScheduling:
+    def test_schedule_ceo_enqueues_prompt_from_run_ceo_tuple(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        with patch("colonyos.orchestrator.run_ceo", return_value=("Ship feature X", MagicMock(success=True, error=None))):
+            daemon_instance._schedule_ceo()
+
+        queued = [item for item in daemon_instance._queue_state.items if item.source_type == "ceo"]
+        assert len(queued) == 1
+        assert queued[0].source_value == "Ship feature X"
+
+    def test_schedule_ceo_skips_failed_result(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        failed = MagicMock(success=False, error="boom")
+        with patch("colonyos.orchestrator.run_ceo", return_value=("", failed)):
+            daemon_instance._schedule_ceo()
+
+        assert not any(item.source_type == "ceo" for item in daemon_instance._queue_state.items)

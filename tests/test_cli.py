@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ from click.testing import CliRunner
 from colonyos.cli import (
     app,
     RouteOutcome,
+    _launch_daemon_tui,
     _compute_elapsed_hours,
     _launch_tui,
     _load_latest_loop_state,
@@ -655,6 +657,147 @@ def _make_config(tmp_path: Path) -> ColonyConfig:
     )
     save_config(tmp_path, config)
     return config
+
+
+class TestDaemonCommand:
+    def test_daemon_uses_tui_when_available(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._interactive_stdio", return_value=True), \
+             patch("colonyos.cli._tui_available", return_value=True), \
+             patch("colonyos.cli._launch_daemon_tui") as mock_launch:
+            result = runner.invoke(app, ["daemon"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        mock_launch.assert_called_once()
+
+    def test_daemon_no_tui_starts_headless(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.daemon.Daemon.start") as mock_start:
+            result = runner.invoke(app, ["daemon", "--no-tui"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        mock_start.assert_called_once()
+
+    def test_launch_daemon_tui_spawns_subprocess(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+
+        class FakeApp:
+            def __init__(self, **kwargs):
+                self.run_callback = kwargs["run_callback"]
+                self.cancel_callback = kwargs["cancel_callback"]
+                self.messages: list[object] = []
+                self.event_queue = SimpleNamespace(
+                    sync_q=SimpleNamespace(put=self.messages.append),
+                )
+
+            def run(self):
+                self.run_callback("daemon-monitor")
+
+        fake_proc = MagicMock()
+        fake_proc.stdout = iter(["line one\n", "line two\n"])
+        fake_proc.wait.return_value = 0
+        fake_proc.pid = 12345
+        fake_proc.poll.return_value = 0
+
+        with patch("colonyos.tui.app.AssistantApp", FakeApp), \
+             patch("colonyos.tui.log_writer.TranscriptLogWriter"), \
+             patch("colonyos.cli.subprocess.Popen", return_value=fake_proc) as mock_popen, \
+             patch("colonyos.cli.signal.getsignal", return_value=signal.SIG_DFL), \
+             patch("colonyos.cli.signal.signal"):
+            _launch_daemon_tui(
+                tmp_path,
+                config,
+                max_budget=25.0,
+                unlimited_budget=False,
+                max_hours=8.0,
+                allow_all_control_users=True,
+                verbose=True,
+                dry_run=True,
+            )
+
+        command = mock_popen.call_args.args[0]
+        assert "--no-tui" in command
+        assert "--allow-all-control-users" in command
+        assert "--dry-run" in command
+        assert "--verbose" in command
+
+    def test_launch_daemon_tui_stops_running_subprocess_on_exit(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+
+        class FakeApp:
+            def __init__(self, **kwargs):
+                self.run_callback = kwargs["run_callback"]
+                self.cancel_callback = kwargs["cancel_callback"]
+                self.messages: list[object] = []
+                self.event_queue = SimpleNamespace(
+                    sync_q=SimpleNamespace(put=self.messages.append),
+                )
+
+            def run(self):
+                self.run_callback("daemon-monitor")
+
+        fake_proc = MagicMock()
+        fake_proc.stdout = iter(["line one\n"])
+        fake_proc.wait.return_value = 0
+        fake_proc.pid = 12345
+        fake_proc.poll.return_value = None
+
+        with patch("colonyos.tui.app.AssistantApp", FakeApp), \
+             patch("colonyos.tui.log_writer.TranscriptLogWriter"), \
+             patch("colonyos.cli.subprocess.Popen", return_value=fake_proc), \
+             patch("colonyos.cli.os.killpg") as mock_killpg, \
+             patch("colonyos.cli.signal.getsignal", return_value=signal.SIG_DFL), \
+             patch("colonyos.cli.signal.signal"):
+            _launch_daemon_tui(
+                tmp_path,
+                config,
+                max_budget=None,
+                unlimited_budget=False,
+                max_hours=None,
+                allow_all_control_users=False,
+                verbose=False,
+                dry_run=False,
+            )
+
+        mock_killpg.assert_called_with(12345, signal.SIGTERM)
+
+    def test_launch_daemon_tui_ignores_kill_errors_during_shutdown(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+
+        class FakeApp:
+            def __init__(self, **kwargs):
+                self.run_callback = kwargs["run_callback"]
+                self.cancel_callback = kwargs["cancel_callback"]
+                self.messages: list[object] = []
+                self.event_queue = SimpleNamespace(
+                    sync_q=SimpleNamespace(put=self.messages.append),
+                )
+
+            def run(self):
+                self.run_callback("daemon-monitor")
+
+        fake_proc = MagicMock()
+        fake_proc.stdout = iter(["line one\n"])
+        fake_proc.wait.return_value = 0
+        fake_proc.pid = 12345
+        fake_proc.poll.return_value = None
+
+        with patch("colonyos.tui.app.AssistantApp", FakeApp), \
+             patch("colonyos.tui.log_writer.TranscriptLogWriter"), \
+             patch("colonyos.cli.subprocess.Popen", return_value=fake_proc), \
+             patch("colonyos.cli.os.killpg", side_effect=PermissionError("no permission")), \
+             patch("colonyos.cli.signal.getsignal", return_value=signal.SIG_DFL), \
+             patch("colonyos.cli.signal.signal"):
+            _launch_daemon_tui(
+                tmp_path,
+                config,
+                max_budget=None,
+                unlimited_budget=False,
+                max_hours=None,
+                allow_all_control_users=False,
+                verbose=False,
+                dry_run=False,
+            )
 
 
 class TestAuto:

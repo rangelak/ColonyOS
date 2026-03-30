@@ -6,7 +6,14 @@ import click
 import json
 import yaml
 
-from colonyos.config import ColonyConfig, save_config
+from colonyos.config import (
+    ColonyConfig,
+    DaemonConfig,
+    RecoveryConfig,
+    RetryConfig,
+    load_config,
+    save_config,
+)
 from colonyos.models import Persona, PhaseResult, Phase, ProjectInfo, RepoContext
 from colonyos.init import (
     MODEL_PRESETS,
@@ -263,8 +270,59 @@ class TestRunAiInit:
 
         assert config.project is not None
         assert config.project.name == "TestApp"
-        assert config.model == "sonnet"  # Cost-optimized preset
+        assert config.model == "opus"  # Cost-optimized now keeps opus everywhere
         assert len(config.personas) == len(PACKS[0].personas)  # startup pack
+
+    def test_preserves_existing_daemon_and_retry_settings(self, tmp_path: Path):
+        save_config(
+            tmp_path,
+            ColonyConfig(
+                daemon=DaemonConfig(
+                    daily_budget_usd=None,
+                    allow_all_control_users=True,
+                ),
+                retry=RetryConfig(
+                    max_attempts=6,
+                    base_delay_seconds=15.0,
+                    max_delay_seconds=90.0,
+                    fallback_model="sonnet",
+                ),
+                recovery=RecoveryConfig(
+                    enabled=True,
+                    max_phase_retries=2,
+                    allow_nuke=True,
+                    max_nuke_attempts=2,
+                    incident_char_cap=5000,
+                ),
+                max_log_files=17,
+            ),
+        )
+        response = json.dumps({
+            "pack_key": "startup",
+            "preset_name": "Cost-optimized",
+            "project_name": "TestApp",
+            "project_description": "A test app",
+            "project_stack": "Python",
+            "vision": "",
+        })
+        result = self._make_success_result(response)
+
+        with patch("colonyos.agent.run_phase_sync", return_value=result), \
+             patch("colonyos.init.click") as mock_click, \
+             patch("colonyos.init.render_config_preview"):
+            mock_click.echo = click.echo
+            mock_click.confirm.return_value = True
+            mock_click.prompt.return_value = ""
+            config = run_ai_init(tmp_path)
+
+        loaded = load_config(tmp_path)
+        assert config.daemon.allow_all_control_users is True
+        assert loaded.daemon.daily_budget_usd is None
+        assert loaded.daemon.allow_all_control_users is True
+        assert loaded.retry.max_attempts == 6
+        assert loaded.retry.fallback_model == "sonnet"
+        assert loaded.recovery.max_phase_retries == 2
+        assert loaded.max_log_files == 17
 
     def test_fallback_on_llm_failure(self, tmp_path: Path):
         failed_result = PhaseResult(
@@ -752,7 +810,7 @@ class TestRunInitReviewsDir:
         assert (reviews_subdir / ".gitkeep").exists()
 
     def test_gitignore_has_cos_pattern(self, tmp_path: Path):
-        """run_init adds cOS_*/ pattern to .gitignore."""
+        """run_init adds only local `.colonyos` runtime artifacts to `.gitignore`."""
         with patch("colonyos.init.click") as mock_click, \
              patch("colonyos.init._collect_personas_with_packs") as mock_personas, \
              patch("colonyos.init._collect_strategic_goals", return_value=""):
@@ -769,8 +827,12 @@ class TestRunInitReviewsDir:
         gitignore = tmp_path / ".gitignore"
         assert gitignore.exists()
         content = gitignore.read_text(encoding="utf-8")
-        assert "cOS_*/" in content
         assert ".colonyos/runs/" in content
+        assert ".colonyos/queue.json" in content
+        assert ".colonyos/daemon_state.json" in content
+        assert ".colonyos/logs/" in content
+        assert ".colonyos/recovery/" in content
+        assert "cOS_*/" not in content
 
     def test_warns_on_old_dirs(self, tmp_path: Path, capsys):
         """run_init warns if old prds/ or tasks/ dirs exist alongside cOS_ dirs."""
@@ -841,7 +903,47 @@ class TestQuickInit:
 
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert raw["project"]["name"] == "TestProject"
-        assert raw["model"] == "sonnet"
+        assert raw["model"] == "opus"
+
+    def test_quick_preserves_existing_nested_settings(self, tmp_path: Path):
+        save_config(
+            tmp_path,
+            ColonyConfig(
+                daemon=DaemonConfig(
+                    daily_budget_usd=None,
+                    allow_all_control_users=True,
+                ),
+                retry=RetryConfig(
+                    max_attempts=4,
+                    base_delay_seconds=12.0,
+                    max_delay_seconds=75.0,
+                    fallback_model="sonnet",
+                ),
+                recovery=RecoveryConfig(
+                    enabled=True,
+                    max_phase_retries=3,
+                    allow_nuke=True,
+                    max_nuke_attempts=2,
+                    incident_char_cap=4200,
+                ),
+            ),
+        )
+
+        config = run_init(
+            tmp_path,
+            quick=True,
+            project_name="TestProject",
+            project_description="A test",
+            project_stack="Python",
+        )
+
+        loaded = load_config(tmp_path)
+        assert config.daemon.allow_all_control_users is True
+        assert loaded.daemon.daily_budget_usd is None
+        assert loaded.daemon.allow_all_control_users is True
+        assert loaded.retry.max_attempts == 4
+        assert loaded.retry.fallback_model == "sonnet"
+        assert loaded.recovery.max_phase_retries == 3
 
     def test_quick_prints_next_step(self, tmp_path: Path, capsys):
         with patch("colonyos.init.click") as mock_click:
@@ -896,17 +998,10 @@ class TestModelPresets:
         assert preset["phase_models"] == {}
         assert preset["model"] == "opus"
 
-    def test_cost_optimized_preset_has_phase_overrides(self):
+    def test_cost_optimized_preset_keeps_opus_everywhere(self):
         preset = MODEL_PRESETS["Cost-optimized"]
-        assert preset["model"] == "sonnet"
-        assert preset["phase_models"]["implement"] == "opus"
-        assert preset["phase_models"]["deliver"] == "haiku"
-        assert preset["phase_models"]["learn"] == "haiku"
-        # Only phases that differ from the global default should be listed
-        assert "plan" not in preset["phase_models"]
-        assert "review" not in preset["phase_models"]
-        assert "fix" not in preset["phase_models"]
-        assert "decision" not in preset["phase_models"]
+        assert preset["model"] == "opus"
+        assert preset["phase_models"] == {}
 
     def test_quick_init_uses_cost_optimized(self, tmp_path: Path):
         config = run_init(
@@ -917,7 +1012,7 @@ class TestModelPresets:
             project_stack="Python",
         )
         assert config.phase_models == dict(MODEL_PRESETS["Cost-optimized"]["phase_models"])
-        assert config.model == "sonnet"
+        assert config.model == "opus"
 
     def test_interactive_quality_first_preset(self, tmp_path: Path):
         with patch("colonyos.init.click") as mock_click, \
@@ -953,7 +1048,7 @@ class TestModelPresets:
             config = run_init(tmp_path)
 
         assert config.phase_models == dict(MODEL_PRESETS["Cost-optimized"]["phase_models"])
-        assert config.model == "sonnet"
+        assert config.model == "opus"
 
 
 # ---------------------------------------------------------------------------

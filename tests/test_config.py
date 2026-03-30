@@ -9,6 +9,7 @@ from colonyos.config import (
     CIFixConfig,
     ColonyConfig,
     BudgetConfig,
+    DaemonConfig,
     DEFAULTS,
     LearningsConfig,
     PhasesConfig,
@@ -839,6 +840,62 @@ class TestSlackConfigTriageFields:
         assert loaded.slack.triage_verbose is True
         assert loaded.slack.max_consecutive_failures == 5
         assert loaded.slack.circuit_breaker_cooldown_minutes == 45
+
+
+class TestDaemonConfigBudgetAndControl:
+    def test_default_daily_budget_is_500(self) -> None:
+        assert DEFAULTS["daemon"]["daily_budget_usd"] == 500.0
+
+    def test_parses_unlimited_daemon_budget(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"daily_budget_usd": "unlimited"}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.daily_budget_usd is None
+
+    def test_roundtrip_allow_all_control_users(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            daemon=DaemonConfig(
+                daily_budget_usd=None,
+                allow_all_control_users=True,
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.daily_budget_usd is None
+        assert loaded.daemon.allow_all_control_users is True
+
+    def test_roundtrip_retry_ceo_profiles_and_max_log_files(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            retry=RetryConfig(
+                max_attempts=5,
+                base_delay_seconds=20.0,
+                max_delay_seconds=300.0,
+                fallback_model="sonnet",
+            ),
+            ceo_profiles=[
+                Persona(
+                    role="CEO One",
+                    expertise="Strategy",
+                    perspective="Move faster",
+                    reviewer=True,
+                )
+            ],
+            max_log_files=12,
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.retry.max_attempts == 5
+        assert loaded.retry.base_delay_seconds == 20.0
+        assert loaded.retry.max_delay_seconds == 300.0
+        assert loaded.retry.fallback_model == "sonnet"
+        assert len(loaded.ceo_profiles) == 1
+        assert loaded.ceo_profiles[0].role == "CEO One"
+        assert loaded.ceo_profiles[0].reviewer is True
+        assert loaded.max_log_files == 12
 
 
 class TestSlackMaxFixRoundsPerThread:
