@@ -7,9 +7,10 @@ import random
 import re
 import sys
 import threading
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, TypeVar, cast
 
 from claude_agent_sdk import (
     AgentDefinition,
@@ -20,6 +21,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import StreamEvent, SystemMessage
 
+from colonyos.cancellation import cancellation_scope, request_cancel
 from colonyos.config import RetryConfig, _SAFETY_CRITICAL_PHASES
 from colonyos.models import Phase, PhaseResult, RetryInfo
 
@@ -28,8 +30,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_ACTIVE_RUNS_LOCK = threading.Lock()
-_ACTIVE_RUNS: set["_SyncRunController"] = set()
+_ACTIVE_PHASE_CONTROLLERS_LOCK = threading.Lock()
+_ACTIVE_PHASE_CONTROLLERS: set["_SyncRunController"] = set()
+_T = TypeVar("_T")
 
 _API_KEY_SOURCE_LABELS = {
     "none": "Claude subscription (no API key)",
@@ -161,21 +164,21 @@ def request_active_phase_cancel(reason: str = "Cancelled by user") -> int:
 
     Returns the number of active runs that were signaled.
     """
-    with _ACTIVE_RUNS_LOCK:
-        active = list(_ACTIVE_RUNS)
-    for controller in active:
+    with _ACTIVE_PHASE_CONTROLLERS_LOCK:
+        controllers = list(_ACTIVE_PHASE_CONTROLLERS)
+    for controller in controllers:
         controller.cancel(reason)
-    return len(active)
+    return len(controllers)
 
 
-def _register_active_run(controller: _SyncRunController) -> None:
-    with _ACTIVE_RUNS_LOCK:
-        _ACTIVE_RUNS.add(controller)
+def _register_active_phase_controller(controller: _SyncRunController) -> None:
+    with _ACTIVE_PHASE_CONTROLLERS_LOCK:
+        _ACTIVE_PHASE_CONTROLLERS.add(controller)
 
 
-def _unregister_active_run(controller: _SyncRunController) -> None:
-    with _ACTIVE_RUNS_LOCK:
-        _ACTIVE_RUNS.discard(controller)
+def _unregister_active_phase_controller(controller: _SyncRunController) -> None:
+    with _ACTIVE_PHASE_CONTROLLERS_LOCK:
+        _ACTIVE_PHASE_CONTROLLERS.discard(controller)
 
 
 async def _run_phase_attempt(
@@ -217,7 +220,8 @@ async def _run_phase_attempt(
                 if etype == "content_block_start":
                     cb = event.get("content_block", {})
                     if cb.get("type") == "tool_use":
-                        current_tool = cb.get("name", "unknown")
+                        tool_name = cb.get("name")
+                        current_tool = tool_name if isinstance(tool_name, str) and tool_name else "unknown"
                         ui.on_tool_start(current_tool)
 
                 elif etype == "content_block_delta":
@@ -460,10 +464,10 @@ async def run_phase(
 
 
 def _run_async_sync(
-    coro_factory: Callable[[], object],
+    coro_factory: Callable[[], Awaitable[_T]],
     *,
     label: str,
-) -> PhaseResult | list[PhaseResult]:
+) -> _T:
     """Run an async coroutine in a worker thread that supports cancellation."""
     controller = _SyncRunController(label=label)
     done = threading.Event()
@@ -494,24 +498,26 @@ def _run_async_sync(
                 done.set()
 
     worker = threading.Thread(target=_worker, name=f"agent-{label}", daemon=True)
-    _register_active_run(controller)
-    worker.start()
+    _register_active_phase_controller(controller)
     try:
-        while not done.wait(0.1):
-            pass
-    except KeyboardInterrupt:
-        controller.cancel("Interrupted by user (Ctrl+C)")
-        worker.join(timeout=10)
-        raise
+        with cancellation_scope(controller.cancel):
+            worker.start()
+            try:
+                while not done.wait(0.1):
+                    pass
+            except KeyboardInterrupt:
+                controller.cancel("Interrupted by user (Ctrl+C)")
+                worker.join(timeout=10)
+                raise
     finally:
-        _unregister_active_run(controller)
+        _unregister_active_phase_controller(controller)
 
     worker.join(timeout=0.1)
     if "error" in outcome:
         raise outcome["error"]  # type: ignore[misc]
     if "cancelled" in outcome:
         raise KeyboardInterrupt(str(outcome["cancelled"]))
-    return outcome["result"]  # type: ignore[return-value]
+    return cast(_T, outcome["result"])
 
 
 def run_phase_sync(

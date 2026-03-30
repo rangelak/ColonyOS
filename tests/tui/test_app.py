@@ -451,7 +451,7 @@ class TestKeybindings:
         async with app.run_test() as pilot:
             await pilot.pause()
             # Trigger cancel action directly (Ctrl+C binding may be intercepted by test harness)
-            with patch("colonyos.tui.app.request_active_phase_cancel") as mock_cancel:
+            with patch("colonyos.tui.app.request_cancel") as mock_cancel:
                 app.action_cancel_run()
             await pilot.pause()
             status = app.query_one(StatusBar)

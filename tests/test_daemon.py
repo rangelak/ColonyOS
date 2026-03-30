@@ -14,6 +14,7 @@ from colonyos.config import ColonyConfig, DaemonConfig
 from colonyos.daemon import Daemon, DaemonError
 from colonyos.daemon_state import DaemonState, save_daemon_state
 from colonyos.models import QueueItem, QueueItemStatus, QueueState
+from colonyos.recovery import PreservationResult
 
 
 @pytest.fixture
@@ -86,6 +87,24 @@ class TestCrashRecovery:
         assert d._queue_state.items[0].error == "daemon crash recovery"
         assert d._queue_state.items[1].status == QueueItemStatus.PENDING
 
+    def test_dirty_startup_recovery_writes_incident(self, tmp_repo: Path, config: ColonyConfig):
+        d = Daemon(tmp_repo, config, dry_run=True)
+        preserve_result = PreservationResult(
+            snapshot_dir=tmp_repo / ".colonyos" / "recovery" / "daemon_crash_recovery",
+            preservation_mode="stash",
+            stash_message="stash-msg",
+        )
+
+        with patch("colonyos.recovery.git_status_porcelain", return_value=" M foo.py"), \
+             patch("colonyos.recovery.preserve_and_reset_worktree", return_value=preserve_result):
+            d._recover_from_crash()
+
+        recovery_files = sorted((tmp_repo / ".colonyos" / "recovery").glob("*.md"))
+        assert recovery_files
+        summary = recovery_files[0].read_text(encoding="utf-8")
+        assert "dirty worktree" in summary.lower()
+        assert "stash-msg" in summary
+
 
 class TestPriorityQueue:
     def test_selects_highest_priority(self, daemon_instance: Daemon):
@@ -147,6 +166,20 @@ class TestBudgetEnforcement:
         ]
         daemon_instance._try_execute_next()
         assert daemon_instance._queue_state.items[0].status == QueueItemStatus.PENDING
+
+    def test_budget_exhaustion_writes_incident_summary(self, daemon_instance: Daemon):
+        daemon_instance._state.daily_spend_usd = 50.0
+        daemon_instance._queue_state.items = [
+            QueueItem(id="item", source_type="prompt", source_value="x", status=QueueItemStatus.PENDING, priority=1),
+        ]
+
+        daemon_instance._try_execute_next()
+
+        recovery_files = sorted((daemon_instance.repo_root / ".colonyos" / "recovery").glob("*.md"))
+        assert recovery_files
+        summary = recovery_files[0].read_text(encoding="utf-8")
+        assert "daily budget was exhausted" in summary.lower()
+        assert "--unlimited-budget" in summary
 
 
 class TestCircuitBreaker:
