@@ -128,6 +128,9 @@ jobs:
             echo "## Installation"
             echo ""
             echo '```bash'
+            echo "# Homebrew (macOS)"
+            echo "brew install rangelak/colonyos/colonyos"
+            echo ""
             echo "# pip / pipx"
             echo "pip install colonyos==${TAG#v}"
             echo "# or: pipx install colonyos==${TAG#v}"
@@ -146,4 +149,69 @@ jobs:
             --title "$TAG" \
             --notes-file /tmp/release_notes.md \
             dist/* SHA256SUMS.txt
+
+  update-homebrew:
+    name: Update Homebrew tap
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Extract version and SHA-256
+        id: meta
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # Compute SHA-256 of the sdist tarball
+          SDIST_FILE=$(ls dist/colonyos-*.tar.gz)
+          SHA256=$(sha256sum "$SDIST_FILE" | awk '{print $1}')
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+
+          echo "Version: ${VERSION}" >&2
+          echo "SHA-256: ${SHA256}" >&2
+
+      - name: Generate Homebrew formula
+        run: |
+          chmod +x scripts/generate-homebrew-formula.sh
+          scripts/generate-homebrew-formula.sh \
+            "${{ steps.meta.outputs.version }}" \
+            "${{ steps.meta.outputs.sha256 }}" \
+            --output /tmp/colonyos.rb
+
+      - name: Push formula to tap repository
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+
+          # Clone the tap repo using the fine-grained PAT
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/rangelak/homebrew-colonyos.git" /tmp/tap
+
+          # Copy the generated formula
+          mkdir -p /tmp/tap/Formula
+          cp /tmp/colonyos.rb /tmp/tap/Formula/colonyos.rb
+
+          # Commit and push
+          cd /tmp/tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/colonyos.rb
+          git commit -m "Update colonyos formula to ${VERSION}"
+          git push origin main
 

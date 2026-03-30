@@ -68,12 +68,28 @@ jobs:
         run: npm run build
 
   shellcheck:
-    name: Lint install.sh
+    name: Lint shell scripts
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
-      - name: Run shellcheck
+      - name: Run shellcheck on install.sh
         run: shellcheck install.sh
+
+      - name: Run shellcheck on generate-homebrew-formula.sh
+        run: shellcheck scripts/generate-homebrew-formula.sh
+
+  homebrew-formula-dry-run:
+    name: Homebrew formula dry-run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Verify formula generation script dry-run
+        run: |
+          chmod +x scripts/generate-homebrew-formula.sh
+          scripts/generate-homebrew-formula.sh --dry-run

@@ -83,6 +83,33 @@ class TestCIWorkflow:
                         f"to a commit SHA — supply chain risk"
                     )
 
+    def test_has_homebrew_formula_dry_run_job(self):
+        """CI must validate the formula generation script via --dry-run."""
+        assert "homebrew-formula-dry-run" in self.workflow["jobs"], (
+            "CI workflow must have a homebrew-formula-dry-run job"
+        )
+
+    def test_homebrew_dry_run_runs_script(self):
+        """The dry-run job must execute generate-homebrew-formula.sh --dry-run."""
+        job = self.workflow["jobs"]["homebrew-formula-dry-run"]
+        steps = job.get("steps", [])
+        step_texts = " ".join(str(s.get("run", "")) for s in steps)
+        assert "generate-homebrew-formula.sh" in step_texts, (
+            "Dry-run job must run generate-homebrew-formula.sh"
+        )
+        assert "--dry-run" in step_texts, (
+            "Dry-run job must pass --dry-run flag"
+        )
+
+    def test_shellcheck_lints_formula_script(self):
+        """Shellcheck job must lint generate-homebrew-formula.sh."""
+        shellcheck_job = self.workflow["jobs"]["shellcheck"]
+        steps = shellcheck_job.get("steps", [])
+        step_texts = " ".join(str(s.get("run", "")) for s in steps)
+        assert "generate-homebrew-formula.sh" in step_texts, (
+            "Shellcheck must lint generate-homebrew-formula.sh"
+        )
+
 
 class TestReleaseWorkflow:
     """Verify .github/workflows/release.yml structure."""
@@ -204,6 +231,60 @@ class TestReleaseWorkflow:
             "Release notes must use curl -fsSL (with -f for HTTP error detection)"
         )
 
+    def test_has_update_homebrew_job(self):
+        """Release workflow must have an update-homebrew job."""
+        assert "update-homebrew" in self.workflow["jobs"], (
+            "Release workflow must have an update-homebrew job"
+        )
+
+    def test_update_homebrew_needs_publish(self):
+        """update-homebrew must run after publish succeeds."""
+        job = self.workflow["jobs"]["update-homebrew"]
+        needs = job.get("needs", [])
+        if isinstance(needs, str):
+            needs = [needs]
+        assert "publish" in needs, (
+            "update-homebrew job must depend on publish"
+        )
+
+    def test_update_homebrew_generates_formula(self):
+        """update-homebrew must run the formula generation script."""
+        job = self.workflow["jobs"]["update-homebrew"]
+        steps = job.get("steps", [])
+        step_texts = " ".join(str(s.get("run", "")) for s in steps)
+        assert "generate-homebrew-formula.sh" in step_texts, (
+            "update-homebrew must run generate-homebrew-formula.sh"
+        )
+
+    def test_update_homebrew_pushes_to_tap(self):
+        """update-homebrew must push the formula to the tap repo."""
+        job = self.workflow["jobs"]["update-homebrew"]
+        steps = job.get("steps", [])
+        step_texts = " ".join(str(s.get("run", "")) for s in steps)
+        assert "homebrew-colonyos" in step_texts, (
+            "update-homebrew must push to rangelak/homebrew-colonyos"
+        )
+
+    def test_update_homebrew_uses_tap_token(self):
+        """update-homebrew must use HOMEBREW_TAP_TOKEN secret."""
+        job = self.workflow["jobs"]["update-homebrew"]
+        steps = job.get("steps", [])
+        step_envs = " ".join(
+            str(s.get("env", {})) for s in steps
+        )
+        assert "HOMEBREW_TAP_TOKEN" in step_envs, (
+            "update-homebrew must use HOMEBREW_TAP_TOKEN secret"
+        )
+
+    def test_release_notes_include_homebrew_install(self):
+        """Release notes must include Homebrew install instructions."""
+        release_job = self.workflow["jobs"]["release"]
+        steps = release_job.get("steps", [])
+        all_run = " ".join(str(s.get("run", "")) for s in steps)
+        assert "brew install" in all_run, (
+            "Release notes must include Homebrew install instructions"
+        )
+
 
 class TestHomebrewFormula:
     """Verify Formula/colonyos.rb structure."""
@@ -228,8 +309,8 @@ class TestHomebrewFormula:
             "Formula must not use pypi.io — use files.pythonhosted.org instead"
         )
 
-    def test_formula_documents_placeholder_state(self):
-        """Formula must document that sha256 is a placeholder before first release."""
-        assert "placeholder" in self.content.lower() or "first release" in self.content.lower(), (
-            "Formula should document that sha256 is a placeholder before first release"
+    def test_formula_documents_development_reference(self):
+        """Formula must document that it is a development reference pointing to the tap."""
+        assert "development reference" in self.content.lower() or "homebrew tap" in self.content.lower(), (
+            "Formula should document that it is a development reference and point to the tap repo"
         )

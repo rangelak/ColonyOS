@@ -31,17 +31,17 @@
   - [x] 1.3 Test the generation script locally: run it, verify the output formula has resource blocks for all transitive deps (click, pyyaml, rich, claude-agent-sdk, etc.)
   - [x] 1.4 Update in-repo `Formula/colonyos.rb` with a comment redirecting to the tap repo as the canonical source
 
-- [ ] 2.0 Add `update-homebrew` job to release workflow
+- [x] 2.0 Add `update-homebrew` job to release workflow
   depends_on: [1.0]
-  - [ ] 2.1 Write tests/validation: add a CI check that `scripts/generate-homebrew-formula.sh --dry-run` succeeds (formula generation without push)
-  - [ ] 2.2 Add `update-homebrew` job to `.github/workflows/release.yml`:
+  - [x] 2.1 Write tests/validation: add a CI check that `scripts/generate-homebrew-formula.sh --dry-run` succeeds (formula generation without push)
+  - [x] 2.2 Add `update-homebrew` job to `.github/workflows/release.yml`:
     - Runs after `publish` job succeeds
     - Sets up Python, installs `homebrew-pypi-poet`
     - Runs `scripts/generate-homebrew-formula.sh` with the tagged version and SHA-256 from build artifacts
     - Clones `rangelak/homebrew-colonyos`, copies generated formula, commits and pushes
     - Uses `HOMEBREW_TAP_TOKEN` secret (fine-grained PAT scoped to tap repo)
-  - [ ] 2.3 Document the one-time setup steps: creating the PAT, adding it as a repo secret, creating the tap repo
-  - [ ] 2.4 Add the Homebrew install command to the GitHub Release notes template in the `release` job
+  - [x] 2.3 Document the one-time setup steps: creating the PAT, adding it as a repo secret, creating the tap repo
+  - [x] 2.4 Add the Homebrew install command to the GitHub Release notes template in the `release` job
 
 - [ ] 3.0 Add install-method detection to `colonyos doctor`
   depends_on: []
