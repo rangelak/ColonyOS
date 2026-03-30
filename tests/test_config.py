@@ -13,6 +13,7 @@ from colonyos.config import (
     LearningsConfig,
     PhasesConfig,
     RecoveryConfig,
+    RetryConfig,
     RouterConfig,
     SlackConfig,
     VALID_MODELS,
@@ -1219,3 +1220,147 @@ class TestRouterConfig:
         assert raw["router"]["confidence_threshold"] == 0.9
         assert raw["router"]["small_fix_threshold"] == 0.95
         assert raw["router"]["qa_budget"] == 1.0
+
+
+class TestRetryConfig:
+    def test_default_values(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.retry.max_attempts == 3
+        assert config.retry.base_delay_seconds == 10.0
+        assert config.retry.max_delay_seconds == 120.0
+        assert config.retry.fallback_model is None
+
+    def test_parsed_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "retry": {
+                    "max_attempts": 5,
+                    "base_delay_seconds": 20.0,
+                    "max_delay_seconds": 300.0,
+                    "fallback_model": "sonnet",
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.retry.max_attempts == 5
+        assert config.retry.base_delay_seconds == 20.0
+        assert config.retry.max_delay_seconds == 300.0
+        assert config.retry.fallback_model == "sonnet"
+
+    def test_missing_section_uses_defaults(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "sonnet"}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.retry.max_attempts == 3
+        assert config.retry.base_delay_seconds == 10.0
+        assert config.retry.max_delay_seconds == 120.0
+        assert config.retry.fallback_model is None
+
+    def test_partial_override(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"retry": {"max_attempts": 5}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.retry.max_attempts == 5
+        assert config.retry.base_delay_seconds == 10.0  # default preserved
+
+    def test_invalid_fallback_model_raises(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"retry": {"fallback_model": "gpt-4"}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Invalid retry fallback_model"):
+            load_config(tmp_repo)
+
+    def test_max_attempts_zero_raises(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"retry": {"max_attempts": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="must be positive"):
+            load_config(tmp_repo)
+
+    def test_negative_base_delay_raises(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"retry": {"base_delay_seconds": -1.0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="non-negative"):
+            load_config(tmp_repo)
+
+    def test_negative_max_delay_raises(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"retry": {"max_delay_seconds": -5.0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="non-negative"):
+            load_config(tmp_repo)
+
+    def test_fallback_model_none_is_valid(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"retry": {"fallback_model": None}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.retry.fallback_model is None
+
+    def test_all_valid_models_accepted_as_fallback(self, tmp_repo: Path):
+        for model in VALID_MODELS:
+            config_dir = tmp_repo / ".colonyos"
+            config_dir.mkdir(exist_ok=True)
+            (config_dir / "config.yaml").write_text(
+                yaml.dump({"retry": {"fallback_model": model}}),
+                encoding="utf-8",
+            )
+            config = load_config(tmp_repo)
+            assert config.retry.fallback_model == model
+
+    def test_high_max_attempts_accepted_with_warning(self, tmp_repo: Path):
+        """max_attempts > 10 is accepted (not rejected) but logs a warning."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir(exist_ok=True)
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"retry": {"max_attempts": 20}}),
+            encoding="utf-8",
+        )
+        # Should NOT raise — value is accepted
+        config = load_config(tmp_repo)
+        assert config.retry.max_attempts == 20
+
+    def test_max_attempts_10_no_warning(self, tmp_repo: Path):
+        """max_attempts=10 should not trigger any warning."""
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir(exist_ok=True)
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"retry": {"max_attempts": 10}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.retry.max_attempts == 10
+
+    def test_defaults_dict_has_retry_section(self):
+        assert "retry" in DEFAULTS
+        assert DEFAULTS["retry"]["max_attempts"] == 3
+        assert DEFAULTS["retry"]["base_delay_seconds"] == 10.0
+        assert DEFAULTS["retry"]["max_delay_seconds"] == 120.0
+        assert DEFAULTS["retry"]["fallback_model"] is None

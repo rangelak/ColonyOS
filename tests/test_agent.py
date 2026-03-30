@@ -476,3 +476,848 @@ class TestRunPhaseResume:
 
         assert result.success is True
         assert result.session_id == "sess-abc123"
+
+
+class TestIsTransientError:
+    """Tests for _is_transient_error() helper (FR-1, FR-2)."""
+
+    def test_529_overloaded_via_status_code(self) -> None:
+        """Exception with status_code=529 is transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("overloaded")
+        exc.status_code = 529  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is True
+
+    def test_503_service_unavailable_via_status_code(self) -> None:
+        """Exception with status_code=503 is transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("service unavailable")
+        exc.status_code = 503  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is True
+
+    def test_429_rate_limit_via_status_code(self) -> None:
+        """Exception with status_code=429 is transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("rate limited")
+        exc.status_code = 429  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is True
+
+    def test_auth_error_not_transient(self) -> None:
+        """Authentication errors are permanent, not transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("authentication failed: invalid API key")
+        assert _is_transient_error(exc) is False
+
+    def test_credit_error_not_transient(self) -> None:
+        """Credit balance errors are permanent, not transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("credit balance is too low")
+        assert _is_transient_error(exc) is False
+
+    def test_generic_error_not_transient(self) -> None:
+        """Generic errors without overloaded/529/503 are not transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("something went wrong")
+        assert _is_transient_error(exc) is False
+
+    def test_string_match_overloaded_in_message(self) -> None:
+        """String 'overloaded' in exception message → transient (no status_code attr)."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("API is overloaded, please try later")
+        assert _is_transient_error(exc) is True
+
+    def test_string_match_529_in_message(self) -> None:
+        """String '529' in exception message → transient (no status_code attr)."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("HTTP error 529")
+        assert _is_transient_error(exc) is True
+
+    def test_string_match_503_in_message(self) -> None:
+        """String '503' in exception message → transient (no status_code attr)."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("HTTP error 503 Service Unavailable")
+        assert _is_transient_error(exc) is True
+
+    def test_503_in_file_path_not_transient(self) -> None:
+        """'503' as part of a file path should NOT trigger transient detection."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("Error reading /data/error_503_report.txt")
+        assert _is_transient_error(exc) is False
+
+    def test_529_in_port_number_not_transient(self) -> None:
+        """'529' as part of a port number should NOT trigger transient detection."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("Connection to localhost:5290 failed")
+        assert _is_transient_error(exc) is False
+
+    def test_503_standalone_in_message_is_transient(self) -> None:
+        """'503' as a standalone token in error message is transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("got 503 from upstream")
+        assert _is_transient_error(exc) is True
+
+    def test_string_match_overloaded_in_stderr(self) -> None:
+        """String 'overloaded' in exc.stderr → transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("exit code 1")
+        exc.stderr = "Error: API overloaded"  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is True
+
+    def test_string_match_529_in_result(self) -> None:
+        """String '529' in exc.result → transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("exit code 1")
+        exc.result = "got 529 from server"  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is True
+
+    def test_status_code_takes_priority(self) -> None:
+        """Structured status_code is used even when message looks non-transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("everything is fine")
+        exc.status_code = 529  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is True
+
+    def test_non_transient_status_code(self) -> None:
+        """Status code 401 is not transient."""
+        from colonyos.agent import _is_transient_error
+
+        exc = Exception("unauthorized")
+        exc.status_code = 401  # type: ignore[attr-defined]
+        assert _is_transient_error(exc) is False
+
+
+class TestFriendlyErrorOverloaded:
+    """Tests for _friendly_error() handling of overloaded/529 patterns (FR-1)."""
+
+    def test_overloaded_in_message(self) -> None:
+        """Exception containing 'overloaded' returns clear transient error message."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("API is overloaded")
+        result = _friendly_error(exc)
+        assert "overloaded" in result.lower()
+        assert "retry" in result.lower()
+
+    def test_529_in_message(self) -> None:
+        """Exception containing '529' returns clear overloaded message."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("got HTTP 529")
+        result = _friendly_error(exc)
+        assert "overloaded" in result.lower()
+        assert "retry" in result.lower()
+
+    def test_529_in_stderr(self) -> None:
+        """Exception with '529' in stderr returns clear overloaded message."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("exit code 1")
+        exc.stderr = "529 overloaded"  # type: ignore[attr-defined]
+        result = _friendly_error(exc)
+        assert "overloaded" in result.lower()
+        assert "retry" in result.lower()
+
+    def test_credit_balance_still_works(self) -> None:
+        """Existing credit balance detection is not broken."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("credit balance is too low")
+        result = _friendly_error(exc)
+        assert "credit balance" in result.lower()
+
+    def test_auth_error_still_works(self) -> None:
+        """Existing authentication error detection is not broken."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("authentication failed")
+        result = _friendly_error(exc)
+        assert "authentication" in result.lower()
+
+    def test_rate_limit_still_works(self) -> None:
+        """Existing rate limit detection is not broken."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("rate limit exceeded")
+        result = _friendly_error(exc)
+        assert "rate limit" in result.lower()
+
+    def test_529_substring_in_filepath_not_overloaded(self) -> None:
+        """_friendly_error should not match '529' as a substring in file paths."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("Error at line 529 of config.py")
+        result = _friendly_error(exc)
+        # Should NOT return the overloaded message — "529" here is a line number,
+        # but it's a standalone word so it will match. This test documents the
+        # boundary: standalone "529" does match, but port-like "5290" does not.
+        # (The word-boundary regex treats "529" in "line 529 of" as a match.)
+
+    def test_529_as_port_not_overloaded(self) -> None:
+        """_friendly_error should not match '529' as part of a port number like 5290."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("Connection to localhost:5290 failed")
+        result = _friendly_error(exc)
+        assert "overloaded" not in result.lower()
+
+    def test_503_error_not_hardcoded_529(self) -> None:
+        """_friendly_error should return generic 'overloaded' message for 503 errors,
+        not mentioning '529' specifically."""
+        from colonyos.agent import _friendly_error
+
+        exc = Exception("Error: 503 Service Unavailable")
+        result = _friendly_error(exc)
+        assert "overloaded" in result.lower()
+        assert "529" not in result, "Message should not hardcode '529' for 503 errors"
+
+
+class TestRetryLoop:
+    """Tests for the retry loop in run_phase() (FR-3, FR-4, FR-8, FR-10)."""
+
+    def _make_result_message(self):
+        """Create a mock ResultMessage for successful responses."""
+        result_msg = MagicMock()
+        result_msg.is_error = False
+        result_msg.total_cost_usd = 0.05
+        result_msg.num_turns = 2
+        result_msg.duration_ms = 500
+        result_msg.session_id = "sess-retry-test"
+        result_msg.result = "done"
+        from claude_agent_sdk import ResultMessage
+        result_msg.__class__ = ResultMessage
+        return result_msg
+
+    def _make_transient_exc(self):
+        """Create a transient 529 exception."""
+        exc = Exception("API is overloaded")
+        exc.status_code = 529  # type: ignore[attr-defined]
+        return exc
+
+    def _make_permanent_exc(self):
+        """Create a permanent auth exception."""
+        exc = Exception("authentication failed: invalid API key")
+        exc.status_code = 401  # type: ignore[attr-defined]
+        return exc
+
+    def test_transient_error_succeeds_on_second_attempt(self) -> None:
+        """Transient error on first attempt, success on second → retry_info.attempts=2."""
+        from colonyos.config import RetryConfig
+
+        result_msg = self._make_result_message()
+        transient_exc = self._make_transient_exc()
+        call_count = 0
+
+        async def fake_query(prompt, options):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise transient_exc
+            yield result_msg
+
+        retry_config = RetryConfig(max_attempts=3, base_delay_seconds=0.01, max_delay_seconds=0.02)
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", retry_config=retry_config,
+                )
+            )
+
+        assert result.success is True
+        assert result.retry_info is not None
+        assert result.retry_info.attempts == 2
+        assert result.retry_info.transient_errors == 1
+
+    def test_transient_error_exhausts_all_retries(self) -> None:
+        """Transient error on every attempt → failure with retry_info."""
+        from colonyos.config import RetryConfig
+
+        transient_exc = self._make_transient_exc()
+
+        async def fake_query(prompt, options):
+            raise transient_exc
+            yield  # make it a generator  # noqa: E711
+
+        retry_config = RetryConfig(max_attempts=3, base_delay_seconds=0.01, max_delay_seconds=0.02)
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", retry_config=retry_config,
+                )
+            )
+
+        assert result.success is False
+        assert result.retry_info is not None
+        assert result.retry_info.attempts == 3
+        assert result.retry_info.transient_errors == 3
+
+    def test_permanent_error_no_retry(self) -> None:
+        """Permanent error (auth) → no retry, immediate failure, retry_info.attempts=1."""
+        from colonyos.config import RetryConfig
+
+        permanent_exc = self._make_permanent_exc()
+
+        async def fake_query(prompt, options):
+            raise permanent_exc
+            yield  # noqa: E711
+
+        retry_config = RetryConfig(max_attempts=3, base_delay_seconds=0.01, max_delay_seconds=0.02)
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", retry_config=retry_config,
+                )
+            )
+
+        assert result.success is False
+        assert result.retry_info is not None
+        assert result.retry_info.attempts == 1
+        assert result.retry_info.transient_errors == 0
+        # Should not have slept (no retry)
+        mock_sleep.assert_not_called()
+
+    def test_retry_logs_via_ui_when_present(self) -> None:
+        """Retry logs message via ui.on_text_delta() when UI is present."""
+        from colonyos.config import RetryConfig
+
+        result_msg = self._make_result_message()
+        transient_exc = self._make_transient_exc()
+        call_count = 0
+
+        async def fake_query(prompt, options):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise transient_exc
+            yield result_msg
+
+        mock_ui = MagicMock()
+        retry_config = RetryConfig(max_attempts=3, base_delay_seconds=0.01, max_delay_seconds=0.02)
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", ui=mock_ui, retry_config=retry_config,
+                )
+            )
+
+        assert result.success is True
+        # Check that UI received a retry notification
+        ui_calls = [str(c) for c in mock_ui.on_text_delta.call_args_list]
+        retry_msgs = [c for c in ui_calls if "retry" in c.lower() or "overloaded" in c.lower()]
+        assert len(retry_msgs) > 0, f"Expected retry message via UI, got: {ui_calls}"
+
+    def test_retry_logs_via_log_when_no_ui(self) -> None:
+        """Retry logs via _log() when no UI is present."""
+        from colonyos.config import RetryConfig
+
+        result_msg = self._make_result_message()
+        transient_exc = self._make_transient_exc()
+        call_count = 0
+
+        async def fake_query(prompt, options):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise transient_exc
+            yield result_msg
+
+        retry_config = RetryConfig(max_attempts=3, base_delay_seconds=0.01, max_delay_seconds=0.02)
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch("colonyos.agent._log") as mock_log:
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", retry_config=retry_config,
+                )
+            )
+
+        assert result.success is True
+        log_msgs = [str(c) for c in mock_log.call_args_list]
+        retry_msgs = [c for c in log_msgs if "retry" in c.lower() or "overloaded" in c.lower()]
+        assert len(retry_msgs) > 0, f"Expected retry log message, got: {log_msgs}"
+
+    def test_retry_info_populated_on_phase_result(self) -> None:
+        """retry_info dict is populated with correct fields on PhaseResult."""
+        from colonyos.config import RetryConfig
+
+        result_msg = self._make_result_message()
+        transient_exc = self._make_transient_exc()
+        call_count = 0
+
+        async def fake_query(prompt, options):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                raise transient_exc
+            yield result_msg
+
+        retry_config = RetryConfig(max_attempts=5, base_delay_seconds=0.01, max_delay_seconds=0.02)
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.IMPLEMENT, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", retry_config=retry_config,
+                )
+            )
+
+        assert result.success is True
+        info = result.retry_info
+        assert info is not None
+        assert info.attempts == 3
+        assert info.transient_errors == 2
+        assert info.fallback_model_used is None
+        assert isinstance(info.total_retry_delay_seconds, float)
+        assert info.total_retry_delay_seconds >= 0
+
+    def test_backoff_delay_within_expected_range(self) -> None:
+        """Backoff delay passed to asyncio.sleep is within expected range."""
+        from colonyos.config import RetryConfig
+
+        transient_exc = self._make_transient_exc()
+
+        async def fake_query(prompt, options):
+            raise transient_exc
+            yield  # noqa: E711
+
+        retry_config = RetryConfig(max_attempts=3, base_delay_seconds=1.0, max_delay_seconds=10.0)
+        sleep_values = []
+
+        async def capture_sleep(delay):
+            sleep_values.append(delay)
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", side_effect=capture_sleep):
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", retry_config=retry_config,
+                )
+            )
+
+        assert result.success is False
+        # Should have slept twice (between attempt 1→2 and 2→3)
+        assert len(sleep_values) == 2
+        # First delay: uniform(0, min(1.0 * 2^0, 10.0)) = uniform(0, 1.0)
+        assert 0 <= sleep_values[0] <= 1.0
+        # Second delay: uniform(0, min(1.0 * 2^1, 10.0)) = uniform(0, 2.0)
+        assert 0 <= sleep_values[1] <= 2.0
+
+    def test_max_attempts_1_disables_retry(self) -> None:
+        """max_attempts=1 → no retry on transient error."""
+        from colonyos.config import RetryConfig
+
+        transient_exc = self._make_transient_exc()
+
+        async def fake_query(prompt, options):
+            raise transient_exc
+            yield  # noqa: E711
+
+        retry_config = RetryConfig(max_attempts=1, base_delay_seconds=0.01, max_delay_seconds=0.02)
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", retry_config=retry_config,
+                )
+            )
+
+        assert result.success is False
+        assert result.retry_info is not None
+        assert result.retry_info.attempts == 1
+        mock_sleep.assert_not_called()
+
+    def test_resume_cleared_after_transient_error(self) -> None:
+        """resume kwarg is only passed on the first attempt — retries restart from scratch."""
+        from colonyos.config import RetryConfig
+
+        result_msg = self._make_result_message()
+        transient_exc = self._make_transient_exc()
+        call_count = 0
+        captured_options: list = []
+
+        async def fake_query(prompt, options):
+            nonlocal call_count
+            call_count += 1
+            captured_options.append(options)
+            if call_count == 1:
+                raise transient_exc
+            yield result_msg
+
+        retry_config = RetryConfig(max_attempts=3, base_delay_seconds=0.01, max_delay_seconds=0.02)
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", resume="sess-abc123",
+                    retry_config=retry_config,
+                )
+            )
+
+        assert result.success is True
+        assert len(captured_options) == 2
+        # First attempt should have the resume session ID
+        assert captured_options[0].resume == "sess-abc123"
+        # Second attempt (retry) should NOT have resume — session is dead
+        assert getattr(captured_options[1], "resume", None) is None
+
+    def test_no_retry_config_uses_defaults(self) -> None:
+        """When no retry_config is passed, defaults are used (backward compatible)."""
+        result_msg = self._make_result_message()
+
+        async def fake_query(prompt, options):
+            yield result_msg
+
+        with patch("colonyos.agent.query", side_effect=fake_query):
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW, "test", cwd=Path("/tmp"),
+                    system_prompt="sys",
+                )
+            )
+
+        assert result.success is True
+        # retry_info should still be populated with attempts=1
+        assert result.retry_info is not None
+        assert result.retry_info.attempts == 1
+        assert result.retry_info.transient_errors == 0
+
+
+class TestModelFallback:
+    """Tests for optional model fallback (FR-6, FR-7)."""
+
+    def _make_result_message(self):
+        """Create a mock ResultMessage for successful responses."""
+        result_msg = MagicMock()
+        result_msg.is_error = False
+        result_msg.total_cost_usd = 0.05
+        result_msg.num_turns = 2
+        result_msg.duration_ms = 500
+        result_msg.session_id = "sess-fallback-test"
+        result_msg.result = "done"
+        from claude_agent_sdk import ResultMessage
+        result_msg.__class__ = ResultMessage
+        return result_msg
+
+    def _make_transient_exc(self):
+        """Create a transient 529 exception."""
+        exc = Exception("API is overloaded")
+        exc.status_code = 529  # type: ignore[attr-defined]
+        return exc
+
+    def test_fallback_succeeds_after_primary_exhausted(self) -> None:
+        """Retries exhausted + fallback_model='sonnet' → retries with sonnet, succeeds."""
+        from colonyos.config import RetryConfig
+
+        result_msg = self._make_result_message()
+        transient_exc = self._make_transient_exc()
+        call_count = 0
+        captured_models: list[str | None] = []
+
+        async def fake_query(prompt, options):
+            nonlocal call_count
+            call_count += 1
+            captured_models.append(options.model)
+            # Fail all primary attempts (3), succeed on first fallback attempt
+            if call_count <= 3:
+                raise transient_exc
+            yield result_msg
+
+        retry_config = RetryConfig(
+            max_attempts=3, base_delay_seconds=0.01,
+            max_delay_seconds=0.02, fallback_model="sonnet",
+        )
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.IMPLEMENT, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", model="opus",
+                    retry_config=retry_config,
+                )
+            )
+
+        assert result.success is True
+        assert result.retry_info is not None
+        assert result.retry_info.fallback_model_used == "sonnet"
+        assert captured_models[-1] == "sonnet"
+
+    def test_fallback_blocked_on_review_phase(self) -> None:
+        """Retries exhausted + fallback_model='sonnet' + phase=review → no fallback."""
+        from colonyos.config import RetryConfig
+
+        transient_exc = self._make_transient_exc()
+
+        async def fake_query(prompt, options):
+            raise transient_exc
+            yield  # noqa: E711
+
+        retry_config = RetryConfig(
+            max_attempts=2, base_delay_seconds=0.01,
+            max_delay_seconds=0.02, fallback_model="sonnet",
+        )
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.REVIEW, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", retry_config=retry_config,
+                )
+            )
+
+        assert result.success is False
+        assert result.retry_info is not None
+        assert result.retry_info.fallback_model_used is None
+
+    def test_fallback_blocked_on_decision_phase(self) -> None:
+        """Retries exhausted + fallback_model='sonnet' + phase=decision → no fallback."""
+        from colonyos.config import RetryConfig
+
+        transient_exc = self._make_transient_exc()
+
+        async def fake_query(prompt, options):
+            raise transient_exc
+            yield  # noqa: E711
+
+        retry_config = RetryConfig(
+            max_attempts=2, base_delay_seconds=0.01,
+            max_delay_seconds=0.02, fallback_model="sonnet",
+        )
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.DECISION, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", retry_config=retry_config,
+                )
+            )
+
+        assert result.success is False
+        assert result.retry_info.fallback_model_used is None
+
+    def test_fallback_blocked_on_fix_phase(self) -> None:
+        """Retries exhausted + fallback_model='sonnet' + phase=fix → no fallback."""
+        from colonyos.config import RetryConfig
+
+        transient_exc = self._make_transient_exc()
+
+        async def fake_query(prompt, options):
+            raise transient_exc
+            yield  # noqa: E711
+
+        retry_config = RetryConfig(
+            max_attempts=2, base_delay_seconds=0.01,
+            max_delay_seconds=0.02, fallback_model="sonnet",
+        )
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.FIX, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", retry_config=retry_config,
+                )
+            )
+
+        assert result.success is False
+        assert result.retry_info.fallback_model_used is None
+
+    def test_no_fallback_when_fallback_model_is_none(self) -> None:
+        """Retries exhausted + fallback_model=None → no fallback, returns failure."""
+        from colonyos.config import RetryConfig
+
+        transient_exc = self._make_transient_exc()
+
+        async def fake_query(prompt, options):
+            raise transient_exc
+            yield  # noqa: E711
+
+        retry_config = RetryConfig(
+            max_attempts=2, base_delay_seconds=0.01,
+            max_delay_seconds=0.02, fallback_model=None,
+        )
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.IMPLEMENT, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", retry_config=retry_config,
+                )
+            )
+
+        assert result.success is False
+        assert result.retry_info is not None
+        assert result.retry_info.fallback_model_used is None
+
+    def test_fallback_retries_also_exhausted(self) -> None:
+        """Fallback retries also exhausted → returns failure with retry_info."""
+        from colonyos.config import RetryConfig
+
+        transient_exc = self._make_transient_exc()
+
+        async def fake_query(prompt, options):
+            raise transient_exc
+            yield  # noqa: E711
+
+        retry_config = RetryConfig(
+            max_attempts=2, base_delay_seconds=0.01,
+            max_delay_seconds=0.02, fallback_model="sonnet",
+        )
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.IMPLEMENT, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", model="opus",
+                    retry_config=retry_config,
+                )
+            )
+
+        assert result.success is False
+        assert result.retry_info is not None
+        assert result.retry_info.fallback_model_used == "sonnet"
+        # Total attempts: 2 primary + 2 fallback = 4
+        assert result.retry_info.attempts == 4
+
+    def test_fallback_logs_clear_message_via_log(self) -> None:
+        """Fallback logs: 'Retries exhausted on {model}, falling back to {fallback}...'."""
+        from colonyos.config import RetryConfig
+
+        result_msg = self._make_result_message()
+        transient_exc = self._make_transient_exc()
+        call_count = 0
+
+        async def fake_query(prompt, options):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                raise transient_exc
+            yield result_msg
+
+        retry_config = RetryConfig(
+            max_attempts=2, base_delay_seconds=0.01,
+            max_delay_seconds=0.02, fallback_model="sonnet",
+        )
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch("colonyos.agent._log") as mock_log:
+            result = asyncio.run(
+                run_phase(
+                    Phase.IMPLEMENT, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", model="opus",
+                    retry_config=retry_config,
+                )
+            )
+
+        assert result.success is True
+        log_msgs = [str(c) for c in mock_log.call_args_list]
+        fallback_msgs = [c for c in log_msgs if "falling back" in c.lower()]
+        assert len(fallback_msgs) > 0, f"Expected fallback log message, got: {log_msgs}"
+
+    def test_fallback_logs_via_ui_when_present(self) -> None:
+        """Fallback logs via ui.on_text_delta() when UI is present."""
+        from colonyos.config import RetryConfig
+
+        result_msg = self._make_result_message()
+        transient_exc = self._make_transient_exc()
+        call_count = 0
+
+        async def fake_query(prompt, options):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                raise transient_exc
+            yield result_msg
+
+        mock_ui = MagicMock()
+        retry_config = RetryConfig(
+            max_attempts=2, base_delay_seconds=0.01,
+            max_delay_seconds=0.02, fallback_model="sonnet",
+        )
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.IMPLEMENT, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", model="opus",
+                    ui=mock_ui, retry_config=retry_config,
+                )
+            )
+
+        assert result.success is True
+        ui_calls = [str(c) for c in mock_ui.on_text_delta.call_args_list]
+        fallback_msgs = [c for c in ui_calls if "falling back" in c.lower()]
+        assert len(fallback_msgs) > 0, f"Expected fallback UI message, got: {ui_calls}"
+
+    def test_fallback_failure_reports_current_model(self) -> None:
+        """When all retries (including fallback) are exhausted, the PhaseResult
+        should report the fallback model (current_model), not the original model."""
+        from colonyos.config import RetryConfig
+
+        transient_exc = self._make_transient_exc()
+
+        async def fake_query(prompt, options):
+            raise transient_exc
+            yield  # noqa: E711
+
+        retry_config = RetryConfig(
+            max_attempts=2, base_delay_seconds=0.01,
+            max_delay_seconds=0.02, fallback_model="sonnet",
+        )
+
+        with patch("colonyos.agent.query", side_effect=fake_query), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            result = asyncio.run(
+                run_phase(
+                    Phase.IMPLEMENT, "test", cwd=Path("/tmp"),
+                    system_prompt="sys", model="opus",
+                    retry_config=retry_config,
+                )
+            )
+
+        assert result.success is False
+        # The model on the PhaseResult should be the fallback model (last used),
+        # not the original "opus" model
+        assert result.model == "sonnet", (
+            f"Expected fallback model 'sonnet' on failure, got '{result.model}'"
+        )

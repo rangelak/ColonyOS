@@ -29,7 +29,7 @@ from colonyos.learnings import (
     load_learnings_for_injection,
     parse_learnings,
 )
-from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightError, PreflightResult, ResumeState, RunLog, RunStatus
+from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightError, PreflightResult, ResumeState, RetryInfo, RunLog, RunStatus
 from colonyos.naming import (
     decision_artifact_path,
     generate_timestamp,
@@ -836,6 +836,7 @@ def _run_sequential_implement(
                 model=config.get_model(Phase.IMPLEMENT),
                 budget_usd=per_task_budget,
                 ui=ui,
+                retry_config=config.retry,
             )
         except Exception as exc:
             _log(f"Task {task_id} raised exception: {exc}")
@@ -1037,6 +1038,7 @@ def _run_parallel_implement(
                 model=config.get_model(Phase.IMPLEMENT),
                 budget_usd=budget_usd,
                 ui=task_ui,
+                retry_config=config.retry,
             )
 
             # Add task_id to artifacts for tracking (FR-10)
@@ -1074,6 +1076,7 @@ def _run_parallel_implement(
                 model=config.get_model(Phase.IMPLEMENT),  # Use implement model
                 budget_usd=budget_usd,
                 ui=conflict_ui,
+                retry_config=config.retry,
             )
 
             return result
@@ -1462,6 +1465,7 @@ def run_preflight_recovery(
         budget_usd=config.budget.per_phase,
         allowed_tools=["Read", "Glob", "Grep", "Bash", "Write", "Edit"],
         ui=ui,
+        retry_config=config.retry,
     )
 
     if not phase_result.success:
@@ -1580,6 +1584,7 @@ def run_auto_recovery(
         budget_usd=config.budget.per_phase,
         allowed_tools=["Read", "Glob", "Grep", "Bash", "Write", "Edit"],
         ui=ui,
+        retry_config=config.retry,
     )
 
 
@@ -1634,6 +1639,7 @@ def run_nuke_summary(
         budget_usd=config.budget.per_phase,
         allowed_tools=["Read", "Glob", "Grep"],
         ui=ui,
+        retry_config=config.retry,
     )
 
 
@@ -1958,6 +1964,7 @@ def run_ceo(
         budget_usd=config.budget.per_phase,
         allowed_tools=["Read", "Glob", "Grep"],
         ui=ui,
+        retry_config=config.retry,
     )
 
     proposal_text = result.artifacts.get("result", "")
@@ -2013,6 +2020,7 @@ def update_directions_after_ceo(
             budget_usd=min(config.budget.per_phase, 1.0),
             allowed_tools=[],
             ui=ui,
+            retry_config=config.retry,
         )
         cost = result.cost_usd or 0.0
         updated = result.artifacts.get("result", "")
@@ -2177,6 +2185,7 @@ def run_sweep(
         budget_usd=config.budget.per_phase,
         allowed_tools=["Read", "Glob", "Grep"],
         ui=ui,
+        retry_config=config.retry,
     )
 
     findings_text = result.artifacts.get("result", "")
@@ -2338,6 +2347,12 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
                         "model": p.model,
                         "error": p.error,
                         "artifacts": p.artifacts,  # FR-10: Include artifacts for task_id tracking
+                        "retry_info": {  # FR-9: Retry metadata
+                            "attempts": p.retry_info.attempts,
+                            "transient_errors": p.retry_info.transient_errors,
+                            "fallback_model_used": p.retry_info.fallback_model_used,
+                            "total_retry_delay_seconds": p.retry_info.total_retry_delay_seconds,
+                        } if p.retry_info is not None else None,
                     }
                     for p in log.phases
                 ],
@@ -2423,6 +2438,12 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
                 model=p.get("model"),
                 error=p.get("error"),
                 artifacts=p.get("artifacts", {}),  # FR-10: Include artifacts for task_id tracking
+                retry_info=RetryInfo(  # FR-9: Retry metadata — explicit field extraction for resilience
+                    attempts=p["retry_info"].get("attempts", 1),
+                    transient_errors=p["retry_info"].get("transient_errors", 0),
+                    fallback_model_used=p["retry_info"].get("fallback_model_used"),
+                    total_retry_delay_seconds=p["retry_info"].get("total_retry_delay_seconds", 0.0),
+                ) if p.get("retry_info") else None,
             ))
 
         log = RunLog(
@@ -2786,6 +2807,7 @@ def run_standalone_review(
                 budget_usd=config.budget.per_phase,
                 allowed_tools=review_tools,
                 ui=persona_ui,
+                retry_config=config.retry,
             ))
 
         # Create progress tracker for real-time status updates
@@ -2867,6 +2889,7 @@ def run_standalone_review(
                 model=config.get_model(Phase.FIX),
                 budget_usd=config.budget.per_phase,
                 ui=fix_ui,
+                retry_config=config.retry,
             )
             phase_results.append(fix_result)
             total_cost += fix_result.cost_usd or 0
@@ -2903,6 +2926,7 @@ def run_standalone_review(
                 budget_usd=config.budget.per_phase,
                 allowed_tools=["Read", "Glob", "Grep", "Bash"],
                 ui=decision_ui,
+                retry_config=config.retry,
             )
             phase_results.append(decision_result)
             total_cost += decision_result.cost_usd or 0
@@ -2988,6 +3012,7 @@ def _run_learn_phase(
             budget_usd=learn_budget,
             allowed_tools=["Read", "Glob", "Grep"],
             ui=learn_ui,
+            retry_config=config.retry,
         )
         log.phases.append(learn_result)
         _save_run_log(repo_root, log)
@@ -3125,6 +3150,7 @@ def _run_ci_fix_loop(
             model=config.get_model(Phase.CI_FIX),
             budget_usd=min(config.budget.per_phase, remaining),
             ui=None,
+            retry_config=config.retry,
         )
         log.phases.append(phase_result)
 
@@ -3395,6 +3421,7 @@ def run_thread_fix(
             model=config.get_model(Phase.IMPLEMENT),
             budget_usd=config.budget.per_phase,
             ui=impl_ui,
+            retry_config=config.retry,
         )
         log.phases.append(impl_result)
 
@@ -3428,6 +3455,7 @@ def run_thread_fix(
             budget_usd=config.budget.per_phase,
             ui=verify_ui,
             allowed_tools=["Read", "Bash", "Glob", "Grep"],
+            retry_config=config.retry,
         )
         log.phases.append(verify_result)
 
@@ -3458,6 +3486,7 @@ def run_thread_fix(
                 model=config.get_model(Phase.DELIVER),
                 budget_usd=config.budget.per_phase,
                 ui=deliver_ui,
+                retry_config=config.retry,
             )
             log.phases.append(deliver_result)
 
@@ -3944,6 +3973,7 @@ def _run_pipeline(
                 budget_usd=config.budget.per_phase,
                 agents=persona_agents,
                 ui=plan_ui,
+                retry_config=config.retry,
             )
             _append_phase(plan_result)
             _capture_phase_memory(memory_store, plan_result, log.run_id, config)
@@ -4058,6 +4088,7 @@ def _run_pipeline(
                     model=config.get_model(Phase.IMPLEMENT),
                     budget_usd=config.budget.per_phase,
                     ui=impl_ui,
+                    retry_config=config.retry,
                 )
                 return attempt_result
 
@@ -4137,6 +4168,7 @@ def _run_pipeline(
                             budget_usd=config.budget.per_phase,
                             allowed_tools=review_tools,
                             ui=persona_ui,
+                            retry_config=config.retry,
                         ))
 
                     # Create progress tracker for real-time status updates
@@ -4215,6 +4247,7 @@ def _run_pipeline(
                             model=config.get_model(Phase.FIX),
                             budget_usd=config.budget.per_phase,
                             ui=fix_ui,
+                            retry_config=config.retry,
                         )
                         _append_phase(fix_result)
                         _capture_phase_memory(memory_store, fix_result, log.run_id, config)
@@ -4240,6 +4273,7 @@ def _run_pipeline(
                     budget_usd=config.budget.per_phase,
                     allowed_tools=["Read", "Glob", "Grep", "Bash"],
                     ui=decision_ui,
+                    retry_config=config.retry,
                 )
                 _append_phase(decision_result)
 
@@ -4292,6 +4326,7 @@ def _run_pipeline(
                     model=config.get_model(Phase.DELIVER),
                     budget_usd=config.budget.per_phase,
                     ui=deliver_ui,
+                    retry_config=config.retry,
                 )
 
             deliver_result = _execute_deliver_phase()

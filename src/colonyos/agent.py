@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
+import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -16,7 +19,8 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import StreamEvent, SystemMessage
 
-from colonyos.models import Phase, PhaseResult
+from colonyos.config import RetryConfig, _SAFETY_CRITICAL_PHASES
+from colonyos.models import Phase, PhaseResult, RetryInfo
 
 if TYPE_CHECKING:
     from colonyos.ui import NullUI, PhaseUI
@@ -29,9 +33,44 @@ _API_KEY_SOURCE_LABELS = {
     "config": "Claude config file",
 }
 
+# Patterns for string-matching transient errors when no structured status_code
+# is available. Uses word-boundary-aware regexes to avoid false positives on
+# substrings like port numbers or file paths containing "503"/"529".
+_TRANSIENT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"overloaded", re.IGNORECASE),
+    re.compile(r"\b529\b"),
+    re.compile(r"\b503\b"),
+)
+
 
 def _log(msg: str) -> None:
     print(f"[colonyos] {msg}", file=sys.stderr, flush=True)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Classify whether an exception represents a transient API error worth retrying.
+
+    Checks structured attributes first (status_code), then falls back to
+    word-boundary-aware regex matching on the exception message, stderr, and
+    result fields.
+
+    Note: This is a workaround until the SDK provides structured error types.
+    """
+    # 1. Structured attribute check — most reliable when available
+    status_code = getattr(exc, "status_code", None)
+    if status_code is not None:
+        return status_code in (429, 503, 529)
+
+    # 2. Regex fallback — check all available text fields with word boundaries
+    raw = str(exc)
+    stderr = getattr(exc, "stderr", None) or ""
+    result = getattr(exc, "result", None) or ""
+
+    for text in (raw, stderr, result):
+        if any(pattern.search(text) for pattern in _TRANSIENT_PATTERNS):
+            return True
+
+    return False
 
 
 def _friendly_error(exc: Exception) -> str:
@@ -55,6 +94,8 @@ def _friendly_error(exc: Exception) -> str:
             return f"Authentication failed — check your API key or Claude login. {text.strip()}"
         if "rate limit" in lower:
             return f"Rate limited by the API. {text.strip()}"
+        if any(pattern.search(text) for pattern in _TRANSIENT_PATTERNS):
+            return "API is temporarily overloaded. Will retry..."
 
     if "exit code 1" in raw and not stderr:
         return (
@@ -64,41 +105,28 @@ def _friendly_error(exc: Exception) -> str:
     return f"{raw}\n{stderr}".strip()
 
 
-async def run_phase(
+@dataclass
+class _AttemptResult:
+    """Result of a single query attempt inside the retry loop."""
+
+    result_msg: ResultMessage | None = None
+    error: Exception | None = None
+
+
+async def _run_phase_attempt(
+    *,
     phase: Phase,
     prompt: str,
-    *,
-    cwd: Path,
-    system_prompt: str,
-    model: str | None = None,
-    budget_usd: float = 5.0,
-    max_turns: int | None = None,
-    agents: dict[str, AgentDefinition] | None = None,
-    allowed_tools: list[str] | None = None,
-    permission_mode: str = "bypassPermissions",
-    ui: PhaseUI | NullUI | None = None,
-    resume: str | None = None,
-) -> PhaseResult:
-    """Run a single phase by invoking Claude Code with the given prompt and instructions."""
-    if allowed_tools is None:
-        allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
-        if agents:
-            allowed_tools.append("Agent")
+    options: ClaudeAgentOptions,
+    ui: PhaseUI | NullUI | None,
+    is_first_attempt: bool,
+    budget_usd: float,
+) -> _AttemptResult:
+    """Execute a single query attempt, streaming messages to the UI.
 
-    options = ClaudeAgentOptions(
-        cwd=cwd,
-        system_prompt=system_prompt,
-        model=model,
-        max_turns=max_turns,
-        max_budget_usd=budget_usd,
-        permission_mode=permission_mode,
-        allowed_tools=allowed_tools,
-        agents=agents,
-        include_partial_messages=ui is not None,
-        **({"resume": resume, "continue_conversation": True} if resume else {}),
-    )
-
-    if ui is None:
+    Returns an _AttemptResult containing either a ResultMessage or an exception.
+    """
+    if is_first_attempt and ui is None:
         _log(f"Starting {phase.value} phase (budget=${budget_usd:.2f})...")
 
     result_msg: ResultMessage | None = None
@@ -147,58 +175,222 @@ async def run_phase(
                 result_msg = message
 
     except Exception as exc:
-        friendly = _friendly_error(exc)
-        error_msg = f"Phase {phase.value} failed: {friendly}"
-        if ui is not None:
-            ui.phase_error(error_msg)
-        else:
-            _log(error_msg)
-        logger.debug("Phase %s raw exception: %r", phase.value, exc)
-        return PhaseResult(
-            phase=phase,
-            success=False,
-            model=model,
-            error=friendly,
-        )
+        return _AttemptResult(error=exc)
 
-    if result_msg is None:
-        err = "No result message received from Claude Code"
-        if ui is not None:
-            ui.phase_error(err)
-        else:
-            _log(err)
-        return PhaseResult(
-            phase=phase,
-            success=False,
-            model=model,
-            error=err,
-        )
+    return _AttemptResult(result_msg=result_msg)
 
-    success = not result_msg.is_error
-    cost = result_msg.total_cost_usd or 0
-    turns = result_msg.num_turns
-    duration = result_msg.duration_ms
 
-    if ui is not None:
-        if success:
-            ui.phase_complete(cost, turns, duration)
-        else:
-            ui.phase_error(result_msg.result or "Unknown error")
-    else:
-        _log(
-            f"Phase {phase.value} {'completed' if success else 'failed'} "
-            f"(cost=${cost:.4f}, turns={turns}, duration={duration}ms)"
-        )
+async def run_phase(
+    phase: Phase,
+    prompt: str,
+    *,
+    cwd: Path,
+    system_prompt: str,
+    model: str | None = None,
+    budget_usd: float = 5.0,
+    max_turns: int | None = None,
+    agents: dict[str, AgentDefinition] | None = None,
+    allowed_tools: list[str] | None = None,
+    permission_mode: str = "bypassPermissions",
+    ui: PhaseUI | NullUI | None = None,
+    resume: str | None = None,
+    retry_config: RetryConfig | None = None,
+) -> PhaseResult:
+    """Run a single phase by invoking Claude Code with the given prompt and instructions.
 
+    Wraps the query call in a retry loop for transient errors (429/503/529) with
+    exponential backoff and full jitter. Permanent errors fail immediately.
+
+    When a ``fallback_model`` is configured, the primary model gets ``max_attempts``
+    tries and the fallback model gets its own ``max_attempts`` tries, so the total
+    number of attempts can be up to ``2 * max_attempts``. Fallback is disabled for
+    safety-critical phases (review, decision, fix).
+    """
+    if retry_config is None:
+        retry_config = RetryConfig()
+
+    if allowed_tools is None:
+        allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+        if agents:
+            allowed_tools.append("Agent")
+
+    max_attempts = retry_config.max_attempts
+    transient_errors = 0
+    total_retry_delay = 0.0
+    last_exc: Exception | None = None
+    fallback_model_used: str | None = None
+
+    # Build the list of (model, max_attempts) passes to try.
+    # Pass 1: primary model. Pass 2 (optional): fallback model.
+    # Total attempts can be up to 2 * max_attempts when fallback is configured.
+    passes: list[tuple[str | None, int]] = [(model, max_attempts)]
+    if (
+        retry_config.fallback_model is not None
+        and phase.value not in _SAFETY_CRITICAL_PHASES
+    ):
+        passes.append((retry_config.fallback_model, max_attempts))
+
+    overall_attempt = 0
+    # resume is only valid for the first attempt — after a transient error kills
+    # the query, the session is dead and retries must restart from scratch.
+    current_resume = resume
+
+    for pass_idx, (current_model, pass_max) in enumerate(passes):
+        for attempt in range(1, pass_max + 1):
+            overall_attempt += 1
+            options = ClaudeAgentOptions(
+                cwd=cwd,
+                system_prompt=system_prompt,
+                model=current_model,
+                max_turns=max_turns,
+                max_budget_usd=budget_usd,
+                permission_mode=permission_mode,
+                allowed_tools=allowed_tools,
+                agents=agents,
+                include_partial_messages=ui is not None,
+                **({"resume": current_resume, "continue_conversation": True} if current_resume else {}),
+            )
+
+            attempt_result = await _run_phase_attempt(
+                phase=phase,
+                prompt=prompt,
+                options=options,
+                ui=ui,
+                is_first_attempt=(overall_attempt == 1),
+                budget_usd=budget_usd,
+            )
+
+            if attempt_result.error is not None:
+                exc = attempt_result.error
+                last_exc = exc
+                is_transient = _is_transient_error(exc)
+
+                if not is_transient or attempt == pass_max:
+                    # Permanent error or last attempt in this pass
+                    transient_errors += 1 if is_transient else 0
+
+                    if is_transient and pass_idx < len(passes) - 1:
+                        # Transient + more passes available → switch to fallback
+                        fallback_model_used = passes[pass_idx + 1][0]
+                        fallback_msg = (
+                            f"Retries exhausted on {current_model or 'default'}, "
+                            f"falling back to {fallback_model_used}..."
+                        )
+                        if ui is not None:
+                            ui.on_text_delta(f"\n🔄 {fallback_msg}\n")
+                        else:
+                            _log(fallback_msg)
+                        break  # break inner loop to advance to next pass
+
+                    # No more passes — return failure
+                    friendly = _friendly_error(exc)
+                    error_msg = f"Phase {phase.value} failed: {friendly}"
+                    if ui is not None:
+                        ui.phase_error(error_msg)
+                    else:
+                        _log(error_msg)
+                    logger.debug("Phase %s raw exception: %r", phase.value, exc)
+                    return PhaseResult(
+                        phase=phase,
+                        success=False,
+                        model=current_model,
+                        error=friendly,
+                        retry_info=RetryInfo(
+                            attempts=overall_attempt,
+                            transient_errors=transient_errors,
+                            fallback_model_used=fallback_model_used,
+                            total_retry_delay_seconds=total_retry_delay,
+                        ),
+                    )
+
+                # Transient error with remaining attempts — retry with backoff
+                transient_errors += 1
+                current_resume = None  # Session is dead after transient error
+                computed_delay = min(
+                    retry_config.base_delay_seconds * (2 ** (attempt - 1)),
+                    retry_config.max_delay_seconds,
+                )
+                delay = random.uniform(0, computed_delay)
+                total_retry_delay += delay
+
+                retry_msg = (
+                    f"API overloaded, retrying in {delay:.0f}s "
+                    f"(attempt {attempt}/{pass_max})..."
+                )
+                if ui is not None:
+                    ui.on_text_delta(f"\n⏳ {retry_msg}\n")
+                else:
+                    _log(retry_msg)
+
+                await asyncio.sleep(delay)
+                continue
+
+            # No exception — check result
+            result_msg = attempt_result.result_msg
+            retry_info = RetryInfo(
+                attempts=overall_attempt,
+                transient_errors=transient_errors,
+                fallback_model_used=fallback_model_used,
+                total_retry_delay_seconds=total_retry_delay,
+            )
+
+            if result_msg is None:
+                err = "No result message received from Claude Code"
+                if ui is not None:
+                    ui.phase_error(err)
+                else:
+                    _log(err)
+                return PhaseResult(
+                    phase=phase,
+                    success=False,
+                    model=current_model,
+                    error=err,
+                    retry_info=retry_info,
+                )
+
+            success = not result_msg.is_error
+            cost = result_msg.total_cost_usd or 0
+            turns = result_msg.num_turns
+            duration = result_msg.duration_ms
+
+            if ui is not None:
+                if success:
+                    ui.phase_complete(cost, turns, duration)
+                else:
+                    ui.phase_error(result_msg.result or "Unknown error")
+            else:
+                _log(
+                    f"Phase {phase.value} {'completed' if success else 'failed'} "
+                    f"(cost=${cost:.4f}, turns={turns}, duration={duration}ms)"
+                )
+
+            return PhaseResult(
+                phase=phase,
+                success=success,
+                cost_usd=result_msg.total_cost_usd,
+                duration_ms=result_msg.duration_ms,
+                session_id=result_msg.session_id,
+                model=current_model,
+                error=result_msg.result if result_msg.is_error else None,
+                artifacts={"result": result_msg.result or ""},
+                retry_info=retry_info,
+            )
+        # Inner loop either completed (all attempts used) or broke out
+        # (fallback transition). Either way, continue to the next pass.
+
+    # Should not reach here, but handle defensively
+    friendly = _friendly_error(last_exc) if last_exc else "Unknown error after retries"
     return PhaseResult(
         phase=phase,
-        success=success,
-        cost_usd=result_msg.total_cost_usd,
-        duration_ms=result_msg.duration_ms,
-        session_id=result_msg.session_id,
-        model=model,
-        error=result_msg.result if result_msg.is_error else None,
-        artifacts={"result": result_msg.result or ""},
+        success=False,
+        model=current_model,
+        error=friendly,
+        retry_info=RetryInfo(
+            attempts=overall_attempt,
+            transient_errors=transient_errors,
+            fallback_model_used=fallback_model_used,
+            total_retry_delay_seconds=total_retry_delay,
+        ),
     )
 
 
@@ -216,6 +408,7 @@ def run_phase_sync(
     permission_mode: str = "bypassPermissions",
     ui: PhaseUI | NullUI | None = None,
     resume: str | None = None,
+    retry_config: RetryConfig | None = None,
 ) -> PhaseResult:
     """Synchronous wrapper around run_phase for use in non-async contexts."""
     return asyncio.run(
@@ -232,6 +425,7 @@ def run_phase_sync(
             permission_mode=permission_mode,
             ui=ui,
             resume=resume,
+            retry_config=retry_config,
         )
     )
 

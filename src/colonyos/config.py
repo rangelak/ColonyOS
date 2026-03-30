@@ -19,7 +19,11 @@ VALID_MODELS: frozenset[str] = frozenset({"opus", "sonnet", "haiku"})
 
 # Phases that serve as safety gates and should not be downgraded to
 # lightweight models without explicit awareness of the trade-off.
-_SAFETY_CRITICAL_PHASES: frozenset[str] = frozenset({"review", "decision", "fix"})
+# Uses Phase enum values so that renaming an enum member causes an AttributeError
+# rather than silently disabling the safety check.
+_SAFETY_CRITICAL_PHASES: frozenset[str] = frozenset(
+    {Phase.REVIEW.value, Phase.DECISION.value, Phase.FIX.value}
+)
 
 DEFAULTS = {
     "model": "opus",
@@ -74,6 +78,12 @@ DEFAULTS = {
         "max_entries": 500,
         "max_inject_tokens": 1500,
         "capture_failures": True,
+    },
+    "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 10.0,
+        "max_delay_seconds": 120.0,
+        "fallback_model": None,
     },
     "recovery": {
         "enabled": True,
@@ -189,6 +199,16 @@ class MemoryConfig:
 
 
 @dataclass
+class RetryConfig:
+    """Configuration for transient error (529/503) retry with exponential backoff."""
+
+    max_attempts: int = 3
+    base_delay_seconds: float = 10.0
+    max_delay_seconds: float = 120.0
+    fallback_model: str | None = None
+
+
+@dataclass
 class RecoveryConfig:
     """Configuration for automatic recovery and nuke escalation."""
 
@@ -268,6 +288,7 @@ class ColonyConfig:
     router: RouterConfig = field(default_factory=RouterConfig)
     sweep: SweepConfig = field(default_factory=SweepConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    retry: RetryConfig = field(default_factory=RetryConfig)
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     daemon: DaemonConfig = field(default_factory=DaemonConfig)
     ceo_profiles: list[Persona] = field(default_factory=list)
@@ -596,6 +617,51 @@ def _parse_memory_config(raw: dict) -> MemoryConfig:
     )
 
 
+def _parse_retry_config(raw: dict) -> RetryConfig:
+    """Parse the ``retry`` section from config.yaml."""
+    if not raw:
+        return RetryConfig()
+    defaults = DEFAULTS["retry"]
+    max_attempts = int(raw.get("max_attempts", defaults["max_attempts"]))
+    if max_attempts < 1:
+        raise ValueError(
+            f"retry.max_attempts must be positive, got {max_attempts}"
+        )
+    if max_attempts > 10:
+        logger.warning(
+            "retry.max_attempts=%d is unusually high (max recommended: 10). "
+            "Combined with fallback, this could result in up to %d total attempts.",
+            max_attempts,
+            max_attempts * 2,
+        )
+    base_delay_seconds = float(raw.get("base_delay_seconds", defaults["base_delay_seconds"]))
+    if base_delay_seconds < 0:
+        raise ValueError(
+            f"retry.base_delay_seconds must be non-negative, got {base_delay_seconds}"
+        )
+    max_delay_seconds = float(raw.get("max_delay_seconds", defaults["max_delay_seconds"]))
+    if max_delay_seconds < 0:
+        raise ValueError(
+            f"retry.max_delay_seconds must be non-negative, got {max_delay_seconds}"
+        )
+    fallback_model_raw = raw.get("fallback_model", defaults["fallback_model"])
+    fallback_model: str | None = None
+    if fallback_model_raw is not None:
+        fallback_model = str(fallback_model_raw)
+        if fallback_model not in VALID_MODELS:
+            raise ValueError(
+                f"Invalid retry fallback_model '{fallback_model}'. "
+                f"Valid options: {sorted(VALID_MODELS)}. "
+                f"Note: use short names (e.g. 'sonnet') not full model IDs."
+            )
+    return RetryConfig(
+        max_attempts=max_attempts,
+        base_delay_seconds=base_delay_seconds,
+        max_delay_seconds=max_delay_seconds,
+        fallback_model=fallback_model,
+    )
+
+
 def _parse_recovery_config(raw: dict) -> RecoveryConfig:
     """Parse the ``recovery`` section from config.yaml."""
     if not raw:
@@ -806,6 +872,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         router=_parse_router_config(raw.get("router", {})),
         sweep=_parse_sweep_config(raw.get("sweep", {})),
         memory=_parse_memory_config(raw.get("memory", {})),
+        retry=_parse_retry_config(raw.get("retry", {})),
         recovery=_parse_recovery_config(raw.get("recovery", {})),
         daemon=_parse_daemon_config(raw.get("daemon", {})),
         ceo_profiles=_parse_personas(raw.get("ceo_profiles", [])),

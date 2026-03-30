@@ -14,6 +14,7 @@ from colonyos.models import (
     PhaseResult,
     QueueItem,
     QueueItemStatus,
+    RetryInfo,
     RunLog,
     RunStatus,
 )
@@ -685,6 +686,207 @@ class TestTaskStatus:
         from colonyos.models import TaskStatus
         assert TaskStatus("pending") == TaskStatus.PENDING
         assert TaskStatus("blocked") == TaskStatus.BLOCKED
+
+
+class TestPhaseResultRetryInfo:
+    """Tests for retry_info field on PhaseResult (FR-9)."""
+
+    def test_retry_info_default_none(self) -> None:
+        """retry_info defaults to None when not provided."""
+        result = PhaseResult(phase=Phase.IMPLEMENT, success=True)
+        assert result.retry_info is None
+
+    def test_retry_info_accepts_populated_dataclass(self) -> None:
+        """retry_info can be set to a RetryInfo with retry metadata."""
+        info = RetryInfo(
+            attempts=3,
+            transient_errors=2,
+            fallback_model_used=None,
+            total_retry_delay_seconds=25.5,
+        )
+        result = PhaseResult(
+            phase=Phase.IMPLEMENT,
+            success=True,
+            cost_usd=1.0,
+            retry_info=info,
+        )
+        assert result.retry_info is not None
+        assert result.retry_info.attempts == 3
+        assert result.retry_info.transient_errors == 2
+        assert result.retry_info.fallback_model_used is None
+        assert result.retry_info.total_retry_delay_seconds == 25.5
+
+    def test_retry_info_with_fallback_model(self) -> None:
+        """retry_info records which fallback model was used."""
+        info = RetryInfo(
+            attempts=5,
+            transient_errors=4,
+            fallback_model_used="sonnet",
+            total_retry_delay_seconds=60.0,
+        )
+        result = PhaseResult(
+            phase=Phase.IMPLEMENT,
+            success=True,
+            retry_info=info,
+        )
+        assert result.retry_info.fallback_model_used == "sonnet"
+
+    def test_backward_compat_old_data_without_retry_info(self) -> None:
+        """Old PhaseResult dicts without retry_info should load gracefully."""
+        old_data = {
+            "phase": "implement",
+            "success": True,
+            "cost_usd": 1.5,
+            "duration_ms": 60000,
+            "session_id": "sess-123",
+            "model": "opus",
+            "error": None,
+            "artifacts": {},
+        }
+        raw_retry = old_data.get("retry_info")
+        result = PhaseResult(
+            phase=Phase(old_data["phase"]),
+            success=old_data["success"],
+            cost_usd=old_data.get("cost_usd"),
+            duration_ms=old_data.get("duration_ms", 0),
+            session_id=old_data.get("session_id", ""),
+            model=old_data.get("model"),
+            error=old_data.get("error"),
+            retry_info=RetryInfo(**raw_retry) if raw_retry else None,
+        )
+        assert result.retry_info is None
+        assert result.success is True
+        assert result.model == "opus"
+
+    def test_retry_info_roundtrip_none(self) -> None:
+        """Serialization round-trip preserves None retry_info."""
+        result = PhaseResult(phase=Phase.REVIEW, success=True)
+        # Simulate serialization (as done in orchestrator._save_run_log)
+        serialized = {
+            "phase": result.phase.value,
+            "success": result.success,
+            "cost_usd": result.cost_usd,
+            "duration_ms": result.duration_ms,
+            "session_id": result.session_id,
+            "model": result.model,
+            "error": result.error,
+            "artifacts": result.artifacts,
+            "retry_info": {
+                "attempts": result.retry_info.attempts,
+                "transient_errors": result.retry_info.transient_errors,
+                "fallback_model_used": result.retry_info.fallback_model_used,
+                "total_retry_delay_seconds": result.retry_info.total_retry_delay_seconds,
+            } if result.retry_info else None,
+        }
+        # Simulate deserialization (as done in orchestrator._load_run_log)
+        raw_retry = serialized.get("retry_info")
+        restored = PhaseResult(
+            phase=Phase(serialized["phase"]),
+            success=serialized["success"],
+            cost_usd=serialized.get("cost_usd"),
+            duration_ms=serialized.get("duration_ms", 0),
+            session_id=serialized.get("session_id", ""),
+            model=serialized.get("model"),
+            error=serialized.get("error"),
+            artifacts=serialized.get("artifacts", {}),
+            retry_info=RetryInfo(**raw_retry) if raw_retry else None,
+        )
+        assert restored.retry_info is None
+
+    def test_retry_info_roundtrip_populated(self) -> None:
+        """Serialization round-trip preserves populated retry_info."""
+        info = RetryInfo(
+            attempts=2,
+            transient_errors=1,
+            fallback_model_used=None,
+            total_retry_delay_seconds=12.3,
+        )
+        result = PhaseResult(
+            phase=Phase.IMPLEMENT,
+            success=True,
+            cost_usd=0.85,
+            retry_info=info,
+        )
+        # Simulate serialization
+        serialized = {
+            "phase": result.phase.value,
+            "success": result.success,
+            "cost_usd": result.cost_usd,
+            "duration_ms": result.duration_ms,
+            "session_id": result.session_id,
+            "model": result.model,
+            "error": result.error,
+            "artifacts": result.artifacts,
+            "retry_info": {
+                "attempts": result.retry_info.attempts,
+                "transient_errors": result.retry_info.transient_errors,
+                "fallback_model_used": result.retry_info.fallback_model_used,
+                "total_retry_delay_seconds": result.retry_info.total_retry_delay_seconds,
+            } if result.retry_info else None,
+        }
+        # Simulate deserialization
+        raw_retry = serialized.get("retry_info")
+        restored = PhaseResult(
+            phase=Phase(serialized["phase"]),
+            success=serialized["success"],
+            cost_usd=serialized.get("cost_usd"),
+            duration_ms=serialized.get("duration_ms", 0),
+            session_id=serialized.get("session_id", ""),
+            model=serialized.get("model"),
+            error=serialized.get("error"),
+            artifacts=serialized.get("artifacts", {}),
+            retry_info=RetryInfo(**raw_retry) if raw_retry else None,
+        )
+        assert restored.retry_info == info
+        assert restored.retry_info.attempts == 2
+        assert restored.retry_info.total_retry_delay_seconds == 12.3
+
+    def test_retry_info_frozen(self) -> None:
+        """RetryInfo is immutable (frozen dataclass)."""
+        info = RetryInfo(attempts=2, transient_errors=1)
+        with pytest.raises(AttributeError):
+            info.attempts = 5  # type: ignore[misc]
+
+    def test_retry_info_from_dict_with_extra_keys(self) -> None:
+        """RetryInfo construction from dict with extra keys should not crash.
+
+        Simulates corrupted or future-version run log JSON containing
+        unexpected fields — the explicit field extraction pattern in
+        _load_run_log should handle this gracefully.
+        """
+        raw = {
+            "attempts": 3,
+            "transient_errors": 1,
+            "fallback_model_used": None,
+            "total_retry_delay_seconds": 5.0,
+            "unexpected_future_field": "should be ignored",
+        }
+        # Explicit extraction (as done in _load_run_log) works fine
+        info = RetryInfo(
+            attempts=raw.get("attempts", 1),
+            transient_errors=raw.get("transient_errors", 0),
+            fallback_model_used=raw.get("fallback_model_used"),
+            total_retry_delay_seconds=raw.get("total_retry_delay_seconds", 0.0),
+        )
+        assert info.attempts == 3
+        assert info.transient_errors == 1
+
+    def test_retry_info_from_dict_with_missing_keys(self) -> None:
+        """RetryInfo construction from dict with missing keys uses defaults.
+
+        Simulates an older run log that doesn't have all RetryInfo fields.
+        """
+        raw = {"attempts": 2}
+        info = RetryInfo(
+            attempts=raw.get("attempts", 1),
+            transient_errors=raw.get("transient_errors", 0),
+            fallback_model_used=raw.get("fallback_model_used"),
+            total_retry_delay_seconds=raw.get("total_retry_delay_seconds", 0.0),
+        )
+        assert info.attempts == 2
+        assert info.transient_errors == 0
+        assert info.fallback_model_used is None
+        assert info.total_retry_delay_seconds == 0.0
 
 
 class TestPhaseQA:

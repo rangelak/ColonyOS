@@ -12,10 +12,11 @@ from colonyos.config import (
     ParallelImplementConfig,
     PhasesConfig,
     RecoveryConfig,
+    RetryConfig,
     save_config,
 )
 from colonyos.learnings import learnings_path, LearningEntry, append_learnings
-from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightResult, ProjectInfo, ResumeState, RunLog, RunStatus
+from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightResult, ProjectInfo, ResumeState, RetryInfo, RunLog, RunStatus
 from colonyos.orchestrator import (
     run,
     run_thread_fix,
@@ -3530,3 +3531,160 @@ class TestDrainInjectedContext:
         second = _drain_injected_context(provider)
         assert "- phase-2 note" in second
         assert "phase-1" not in second
+
+
+class TestRetryConfigWiring:
+    """Integration tests verifying retry_config flows from ColonyConfig to run_phase_sync."""
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_retry_config_passed_to_run_phase_sync(
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
+    ):
+        """All run_phase_sync calls receive retry_config from ColonyConfig."""
+        config.retry = RetryConfig(max_attempts=5, base_delay_seconds=20.0)
+        save_config(tmp_git_repo, config)
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(
+                phase=Phase.DECISION, success=True, cost_usd=0.01,
+                duration_ms=50, session_id="s",
+                artifacts={"result": "VERDICT: GO"},
+            ),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Add tests", repo_root=tmp_git_repo, config=config)
+        assert log.status == RunStatus.COMPLETED
+
+        # Every run_phase_sync call must include retry_config
+        for call in mock_run.call_args_list:
+            assert "retry_config" in call.kwargs, (
+                f"retry_config missing from call: {call}"
+            )
+            assert call.kwargs["retry_config"] is config.retry
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_retry_config_passed_to_parallel_review_calls(
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
+    ):
+        """Parallel review calls include retry_config in their kwargs dicts."""
+        config.retry = RetryConfig(max_attempts=2)
+        save_config(tmp_git_repo, config)
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(
+                phase=Phase.DECISION, success=True, cost_usd=0.01,
+                duration_ms=50, session_id="s",
+                artifacts={"result": "VERDICT: GO"},
+            ),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        run("Add tests", repo_root=tmp_git_repo, config=config)
+
+        # Check each parallel review call dict has retry_config
+        assert mock_parallel.call_count >= 1
+        review_calls = mock_parallel.call_args_list[0][0][0]
+        for call_kwargs in review_calls:
+            assert "retry_config" in call_kwargs, (
+                f"retry_config missing from parallel call: {call_kwargs}"
+            )
+            assert call_kwargs["retry_config"] is config.retry
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_retry_info_populated_in_run_log(
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
+    ):
+        """PhaseResult.retry_info flows through to RunLog when populated."""
+        save_config(tmp_git_repo, config)
+
+        retry_info = RetryInfo(
+            attempts=2,
+            transient_errors=1,
+            fallback_model_used=None,
+            total_retry_delay_seconds=12.5,
+        )
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            PhaseResult(
+                phase=Phase.IMPLEMENT, success=True, cost_usd=0.05,
+                duration_ms=500, session_id="impl-session",
+                artifacts={"result": "done"},
+                retry_info=retry_info,
+            ),
+            PhaseResult(
+                phase=Phase.DECISION, success=True, cost_usd=0.01,
+                duration_ms=50, session_id="s",
+                artifacts={"result": "VERDICT: GO"},
+            ),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Add tests", repo_root=tmp_git_repo, config=config)
+        assert log.status == RunStatus.COMPLETED
+
+        # Find the implement phase and verify retry_info is present
+        impl_phases = [p for p in log.phases if p.phase == Phase.IMPLEMENT]
+        assert len(impl_phases) >= 1
+        assert impl_phases[0].retry_info == retry_info
+        assert impl_phases[0].retry_info.attempts == 2
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_recovery_not_triggered_when_retry_succeeds(
+        self, mock_run, mock_parallel, tmp_git_repo: Path,
+    ):
+        """When run_phase_sync returns success (even after internal retries),
+        the orchestrator's _attempt_phase_recovery is NOT invoked."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[REVIEWER_PERSONA],
+            model="test-model",
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+            phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True),
+            recovery=RecoveryConfig(enabled=True, max_phase_retries=2),
+            retry=RetryConfig(max_attempts=3),
+        )
+        save_config(tmp_git_repo, config)
+
+        # Simulate: implement succeeded after internal retries (retry_info shows 2 attempts)
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            PhaseResult(
+                phase=Phase.IMPLEMENT, success=True, cost_usd=0.05,
+                duration_ms=500, session_id="impl",
+                artifacts={"result": "done"},
+                retry_info=RetryInfo(
+                    attempts=2, transient_errors=1,
+                    fallback_model_used=None,
+                    total_retry_delay_seconds=15.0,
+                ),
+            ),
+            PhaseResult(
+                phase=Phase.DECISION, success=True, cost_usd=0.01,
+                duration_ms=50, session_id="s",
+                artifacts={"result": "VERDICT: GO"},
+            ),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Add tests", repo_root=tmp_git_repo, config=config)
+
+        # Run completed successfully — recovery was never needed
+        assert log.status == RunStatus.COMPLETED
+        assert len(log.recovery_events) == 0
