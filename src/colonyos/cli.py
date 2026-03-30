@@ -27,7 +27,7 @@ from colonyos.cancellation import (
 )
 from colonyos.config import ColonyConfig, load_config, save_config, runs_dir_path
 from colonyos.doctor import run_doctor_checks
-from colonyos.init import run_ai_init, run_init
+from colonyos.init import is_git_repo, run_ai_init, run_init
 from colonyos.models import (
     BranchRestoreError,
     LoopState,
@@ -1286,6 +1286,16 @@ def init(
         raise click.UsageError("--manual cannot be combined with --quick or --personas.")
 
     repo_root = _find_repo_root()
+
+    if not is_git_repo(repo_root):
+        click.secho(
+            "⚠  Warning: Not inside a git repository. "
+            "ColonyOS works per-project — please cd into a git repo.",
+            fg="yellow",
+            err=True,
+        )
+        if not click.confirm("  Continue anyway?", default=False):
+            raise SystemExit(0)
 
     if quick or personas or manual:
         run_init(

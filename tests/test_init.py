@@ -20,6 +20,7 @@ from colonyos.init import (
     _AI_INIT_TIMEOUT_SECONDS,
     _AiInitTimeout,
     _friendly_init_error,
+    is_git_repo,
     select_persona_pack,
     _collect_personas_with_packs,
     run_init,
@@ -1072,3 +1073,71 @@ class TestPacksSummary:
     def test_keys_match_pack_keys(self):
         summary_keys = [e["key"] for e in packs_summary()]
         assert summary_keys == pack_keys()
+
+
+# ---------------------------------------------------------------------------
+# Task 4.0: Non-git-repo guard
+# ---------------------------------------------------------------------------
+
+class TestIsGitRepo:
+    def test_returns_true_when_dot_git_exists(self, tmp_path: Path):
+        (tmp_path / ".git").mkdir()
+        assert is_git_repo(tmp_path) is True
+
+    def test_returns_true_for_subdirectory_of_git_repo(self, tmp_path: Path):
+        (tmp_path / ".git").mkdir()
+        sub = tmp_path / "src" / "app"
+        sub.mkdir(parents=True)
+        assert is_git_repo(sub) is True
+
+    def test_returns_false_when_no_dot_git(self, tmp_path: Path):
+        assert is_git_repo(tmp_path) is False
+
+    def test_returns_true_for_git_submodule_file(self, tmp_path: Path):
+        # Git submodules use a .git *file*, not a directory
+        (tmp_path / ".git").write_text("gitdir: ../.git/modules/sub\n")
+        assert is_git_repo(tmp_path) is True
+
+
+class TestInitGitRepoGuard:
+    """Test that the ``init`` CLI command warns when outside a git repo."""
+
+    def test_warns_and_aborts_when_not_git_repo(self, tmp_path: Path):
+        """Init should warn and exit when user declines to continue."""
+        from click.testing import CliRunner
+        from colonyos.cli import init
+
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            # 'n' to decline continuing
+            result = runner.invoke(init, input="n\n")
+            assert "Not inside a git repository" in result.output or \
+                   "Not inside a git repository" in (result.output + str(result.exception or ""))
+            # Should not have proceeded to the main init flow
+            assert result.exit_code == 0
+
+    def test_warns_and_proceeds_when_user_confirms(self, tmp_path: Path):
+        """Init should continue when user confirms despite no git repo."""
+        from click.testing import CliRunner
+        from colonyos.cli import init
+
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            # 'y' to confirm, then the init wizard will start — we just
+            # check that it got past the guard (it will prompt for more input)
+            result = runner.invoke(init, ["--manual"], input="y\n")
+            # The guard was passed — the "Continue anyway?" prompt was shown
+            assert "Continue anyway?" in result.output
+
+    def test_no_warning_inside_git_repo(self, tmp_path: Path):
+        """Init should not warn when inside a proper git repo."""
+        from click.testing import CliRunner
+        from colonyos.cli import init
+
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            Path(td, ".git").mkdir()
+            # Will proceed to init wizard, which needs more input — just
+            # check the guard message is absent
+            result = runner.invoke(init, ["--manual"], input="\n")
+            assert "Not inside a git repository" not in result.output

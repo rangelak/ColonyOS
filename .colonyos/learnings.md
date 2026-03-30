@@ -105,3 +105,20 @@ _Date: 2026-03-30 | Feature: add_a_pr_outcome_tracking_system_that_monitors_the_
 - **[code-quality]** `from_dict()`/deserialization helpers that raise raw KeyError on malformed input need try/except with fallback defaults.
 - **[testing]** Rich console renderers that create their own `Console()` instance break test output capture; accept console as a parameter.
 - **[security]** External API string fields interpolated into XML/prompt structural attributes (not just body) must be escaped separately.
+
+## Run: run-20260330_182656-36e04103ef
+_Date: 2026-03-30 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
+
+- **[code-quality]** Single `os.write()` calls for serialization can exceed pipe/fd buffer limits; use `os.fdopen()` + buffered `.write()`.
+- **[code-quality]** Optional config fields compared with `<`/`>` without None guards raise TypeError; validate non-None before arithmetic.
+- **[architecture]** Superseded dataclasses kept alongside their replacements accumulate dead abstractions; remove the old type promptly.
+- **[testing]** Auth token validation that catches network errors as "success" silently accepts any token when the server is unreachable.
+- **[architecture]** Instruction/prompt templates describing file locations in prose are fragile; use explicit glob patterns or concrete paths.
+- **[code-quality]** Single `os.write()` calls for serialization can exceed pipe/fd buffer limits; use `os.fdopen()` + buffered `.write()`.
+- **[code-quality]** Optional config fields compared with `<`/`>` without None guards raise TypeError; validate non-None before arithmetic.
+- **[architecture]** Superseded dataclasses kept alongside their replacements accumulate dead abstractions; remove the old type promptly.
+- **[testing]** Auth validation that catches network errors as "success" silently accepts any token when the server is unreachable.
+- **[code-quality]** Single `os.write()` for large payloads can exceed fd buffer limits; use `os.fdopen()` with buffered `.write()` instead.
+- **[code-quality]** Optional config fields compared with arithmetic operators without None guards raise TypeError at runtime.
+- **[architecture]** Superseded dataclasses kept alongside replacements accumulate dead abstractions; remove the old type promptly.
+- **[testing]** Auth validation catching network errors as "success" silently accepts any token when the server is unreachable.
