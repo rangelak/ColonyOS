@@ -458,6 +458,24 @@ class TestProvisionScriptE2E:
                 f"Missing provisioning step {step_num}/7"
             )
 
+    def test_api_key_prompts_suppress_echo(self):
+        """API key and token prompts must use read -rs to suppress terminal echo."""
+        content = self.SCRIPT.read_text(encoding="utf-8")
+        # Find all read prompts for secrets (API key and token)
+        secret_reads = re.findall(
+            r'read\s+[^"]*-p\s+"[^"]*(?:API_KEY|TOKEN)[^"]*"',
+            content,
+        )
+        assert len(secret_reads) >= 2, (
+            "Expected at least 2 secret prompts (API key + token)"
+        )
+        for read_cmd in secret_reads:
+            flags_part = read_cmd.split("-p")[0]
+            # -s can be standalone or combined (e.g., -rs, -sr, -s)
+            assert re.search(r"-\w*s", flags_part), (
+                f"Secret prompt must use -s flag to suppress echo: {read_cmd}"
+            )
+
     def test_passes_shellcheck(self):
         """Shellcheck lint if available."""
         if not _command_exists("shellcheck"):
@@ -561,6 +579,24 @@ class TestReleaseWorkflowE2E:
         assert "git commit" in all_run, "Job must commit the formula"
         assert "git push" in all_run, "Job must push to tap repo"
 
+    def test_uses_credential_helper_not_url_token(self):
+        """Token must not be embedded in clone URL — use credential helper instead."""
+        steps = self.homebrew_job.get("steps", [])
+        all_run = " ".join(str(s.get("run", "")) for s in steps)
+        assert "credential.helper" in all_run, (
+            "Job must use git credential.helper for authentication"
+        )
+        # Ensure the clone URL doesn't contain the token
+        clone_match = re.search(r'git clone\s+"([^"]+)"', all_run)
+        if clone_match:
+            clone_url = clone_match.group(1)
+            assert "HOMEBREW_TAP_TOKEN" not in clone_url, (
+                "Token must not be embedded in clone URL (log-leak risk)"
+            )
+            assert "x-access-token" not in clone_url, (
+                "Credentials must not be in clone URL"
+            )
+
     def test_uses_bot_identity_for_commit(self):
         steps = self.homebrew_job.get("steps", [])
         all_run = " ".join(str(s.get("run", "")) for s in steps)
@@ -637,11 +673,6 @@ class TestReadmeInstallDocsE2E:
 def _command_exists(cmd: str) -> bool:
     """Check if a command is available on PATH."""
     try:
-        subprocess.run(
-            ["which", cmd],
-            capture_output=True,
-            timeout=5,
-        )
         return subprocess.run(
             ["which", cmd], capture_output=True, timeout=5
         ).returncode == 0

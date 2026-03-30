@@ -209,17 +209,18 @@ jobs:
         run: |
           VERSION="${{ steps.meta.outputs.version }}"
 
-          # Clone the tap repo using the fine-grained PAT
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/rangelak/homebrew-colonyos.git" /tmp/tap
-
-          # Copy the generated formula
-          mkdir -p /tmp/tap/Formula
-          cp /tmp/colonyos.rb /tmp/tap/Formula/colonyos.rb
-
-          # Commit and push — pull --rebase first to handle concurrent tag pushes
+          # Clone the tap repo using a credential helper to avoid token in URL/logs
+          git clone "https://github.com/rangelak/homebrew-colonyos.git" /tmp/tap
           cd /tmp/tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config credential.helper '!f() { echo "username=x-access-token"; echo "password=${HOMEBREW_TAP_TOKEN}"; }; f'
+
+          # Copy the generated formula
+          mkdir -p Formula
+          cp /tmp/colonyos.rb Formula/colonyos.rb
+
+          # Commit and push — pull --rebase first to handle concurrent tag pushes
           git add Formula/colonyos.rb
           git commit -m "Update colonyos formula to ${VERSION}"
           git pull --rebase origin main

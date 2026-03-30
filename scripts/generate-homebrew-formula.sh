@@ -212,6 +212,8 @@ end
 RUBY_EOF
 
 # Remove any trailing blank lines from resources, then assemble
+# NOTE: Uses GNU sed syntax (multi-line branch/append). The fallback (|| echo)
+# handles BSD sed on macOS, but this script only runs in CI on Ubuntu runners.
 TRIMMED_RESOURCES=$(echo "$FILTERED_RESOURCES" | sed -e :a -e '/^[[:space:]]*$/d;N;ba' 2>/dev/null || echo "$FILTERED_RESOURCES")
 
 FORMULA="${FORMULA_HEADER}

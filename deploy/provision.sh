@@ -201,10 +201,12 @@ else
     GITHUB_KEY="${GITHUB_TOKEN:-}"
 
     if [ -z "$ANTHROPIC_KEY" ] && [ "$AUTO_YES" = false ]; then
-      read -r -p "  Enter ANTHROPIC_API_KEY (or leave blank to configure later): " ANTHROPIC_KEY
+      read -rs -p "  Enter ANTHROPIC_API_KEY (or leave blank to configure later): " ANTHROPIC_KEY
+      echo  # newline after silent input
     fi
     if [ -z "$GITHUB_KEY" ] && [ "$AUTO_YES" = false ]; then
-      read -r -p "  Enter GITHUB_TOKEN (or leave blank to configure later): " GITHUB_KEY
+      read -rs -p "  Enter GITHUB_TOKEN (or leave blank to configure later): " GITHUB_KEY
+      echo  # newline after silent input
     fi
 
     cat > "$ENV_FILE" <<ENVEOF
