@@ -213,6 +213,9 @@ class TextualUI:
             return
         self._queue.put(NoticeMsg(text=note))
 
+    def slack_note(self, text: str) -> None:
+        """No-op: TextualUI is terminal-side only."""
+
     # -- streaming callbacks ------------------------------------------------
 
     def on_tool_start(self, tool_name: str) -> None:

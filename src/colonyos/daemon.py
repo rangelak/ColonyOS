@@ -97,6 +97,9 @@ class _CombinedUI:
         self._primary.phase_note(*args, **kwargs)
         self._secondary_call("phase_note", *args, **kwargs)
 
+    def slack_note(self, text: str) -> None:
+        self._secondary_call("phase_note", text)
+
     def on_tool_start(self, *args: object) -> None:
         self._primary.on_tool_start(*args)
         self._secondary_call("on_tool_start", *args)
@@ -176,6 +179,9 @@ class _DaemonMonitorEventUI:
         if not note:
             return
         self._emit({"type": "notice", "text": note})
+
+    def slack_note(self, text: str) -> None:
+        """No-op: monitor event UIs are terminal-side only."""
 
     def on_tool_start(self, tool_name: str) -> None:
         self._flush_text()

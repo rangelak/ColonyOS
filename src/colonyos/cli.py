@@ -3711,6 +3711,9 @@ def _watch_slack_impl(
             self._terminal.phase_note(*a, **kw)  # type: ignore[union-attr]
             self._safe_slack_call("phase_note", *a, **kw)
 
+        def slack_note(self, text: str) -> None:
+            self._safe_slack_call("phase_note", text)
+
         def on_tool_start(self, *a: object) -> None:
             self._terminal.on_tool_start(*a)  # type: ignore[union-attr]
 

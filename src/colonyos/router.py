@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
+from colonyos.models import extract_result_text
 from colonyos.sanitize import sanitize_display_text, sanitize_untrusted_content
 
 logger = logging.getLogger(__name__)
@@ -394,9 +395,7 @@ def choose_tui_mode(
         allowed_tools=[],
     )
 
-    raw_text = ""
-    if result.artifacts:
-        raw_text = next(iter(result.artifacts.values()), "")
+    raw_text = extract_result_text(result.artifacts)
     if not raw_text and result.error:
         logger.warning("Mode-selection call failed from %s: %s", source, result.error[:200])
         return ModeAgentDecision(
@@ -746,9 +745,7 @@ def route_query(
     # Extract text from artifacts. run_phase_sync returns a single-entry dict
     # keyed by artifact name; we take the first (and only) value. If the SDK
     # ever returns multiple artifacts, revisit to use a well-known key.
-    raw_text = ""
-    if result.artifacts:
-        raw_text = next(iter(result.artifacts.values()), "")
+    raw_text = extract_result_text(result.artifacts)
     if not raw_text and result.error:
         logger.warning("Router LLM call failed: %s", result.error[:200])
         return RouterResult(
@@ -865,10 +862,9 @@ def answer_question(
     )
 
     # Extract answer from artifacts (single-entry dict; see route_query comment).
-    if result.artifacts:
-        answer = next(iter(result.artifacts.values()), "")
-        if answer:
-            return answer
+    answer = extract_result_text(result.artifacts)
+    if answer:
+        return answer
 
     if result.error:
         logger.warning("Q&A agent call failed: %s", result.error[:200])

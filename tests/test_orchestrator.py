@@ -36,6 +36,7 @@ from colonyos.orchestrator import (
     _build_thread_fix_prompt,
     _build_ceo_prompt,
     _build_run_id,
+    _invoke_ui_factory,
     _load_run_log,
     _parse_learn_output,
     _parse_parent_tasks,
@@ -1846,6 +1847,108 @@ class TestLoadRunLogSourceIssue:
         assert loaded.source_issue_url is None
 
 
+class TestSaveRunLogParallelFields:
+    """Round-trip for pr_url, post_fix_head_sha, parallel_tasks, wall/agent time."""
+
+    def test_round_trips_parallel_metadata(self, tmp_repo: Path) -> None:
+        log = RunLog(
+            run_id="r-parallel", prompt="test", status=RunStatus.COMPLETED,
+            pr_url="https://github.com/org/repo/pull/99",
+            post_fix_head_sha="abc123",
+            parallel_tasks=5,
+            wall_time_ms=30000,
+            agent_time_ms=90000,
+        )
+        path = _save_run_log(tmp_repo, log)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["pr_url"] == "https://github.com/org/repo/pull/99"
+        assert data["post_fix_head_sha"] == "abc123"
+        assert data["parallel_tasks"] == 5
+        assert data["wall_time_ms"] == 30000
+        assert data["agent_time_ms"] == 90000
+
+    def test_loads_parallel_metadata(self, tmp_repo: Path) -> None:
+        log = RunLog(
+            run_id="r-par-load", prompt="test", status=RunStatus.FAILED,
+            pr_url="https://github.com/org/repo/pull/7",
+            post_fix_head_sha="def456",
+            parallel_tasks=3,
+            wall_time_ms=10000,
+            agent_time_ms=25000,
+        )
+        _save_run_log(tmp_repo, log)
+        loaded = _load_run_log(tmp_repo, "r-par-load")
+        assert loaded.pr_url == "https://github.com/org/repo/pull/7"
+        assert loaded.post_fix_head_sha == "def456"
+        assert loaded.parallel_tasks == 3
+        assert loaded.wall_time_ms == 10000
+        assert loaded.agent_time_ms == 25000
+
+    def test_backward_compat_missing_parallel_fields(self, tmp_repo: Path) -> None:
+        runs_dir = tmp_repo / ".colonyos" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "old-par.json").write_text(json.dumps({
+            "run_id": "old-par", "prompt": "test", "status": "failed",
+            "phases": [], "total_cost_usd": 0.0,
+        }), encoding="utf-8")
+        loaded = _load_run_log(tmp_repo, "old-par")
+        assert loaded.pr_url is None
+        assert loaded.post_fix_head_sha is None
+        assert loaded.parallel_tasks is None
+        assert loaded.wall_time_ms is None
+        assert loaded.agent_time_ms is None
+
+
+class TestInvokeUIFactory:
+    """Regression tests for _invoke_ui_factory with extended and legacy signatures."""
+
+    def test_legacy_prefix_only_factory(self) -> None:
+        called_with: list[str] = []
+
+        def legacy_factory(prefix: str) -> str:
+            called_with.append(prefix)
+            return f"ui-{prefix}"
+
+        result = _invoke_ui_factory(legacy_factory, prefix="[R1] ")
+        assert result == "ui-[R1] "
+        assert called_with == ["[R1] "]
+
+    def test_extended_factory_with_task_id(self) -> None:
+        captured: dict[str, object] = {}
+
+        def extended_factory(*, prefix: str = "", task_id: str | None = None, badge: object = None) -> str:
+            captured["prefix"] = prefix
+            captured["task_id"] = task_id
+            return f"ui-task-{task_id}"
+
+        result = _invoke_ui_factory(extended_factory, prefix="", task_id="3.0")
+        assert result == "ui-task-3.0"
+        assert captured["task_id"] == "3.0"
+
+    def test_legacy_factory_with_badge_gets_markup_prefix(self) -> None:
+        from colonyos.ui import StreamBadge
+        badge = StreamBadge(text="R1", style="cyan")
+
+        called_with: list[str] = []
+
+        def legacy_factory(prefix: str) -> str:
+            called_with.append(prefix)
+            return "ui"
+
+        _invoke_ui_factory(legacy_factory, badge=badge)
+        assert called_with[0] == f"{badge.markup} "
+
+    def test_kwargs_factory(self) -> None:
+        captured: dict[str, object] = {}
+
+        def kwargs_factory(**kw: object) -> str:
+            captured.update(kw)
+            return "ui"
+
+        _invoke_ui_factory(kwargs_factory, prefix="x", task_id="1.0")
+        assert captured["task_id"] == "1.0"
+
+
 class TestBuildCeoPromptWithIssues:
     @patch("colonyos.github.fetch_open_issues")
     def test_injects_open_issues(self, mock_fetch, tmp_repo: Path, config: ColonyConfig) -> None:
@@ -3356,6 +3459,9 @@ class TestParallelImplementIntegration:
 
             def phase_error(self, error: str) -> None:
                 self.errors.append(error)
+
+            def slack_note(self, text: str) -> None:
+                pass
 
         ui = FakeUI()
         mock_preflight.return_value = PreflightResult(

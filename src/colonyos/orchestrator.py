@@ -11,6 +11,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
+from typing import Protocol
 
 import click
 from claude_agent_sdk import AgentDefinition
@@ -67,6 +68,23 @@ from colonyos.ui import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class UIFactory(Protocol):
+    """Callable that produces phase-UI instances.
+
+    Extended factories accept ``prefix``, ``task_id``, and ``badge``
+    keyword arguments.  Legacy factories that only accept a positional
+    ``prefix`` string are handled via ``_invoke_ui_factory``.
+    """
+
+    def __call__(
+        self,
+        *,
+        prefix: str = "",
+        task_id: str | None = None,
+        badge: StreamBadge | None = None,
+    ) -> object: ...
 
 
 def _touch_heartbeat(repo_root: Path) -> None:
@@ -1354,30 +1372,8 @@ def _format_implement_result_note(result: PhaseResult) -> str:
     return "\n".join(parts)
 
 
-def _post_slack_phase_note(ui: object | None, text: str) -> None:
-    """Emit a phase note only to Slack-backed UIs, avoiding terminal duplicates."""
-    note = text.strip()
-    if not note or ui is None:
-        return
-
-    target = None
-    if hasattr(ui, "_slack"):
-        target = getattr(ui, "_slack")
-    elif hasattr(ui, "_secondary"):
-        target = getattr(ui, "_secondary")
-    elif ui.__class__.__name__ in {"SlackUI", "FanoutSlackUI"}:
-        target = ui
-
-    if target is None:
-        return
-
-    phase_note = getattr(target, "phase_note", None)
-    if callable(phase_note):
-        phase_note(note)
-
-
 def _invoke_ui_factory(
-    ui_factory: object,
+    ui_factory: UIFactory | Callable[..., object],
     *,
     prefix: str = "",
     task_id: str | None = None,
@@ -2591,6 +2587,11 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
                 "source_issue_url": log.source_issue_url,
                 "source_type": log.source_type,
                 "review_comment_id": log.review_comment_id,
+                "pr_url": log.pr_url,
+                "post_fix_head_sha": log.post_fix_head_sha,
+                "parallel_tasks": log.parallel_tasks,
+                "wall_time_ms": log.wall_time_ms,
+                "agent_time_ms": log.agent_time_ms,
                 "preflight": log.preflight.to_dict() if log.preflight else None,
                 "last_successful_phase": last_successful_phase,
                 "resume_events": resume_events,
@@ -2720,6 +2721,11 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
             preflight=PreflightResult.from_dict(data["preflight"]) if data.get("preflight") else None,
             source_type=data.get("source_type"),
             review_comment_id=data.get("review_comment_id"),
+            pr_url=data.get("pr_url"),
+            post_fix_head_sha=data.get("post_fix_head_sha"),
+            parallel_tasks=data.get("parallel_tasks"),
+            wall_time_ms=data.get("wall_time_ms"),
+            agent_time_ms=data.get("agent_time_ms"),
             recovery_events=list(data.get("recovery_events", [])),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -3569,7 +3575,7 @@ def run_thread_fix(
     config: ColonyConfig,
     verbose: bool = False,
     quiet: bool = False,
-    ui_factory: object | None = None,
+    ui_factory: UIFactory | Callable[..., object] | None = None,
     expected_head_sha: str | None = None,
     source_type: str | None = None,
     review_comment_id: str | None = None,
@@ -3854,7 +3860,7 @@ def run(
     quiet: bool = False,
     source_issue: int | None = None,
     source_issue_url: str | None = None,
-    ui_factory: object | None = None,
+    ui_factory: UIFactory | Callable[..., object] | None = None,
     user_injection_provider: Callable[[], list[str]] | None = None,
     offline: bool = False,
     force: bool = False,
@@ -3865,7 +3871,7 @@ def run(
     """Execute the full orchestration loop: plan -> implement -> review -> deliver.
 
     Args:
-        ui_factory: Optional callable ``(prefix: str) -> UI | None`` that
+        ui_factory: Optional callable conforming to ``UIFactory`` protocol that
             overrides the default terminal UI.  Used by the Slack watcher to
             inject :class:`SlackUI` so phase progress appears as threaded
             replies.
@@ -4326,8 +4332,8 @@ def _run_pipeline(
                 impl_ui.phase_header("Implement", config.budget.per_phase, config.get_model(Phase.IMPLEMENT), branch_name)
                 task_outline = _load_task_outline(repo_root, task_rel)
                 task_outline_note = _format_task_outline_note(task_outline)
-                if task_outline_note:
-                    _post_slack_phase_note(impl_ui, task_outline_note)
+                if task_outline_note and impl_ui is not None:
+                    impl_ui.slack_note(task_outline_note)  # type: ignore[union-attr]
             else:
                 _log("=== Phase 2: Implement ===")
 
@@ -4352,7 +4358,7 @@ def _run_pipeline(
                             f"{attempt_result.artifacts.get('parallelism_ratio', '1.0x')}"
                         )
                         if impl_ui is not None:
-                            _post_slack_phase_note(impl_ui, _format_implement_result_note(attempt_result))
+                            impl_ui.slack_note(_format_implement_result_note(attempt_result))  # type: ignore[union-attr]
                             if attempt_result.success:
                                 completed_tasks = int(attempt_result.artifacts.get("completed", "0"))
                                 impl_ui.phase_complete(
@@ -4385,7 +4391,7 @@ def _run_pipeline(
                             f"{attempt_result.artifacts.get('total_tasks', '?')} tasks"
                         )
                         if impl_ui is not None:
-                            _post_slack_phase_note(impl_ui, _format_implement_result_note(attempt_result))
+                            impl_ui.slack_note(_format_implement_result_note(attempt_result))  # type: ignore[union-attr]
                             if attempt_result.success:
                                 completed_tasks = int(attempt_result.artifacts.get("completed", "0"))
                                 impl_ui.phase_complete(
@@ -4517,8 +4523,7 @@ def _run_pipeline(
                     if progress_tracker is not None:
                         progress_tracker.print_summary(round_num=iteration + 1)
                     if review_header_ui is not None:
-                        _post_slack_phase_note(
-                            review_header_ui,
+                        review_header_ui.slack_note(  # type: ignore[union-attr]
                             _format_review_round_note(
                                 results,
                                 reviewers,

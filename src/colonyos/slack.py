@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, runtime_checkable
 
 from colonyos.config import RouterConfig, SlackConfig, load_config, runs_dir_path
+from colonyos.models import extract_result_text
 from colonyos.sanitize import sanitize_untrusted_content, strip_slack_links
 
 if TYPE_CHECKING:
@@ -580,6 +581,9 @@ class SlackUI:
             text=note,
         )
 
+    def slack_note(self, text: str) -> None:
+        self.phase_note(text)
+
     def on_tool_start(self, *a: object) -> None:
         pass
 
@@ -623,6 +627,10 @@ class FanoutSlackUI:
     def phase_note(self, text: str) -> None:
         for target in self._targets:
             target.phase_note(text)
+
+    def slack_note(self, text: str) -> None:
+        for target in self._targets:
+            target.slack_note(text)
 
     def on_tool_start(self, *a: object) -> None:
         for target in self._targets:
@@ -1061,9 +1069,7 @@ def _triage_message_legacy(
         allowed_tools=[],  # no tool access
     )
 
-    raw_text = ""
-    if result.artifacts:
-        raw_text = next(iter(result.artifacts.values()), "")
+    raw_text = extract_result_text(result.artifacts)
     if not raw_text and result.error:
         logger.warning("Triage LLM call failed: %s", result.error[:200])
         return TriageResult(
