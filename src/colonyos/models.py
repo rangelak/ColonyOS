@@ -327,32 +327,59 @@ class LoopState:
         )
 
 
-# Priority tier constants (lower number = higher priority)
-PRIORITY_SLACK: int = 0    # P0: Direct user requests (Slack / manual prompts)
-PRIORITY_ISSUE: int = 1    # P1: GitHub issue backlog
-PRIORITY_AUTO: int = 2     # P2: CEO / cleanup / autonomous maintenance
+# Backward-compatible public priority constants.
+# These are still used by tests and external imports.
+PRIORITY_BUG: int = 0
+PRIORITY_FEATURE: int = 1
+PRIORITY_CEO: int = 2
+PRIORITY_CLEANUP: int = 3
+
+# Internal runtime queue tiers (lower number = higher priority).
+PRIORITY_SLACK: int = 0
+PRIORITY_ISSUE: int = 1
+PRIORITY_AUTO: int = 2
 
 _BUG_SIGNAL_WORDS = frozenset({"bug", "fix", "broken", "crash", "error", "regression", "hotfix"})
 
 
 def compute_priority(source_type: str, labels: list[str] | None = None) -> int:
-    """Compute deterministic priority tier from source type and labels.
+    """Compute the legacy public priority tier from source type and labels."""
+    labels = labels or []
+    lower_labels = [lbl.lower() for lbl in labels]
 
-    Returns P0-P3 integer where lower = higher priority.
-    """
+    if source_type == "issue":
+        for lbl in lower_labels:
+            if any(word in lbl for word in _BUG_SIGNAL_WORDS):
+                return PRIORITY_BUG
+        return PRIORITY_FEATURE
+    if source_type == "ceo":
+        return PRIORITY_CEO
+    if source_type in {"cleanup", "refactor"}:
+        return PRIORITY_CLEANUP
+
+    for lbl in lower_labels:
+        if any(word in lbl for word in _BUG_SIGNAL_WORDS):
+            return PRIORITY_BUG
+    return PRIORITY_FEATURE
+
+
+def compute_runtime_priority(source_type: str, labels: list[str] | None = None) -> int:
+    """Compute runtime queue priority for scheduling decisions."""
     labels = labels or []
     lower_labels = [lbl.lower() for lbl in labels]
 
     if source_type in {"slack", "slack_fix", "prompt", "pr_review_fix"}:
+        for lbl in lower_labels:
+            if any(word in lbl for word in _BUG_SIGNAL_WORDS):
+                return PRIORITY_SLACK
         return PRIORITY_SLACK
     if source_type == "issue":
-        if any(any(word in lbl for word in _BUG_SIGNAL_WORDS) for lbl in lower_labels):
-            return PRIORITY_SLACK
+        for lbl in lower_labels:
+            if any(word in lbl for word in _BUG_SIGNAL_WORDS):
+                return PRIORITY_SLACK
         return PRIORITY_ISSUE
     if source_type in {"ceo", "cleanup", "refactor"}:
         return PRIORITY_AUTO
-
-    # Default: user-sourced feature work.
     return PRIORITY_ISSUE
 
 
@@ -383,7 +410,7 @@ class QueueItem:
     - "cleanup": Cleanup / maintenance
     """
 
-    SCHEMA_VERSION: ClassVar[int] = 5  # class-level constant; bump on structural changes
+    SCHEMA_VERSION: ClassVar[int] = 4  # class-level constant; kept stable for backward compatibility
 
     id: str
     source_type: str  # "prompt", "issue", "slack", "slack_fix", "pr_review_fix", "ceo", or "cleanup"

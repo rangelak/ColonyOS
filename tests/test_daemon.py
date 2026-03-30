@@ -540,6 +540,57 @@ class TestSlackNotifications:
         assert mock_post.called
         mock_summary.assert_called_once()
 
+    def test_execute_item_fanouts_summary_to_merged_slack_threads(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        daemon_instance._slack_client = MagicMock()
+        item = QueueItem(
+            id="slack-1",
+            source_type="slack",
+            source_value="Add brew install support",
+            summary="Add brew install support",
+            slack_channel="C1",
+            slack_ts="111.1",
+            notification_channel="C1",
+            notification_thread_ts="111.1",
+            merged_sources=[
+                {"source_type": "slack", "channel": "C2", "ts": "222.2"},
+            ],
+            status=QueueItemStatus.PENDING,
+        )
+        fake_log = RunLog(
+            run_id="run-merged-1",
+            prompt="brew",
+            status=RunStatus.COMPLETED,
+            phases=[
+                PhaseResult(
+                    phase=Phase.PLAN,
+                    success=True,
+                    cost_usd=0.1,
+                    duration_ms=100,
+                )
+            ],
+            branch_name="colonyos/brew",
+            pr_url="https://example.com/pr/2",
+            total_cost_usd=0.1,
+        )
+
+        with patch("colonyos.cli.run_pipeline_for_queue_item", return_value=fake_log), \
+             patch("colonyos.slack.post_message") as mock_post, \
+             patch("colonyos.slack.post_run_summary") as mock_summary:
+            daemon_instance._execute_item(item)
+
+        summary_targets = [
+            (call.args[1], call.args[2])
+            for call in mock_summary.call_args_list
+        ]
+        assert summary_targets == [("C1", "111.1"), ("C2", "222.2")]
+        start_targets = [
+            (call.args[1], call.kwargs.get("thread_ts"))
+            for call in mock_post.call_args_list
+        ]
+        assert ("C1", "111.1") in start_targets
+        assert ("C2", "222.2") in start_targets
+
     def test_try_execute_next_posts_failure_to_slack_thread(self, daemon_instance: Daemon):
         daemon_instance.dry_run = False
         daemon_instance._slack_client = MagicMock()

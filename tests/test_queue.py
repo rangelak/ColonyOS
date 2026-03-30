@@ -345,6 +345,20 @@ class TestQueueAdd:
         assert state is not None
         assert len(state.items) == 2
 
+    def test_add_keeps_similar_manual_prompts_as_distinct_items(self, runner: CliRunner, configured_repo: Path):
+        with patch("colonyos.cli._find_repo_root", return_value=configured_repo):
+            runner.invoke(app, ["queue", "add", "Add brew install support"])
+            result = runner.invoke(app, ["queue", "add", "We need a brew installation flow"])
+        assert result.exit_code == 0
+
+        state = _load_queue_state(configured_repo)
+        assert state is not None
+        assert len(state.items) == 2
+        assert [item.source_value for item in state.items] == [
+            "Add brew install support",
+            "We need a brew installation flow",
+        ]
+
     def test_add_no_input(self, runner: CliRunner, configured_repo: Path):
         with patch("colonyos.cli._find_repo_root", return_value=configured_repo):
             result = runner.invoke(app, ["queue", "add"])

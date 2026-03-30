@@ -44,6 +44,7 @@ from colonyos.queue_runtime import (
     attach_demand_signal,
     find_related_history_items,
     find_similar_queue_item,
+    notification_targets,
     pending_queue_snapshot,
     reprioritize_queue,
     reprioritize_queue_item,
@@ -471,30 +472,35 @@ class Daemon:
 
         # Import here to avoid circular imports — cli.py imports from many modules
         from colonyos.cli import run_pipeline_for_queue_item
-        from colonyos.slack import SlackUI, post_message, post_run_summary
+        from colonyos.slack import FanoutSlackUI, SlackUI, post_message, post_run_summary
 
         notification = self._ensure_notification_thread(
             item,
             f":gear: *Starting {item.source_type} work*\n{item.summary or item.source_value[:160]}",
         )
+        targets = notification_targets(item)
         ui_factory = None
-        if notification is not None:
+        if notification is not None and targets:
             client, channel, thread_ts = notification
 
-            def _slack_ui_factory(prefix: str = "") -> SlackUI:
-                return SlackUI(client, channel, thread_ts)
+            def _slack_ui_factory(prefix: str = "") -> SlackUI | FanoutSlackUI:
+                slack_targets = [SlackUI(client, target_channel, target_ts) for target_channel, target_ts in targets]
+                if len(slack_targets) == 1:
+                    return slack_targets[0]
+                return FanoutSlackUI(*slack_targets)
 
             ui_factory = _slack_ui_factory
             try:
-                post_message(
-                    client,
-                    channel,
-                    (
-                        f":rocket: Working on *{item.source_type}* request\n"
-                        f"{item.summary or item.issue_title or item.source_value[:200]}"
-                    ),
-                    thread_ts=thread_ts,
-                )
+                for target_channel, target_ts in targets:
+                    post_message(
+                        client,
+                        target_channel,
+                        (
+                            f":rocket: Working on *{item.source_type}* request\n"
+                            f"{item.summary or item.issue_title or item.source_value[:200]}"
+                        ),
+                        thread_ts=target_ts,
+                    )
             except Exception:
                 logger.debug("Failed to post queue execution start", exc_info=True)
 
@@ -514,21 +520,22 @@ class Daemon:
         if log.preflight and log.preflight.head_sha:
             item.head_sha = log.preflight.head_sha
 
-        if notification is not None:
+        if notification is not None and targets:
             client, channel, thread_ts = notification
             try:
-                post_run_summary(
-                    client,
-                    channel,
-                    thread_ts,
-                    status=log.status.value,
-                    total_cost=log.total_cost_usd,
-                    branch_name=log.branch_name,
-                    pr_url=log.pr_url,
-                    summary=item.summary,
-                    phase_breakdown=self._format_phase_breakdown(log),
-                    demand_count=item.demand_count,
-                )
+                for target_channel, target_ts in targets:
+                    post_run_summary(
+                        client,
+                        target_channel,
+                        target_ts,
+                        status=log.status.value,
+                        total_cost=log.total_cost_usd,
+                        branch_name=log.branch_name,
+                        pr_url=log.pr_url,
+                        summary=item.summary,
+                        phase_breakdown=self._format_phase_breakdown(log),
+                        demand_count=item.demand_count,
+                    )
             except Exception:
                 logger.debug("Failed to post final queue summary", exc_info=True)
         return log
@@ -1119,12 +1126,13 @@ class Daemon:
         try:
             from colonyos.slack import post_message
 
-            post_message(
-                client,
-                channel,
-                f":x: *{item.source_type} execution failed*\n{details}",
-                thread_ts=thread_ts,
-            )
+            for target_channel, target_ts in notification_targets(item) or [(channel, thread_ts)]:
+                post_message(
+                    client,
+                    target_channel,
+                    f":x: *{item.source_type} execution failed*\n{details}",
+                    thread_ts=target_ts,
+                )
         except Exception:
             logger.debug("Failed to post daemon failure notification", exc_info=True)
 

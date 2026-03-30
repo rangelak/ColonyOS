@@ -537,6 +537,51 @@ class SlackUI:
         pass
 
 
+class FanoutSlackUI:
+    """Mirror Slack phase updates to multiple request threads."""
+
+    def __init__(self, *targets: SlackUI) -> None:
+        self._targets = list(targets)
+
+    def phase_header(
+        self,
+        phase_name: str,
+        budget: float,
+        model: str,
+        extra: str = "",
+    ) -> None:
+        for target in self._targets:
+            target.phase_header(phase_name, budget, model, extra)
+
+    def phase_complete(self, cost: float, turns: int, duration_ms: int) -> None:
+        for target in self._targets:
+            target.phase_complete(cost, turns, duration_ms)
+
+    def phase_error(self, error: str) -> None:
+        for target in self._targets:
+            target.phase_error(error)
+
+    def on_tool_start(self, *a: object) -> None:
+        for target in self._targets:
+            target.on_tool_start(*a)
+
+    def on_tool_input_delta(self, *a: object) -> None:
+        for target in self._targets:
+            target.on_tool_input_delta(*a)
+
+    def on_tool_done(self) -> None:
+        for target in self._targets:
+            target.on_tool_done()
+
+    def on_text_delta(self, *a: object) -> None:
+        for target in self._targets:
+            target.on_text_delta(*a)
+
+    def on_turn_complete(self) -> None:
+        for target in self._targets:
+            target.on_turn_complete()
+
+
 # ---------------------------------------------------------------------------
 # Deduplication ledger
 # ---------------------------------------------------------------------------

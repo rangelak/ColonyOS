@@ -318,10 +318,11 @@ flowchart TD
 | `colonyos daemon --max-budget N` | Daily budget cap in USD |
 | `colonyos daemon --max-hours N` | Maximum wall-clock hours before exit |
 | `colonyos daemon --dry-run` | Log what would run without executing |
-| `colonyos watch` | Watch Slack channels and trigger runs from messages |
-| `colonyos watch --dry-run` | Log triggers without executing |
-| `colonyos watch --max-hours N` | Wall-clock limit for the watcher |
-| `colonyos watch --max-budget N` | Aggregate USD spend limit |
+| `colonyos watch-slack` | Watch Slack channels and trigger runs from messages |
+| `colonyos watch-slack --dry-run` | Log triggers without executing |
+| `colonyos watch-slack --max-hours N` | Wall-clock limit for the watcher |
+| `colonyos watch-slack --max-budget N` | Aggregate USD spend limit |
+| `colonyos watch` | Deprecated alias for `watch-slack` |
 | `colonyos ui` | Launch the local web dashboard |
 | `colonyos ui --port N` | Custom port (default: 7400) |
 | `colonyos ui --no-open` | Don't auto-open the browser |
@@ -580,7 +581,7 @@ slack:
 pip install "colonyos[slack]"
 
 # Start watching
-colonyos watch
+colonyos watch-slack
 ```
 
 The watcher runs as a long-lived process using Slack Bolt SDK with Socket Mode (no public URL required). When someone mentions `@ColonyOS fix the login bug` in a configured channel, the watcher sanitizes the input, triggers a pipeline run, and posts threaded progress updates back to the Slack thread.

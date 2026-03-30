@@ -54,10 +54,9 @@ from colonyos.orchestrator import (
 )
 from colonyos.queue_runtime import (
     archive_terminal_queue_items,
-    attach_demand_signal,
     build_similarity_context,
     find_related_history_items,
-    find_similar_queue_item,
+    notification_targets,
     pending_queue_snapshot,
     reprioritize_queue_item,
     select_next_pending_item,
@@ -310,6 +309,89 @@ def _print_daemon_banner(
         )
     )
     con.print()
+
+
+def _parse_duration_label_to_ms(label: str) -> int:
+    """Best-effort parse for PhaseUI duration labels like '14s' or '2m 03s'."""
+    total_ms = 0
+    for value, unit in re.findall(r"(\d+)(ms|s|m|h)", label.lower()):
+        amount = int(value)
+        if unit == "ms":
+            total_ms += amount
+        elif unit == "s":
+            total_ms += amount * 1000
+        elif unit == "m":
+            total_ms += amount * 60_000
+        elif unit == "h":
+            total_ms += amount * 3_600_000
+    return total_ms
+
+
+def _parse_daemon_tui_output_line(text: str) -> object | None:
+    """Map daemon subprocess stdout lines back into structured TUI messages."""
+    from colonyos.tui.adapter import (
+        NoticeMsg,
+        PhaseCompleteMsg,
+        PhaseErrorMsg,
+        PhaseHeaderMsg,
+        TextBlockMsg,
+        ToolLineMsg,
+    )
+    from colonyos.ui import DEFAULT_TOOL_STYLE, TOOL_STYLE
+
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if set(stripped) <= {"─", " "}:
+        return None
+    if "Phase:" in stripped and "budget" in stripped:
+        match = re.search(
+            r"Phase:\s*(?P<name>.*?)\s+\$(?P<budget>\d+(?:\.\d+)?)\s+budget\s+·\s+(?P<model>[^·]+?)(?:\s+·\s+(?P<extra>.*?))?(?:\s*─+)?$",
+            stripped,
+        )
+        if match:
+            extra = (match.group("extra") or "").strip()
+            return PhaseHeaderMsg(
+                phase_name=match.group("name").strip(),
+                budget=float(match.group("budget")),
+                model=match.group("model").strip(),
+                extra=extra,
+            )
+    if stripped.startswith("[colonyos]"):
+        return NoticeMsg(text=stripped.removeprefix("[colonyos]").strip())
+
+    tool_match = re.match(
+        r"^\s*(?:(?P<prefix>\[[^\]]+\]|R\d+)\s+)?[●•]\s+(?P<name>[A-Za-z][A-Za-z0-9_-]*)(?:\s+(?P<arg>.*))?$",
+        text,
+    )
+    if tool_match:
+        prefix = (tool_match.group("prefix") or "").strip()
+        tool_name = tool_match.group("name")
+        arg = (tool_match.group("arg") or "").strip()
+        if prefix:
+            tool_name = f"{prefix} {tool_name}"
+        return ToolLineMsg(
+            tool_name=tool_name,
+            arg=arg,
+            style=TOOL_STYLE.get(tool_match.group("name"), DEFAULT_TOOL_STYLE),
+        )
+
+    complete_match = re.match(
+        r"^\s*✓\s+Phase completed\s+\$(?P<cost>\d+(?:\.\d+)?)\s+·\s+(?P<turns>\d+)\s+turns\s+·\s+(?P<duration>.+?)\s*$",
+        stripped,
+    )
+    if complete_match:
+        return PhaseCompleteMsg(
+            cost=float(complete_match.group("cost")),
+            turns=int(complete_match.group("turns")),
+            duration_ms=_parse_duration_label_to_ms(complete_match.group("duration")),
+        )
+
+    error_match = re.match(r"^\s*✗\s+Phase failed:\s*(?P<error>.+?)\s*$", stripped)
+    if error_match:
+        return PhaseErrorMsg(error=error_match.group("error"))
+
+    return TextBlockMsg(text=text)
 
 
 REPL_HISTORY_PATH = Path.home() / ".colonyos_history"
@@ -2550,20 +2632,6 @@ def add(prompts: tuple[str, ...], issue_refs: tuple[str, ...]) -> None:
 
     # Add free-text prompts
     for prompt_text in prompts:
-        similar = find_similar_queue_item(
-            state,
-            source_type="prompt",
-            prompt_text=prompt_text,
-        )
-        if similar is not None:
-            attach_demand_signal(
-                similar.item,
-                source_type="prompt",
-                source_value=prompt_text,
-                summary=prompt_text[:160],
-            )
-            reprioritize_queue_item(similar.item)
-            continue
         item = QueueItem(
             id=str(uuid.uuid4()),
             source_type="prompt",
@@ -2587,20 +2655,6 @@ def add(prompts: tuple[str, ...], issue_refs: tuple[str, ...]) -> None:
 
         number = parse_issue_ref(ref)
         issue = fetch_issue(number, repo_root)
-        similar = find_similar_queue_item(
-            state,
-            source_type="issue",
-            prompt_text=issue.title,
-        )
-        if similar is not None:
-            attach_demand_signal(
-                similar.item,
-                source_type="issue",
-                source_value=str(issue.number),
-                summary=issue.title,
-            )
-            reprioritize_queue_item(similar.item)
-            continue
 
         item = QueueItem(
             id=str(uuid.uuid4()),
@@ -3090,6 +3144,7 @@ def _watch_slack_impl(
             )
 
     from colonyos.slack import (
+        FanoutSlackUI,
         SlackClient,
         SlackUI,
         SlackWatchState,
@@ -3710,6 +3765,34 @@ def _watch_slack_impl(
             with self._state_lock:
                 return select_next_pending_item(self._queue_state)
 
+        def _notification_targets(self, item: QueueItem) -> list[tuple[str, str]]:
+            return notification_targets(item)
+
+        def _post_run_summary_to_targets(
+            self,
+            client: SlackClient,
+            item: QueueItem,
+            *,
+            status: str,
+            total_cost: float,
+            branch_name: str | None,
+            pr_url: str | None,
+            phase_breakdown: list[str],
+        ) -> None:
+            for channel, thread_ts in self._notification_targets(item):
+                post_run_summary(
+                    client,
+                    channel,
+                    thread_ts,
+                    status=status,
+                    total_cost=total_cost,
+                    branch_name=branch_name,
+                    pr_url=pr_url,
+                    summary=item.summary,
+                    phase_breakdown=phase_breakdown,
+                    demand_count=item.demand_count,
+                )
+
         def _execute_item(self, item_to_run: QueueItem) -> None:
             try:
                 current_config = load_config(self._repo_root)
@@ -3732,6 +3815,7 @@ def _watch_slack_impl(
 
             slack_ts = item_to_run.slack_ts
             slack_channel = item_to_run.slack_channel
+            slack_targets = self._notification_targets(item_to_run)
 
             # Wait for the Slack client with a timeout instead of silently deferring
             if not self._slack_client_ready.wait(timeout=10.0):
@@ -3757,10 +3841,13 @@ def _watch_slack_impl(
 
                 def _dual_ui_factory(
                     prefix: str = "",
-                    _ch: str = slack_channel,
-                    _ts: str = slack_ts,
-                ) -> SlackUI | _DualUI:
-                    slack_ui = SlackUI(client, _ch, _ts)
+                ) -> object:
+                    slack_ui_targets = [SlackUI(client, channel, thread_ts) for channel, thread_ts in slack_targets]
+                    slack_ui: SlackUI | FanoutSlackUI
+                    if len(slack_ui_targets) == 1:
+                        slack_ui = slack_ui_targets[0]
+                    else:
+                        slack_ui = FanoutSlackUI(*slack_ui_targets)
                     if self._quiet:
                         return slack_ui
                     terminal_ui = PhaseUI(verbose=self._verbose, prefix=prefix)
@@ -3769,7 +3856,8 @@ def _watch_slack_impl(
                 ui_factory = _dual_ui_factory
 
                 try:
-                    post_acknowledgment(client, slack_channel, slack_ts, item_to_run.source_value[:200])  # type: ignore[arg-type]
+                    for channel, thread_ts in slack_targets:
+                        post_acknowledgment(client, channel, thread_ts, item_to_run.source_value[:200])  # type: ignore[arg-type]
                 except Exception:
                     logger.debug("Failed to post pipeline start", exc_info=True)
 
@@ -3817,27 +3905,25 @@ def _watch_slack_impl(
                 save_watch_state(self._repo_root, self._watch_state)
 
             # Post result to Slack thread
-            if client and slack_ts and slack_channel:
+            if client and slack_targets:
                 emoji = "white_check_mark" if log.status == RunStatus.COMPLETED else "x"
-                try:
-                    react_to_message(client, slack_channel, slack_ts, emoji)  # type: ignore[arg-type]
-                except Exception:
-                    logger.debug("Failed to add result reaction", exc_info=True)
+                for channel, thread_ts in slack_targets:
+                    try:
+                        react_to_message(client, channel, thread_ts, emoji)  # type: ignore[arg-type]
+                    except Exception:
+                        logger.debug("Failed to add result reaction", exc_info=True)
 
-                post_run_summary(
+                self._post_run_summary_to_targets(
                     client,  # type: ignore[arg-type]
-                    slack_channel,
-                    slack_ts,
+                    item_to_run,
                     status=log.status.value,
                     total_cost=log.total_cost_usd,
                     branch_name=log.branch_name,
                     pr_url=log.pr_url,
-                    summary=item_to_run.summary,
                     phase_breakdown=[
                         f"- {phase.phase.value}: {'ok' if phase.success else 'failed'}, ${(phase.cost_usd or 0.0):.4f}"
                         for phase in log.phases
                     ],
-                    demand_count=item_to_run.demand_count,
                 )
 
             # Check consecutive failure circuit breaker
@@ -3930,6 +4016,7 @@ def _watch_slack_impl(
 
             slack_ts = item_to_run.slack_ts
             slack_channel = item_to_run.slack_channel
+            slack_targets = self._notification_targets(item_to_run)
 
             # Wait for Slack client
             if not self._slack_client_ready.wait(timeout=10.0):
@@ -3947,10 +4034,13 @@ def _watch_slack_impl(
 
                 def _fix_ui_factory(
                     prefix: str = "",
-                    _ch: str = slack_channel,
-                    _ts: str = slack_ts,
-                ) -> SlackUI | _DualUI:
-                    slack_ui = SlackUI(client, _ch, _ts)
+                ) -> object:
+                    slack_ui_targets = [SlackUI(client, channel, thread_ts) for channel, thread_ts in slack_targets]
+                    slack_ui: SlackUI | FanoutSlackUI
+                    if len(slack_ui_targets) == 1:
+                        slack_ui = slack_ui_targets[0]
+                    else:
+                        slack_ui = FanoutSlackUI(*slack_ui_targets)
                     if self._quiet:
                         return slack_ui
                     terminal_ui = PhaseUI(verbose=self._verbose, prefix=prefix)
@@ -4054,27 +4144,25 @@ def _watch_slack_impl(
                 save_watch_state(self._repo_root, self._watch_state)
 
             # Post fix result to Slack thread
-            if client and slack_ts and slack_channel:
+            if client and slack_targets:
                 emoji = "white_check_mark" if log.status == RunStatus.COMPLETED else "x"
-                try:
-                    react_to_message(client, slack_channel, slack_ts, emoji)  # type: ignore[arg-type]
-                except Exception:
-                    logger.debug("Failed to add fix result reaction", exc_info=True)
+                for channel, thread_ts in slack_targets:
+                    try:
+                        react_to_message(client, channel, thread_ts, emoji)  # type: ignore[arg-type]
+                    except Exception:
+                        logger.debug("Failed to add fix result reaction", exc_info=True)
 
-                post_run_summary(
+                self._post_run_summary_to_targets(
                     client,  # type: ignore[arg-type]
-                    slack_channel,
-                    slack_ts,
+                    item_to_run,
                     status=log.status.value,
                     total_cost=log.total_cost_usd,
                     branch_name=log.branch_name,
                     pr_url=log.pr_url,
-                    summary=item_to_run.summary,
                     phase_breakdown=[
                         f"- {phase.phase.value}: {'ok' if phase.success else 'failed'}, ${(phase.cost_usd or 0.0):.4f}"
                         for phase in log.phases
                     ],
-                    demand_count=item_to_run.demand_count,
                 )
 
     queue_executor = QueueExecutor(
@@ -4373,7 +4461,7 @@ def _launch_daemon_tui(
     import threading
 
     from colonyos.tui.app import AssistantApp
-    from colonyos.tui.adapter import NoticeMsg, PhaseHeaderMsg, TextBlockMsg
+    from colonyos.tui.adapter import NoticeMsg
     from colonyos.tui.log_writer import TranscriptLogWriter
     from colonyos.tui.widgets.transcript import TranscriptView
 
@@ -4400,29 +4488,6 @@ def _launch_daemon_tui(
         queue = getattr(getattr(app_instance, "event_queue", None), "sync_q", None)
         if queue is not None:
             queue.put(NoticeMsg(text=text))
-
-    def _message_for_daemon_output(text: str) -> object | None:
-        stripped = text.strip()
-        if not stripped:
-            return None
-        if set(stripped) <= {"─", " "}:
-            return None
-        if "Phase:" in stripped and "budget" in stripped:
-            match = re.search(
-                r"Phase:\s*(?P<name>.*?)\s+\$(?P<budget>\d+(?:\.\d+)?)\s+budget\s+·\s+(?P<model>[^·]+?)(?:\s+·\s+(?P<extra>.*?))?(?:\s*─+)?$",
-                stripped,
-            )
-            if match:
-                extra = (match.group("extra") or "").strip()
-                return PhaseHeaderMsg(
-                    phase_name=match.group("name").strip(),
-                    budget=float(match.group("budget")),
-                    model=match.group("model").strip(),
-                    extra=extra,
-                )
-        if stripped.startswith("[colonyos]"):
-            return NoticeMsg(text=stripped.removeprefix("[colonyos]").strip())
-        return TextBlockMsg(text=text)
 
     def _terminate_daemon_process(*, reason: str, force: bool = False) -> None:
         with process_lock:
@@ -4489,7 +4554,7 @@ def _launch_daemon_tui(
             for line in stream:
                 text = line.rstrip()
                 if text:
-                    msg = _message_for_daemon_output(text)
+                    msg = _parse_daemon_tui_output_line(text)
                     if msg is not None:
                         queue.put(msg)
 
@@ -5459,7 +5524,7 @@ def pr_review(
     loaded_state = load_pr_review_state(repo_root, pr_number)
     state: PRReviewState
     if loaded_state is None:
-        state = PRReviewState(pr_number=pr_number)
+        state = PRReviewState(pr_number)
         save_pr_review_state(repo_root, state)
     else:
         state = loaded_state

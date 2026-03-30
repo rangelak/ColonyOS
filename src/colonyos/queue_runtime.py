@@ -9,7 +9,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-from colonyos.models import QueueItem, QueueItemStatus, QueueState, compute_priority
+from colonyos.models import QueueItem, QueueItemStatus, QueueState, compute_runtime_priority
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +167,31 @@ def attach_demand_signal(
     item.merged_sources.append(entry)
 
 
+def notification_targets(item: QueueItem) -> list[tuple[str, str]]:
+    """Return unique Slack thread targets for the canonical and merged requests."""
+    targets: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(channel: str | None, thread_ts: str | None) -> None:
+        if not channel or not thread_ts:
+            return
+        target = (channel, thread_ts)
+        if target in seen:
+            return
+        seen.add(target)
+        targets.append(target)
+
+    _add(item.notification_channel or item.slack_channel, item.notification_thread_ts or item.slack_ts)
+    for source in item.merged_sources:
+        if not isinstance(source, dict):
+            continue
+        _add(
+            source.get("notification_channel") or source.get("channel") or source.get("slack_channel"),
+            source.get("notification_thread_ts") or source.get("thread_ts") or source.get("ts") or source.get("slack_ts"),
+        )
+    return targets
+
+
 def build_similarity_context(item: QueueItem, queue_state: QueueState) -> str:
     lines: list[str] = []
     if item.demand_count > 1:
@@ -199,7 +224,7 @@ def reprioritize_queue_item(
     now: datetime | None = None,
 ) -> None:
     current_time = now or datetime.now(timezone.utc)
-    base_priority = compute_priority(item.source_type)
+    base_priority = compute_runtime_priority(item.source_type)
     adjusted = base_priority
     reasons = [f"base:{item.source_type}"]
 
