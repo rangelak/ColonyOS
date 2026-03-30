@@ -24,7 +24,6 @@ from colonyos import __version__
 from colonyos.cancellation import (
     cancellation_scope,
     install_signal_cancel_handlers,
-    request_cancel,
 )
 from colonyos.config import ColonyConfig, load_config, save_config, runs_dir_path
 from colonyos.doctor import run_doctor_checks
@@ -1359,7 +1358,9 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
     )
 
     try:
-        with _repo_runtime_guard(repo_root, "run"), install_signal_cancel_handlers():
+        with _repo_runtime_guard(repo_root, "run"), install_signal_cancel_handlers(
+            include_sighup=True,
+        ):
             if use_tui:
                 with _mark_repo_runtime_session(repo_root):
                     _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
@@ -6376,7 +6377,6 @@ def _launch_tui(
     previous_handler = signal.getsignal(signal.SIGINT)
 
     def _sigint_handler(signum, frame) -> None:  # noqa: ANN001
-        request_cancel("SIGINT received")
         app_instance.call_from_thread(app_instance.action_cancel_run)
 
     signal.signal(signal.SIGINT, _sigint_handler)
