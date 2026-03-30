@@ -950,7 +950,7 @@ class Daemon:
                     source_value=source_val,
                     status=QueueItemStatus.PENDING,
                     priority=compute_priority("cleanup"),
-                    summary=f"Cleanup/refactor {candidate.path.name}",
+                    summary=f"Cleanup/refactor {Path(candidate.path).name}",
                     priority_reason="base:cleanup",
                     notification_channel=self._default_notification_channel(),
                 )

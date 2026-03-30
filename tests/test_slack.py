@@ -17,6 +17,7 @@ from colonyos.slack import (
     _build_triage_prompt,
     _parse_triage_response,
     check_rate_limit,
+    create_slack_app,
     extract_base_branch,
     extract_prompt_from_mention,
     extract_raw_from_formatted_prompt,
@@ -138,6 +139,25 @@ class TestSlackConfigParsing:
             (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
         )
         assert "slack" not in raw
+
+
+class TestCreateSlackApp:
+    def test_import_failure_surfaces_actionable_runtime_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        original_import = __import__
+
+        def fake_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
+            if name == "slack_bolt":
+                raise KeyError("slack_sdk")
+            return original_import(name, globals, locals, fromlist, level)
+
+        caplog.set_level("DEBUG", logger="colonyos.slack")
+        with patch("builtins.__import__", side_effect=fake_import):
+            with pytest.raises(RuntimeError, match="Slack dependencies failed to import cleanly"):
+                create_slack_app(SlackConfig(enabled=True))
+
+        assert "Slack dependency import crashed unexpectedly" in caplog.text
+        assert "python=" in caplog.text
+        assert "slack_sdk=" in caplog.text
 
 
 # ---------------------------------------------------------------------------

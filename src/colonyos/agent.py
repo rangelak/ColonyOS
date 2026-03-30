@@ -150,8 +150,23 @@ class _SyncRunController:
             self._cancel_reason = reason
             loop = self._loop
             task = self._task
-        if loop is not None and task is not None:
+        if loop is None or task is None or task.done():
+            return
+        if loop.is_closed():
+            return
+        try:
             loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            logger.debug(
+                "Cancellation for %s arrived after the event loop closed",
+                self.label,
+                exc_info=True,
+            )
+
+    def detach(self) -> None:
+        with self._lock:
+            self._loop = None
+            self._task = None
 
     @property
     def cancel_reason(self) -> str:
@@ -494,6 +509,7 @@ def _run_async_sync(
                         asyncio.gather(*pending, return_exceptions=True)
                     )
             finally:
+                controller.detach()
                 loop.close()
                 done.set()
 

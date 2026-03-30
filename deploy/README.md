@@ -2,9 +2,9 @@
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.11-3.13 recommended
 - Git with `gh` CLI authenticated
-- Slack Bot Token (`SLACK_BOT_TOKEN`) and App Token (`SLACK_APP_TOKEN`)
+- Slack Bot Token (`COLONYOS_SLACK_BOT_TOKEN`) and App Token (`COLONYOS_SLACK_APP_TOKEN`)
 - Anthropic API Key (`ANTHROPIC_API_KEY`)
 - systemd (Linux)
 
@@ -16,7 +16,7 @@
    git clone <your-repo-url> repo
    cd repo
    python -m venv ../venv
-   ../venv/bin/pip install -e .
+   ../venv/bin/pip install -e ".[slack]"
    ```
 
 2. **Configure environment** — create `/opt/colonyos/env` owned by the
@@ -89,7 +89,7 @@
 | Symptom | Check |
 |---------|-------|
 | Daemon won't start | `journalctl -u colonyos -e` for errors |
-| No Slack messages | Verify `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in env file |
+| No Slack messages | Verify `COLONYOS_SLACK_BOT_TOKEN` and `COLONYOS_SLACK_APP_TOKEN` in env file; if imports fail, reinstall with `../venv/bin/pip install -e ".[slack]"` and use Python 3.11-3.13 |
 | Budget paused | Check `.colonyos/daemon_state.json` for `daily_spend_usd` |
 | Circuit breaker active | Check `daemon_state.json` for `circuit_breaker_until` |
 | Multiple instances | Check `.colonyos/runtime.lock` and `.colonyos/runtime_processes.json` for an active repo runtime before starting another daemon or standalone watcher |
@@ -99,6 +99,6 @@
 ```bash
 cd /opt/colonyos/repo
 git pull
-../venv/bin/pip install -e .
+../venv/bin/pip install -e ".[slack]"
 sudo systemctl restart colonyos
 ```
