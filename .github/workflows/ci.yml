@@ -81,6 +81,9 @@ jobs:
       - name: Run shellcheck on generate-homebrew-formula.sh
         run: shellcheck scripts/generate-homebrew-formula.sh
 
+      - name: Run shellcheck on provision.sh
+        run: shellcheck deploy/provision.sh
+
   homebrew-formula-dry-run:
     name: Homebrew formula dry-run
     runs-on: ubuntu-latest

@@ -60,9 +60,9 @@
   - [x] 4.1 Write tests: verify init warns when cwd is not a git repo, verify init proceeds normally in a git repo
   - [x] 4.2 Add guard to `src/colonyos/init.py`: when cwd has no `.git` directory (walking up), print a warning like "Warning: Not inside a git repository. ColonyOS works per-project — please cd into a git repo." and prompt for confirmation before proceeding
 
-- [ ] 5.0 Create VM provisioning script
+- [x] 5.0 Create VM provisioning script
   depends_on: []
-  - [ ] 5.1 Write `deploy/provision.sh` that:
+  - [x] 5.1 Write `deploy/provision.sh` that:
     - Detects Ubuntu version (22.04+ required)
     - Installs Python 3.11+, Node.js LTS, Git, GitHub CLI via apt/nodesource
     - Installs pipx, then `pipx install colonyos` (with optional `[slack]` extra)
@@ -71,9 +71,9 @@
     - Prompts for `ANTHROPIC_API_KEY` and `GITHUB_TOKEN`, writes to `/opt/colonyos/env` with `chmod 600`
     - Enables and starts the systemd service
     - Runs `colonyos doctor` as verification
-  - [ ] 5.2 Add `--dry-run` flag to `deploy/provision.sh` for testing without side effects
-  - [ ] 5.3 Update `deploy/README.md` to reference `provision.sh` as the primary setup method
-  - [ ] 5.4 Add shellcheck linting for `deploy/provision.sh` to CI workflow (`.github/workflows/ci.yml`)
+  - [x] 5.2 Add `--dry-run` flag to `deploy/provision.sh` for testing without side effects
+  - [x] 5.3 Update `deploy/README.md` to reference `provision.sh` as the primary setup method
+  - [x] 5.4 Add shellcheck linting for `deploy/provision.sh` to CI workflow (`.github/workflows/ci.yml`)
 
 - [ ] 6.0 Update README and documentation
   depends_on: [1.0, 3.0]
