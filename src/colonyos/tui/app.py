@@ -20,6 +20,7 @@ import janus
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 
+from colonyos.agent import request_active_phase_cancel
 from colonyos.models import PreflightError
 from colonyos.tui.adapter import (
     CommandOutputMsg,
@@ -276,6 +277,7 @@ class AssistantApp(App):
         # First press — graceful stop: signal the daemon or orchestrator first so
         # worker cancellation does not block on a still-running child process.
         self._stop_event.set()
+        request_active_phase_cancel("Cancelled by user from TUI")
         if self._cancel_callback is not None:
             self._cancel_callback()
         self.workers.cancel_all()

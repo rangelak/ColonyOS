@@ -745,10 +745,21 @@ class Daemon:
     def _install_signal_handlers(self) -> None:
         """Install SIGINT/SIGTERM handlers for graceful shutdown."""
         def _handler(signum: int, frame: Any) -> None:
+            from colonyos.agent import request_active_phase_cancel
+
             sig_name = signal.Signals(signum).name
             logger.info("Received %s, initiating shutdown", sig_name)
             self.stop()
             if self._pipeline_running:
+                cancelled = request_active_phase_cancel(
+                    f"Interrupted active phase because {sig_name} was received"
+                )
+                if cancelled:
+                    logger.warning(
+                        "Requested cancellation for %d active phase run(s) due to %s",
+                        cancelled,
+                        sig_name,
+                    )
                 logger.warning("Interrupting active pipeline due to %s", sig_name)
                 raise KeyboardInterrupt(f"{sig_name} received")
 
