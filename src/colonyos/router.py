@@ -358,7 +358,7 @@ def choose_tui_mode(
 ) -> ModeAgentDecision:
     """Select the best TUI operating mode for a user request."""
     from colonyos.agent import run_phase_sync
-    from colonyos.config import RouterConfig, load_config
+    from colonyos.config import LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS, RouterConfig, load_config
     from colonyos.models import Phase
 
     heuristic = _heuristic_mode_decision(
@@ -393,6 +393,7 @@ def choose_tui_mode(
         model=resolved_model,
         budget_usd=0.05,
         allowed_tools=[],
+        timeout_seconds=LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS,
     )
 
     raw_text = extract_result_text(result.artifacts)
@@ -713,7 +714,7 @@ def route_query(
         RouterResult with the classification.
     """
     from colonyos.agent import run_phase_sync
-    from colonyos.config import RouterConfig, load_config
+    from colonyos.config import LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS, RouterConfig, load_config
     from colonyos.models import Phase
 
     cwd = repo_root if repo_root is not None else Path.cwd()
@@ -740,6 +741,7 @@ def route_query(
         model=resolved_model,
         budget_usd=0.05,  # tiny budget for routing
         allowed_tools=[],  # no tool access
+        timeout_seconds=LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS,
     )
 
     # Extract text from artifacts. run_phase_sync returns a single-entry dict
@@ -837,6 +839,7 @@ def answer_question(
         The answer as a string, or an error message if the call failed.
     """
     from colonyos.agent import run_phase_sync
+    from colonyos.config import QA_PHASE_TIMEOUT_SECONDS
     from colonyos.models import Phase
 
     cwd = repo_root if repo_root is not None else Path.cwd()
@@ -859,6 +862,7 @@ def answer_question(
         model=model,
         budget_usd=qa_budget,
         allowed_tools=read_only_tools,
+        timeout_seconds=QA_PHASE_TIMEOUT_SECONDS,
     )
 
     # Extract answer from artifacts (single-entry dict; see route_query comment).

@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, runtime_checkable
 
-from colonyos.config import RouterConfig, SlackConfig, load_config, runs_dir_path
+from colonyos.config import LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS, RouterConfig, SlackConfig, load_config, runs_dir_path
 from colonyos.models import extract_result_text
 from colonyos.sanitize import sanitize_untrusted_content, strip_slack_links
 
@@ -1067,6 +1067,7 @@ def _triage_message_legacy(
         model=model,
         budget_usd=0.05,  # tiny budget for triage
         allowed_tools=[],  # no tool access
+        timeout_seconds=LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS,
     )
 
     raw_text = extract_result_text(result.artifacts)

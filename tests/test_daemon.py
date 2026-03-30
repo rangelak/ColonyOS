@@ -985,3 +985,72 @@ class TestOutcomePolling:
         config = ColonyConfig(daemon=DaemonConfig(outcome_poll_interval_minutes=15))
         d = Daemon(tmp_repo, config, dry_run=True)
         assert d.daemon_config.outcome_poll_interval_minutes == 15
+
+
+class TestPipelineWatchdog:
+    """Tests for the pipeline-level timeout watchdog in _run_pipeline_for_item."""
+
+    def test_watchdog_raises_on_timeout(self, tmp_repo: Path):
+        """Pipeline that exceeds the timeout should raise RuntimeError."""
+        config = ColonyConfig(
+            daemon=DaemonConfig(pipeline_timeout_seconds=60),
+        )
+        d = Daemon(tmp_repo, config, dry_run=False)
+
+        item = QueueItem(
+            id="item-timeout",
+            source_type="prompt",
+            source_value="slow task",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+
+        def fake_pipeline(**kwargs: object) -> RunLog:
+            time.sleep(3)
+            return RunLog(
+                run_id="run-slow",
+                prompt="slow task",
+                status=RunStatus.COMPLETED,
+                total_cost_usd=0.0,
+            )
+
+        with patch.object(d, "daemon_config") as mock_cfg:
+            mock_cfg.pipeline_timeout_seconds = 1
+            mock_cfg.auto_recover_dirty_worktree = False
+
+            with patch(
+                "colonyos.cli.run_pipeline_for_queue_item",
+                side_effect=fake_pipeline,
+            ), pytest.raises(RuntimeError, match="exceeded.*wall-clock timeout"):
+                d._run_pipeline_for_item(item)
+
+    def test_watchdog_cancelled_on_fast_success(self, tmp_repo: Path):
+        """Fast pipeline should complete without the watchdog firing."""
+        config = ColonyConfig(
+            daemon=DaemonConfig(pipeline_timeout_seconds=300),
+        )
+        d = Daemon(tmp_repo, config, dry_run=False)
+
+        item = QueueItem(
+            id="item-fast",
+            source_type="prompt",
+            source_value="quick task",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+
+        def fast_pipeline(**kwargs: object) -> RunLog:
+            return RunLog(
+                run_id="run-fast",
+                prompt="quick task",
+                status=RunStatus.COMPLETED,
+                total_cost_usd=0.0,
+            )
+
+        with patch(
+            "colonyos.cli.run_pipeline_for_queue_item",
+            side_effect=fast_pipeline,
+        ):
+            log = d._run_pipeline_for_item(item)
+
+        assert log.status == RunStatus.COMPLETED

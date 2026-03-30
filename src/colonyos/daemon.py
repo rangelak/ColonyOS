@@ -1238,27 +1238,66 @@ class Daemon:
     ) -> RunLog:
         from colonyos.cli import run_pipeline_for_queue_item
 
+        timeout = self.daemon_config.pipeline_timeout_seconds
+        timed_out = threading.Event()
+
+        def _timeout_watchdog() -> None:
+            logger.warning(
+                "Pipeline timeout (%ds) reached for item %s, requesting cancellation",
+                timeout,
+                item.id,
+            )
+            timed_out.set()
+            from colonyos.agent import request_active_phase_cancel
+
+            cancelled = request_active_phase_cancel(
+                f"Pipeline exceeded {timeout}s wall-clock timeout"
+            )
+            if not cancelled:
+                from colonyos.cancellation import request_cancel
+
+                request_cancel(
+                    f"Pipeline exceeded {timeout}s wall-clock timeout"
+                )
+
         attempted_dirty_worktree_recovery = False
-        while True:
-            try:
-                with self._agent_lock:
-                    return run_pipeline_for_queue_item(
-                        item=item,
-                        repo_root=self.repo_root,
-                        config=self.config,
-                        verbose=self.verbose,
-                        quiet=False,
-                        ui_factory=ui_factory,
-                        queue_state=self._queue_state,
+        watchdog = threading.Timer(timeout, _timeout_watchdog)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            while True:
+                if timed_out.is_set():
+                    raise RuntimeError(
+                        f"Pipeline for item {item.id} exceeded "
+                        f"{timeout}s wall-clock timeout"
                     )
-            except PreflightError as exc:
-                if (
-                    attempted_dirty_worktree_recovery
-                    or not self._should_auto_recover_dirty_worktree(exc)
-                ):
-                    raise
-                attempted_dirty_worktree_recovery = True
-                self._recover_dirty_worktree_and_retry(item, exc)
+                try:
+                    with self._agent_lock:
+                        result = run_pipeline_for_queue_item(
+                            item=item,
+                            repo_root=self.repo_root,
+                            config=self.config,
+                            verbose=self.verbose,
+                            quiet=False,
+                            ui_factory=ui_factory,
+                            queue_state=self._queue_state,
+                        )
+                    if timed_out.is_set():
+                        raise RuntimeError(
+                            f"Pipeline for item {item.id} exceeded "
+                            f"{timeout}s wall-clock timeout"
+                        )
+                    return result
+                except PreflightError as exc:
+                    if (
+                        attempted_dirty_worktree_recovery
+                        or not self._should_auto_recover_dirty_worktree(exc)
+                    ):
+                        raise
+                    attempted_dirty_worktree_recovery = True
+                    self._recover_dirty_worktree_and_retry(item, exc)
+        finally:
+            watchdog.cancel()
 
     # ------------------------------------------------------------------
     # Background threads

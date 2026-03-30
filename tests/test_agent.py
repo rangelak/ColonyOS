@@ -10,7 +10,9 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 
 from colonyos.agent import (
+    PhaseTimeoutError,
     _SyncRunController,
+    _run_async_sync,
     request_active_phase_cancel,
     run_phase,
     run_phase_sync,
@@ -1411,3 +1413,69 @@ class TestModelFallback:
         assert result.model == "sonnet", (
             f"Expected fallback model 'sonnet' on failure, got '{result.model}'"
         )
+
+
+class TestPhaseTimeout:
+    """Tests for wall-clock timeout on phase execution."""
+
+    def test_run_async_sync_raises_on_timeout(self) -> None:
+        """_run_async_sync should raise PhaseTimeoutError when deadline is exceeded."""
+
+        async def _hang_forever() -> str:
+            await asyncio.sleep(3600)
+            return "never"
+
+        with pytest.raises(PhaseTimeoutError) as exc_info:
+            _run_async_sync(
+                _hang_forever,
+                label="test-hang",
+                timeout_seconds=1,
+            )
+        assert "test-hang" in exc_info.value.phase_label
+        assert exc_info.value.timeout_seconds == 1
+
+    def test_run_async_sync_no_timeout_when_fast(self) -> None:
+        """Fast coroutines should complete normally even with a timeout set."""
+
+        async def _quick() -> int:
+            return 42
+
+        result = _run_async_sync(
+            _quick,
+            label="test-quick",
+            timeout_seconds=5,
+        )
+        assert result == 42
+
+    def test_run_async_sync_no_timeout_when_none(self) -> None:
+        """timeout_seconds=None should not enforce any deadline."""
+
+        async def _quick() -> str:
+            return "ok"
+
+        result = _run_async_sync(
+            _quick,
+            label="test-no-timeout",
+            timeout_seconds=None,
+        )
+        assert result == "ok"
+
+    def test_run_phase_sync_returns_failed_result_on_timeout(self) -> None:
+        """run_phase_sync should return a failed PhaseResult when timeout is hit."""
+
+        async def fake_query(prompt, options):
+            await asyncio.sleep(3600)
+            yield  # noqa: E711
+
+        with patch("colonyos.agent.query", side_effect=fake_query):
+            result = run_phase_sync(
+                Phase.VERIFY,
+                "run tests",
+                cwd=Path("/tmp"),
+                system_prompt="sys",
+                timeout_seconds=1,
+            )
+
+        assert result.success is False
+        assert result.phase == Phase.VERIFY
+        assert "timed out" in (result.error or "").lower()

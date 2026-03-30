@@ -3633,7 +3633,7 @@ class TestEndToEndSessionPersistence:
         call_args: list[dict] = []
 
         def mock_run_phase_sync(phase, prompt, *, cwd, system_prompt, model,
-                                 budget_usd, ui, resume=None):
+                                 budget_usd, ui, resume=None, **kwargs):
             call_args.append({"resume": resume})
             if resume is not None:
                 # Simulate resume failure
