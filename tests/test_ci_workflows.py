@@ -276,6 +276,50 @@ class TestReleaseWorkflow:
             "update-homebrew must use HOMEBREW_TAP_TOKEN secret"
         )
 
+    def test_sdist_uses_exact_version_not_glob(self):
+        """Sdist file lookup must use exact version, not a glob pattern."""
+        job = self.workflow["jobs"]["update-homebrew"]
+        steps = job.get("steps", [])
+        meta_run = ""
+        for step in steps:
+            if step.get("id") == "meta":
+                meta_run = str(step.get("run", ""))
+                break
+        assert "colonyos-${VERSION}.tar.gz" in meta_run, (
+            "Sdist lookup must use exact version (colonyos-${VERSION}.tar.gz), not a glob"
+        )
+        assert "colonyos-*.tar.gz" not in meta_run, (
+            "Sdist lookup must not use glob pattern colonyos-*.tar.gz"
+        )
+
+    def test_update_homebrew_has_failure_alerting(self):
+        """update-homebrew must have a failure-handling step to open an issue."""
+        job = self.workflow["jobs"]["update-homebrew"]
+        steps = job.get("steps", [])
+        has_failure_step = any(
+            "failure()" in str(step.get("if", "")) for step in steps
+        )
+        assert has_failure_step, (
+            "update-homebrew must have an if: failure() step for alerting"
+        )
+
+    def test_update_homebrew_has_concurrency_group(self):
+        """update-homebrew must have its own concurrency group to prevent race conditions."""
+        job = self.workflow["jobs"]["update-homebrew"]
+        concurrency = job.get("concurrency", {})
+        assert concurrency, (
+            "update-homebrew must have a concurrency group"
+        )
+
+    def test_update_homebrew_pull_rebase_before_push(self):
+        """update-homebrew must pull --rebase before push to handle concurrent tag pushes."""
+        job = self.workflow["jobs"]["update-homebrew"]
+        steps = job.get("steps", [])
+        all_run = " ".join(str(s.get("run", "")) for s in steps)
+        assert "pull --rebase" in all_run, (
+            "update-homebrew must pull --rebase before push"
+        )
+
     def test_release_notes_include_homebrew_install(self):
         """Release notes must include Homebrew install instructions."""
         release_job = self.workflow["jobs"]["release"]

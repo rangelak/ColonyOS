@@ -403,13 +403,30 @@ class TestProvisionScriptE2E:
             "Script must install Node.js"
         )
 
+    def test_nodejs_installed_via_signed_apt_repo(self):
+        """Node.js must be installed via signed apt repo, not curl|bash."""
+        content = self.SCRIPT.read_text(encoding="utf-8")
+        assert "nodesource.com/setup" not in content, (
+            "Node.js must not be installed via curl|bash setup script (supply chain risk)"
+        )
+        assert "nodesource.gpg" in content or "keyrings" in content, (
+            "Node.js must be installed via signed apt repo with GPG key"
+        )
+
     def test_installs_github_cli(self):
         content = self.SCRIPT.read_text(encoding="utf-8")
         assert "gh" in content, "Script must install GitHub CLI"
 
     def test_installs_colonyos_via_pipx(self):
         content = self.SCRIPT.read_text(encoding="utf-8")
-        assert "pipx install colonyos" in content
+        assert "pipx install" in content
+
+    def test_pipx_install_is_idempotent(self):
+        """pipx install must use --force for re-runnability."""
+        content = self.SCRIPT.read_text(encoding="utf-8")
+        assert "pipx install --force" in content, (
+            "pipx install must use --force for idempotent re-runs"
+        )
 
     def test_creates_system_user(self):
         content = self.SCRIPT.read_text(encoding="utf-8")

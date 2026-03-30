@@ -119,9 +119,17 @@ if command -v node >/dev/null 2>&1; then
   ok "Node.js $NODE_VERSION already installed"
 else
   if [ "$DRY_RUN" = true ]; then
-    info "(dry-run) would install Node.js LTS via nodesource"
+    info "(dry-run) would install Node.js LTS via nodesource signed apt repo"
   else
-    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+    # Install via signed apt repo instead of curl|bash (supply chain safety)
+    apt-get install -y -qq ca-certificates gnupg
+    mkdir -p /usr/share/keyrings
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg
+    NODE_MAJOR=20
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+      | tee /etc/apt/sources.list.d/nodesource.list > /dev/null
+    apt-get update -qq
     apt-get install -y -qq nodejs
   fi
   ok "Node.js LTS installed"
@@ -159,9 +167,9 @@ ok "pipx available"
 
 if [ -n "$COLONYOS_EXTRA" ]; then
   info "Installing colonyos with extra: $COLONYOS_EXTRA"
-  run_cmd pipx install "colonyos${COLONYOS_EXTRA}" --python "$PYTHON"
+  run_cmd pipx install --force "colonyos${COLONYOS_EXTRA}" --python "$PYTHON"
 else
-  run_cmd pipx install colonyos --python "$PYTHON"
+  run_cmd pipx install --force colonyos --python "$PYTHON"
 fi
 ok "ColonyOS installed via pipx"
 

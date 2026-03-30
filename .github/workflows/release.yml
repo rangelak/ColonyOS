@@ -154,6 +154,9 @@ jobs:
     name: Update Homebrew tap
     needs: publish
     runs-on: ubuntu-latest
+    concurrency:
+      group: homebrew-tap-update
+      cancel-in-progress: false
     permissions:
       contents: read
     steps:
@@ -178,8 +181,14 @@ jobs:
           VERSION="${TAG#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-          # Compute SHA-256 of the sdist tarball
-          SDIST_FILE=$(ls dist/colonyos-*.tar.gz)
+          # Compute SHA-256 of the sdist tarball — use exact version to avoid glob ambiguity
+          SDIST_FILE="dist/colonyos-${VERSION}.tar.gz"
+          if [ ! -f "$SDIST_FILE" ]; then
+            echo "::error::Expected sdist not found: $SDIST_FILE"
+            echo "Available files:" >&2
+            ls -la dist/*.tar.gz >&2 || true
+            exit 1
+          fi
           SHA256=$(sha256sum "$SDIST_FILE" | awk '{print $1}')
           echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
 
@@ -207,11 +216,23 @@ jobs:
           mkdir -p /tmp/tap/Formula
           cp /tmp/colonyos.rb /tmp/tap/Formula/colonyos.rb
 
-          # Commit and push
+          # Commit and push — pull --rebase first to handle concurrent tag pushes
           cd /tmp/tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/colonyos.rb
           git commit -m "Update colonyos formula to ${VERSION}"
+          git pull --rebase origin main
           git push origin main
+
+      - name: Open issue on tap update failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          gh issue create \
+            --repo rangelak/ColonyOS \
+            --title "Homebrew tap update failed for v${VERSION}" \
+            --body "The \`update-homebrew\` job failed for release v${VERSION}. The PyPI package was published successfully, but the Homebrew formula was not updated. Please investigate the [workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) and manually update the tap if needed."
 
