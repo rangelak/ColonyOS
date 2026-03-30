@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from colonyos.memory import MemoryCategory, MemoryStore
 from colonyos.sanitize import sanitize_ci_logs
 
 logger = logging.getLogger(__name__)
@@ -302,6 +303,28 @@ def poll_outcomes(repo_root: Path) -> None:
                     labels=_extract_labels(data),
                     close_context=close_context,
                 )
+                # Capture reviewer feedback as a FAILURE memory entry so the
+                # pipeline can learn from rejected PRs.  Only stored when there
+                # is actual reviewer feedback (non-empty close_context).
+                if close_context:
+                    run_id = outcome["run_id"]
+                    try:
+                        with MemoryStore(repo_root) as mem:
+                            mem.add_memory(
+                                category=MemoryCategory.FAILURE,
+                                phase="deliver",
+                                run_id=run_id,
+                                text=(
+                                    f"PR #{pr_number} closed without merge. "
+                                    f"Reviewer feedback: {close_context}"
+                                ),
+                            )
+                    except Exception:
+                        logger.warning(
+                            "Failed to store memory for closed PR #%d",
+                            pr_number,
+                            exc_info=True,
+                        )
             else:
                 # Still open — just update last_polled_at
                 store.update_outcome(

@@ -57,10 +57,10 @@
   - [x] 6.3 Add `compute_delivery_outcomes()` function that reads from `OutcomeStore` and returns `DeliveryOutcomeStats`
   - [x] 6.4 Add `render_delivery_outcomes()` function that renders the stats as a Rich Panel, and call it from `render_dashboard()` after the parallelism section
 
-- [ ] 7.0 Memory capture — store feedback from closed PRs as memory entries
+- [x] 7.0 Memory capture — store feedback from closed PRs as memory entries
   depends_on: [1.0]
-  - [ ] 7.1 Write tests for memory capture: verify that when poll_outcomes detects open→closed transition, a MemoryEntry with category FAILURE is created with sanitized close_context, verify no memory is created for merged PRs, verify no memory for PRs closed without any reviewer comment
-  - [ ] 7.2 In `poll_outcomes()`, after detecting a status change from open to closed (not merged), call `MemoryStore.add_memory()` with category=FAILURE, phase="deliver", text="PR #{number} closed without merge. Reviewer feedback: {close_context}". Use existing `MemoryStore` from `memory.py`.
+  - [x] 7.1 Write tests for memory capture: verify that when poll_outcomes detects open→closed transition, a MemoryEntry with category FAILURE is created with sanitized close_context, verify no memory is created for merged PRs, verify no memory for PRs closed without any reviewer comment
+  - [x] 7.2 In `poll_outcomes()`, after detecting a status change from open to closed (not merged), call `MemoryStore.add_memory()` with category=FAILURE, phase="deliver", text="PR #{number} closed without merge. Reviewer feedback: {close_context}". Use existing `MemoryStore` from `memory.py`.
 
 - [ ] 8.0 Daemon integration — automatic outcome polling in _tick()
   depends_on: [1.0, 2.0]

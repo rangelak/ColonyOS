@@ -545,3 +545,110 @@ class TestOutcomesCLI:
 
         assert result.exit_code == 0
         assert "42" in result.output
+
+
+# ---------------------------------------------------------------------------
+# 7.1 Memory capture tests
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryCapture:
+    """Tests for memory capture when poll_outcomes detects PR closure."""
+
+    def test_closed_pr_creates_failure_memory(self, store: OutcomeStore, tmp_repo: Path):
+        """When poll_outcomes detects open→closed, a FAILURE MemoryEntry is created."""
+        store.track_pr("run-1", 42, "url1", "feat/x")
+        gh_data = _make_gh_result(
+            state="CLOSED",
+            closed_at="2025-01-15T10:00:00Z",
+            comments=[{"body": "This PR is too large, please split."}],
+        )
+        with (
+            patch("colonyos.outcomes._call_gh_pr_view", return_value=gh_data),
+            patch("colonyos.outcomes.MemoryStore") as MockMemStore,
+        ):
+            mock_mem_instance = MagicMock()
+            MockMemStore.return_value.__enter__ = MagicMock(return_value=mock_mem_instance)
+            MockMemStore.return_value.__exit__ = MagicMock(return_value=False)
+
+            poll_outcomes(tmp_repo)
+
+            mock_mem_instance.add_memory.assert_called_once()
+            call_kwargs = mock_mem_instance.add_memory.call_args
+            # Check category is FAILURE
+            from colonyos.memory import MemoryCategory
+            assert call_kwargs.kwargs["category"] == MemoryCategory.FAILURE
+            # Check phase is "deliver"
+            assert call_kwargs.kwargs["phase"] == "deliver"
+            # Check text contains PR number and reviewer feedback
+            assert "PR #42" in call_kwargs.kwargs["text"]
+            assert "closed without merge" in call_kwargs.kwargs["text"]
+            assert "too large" in call_kwargs.kwargs["text"].lower()
+
+    def test_merged_pr_does_not_create_memory(self, store: OutcomeStore, tmp_repo: Path):
+        """No memory entry is created for merged PRs."""
+        store.track_pr("run-1", 42, "url1", "feat/x")
+        gh_data = _make_gh_result(
+            state="MERGED",
+            merged_at="2025-01-15T10:00:00Z",
+            reviews=[{"body": "LGTM"}],
+        )
+        with (
+            patch("colonyos.outcomes._call_gh_pr_view", return_value=gh_data),
+            patch("colonyos.outcomes.MemoryStore") as MockMemStore,
+        ):
+            poll_outcomes(tmp_repo)
+            MockMemStore.assert_not_called()
+
+    def test_closed_pr_without_comments_no_memory(self, store: OutcomeStore, tmp_repo: Path):
+        """No memory entry for PRs closed without any reviewer comment."""
+        store.track_pr("run-1", 42, "url1", "feat/x")
+        gh_data = _make_gh_result(
+            state="CLOSED",
+            closed_at="2025-01-15T10:00:00Z",
+            # No comments or reviews — close_context will be empty
+            comments=[],
+            reviews=[],
+        )
+        with (
+            patch("colonyos.outcomes._call_gh_pr_view", return_value=gh_data),
+            patch("colonyos.outcomes.MemoryStore") as MockMemStore,
+        ):
+            poll_outcomes(tmp_repo)
+            MockMemStore.assert_not_called()
+
+    def test_memory_capture_failure_does_not_break_poll(self, store: OutcomeStore, tmp_repo: Path):
+        """If MemoryStore.add_memory raises, poll_outcomes continues without crashing."""
+        store.track_pr("run-1", 42, "url1", "feat/x")
+        store.track_pr("run-2", 43, "url2", "feat/y")
+        gh_data_closed = _make_gh_result(
+            state="CLOSED",
+            closed_at="2025-01-15T10:00:00Z",
+            comments=[{"body": "Rejected: duplicate of another PR"}],
+        )
+        gh_data_merged = _make_gh_result(
+            state="MERGED",
+            merged_at="2025-01-15T12:00:00Z",
+        )
+
+        def mock_gh(pr_number, repo_root):
+            if pr_number == 42:
+                return gh_data_closed
+            return gh_data_merged
+
+        with (
+            patch("colonyos.outcomes._call_gh_pr_view", side_effect=mock_gh),
+            patch("colonyos.outcomes.MemoryStore") as MockMemStore,
+        ):
+            mock_mem_instance = MagicMock()
+            mock_mem_instance.add_memory.side_effect = Exception("DB locked")
+            MockMemStore.return_value.__enter__ = MagicMock(return_value=mock_mem_instance)
+            MockMemStore.return_value.__exit__ = MagicMock(return_value=False)
+
+            # Should NOT raise despite memory store failure
+            poll_outcomes(tmp_repo)
+
+        # PR 43 should still be updated to merged
+        outcomes = store.get_outcomes()
+        pr43 = [o for o in outcomes if o["pr_number"] == 43][0]
+        assert pr43["status"] == "merged"
