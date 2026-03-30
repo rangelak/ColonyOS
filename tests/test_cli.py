@@ -20,6 +20,7 @@ from colonyos.cli import (
     _launch_tui,
     _load_latest_loop_state,
     _NEW_CONVERSATION_SIGNAL,
+    _parse_daemon_tui_output_line,
     _SAFE_TUI_COMMANDS,
     _handle_tui_command,
     _run_direct_agent,
@@ -34,7 +35,14 @@ from colonyos.models import (
     PreflightError, ProjectInfo, RunLog, RunStatus,
 )
 from colonyos.persona_packs import PACKS
-from colonyos.tui.adapter import NoticeMsg, PhaseHeaderMsg, TextBlockMsg
+from colonyos.tui.adapter import (
+    NoticeMsg,
+    PhaseCompleteMsg,
+    PhaseErrorMsg,
+    PhaseHeaderMsg,
+    TextBlockMsg,
+    ToolLineMsg,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -661,6 +669,25 @@ def _make_config(tmp_path: Path) -> ColonyConfig:
 
 
 class TestDaemonCommand:
+    def test_parse_daemon_tui_output_line_recognizes_tool_lines(self):
+        msg = _parse_daemon_tui_output_line("  [3.0] ● Read src/app.py")
+        assert isinstance(msg, ToolLineMsg)
+        assert msg.tool_name == "[3.0] Read"
+        assert msg.arg == "src/app.py"
+        assert msg.style == "cyan"
+
+    def test_parse_daemon_tui_output_line_recognizes_phase_completion(self):
+        msg = _parse_daemon_tui_output_line("  ✓ Phase completed  $0.37 · 4 turns · 2m 03s")
+        assert isinstance(msg, PhaseCompleteMsg)
+        assert msg.cost == pytest.approx(0.37)
+        assert msg.turns == 4
+        assert msg.duration_ms == 123000
+
+    def test_parse_daemon_tui_output_line_recognizes_phase_error(self):
+        msg = _parse_daemon_tui_output_line("  ✗ Phase failed: branch restore failed")
+        assert isinstance(msg, PhaseErrorMsg)
+        assert msg.error == "branch restore failed"
+
     def test_daemon_uses_tui_when_available(self, runner: CliRunner, tmp_path: Path):
         _make_config(tmp_path)
         with patch("colonyos.cli._interactive_stdio", return_value=True), \
@@ -708,6 +735,8 @@ class TestDaemonCommand:
         fake_proc = MagicMock()
         fake_proc.stdout = iter([
             "──────────── Phase: Plan  $10.00 budget · opus · 7 persona subagents ────────────\n",
+            "  ● Read src/colonyos/daemon.py\n",
+            "  ✓ Phase completed  $0.12 · 2 turns · 14s\n",
             "[colonyos] starting daemon work\n",
             "line two\n",
         ])
@@ -740,6 +769,8 @@ class TestDaemonCommand:
         assert env["COLONYOS_DAEMON_MONITOR"] == "1"
         assert any(isinstance(msg, NoticeMsg) for msg in messages)
         assert any(isinstance(msg, PhaseHeaderMsg) for msg in messages)
+        assert any(isinstance(msg, ToolLineMsg) for msg in messages)
+        assert any(isinstance(msg, PhaseCompleteMsg) for msg in messages)
         assert any(isinstance(msg, TextBlockMsg) for msg in messages)
 
     def test_launch_daemon_tui_stops_running_subprocess_on_exit(self, tmp_path: Path):
@@ -819,6 +850,17 @@ class TestDaemonCommand:
                 verbose=False,
                 dry_run=False,
             )
+
+
+class TestWatchSlackCommand:
+    def test_watch_alias_calls_watch_slack(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._watch_slack_impl") as mock_watch:
+            result = runner.invoke(app, ["watch"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert "deprecated" in result.output.lower()
+        mock_watch.assert_called_once()
 
 
 class TestAuto:

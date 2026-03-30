@@ -13,8 +13,17 @@ import pytest
 from colonyos.config import ColonyConfig, DaemonConfig
 from colonyos.daemon import Daemon, DaemonError
 from colonyos.daemon_state import DaemonState, save_daemon_state
-from colonyos.models import QueueItem, QueueItemStatus, QueueState
+from colonyos.models import (
+    Phase,
+    PhaseResult,
+    QueueItem,
+    QueueItemStatus,
+    QueueState,
+    RunLog,
+    RunStatus,
+)
 from colonyos.recovery import PreservationResult
+from colonyos.slack import SlackWatchState, save_watch_state
 
 
 @pytest.fixture
@@ -146,7 +155,7 @@ class TestPriorityQueue:
         ]
         item = daemon_instance._next_pending_item()
         assert item is not None
-        assert item.priority == 2  # Promoted from 3 to 2
+        assert item.priority == 1  # Cleanup defaults to P2, age promotes it to P1
 
 
 class TestBudgetEnforcement:
@@ -490,6 +499,150 @@ class TestCeoScheduling:
             daemon_instance._schedule_ceo()
 
         assert not any(item.source_type == "ceo" for item in daemon_instance._queue_state.items)
+
+
+class TestSlackNotifications:
+    def test_execute_item_posts_threaded_summary_for_auto_work(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        daemon_instance._slack_client = MagicMock()
+        item = QueueItem(
+            id="cleanup-1",
+            source_type="cleanup",
+            source_value="src/foo.py",
+            summary="Cleanup/refactor foo.py",
+            notification_channel="C1",
+            status=QueueItemStatus.PENDING,
+        )
+        fake_log = RunLog(
+            run_id="run-1",
+            prompt="cleanup",
+            status=RunStatus.COMPLETED,
+            phases=[
+                PhaseResult(
+                    phase=Phase.PLAN,
+                    success=True,
+                    cost_usd=0.1,
+                    duration_ms=100,
+                )
+            ],
+            branch_name="colonyos/cleanup-foo",
+            pr_url="https://example.com/pr/1",
+        )
+        fake_log.total_cost_usd = 0.1
+
+        with patch("colonyos.cli.run_pipeline_for_queue_item", return_value=fake_log), \
+             patch("colonyos.slack.post_message", return_value={"ts": "1234.5"}) as mock_post, \
+             patch("colonyos.slack.post_run_summary") as mock_summary:
+            log = daemon_instance._execute_item(item)
+
+        assert log is fake_log
+        assert item.notification_thread_ts == "1234.5"
+        assert mock_post.called
+        mock_summary.assert_called_once()
+
+    def test_execute_item_fanouts_summary_to_merged_slack_threads(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        daemon_instance._slack_client = MagicMock()
+        item = QueueItem(
+            id="slack-1",
+            source_type="slack",
+            source_value="Add brew install support",
+            summary="Add brew install support",
+            slack_channel="C1",
+            slack_ts="111.1",
+            notification_channel="C1",
+            notification_thread_ts="111.1",
+            merged_sources=[
+                {"source_type": "slack", "channel": "C2", "ts": "222.2"},
+            ],
+            status=QueueItemStatus.PENDING,
+        )
+        fake_log = RunLog(
+            run_id="run-merged-1",
+            prompt="brew",
+            status=RunStatus.COMPLETED,
+            phases=[
+                PhaseResult(
+                    phase=Phase.PLAN,
+                    success=True,
+                    cost_usd=0.1,
+                    duration_ms=100,
+                )
+            ],
+            branch_name="colonyos/brew",
+            pr_url="https://example.com/pr/2",
+            total_cost_usd=0.1,
+        )
+
+        with patch("colonyos.cli.run_pipeline_for_queue_item", return_value=fake_log), \
+             patch("colonyos.slack.post_message") as mock_post, \
+             patch("colonyos.slack.post_run_summary") as mock_summary:
+            daemon_instance._execute_item(item)
+
+        summary_targets = [
+            (call.args[1], call.args[2])
+            for call in mock_summary.call_args_list
+        ]
+        assert summary_targets == [("C1", "111.1"), ("C2", "222.2")]
+        start_targets = [
+            (call.args[1], call.kwargs.get("thread_ts"))
+            for call in mock_post.call_args_list
+        ]
+        assert ("C1", "111.1") in start_targets
+        assert ("C2", "222.2") in start_targets
+
+    def test_try_execute_next_posts_failure_to_slack_thread(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        daemon_instance._slack_client = MagicMock()
+        daemon_instance._queue_state.items = [
+            QueueItem(
+                id="issue-1",
+                source_type="issue",
+                source_value="1",
+                summary="Fix prod bug",
+                notification_channel="C1",
+                status=QueueItemStatus.PENDING,
+                priority=1,
+            )
+        ]
+        with patch.object(daemon_instance, "_execute_item", side_effect=RuntimeError("boom")), \
+             patch("colonyos.slack.post_message", return_value={"ts": "1234.5"}) as mock_post:
+            daemon_instance._try_execute_next()
+
+        item = daemon_instance._queue_state.items[0]
+        assert item.status == QueueItemStatus.FAILED
+        assert mock_post.called
+        assert any(
+            "execution failed" in str(call)
+            for call in mock_post.call_args_list
+        )
+
+    def test_daily_digest_posts_top_three(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config = DaemonConfig(digest_hour_utc=0)
+        daemon_instance._queue_state.items = [
+            QueueItem(id="slack-1", source_type="slack", source_value="a", summary="Slack request", status=QueueItemStatus.PENDING, priority=0),
+            QueueItem(id="issue-1", source_type="issue", source_value="1", summary="Issue request", status=QueueItemStatus.PENDING, priority=1),
+            QueueItem(id="ceo-1", source_type="ceo", source_value="x", summary="CEO request", status=QueueItemStatus.PENDING, priority=2),
+        ]
+        with patch.object(daemon_instance, "_post_slack_message") as mock_post:
+            daemon_instance._post_daily_digest_if_due()
+
+        assert mock_post.called
+        digest = mock_post.call_args.args[0]
+        assert "Daily ColonyOS Queue Digest" in digest
+        assert "Top 3 pending" in digest
+        assert "Slack request" in digest
+
+    def test_load_or_create_daemon_watch_state_reuses_persisted_state(self, tmp_repo: Path, config: ColonyConfig):
+        persisted = SlackWatchState(watch_id="daemon")
+        persisted.mark_processed("C1", "1.0", "slack-1")
+        save_watch_state(tmp_repo, persisted)
+
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+        state = daemon._load_or_create_daemon_watch_state()
+
+        assert state.watch_id == "daemon"
+        assert state.is_processed("C1", "1.0")
 
 
 class TestOutcomePolling:

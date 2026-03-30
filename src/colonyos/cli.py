@@ -38,6 +38,7 @@ from colonyos.models import (
     QueueStatus,
     RunLog,
     RunStatus,
+    compute_priority,
 )
 from colonyos.naming import generate_timestamp
 from colonyos.orchestrator import (
@@ -50,6 +51,16 @@ from colonyos.orchestrator import (
     run_standalone_review,
     prepare_resume,
     update_directions_after_ceo,
+)
+from colonyos.queue_runtime import (
+    archive_terminal_queue_items,
+    build_similarity_context,
+    find_related_history_items,
+    notification_targets,
+    pending_queue_snapshot,
+    reprioritize_queue_item,
+    select_next_pending_item,
+    sorted_pending_items,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,6 +118,8 @@ def _print_run_summary(log: RunLog) -> None:
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
     table.add_column("Phase", style="bold")
     table.add_column("Status", justify="center")
+    table.add_column("Priority", justify="right")
+    table.add_column("Why", style="dim")
     table.add_column("Cost", justify="right")
     table.add_column("Duration", justify="right")
 
@@ -296,6 +309,89 @@ def _print_daemon_banner(
         )
     )
     con.print()
+
+
+def _parse_duration_label_to_ms(label: str) -> int:
+    """Best-effort parse for PhaseUI duration labels like '14s' or '2m 03s'."""
+    total_ms = 0
+    for value, unit in re.findall(r"(\d+)(ms|s|m|h)", label.lower()):
+        amount = int(value)
+        if unit == "ms":
+            total_ms += amount
+        elif unit == "s":
+            total_ms += amount * 1000
+        elif unit == "m":
+            total_ms += amount * 60_000
+        elif unit == "h":
+            total_ms += amount * 3_600_000
+    return total_ms
+
+
+def _parse_daemon_tui_output_line(text: str) -> object | None:
+    """Map daemon subprocess stdout lines back into structured TUI messages."""
+    from colonyos.tui.adapter import (
+        NoticeMsg,
+        PhaseCompleteMsg,
+        PhaseErrorMsg,
+        PhaseHeaderMsg,
+        TextBlockMsg,
+        ToolLineMsg,
+    )
+    from colonyos.ui import DEFAULT_TOOL_STYLE, TOOL_STYLE
+
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if set(stripped) <= {"─", " "}:
+        return None
+    if "Phase:" in stripped and "budget" in stripped:
+        match = re.search(
+            r"Phase:\s*(?P<name>.*?)\s+\$(?P<budget>\d+(?:\.\d+)?)\s+budget\s+·\s+(?P<model>[^·]+?)(?:\s+·\s+(?P<extra>.*?))?(?:\s*─+)?$",
+            stripped,
+        )
+        if match:
+            extra = (match.group("extra") or "").strip()
+            return PhaseHeaderMsg(
+                phase_name=match.group("name").strip(),
+                budget=float(match.group("budget")),
+                model=match.group("model").strip(),
+                extra=extra,
+            )
+    if stripped.startswith("[colonyos]"):
+        return NoticeMsg(text=stripped.removeprefix("[colonyos]").strip())
+
+    tool_match = re.match(
+        r"^\s*(?:(?P<prefix>\[[^\]]+\]|R\d+)\s+)?[●•]\s+(?P<name>[A-Za-z][A-Za-z0-9_-]*)(?:\s+(?P<arg>.*))?$",
+        text,
+    )
+    if tool_match:
+        prefix = (tool_match.group("prefix") or "").strip()
+        tool_name = tool_match.group("name")
+        arg = (tool_match.group("arg") or "").strip()
+        if prefix:
+            tool_name = f"{prefix} {tool_name}"
+        return ToolLineMsg(
+            tool_name=tool_name,
+            arg=arg,
+            style=TOOL_STYLE.get(tool_match.group("name"), DEFAULT_TOOL_STYLE),
+        )
+
+    complete_match = re.match(
+        r"^\s*✓\s+Phase completed\s+\$(?P<cost>\d+(?:\.\d+)?)\s+·\s+(?P<turns>\d+)\s+turns\s+·\s+(?P<duration>.+?)\s*$",
+        stripped,
+    )
+    if complete_match:
+        return PhaseCompleteMsg(
+            cost=float(complete_match.group("cost")),
+            turns=int(complete_match.group("turns")),
+            duration_ms=_parse_duration_label_to_ms(complete_match.group("duration")),
+        )
+
+    error_match = re.match(r"^\s*✗\s+Phase failed:\s*(?P<error>.+?)\s*$", stripped)
+    if error_match:
+        return PhaseErrorMsg(error=error_match.group("error"))
+
+    return TextBlockMsg(text=text)
 
 
 REPL_HISTORY_PATH = Path.home() / ".colonyos_history"
@@ -1487,6 +1583,7 @@ def _save_queue_state(repo_root: Path, state: QueueState) -> Path:
     """
     colonyos_dir = repo_root / ".colonyos"
     colonyos_dir.mkdir(parents=True, exist_ok=True)
+    archive_terminal_queue_items(repo_root, state)
     path = colonyos_dir / QUEUE_FILE
     fd, tmp_path_str = tempfile.mkstemp(
         dir=str(colonyos_dir), suffix=".tmp", prefix="queue_",
@@ -1603,6 +1700,8 @@ def _print_queue_summary(state: QueueState) -> None:
             str(idx),
             source,
             Text(status_text, style=style),
+            f"P{item.priority}",
+            (item.priority_reason or "-")[:40],
             cost,
             dur,
             pr,
@@ -2537,8 +2636,17 @@ def add(prompts: tuple[str, ...], issue_refs: tuple[str, ...]) -> None:
             id=str(uuid.uuid4()),
             source_type="prompt",
             source_value=prompt_text,
+            raw_prompt=prompt_text,
+            summary=prompt_text[:160],
             status=QueueItemStatus.PENDING,
+            priority=compute_priority("prompt"),
+            priority_reason="base:prompt",
+            related_item_ids=[
+                related.id
+                for related in find_related_history_items(state, prompt_text=prompt_text)
+            ],
         )
+        reprioritize_queue_item(item)
         new_items.append(item)
 
     # Add issue references (validate at add-time)
@@ -2554,7 +2662,15 @@ def add(prompts: tuple[str, ...], issue_refs: tuple[str, ...]) -> None:
             source_value=str(issue.number),
             status=QueueItemStatus.PENDING,
             issue_title=issue.title,
+            summary=issue.title,
+            priority=compute_priority("issue", issue.labels),
+            priority_reason="base:issue",
+            related_item_ids=[
+                related.id
+                for related in find_related_history_items(state, prompt_text=issue.title)
+            ],
         )
+        reprioritize_queue_item(item)
         new_items.append(item)
 
     state.items.extend(new_items)
@@ -2621,9 +2737,10 @@ def queue_start(
     current_item: QueueItem | None = None
 
     try:
-        for item in state.items:
-            if item.status != QueueItemStatus.PENDING:
-                continue
+        while True:
+            item = select_next_pending_item(state)
+            if item is None:
+                break
 
             # --- Time cap check ---
             elapsed = _compute_queue_elapsed_hours(state)
@@ -2981,13 +3098,7 @@ def directions(regenerate: bool, static: bool, auto_update: bool, verbose: bool)
 # ---------------------------------------------------------------------------
 
 
-@app.command()
-@click.option("--max-hours", type=float, default=None, help="Maximum wall-clock hours for the watcher.")
-@click.option("--max-budget", type=float, default=None, help="Maximum aggregate USD spend.")
-@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
-@click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
-@click.option("--dry-run", is_flag=True, help="Log triggers without executing pipeline.")
-def watch(
+def _watch_slack_impl(
     max_hours: float | None,
     max_budget: float | None,
     verbose: bool,
@@ -3033,6 +3144,7 @@ def watch(
             )
 
     from colonyos.slack import (
+        FanoutSlackUI,
         SlackClient,
         SlackUI,
         SlackWatchState,
@@ -3063,6 +3175,7 @@ def watch(
         triage_message,
         wait_for_approval,
     )
+    from colonyos.slack_queue import SlackQueueEngine
 
     try:
         bolt_app = create_slack_app(config.slack)
@@ -3650,10 +3763,35 @@ def watch(
 
         def _next_pending_item(self) -> QueueItem | None:
             with self._state_lock:
-                for item in self._queue_state.items:
-                    if item.status == QueueItemStatus.PENDING:
-                        return item
-            return None
+                return select_next_pending_item(self._queue_state)
+
+        def _notification_targets(self, item: QueueItem) -> list[tuple[str, str]]:
+            return notification_targets(item)
+
+        def _post_run_summary_to_targets(
+            self,
+            client: SlackClient,
+            item: QueueItem,
+            *,
+            status: str,
+            total_cost: float,
+            branch_name: str | None,
+            pr_url: str | None,
+            phase_breakdown: list[str],
+        ) -> None:
+            for channel, thread_ts in self._notification_targets(item):
+                post_run_summary(
+                    client,
+                    channel,
+                    thread_ts,
+                    status=status,
+                    total_cost=total_cost,
+                    branch_name=branch_name,
+                    pr_url=pr_url,
+                    summary=item.summary,
+                    phase_breakdown=phase_breakdown,
+                    demand_count=item.demand_count,
+                )
 
         def _execute_item(self, item_to_run: QueueItem) -> None:
             try:
@@ -3677,6 +3815,7 @@ def watch(
 
             slack_ts = item_to_run.slack_ts
             slack_channel = item_to_run.slack_channel
+            slack_targets = self._notification_targets(item_to_run)
 
             # Wait for the Slack client with a timeout instead of silently deferring
             if not self._slack_client_ready.wait(timeout=10.0):
@@ -3702,10 +3841,13 @@ def watch(
 
                 def _dual_ui_factory(
                     prefix: str = "",
-                    _ch: str = slack_channel,
-                    _ts: str = slack_ts,
-                ) -> SlackUI | _DualUI:
-                    slack_ui = SlackUI(client, _ch, _ts)
+                ) -> object:
+                    slack_ui_targets = [SlackUI(client, channel, thread_ts) for channel, thread_ts in slack_targets]
+                    slack_ui: SlackUI | FanoutSlackUI
+                    if len(slack_ui_targets) == 1:
+                        slack_ui = slack_ui_targets[0]
+                    else:
+                        slack_ui = FanoutSlackUI(*slack_ui_targets)
                     if self._quiet:
                         return slack_ui
                     terminal_ui = PhaseUI(verbose=self._verbose, prefix=prefix)
@@ -3714,7 +3856,8 @@ def watch(
                 ui_factory = _dual_ui_factory
 
                 try:
-                    post_acknowledgment(client, slack_channel, slack_ts, item_to_run.source_value[:200])  # type: ignore[arg-type]
+                    for channel, thread_ts in slack_targets:
+                        post_acknowledgment(client, channel, thread_ts, item_to_run.source_value[:200])  # type: ignore[arg-type]
                 except Exception:
                     logger.debug("Failed to post pipeline start", exc_info=True)
 
@@ -3762,21 +3905,25 @@ def watch(
                 save_watch_state(self._repo_root, self._watch_state)
 
             # Post result to Slack thread
-            if client and slack_ts and slack_channel:
+            if client and slack_targets:
                 emoji = "white_check_mark" if log.status == RunStatus.COMPLETED else "x"
-                try:
-                    react_to_message(client, slack_channel, slack_ts, emoji)  # type: ignore[arg-type]
-                except Exception:
-                    logger.debug("Failed to add result reaction", exc_info=True)
+                for channel, thread_ts in slack_targets:
+                    try:
+                        react_to_message(client, channel, thread_ts, emoji)  # type: ignore[arg-type]
+                    except Exception:
+                        logger.debug("Failed to add result reaction", exc_info=True)
 
-                post_run_summary(
+                self._post_run_summary_to_targets(
                     client,  # type: ignore[arg-type]
-                    slack_channel,
-                    slack_ts,
+                    item_to_run,
                     status=log.status.value,
                     total_cost=log.total_cost_usd,
                     branch_name=log.branch_name,
                     pr_url=log.pr_url,
+                    phase_breakdown=[
+                        f"- {phase.phase.value}: {'ok' if phase.success else 'failed'}, ${(phase.cost_usd or 0.0):.4f}"
+                        for phase in log.phases
+                    ],
                 )
 
             # Check consecutive failure circuit breaker
@@ -3869,6 +4016,7 @@ def watch(
 
             slack_ts = item_to_run.slack_ts
             slack_channel = item_to_run.slack_channel
+            slack_targets = self._notification_targets(item_to_run)
 
             # Wait for Slack client
             if not self._slack_client_ready.wait(timeout=10.0):
@@ -3886,10 +4034,13 @@ def watch(
 
                 def _fix_ui_factory(
                     prefix: str = "",
-                    _ch: str = slack_channel,
-                    _ts: str = slack_ts,
-                ) -> SlackUI | _DualUI:
-                    slack_ui = SlackUI(client, _ch, _ts)
+                ) -> object:
+                    slack_ui_targets = [SlackUI(client, channel, thread_ts) for channel, thread_ts in slack_targets]
+                    slack_ui: SlackUI | FanoutSlackUI
+                    if len(slack_ui_targets) == 1:
+                        slack_ui = slack_ui_targets[0]
+                    else:
+                        slack_ui = FanoutSlackUI(*slack_ui_targets)
                     if self._quiet:
                         return slack_ui
                     terminal_ui = PhaseUI(verbose=self._verbose, prefix=prefix)
@@ -3993,21 +4144,25 @@ def watch(
                 save_watch_state(self._repo_root, self._watch_state)
 
             # Post fix result to Slack thread
-            if client and slack_ts and slack_channel:
+            if client and slack_targets:
                 emoji = "white_check_mark" if log.status == RunStatus.COMPLETED else "x"
-                try:
-                    react_to_message(client, slack_channel, slack_ts, emoji)  # type: ignore[arg-type]
-                except Exception:
-                    logger.debug("Failed to add fix result reaction", exc_info=True)
+                for channel, thread_ts in slack_targets:
+                    try:
+                        react_to_message(client, channel, thread_ts, emoji)  # type: ignore[arg-type]
+                    except Exception:
+                        logger.debug("Failed to add fix result reaction", exc_info=True)
 
-                post_run_summary(
+                self._post_run_summary_to_targets(
                     client,  # type: ignore[arg-type]
-                    slack_channel,
-                    slack_ts,
+                    item_to_run,
                     status=log.status.value,
                     total_cost=log.total_cost_usd,
                     branch_name=log.branch_name,
                     pr_url=log.pr_url,
+                    phase_breakdown=[
+                        f"- {phase.phase.value}: {'ok' if phase.success else 'failed'}, ${(phase.cost_usd or 0.0):.4f}"
+                        for phase in log.phases
+                    ],
                 )
 
     queue_executor = QueueExecutor(
@@ -4023,42 +4178,34 @@ def watch(
         circuit_breaker_cooldown_minutes=config.slack.circuit_breaker_cooldown_minutes,
     )
 
-    # Register event handlers
-    bolt_app.event("app_mention")(_handle_event)
+    def _publish_watch_client(client: SlackClient) -> None:
+        nonlocal _slack_client
+        _slack_client = client
 
-    # Always register reaction_added to suppress Bolt's "Unhandled request" warnings.
-    # Only actually process reactions when trigger_mode includes them.
-    if config.slack.trigger_mode not in ("reaction", "all"):
-        bolt_app.event("reaction_added")(lambda event, client: None)
-    else:
-        def _handle_reaction(event: dict, client: object) -> None:
-            """Handle reaction_added events — re-fetch the original message and process."""
-            item = event.get("item", {})
-            if item.get("type") != "message":
-                return
-            channel = item.get("channel", "")
-            ts = item.get("ts", "")
-            # Re-fetch the original message to get its text
-            try:
-                result = client.conversations_history(  # type: ignore[union-attr]
-                    channel=channel, latest=ts, inclusive=True, limit=1,
-                )
-                messages = result.get("messages", [])
-                if not messages:
-                    return
-                msg = messages[0]
-                # Build a synthetic event dict compatible with _handle_event
-                synthetic_event = {
-                    "channel": channel,
-                    "ts": ts,
-                    "user": msg.get("user", "unknown"),
-                    "text": msg.get("text", ""),
-                }
-                _handle_event(synthetic_event, client)
-            except Exception:
-                logger.debug("Failed to fetch message for reaction event", exc_info=True)
+    def _persist_watch_queue() -> None:
+        _save_queue_state(repo_root, queue_state)
 
-        bolt_app.event("reaction_added")(_handle_reaction)
+    def _persist_watch_runtime_state() -> None:
+        save_watch_state(repo_root, watch_state)
+
+    slack_engine = SlackQueueEngine(
+        repo_root=repo_root,
+        config=config,
+        queue_state=queue_state,
+        watch_state=watch_state,
+        state_lock=state_lock,
+        shutdown_event=shutdown_event,
+        bot_user_id=bot_user_id,
+        slack_client_ready=_slack_client_ready,
+        publish_client=_publish_watch_client,
+        persist_queue=_persist_watch_queue,
+        persist_watch_state=_persist_watch_runtime_state,
+        is_time_exceeded=_check_time_exceeded,
+        is_budget_exceeded=_check_budget_exceeded,
+        is_daily_budget_exceeded=_check_daily_budget_exceeded,
+        dry_run=dry_run,
+    )
+    slack_engine.register(bolt_app)
 
     shutdown_reason: dict[str, str | None] = {"value": None}
 
@@ -4154,6 +4301,47 @@ def watch(
             save_watch_state(repo_root, watch_state)
 
 
+@app.command("watch-slack")
+@click.option("--max-hours", type=float, default=None, help="Maximum wall-clock hours for the watcher.")
+@click.option("--max-budget", type=float, default=None, help="Maximum aggregate USD spend.")
+@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
+@click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
+@click.option("--dry-run", is_flag=True, help="Log triggers without executing pipeline.")
+def watch_slack(
+    max_hours: float | None,
+    max_budget: float | None,
+    verbose: bool,
+    quiet: bool,
+    dry_run: bool,
+) -> None:
+    """Watch Slack channels and trigger pipeline runs from messages."""
+    _watch_slack_impl(max_hours, max_budget, verbose, quiet, dry_run)
+
+
+@app.command("watch")
+@click.option("--max-hours", type=float, default=None, help="Maximum wall-clock hours for the watcher.")
+@click.option("--max-budget", type=float, default=None, help="Maximum aggregate USD spend.")
+@click.option("-v", "--verbose", is_flag=True, help="Stream agent text output alongside tool activity.")
+@click.option("-q", "--quiet", is_flag=True, help="Minimal output (no streaming, just phase start/end).")
+@click.option("--dry-run", is_flag=True, help="Log triggers without executing pipeline.")
+def watch_legacy(
+    max_hours: float | None,
+    max_budget: float | None,
+    verbose: bool,
+    quiet: bool,
+    dry_run: bool,
+) -> None:
+    """Deprecated alias for `watch-slack`."""
+    click.echo(
+        click.style(
+            "`colonyos watch` is deprecated; use `colonyos watch-slack`.",
+            fg="yellow",
+        ),
+        err=True,
+    )
+    _watch_slack_impl(max_hours, max_budget, verbose, quiet, dry_run)
+
+
 # ---------------------------------------------------------------------------
 # Daemon – queue-item pipeline helper
 # ---------------------------------------------------------------------------
@@ -4165,14 +4353,62 @@ def run_pipeline_for_queue_item(
     repo_root: "Path",
     config: "ColonyConfig",
     verbose: bool = False,
-) -> float:
+    quiet: bool = False,
+    ui_factory: Any | None = None,
+    queue_state: "QueueState | None" = None,
+) -> RunLog:
     """Execute a single queue item through the orchestration pipeline.
 
-    Returns the total cost (USD) of the run.  Called by the daemon process
+    Returns the full run log. Called by the daemon process
     to drive items that were enqueued via Slack, GitHub issues, CEO
     proposals, etc.
     """
     from colonyos.github import fetch_issue, format_issue_as_prompt
+
+    if item.source_type == "slack_fix":
+        from colonyos.orchestrator import _load_run_log, run_thread_fix
+        from colonyos.sanitize import sanitize_untrusted_content
+        from colonyos.slack import extract_raw_from_formatted_prompt, is_valid_git_ref
+
+        if not item.branch_name or not is_valid_git_ref(item.branch_name):
+            raise RuntimeError("Invalid branch name for slack_fix queue item")
+
+        parent_item = None
+        if queue_state is not None and item.parent_item_id:
+            parent_item = next(
+                (queued for queued in queue_state.items if queued.id == item.parent_item_id),
+                None,
+            )
+
+        raw_prompt = ""
+        if parent_item is not None:
+            raw_prompt = (
+                parent_item.raw_prompt
+                or extract_raw_from_formatted_prompt(parent_item.source_value)
+            )
+        original_prompt = sanitize_untrusted_content(raw_prompt) if raw_prompt else ""
+        prd_rel = ""
+        task_rel = ""
+        if parent_item is not None and parent_item.run_id:
+            parent_log = _load_run_log(repo_root, parent_item.run_id)
+            if parent_log:
+                prd_rel = parent_log.prd_rel or ""
+                task_rel = parent_log.task_rel or ""
+
+        return run_thread_fix(
+            item.source_value,
+            branch_name=item.branch_name,
+            pr_url=item.pr_url,
+            original_prompt=original_prompt,
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            repo_root=repo_root,
+            config=config,
+            verbose=verbose,
+            quiet=quiet,
+            ui_factory=ui_factory,
+            expected_head_sha=item.head_sha,
+        )
 
     # Build prompt and optional issue metadata
     if item.source_type == "issue":
@@ -4185,17 +4421,28 @@ def run_pipeline_for_queue_item(
         source_issue = None
         source_issue_url = None
 
+    related_context = ""
+    if queue_state is not None:
+        related_context = build_similarity_context(item, queue_state)
+    if related_context:
+        prompt_text = (
+            f"{prompt_text}\n\n## Similar Request Context\n"
+            f"{related_context}"
+        )
+
     log = run_orchestrator(
         prompt_text,
         repo_root=repo_root,
         config=config,
         verbose=verbose,
-        quiet=False,
+        quiet=quiet,
+        ui_factory=ui_factory,
+        base_branch=item.base_branch,
         source_issue=source_issue,
         source_issue_url=source_issue_url,
     )
 
-    return log.total_cost_usd
+    return log
 
 
 def _launch_daemon_tui(
@@ -4214,7 +4461,7 @@ def _launch_daemon_tui(
     import threading
 
     from colonyos.tui.app import AssistantApp
-    from colonyos.tui.adapter import NoticeMsg, PhaseHeaderMsg, TextBlockMsg
+    from colonyos.tui.adapter import NoticeMsg
     from colonyos.tui.log_writer import TranscriptLogWriter
     from colonyos.tui.widgets.transcript import TranscriptView
 
@@ -4241,29 +4488,6 @@ def _launch_daemon_tui(
         queue = getattr(getattr(app_instance, "event_queue", None), "sync_q", None)
         if queue is not None:
             queue.put(NoticeMsg(text=text))
-
-    def _message_for_daemon_output(text: str) -> object | None:
-        stripped = text.strip()
-        if not stripped:
-            return None
-        if set(stripped) <= {"─", " "}:
-            return None
-        if "Phase:" in stripped and "budget" in stripped:
-            match = re.search(
-                r"Phase:\s*(?P<name>.*?)\s+\$(?P<budget>\d+(?:\.\d+)?)\s+budget\s+·\s+(?P<model>[^·]+?)(?:\s+·\s+(?P<extra>.*?))?(?:\s*─+)?$",
-                stripped,
-            )
-            if match:
-                extra = (match.group("extra") or "").strip()
-                return PhaseHeaderMsg(
-                    phase_name=match.group("name").strip(),
-                    budget=float(match.group("budget")),
-                    model=match.group("model").strip(),
-                    extra=extra,
-                )
-        if stripped.startswith("[colonyos]"):
-            return NoticeMsg(text=stripped.removeprefix("[colonyos]").strip())
-        return TextBlockMsg(text=text)
 
     def _terminate_daemon_process(*, reason: str, force: bool = False) -> None:
         with process_lock:
@@ -4330,7 +4554,7 @@ def _launch_daemon_tui(
             for line in stream:
                 text = line.rstrip()
                 if text:
-                    msg = _message_for_daemon_output(text)
+                    msg = _parse_daemon_tui_output_line(text)
                     if msg is not None:
                         queue.put(msg)
 
@@ -5300,7 +5524,7 @@ def pr_review(
     loaded_state = load_pr_review_state(repo_root, pr_number)
     state: PRReviewState
     if loaded_state is None:
-        state = PRReviewState(pr_number=pr_number)
+        state = PRReviewState(pr_number)
         save_pr_review_state(repo_root, state)
     else:
         state = loaded_state
