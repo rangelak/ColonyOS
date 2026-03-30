@@ -538,6 +538,31 @@ class TestCLISweepCommand:
         assert "Another ColonyOS runtime is already active" in result.output
         mock_run.assert_not_called()
 
+    def test_sweep_dry_run_rejects_busy_repo_runtime(self, runner, tmp_repo: Path):
+        from colonyos.cli import app
+
+        config = ColonyConfig(project=ProjectInfo(name="Test", description="test", stack="Python"))
+        save_config(tmp_repo, config)
+        busy = RuntimeBusyError(
+            tmp_repo,
+            RuntimeProcessRecord(
+                pid=3434,
+                mode="daemon",
+                cwd=str(tmp_repo),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos daemon",
+            ),
+        )
+
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_repo), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy), \
+             patch("colonyos.orchestrator.run_sweep") as mock_run:
+            result = runner.invoke(app, ["sweep"])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
+        mock_run.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # 7. Integration tests — task file compatibility and end-to-end flows

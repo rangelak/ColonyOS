@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 import uuid
-from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout, suppress
+from contextlib import contextmanager, redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -499,7 +499,9 @@ def app(ctx: click.Context) -> None:
             and _tui_available()
             and config.project is not None
         ):
-            with _repo_runtime_session(repo_root, "interactive-tui"):
+            with _repo_runtime_session(repo_root, "interactive-tui"), install_signal_cancel_handlers(
+                include_sighup=True,
+            ):
                 _launch_tui(repo_root, config)
             return
         _show_welcome()
@@ -2188,6 +2190,12 @@ def auto(
                     _save_loop_state(repo_root, loop_state)
                     break
     except KeyboardInterrupt:
+        click.echo("\nAutonomous loop interrupted.")
+        loop_state.status = LoopStatus.INTERRUPTED
+        _save_loop_state(repo_root, loop_state)
+    except SystemExit as exc:
+        if exc.code != 128 + signal.SIGTERM:
+            raise
         click.echo("\nAutonomous loop interrupted.")
         loop_state.status = LoopStatus.INTERRUPTED
         _save_loop_state(repo_root, loop_state)
@@ -5371,8 +5379,8 @@ def sweep(path: str | None, execute: bool, plan_only: bool, max_tasks: int | Non
         )
         sys.exit(1)
 
-    runtime_guard = _repo_runtime_guard(repo_root, "sweep") if execute else nullcontext()
-    signal_guard = install_signal_cancel_handlers() if execute else nullcontext()
+    runtime_guard = _repo_runtime_guard(repo_root, "sweep")
+    signal_guard = install_signal_cancel_handlers()
 
     try:
         from colonyos.orchestrator import run_sweep as _run_sweep, parse_sweep_findings
@@ -6398,7 +6406,9 @@ def tui(prompt: str | None, verbose: bool) -> None:
 
     click.echo(click.style("`colonyos tui` is deprecated; use `colonyos run` instead.", dim=True))
     try:
-        with _repo_runtime_session(repo_root, "tui"):
+        with _repo_runtime_session(repo_root, "tui"), install_signal_cancel_handlers(
+            include_sighup=True,
+        ):
             _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
     except ImportError as exc:
         click.echo(

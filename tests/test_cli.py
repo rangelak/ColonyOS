@@ -3,6 +3,7 @@ import json
 import os
 import signal
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -128,6 +129,19 @@ class TestRootCommand:
         assert result.exit_code != 0
         assert "Another ColonyOS runtime is already active" in result.output
         mock_launch.assert_not_called()
+
+    def test_bare_colonyos_tui_installs_signal_cancel_handlers(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=True), \
+             patch("colonyos.cli._interactive_stdio", return_value=True), \
+             patch("colonyos.cli.install_signal_cancel_handlers", return_value=nullcontext()) as mock_handlers, \
+             patch("colonyos.cli._launch_tui") as mock_launch:
+            result = runner.invoke(app, [])
+
+        assert result.exit_code == 0
+        mock_handlers.assert_called_once_with(include_sighup=True)
+        mock_launch.assert_called_once()
 
 
 class TestStatus:
@@ -1087,6 +1101,21 @@ class TestAuto:
 
         assert result.exit_code != 0
         assert "Another ColonyOS runtime is already active" in result.output
+
+    def test_sigterm_marks_loop_interrupted(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch(
+                 "colonyos.cli._run_single_iteration",
+                 side_effect=SystemExit(128 + signal.SIGTERM),
+             ), \
+             patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
+            result = runner.invoke(app, ["auto", "--no-confirm"])
+
+        assert result.exit_code == 0
+        loop_state = _load_latest_loop_state(tmp_path)
+        assert loop_state is not None
+        assert loop_state.status == LoopStatus.INTERRUPTED
 
     def test_propose_only_mode(self, runner: CliRunner, tmp_path: Path):
         _make_config(tmp_path)
