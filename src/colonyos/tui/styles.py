@@ -49,6 +49,8 @@ IDLE_PHRASES = (
 APP_CSS = """
 Screen {
     layout: vertical;
+    overflow-x: hidden;
+    overflow-y: hidden;
 }
 
 StatusBar {
@@ -62,9 +64,6 @@ StatusBar {
 TranscriptView {
     height: 1fr;
     min-height: 10;
-}
-
-TranscriptView RichLog {
     padding: 0 2;
     scrollbar-size: 1 1;
 }
