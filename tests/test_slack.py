@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from colonyos.config import ColonyConfig, SlackConfig, load_config, save_config
+from colonyos.models import Phase, PhaseResult
 from colonyos.sanitize import XML_TAG_RE, sanitize_untrusted_content
 from colonyos.slack import (
     SlackUI,
@@ -21,6 +22,7 @@ from colonyos.slack import (
     extract_base_branch,
     extract_prompt_from_mention,
     extract_raw_from_formatted_prompt,
+    format_phase_breakdown_line,
     format_acknowledgment,
     format_phase_update,
     format_run_summary,
@@ -350,6 +352,37 @@ class TestFormatRunSummary:
         assert ":x:" in result
 
 
+class TestFormatPhaseBreakdownLine:
+    def test_implement_includes_task_counts(self) -> None:
+        phase = PhaseResult(
+            phase=Phase.IMPLEMENT,
+            success=True,
+            cost_usd=1.23,
+            duration_ms=1000,
+            artifacts={"completed": "3", "total_tasks": "4", "failed": "1", "blocked": "0"},
+        )
+
+        result = format_phase_breakdown_line(phase)
+
+        assert "implement" in result
+        assert "tasks 3/4" in result
+        assert "1 failed" in result
+
+    def test_review_includes_verdict(self) -> None:
+        phase = PhaseResult(
+            phase=Phase.REVIEW,
+            success=True,
+            cost_usd=0.42,
+            duration_ms=1000,
+            artifacts={"result": "VERDICT: request-changes\n\nFINDINGS:\n- test"},
+        )
+
+        result = format_phase_breakdown_line(phase)
+
+        assert "review" in result
+        assert "request-changes" in result
+
+
 # ---------------------------------------------------------------------------
 # SlackUI tests (Task 4.3)
 # ---------------------------------------------------------------------------
@@ -369,17 +402,29 @@ class TestSlackUI:
     def test_phase_complete_posts_message(self) -> None:
         client = MagicMock()
         ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_header("implement", 5.0, "sonnet")
         ui.phase_complete(1.5, 10, 30000)
-        client.chat_postMessage.assert_called_once()
+        call_kwargs = client.chat_postMessage.call_args[1]
+        assert "implement" in call_kwargs["text"]
+        assert "completed" in call_kwargs["text"]
 
     def test_phase_error_posts_generic_message(self) -> None:
         client = MagicMock()
         ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_header("review", 5.0, "sonnet")
         ui.phase_error("something broke")
         call_kwargs = client.chat_postMessage.call_args[1]
         # Error details must NOT be echoed to Slack (security)
         assert "something broke" not in call_kwargs["text"]
+        assert "review" in call_kwargs["text"]
         assert "Check server logs" in call_kwargs["text"]
+
+    def test_phase_note_posts_message(self) -> None:
+        client = MagicMock()
+        ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_note("Review round 1: 2 approved, 1 requested changes.")
+        call_kwargs = client.chat_postMessage.call_args[1]
+        assert "Review round 1" in call_kwargs["text"]
 
     def test_noop_methods(self) -> None:
         """Streaming callbacks are no-ops and don't raise."""

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from colonyos.agent import run_phase_sync
 from colonyos.config import ColonyConfig
-from colonyos.models import Phase, QueueItem, QueueItemStatus, QueueState
+from colonyos.models import Phase, QueueItem, QueueItemStatus, QueueState, extract_result_text
 from colonyos.queue_runtime import reprioritize_queue_item
 from colonyos.ui import NullUI, PhaseUI
 
@@ -83,9 +83,7 @@ def score_queue_with_agent(
         allowed_tools=[],
         ui=ui,
     )
-    raw_text = ""
-    if result.artifacts:
-        raw_text = next(iter(result.artifacts.values()), "")
+    raw_text = extract_result_text(result.artifacts)
     if not raw_text:
         logger.warning("Prioritizer returned no JSON output")
         return []

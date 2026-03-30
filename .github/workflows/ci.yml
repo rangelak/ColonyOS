@@ -68,21 +68,22 @@ jobs:
         run: npm run build
 
   shellcheck:
-    name: Lint shell scripts
+    name: Lint ${{ matrix.script }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        script:
+          - install.sh
+          - scripts/generate-homebrew-formula.sh
+          - deploy/provision.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
-      - name: Run shellcheck on install.sh
-        run: shellcheck install.sh
-
-      - name: Run shellcheck on generate-homebrew-formula.sh
-        run: shellcheck scripts/generate-homebrew-formula.sh
-
-      - name: Run shellcheck on provision.sh
-        run: shellcheck deploy/provision.sh
+      - name: Run shellcheck
+        run: shellcheck "${{ matrix.script }}"
 
   homebrew-formula-dry-run:
     name: Homebrew formula dry-run

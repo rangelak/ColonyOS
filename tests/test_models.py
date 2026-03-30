@@ -17,6 +17,7 @@ from colonyos.models import (
     RetryInfo,
     RunLog,
     RunStatus,
+    extract_result_text,
 )
 
 
@@ -940,3 +941,29 @@ class TestPhaseQA:
         """Phase.QA and Phase.TRIAGE are distinct phases."""
         assert Phase.QA != Phase.TRIAGE
         assert Phase.QA.value != Phase.TRIAGE.value
+
+
+class TestExtractResultText:
+    def test_canonical_result_key(self) -> None:
+        assert extract_result_text({"result": "hello"}) == "hello"
+
+    def test_single_entry_fallback(self) -> None:
+        assert extract_result_text({"output": "fallback"}) == "fallback"
+
+    def test_none_artifacts(self) -> None:
+        assert extract_result_text(None) == ""
+
+    def test_empty_dict(self) -> None:
+        assert extract_result_text({}) == ""
+
+    def test_result_key_preferred_over_others(self) -> None:
+        assert extract_result_text({"result": "primary", "extra": "secondary"}) == "primary"
+
+    def test_multi_entry_no_result_key_returns_empty(self) -> None:
+        assert extract_result_text({"a": "1", "b": "2"}) == ""
+
+    def test_non_string_result_coerced(self) -> None:
+        assert extract_result_text({"result": 42}) == "42"
+
+    def test_single_non_string_not_returned(self) -> None:
+        assert extract_result_text({"data": {"nested": True}}) == ""

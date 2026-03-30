@@ -56,9 +56,15 @@ def decode_monitor_event_line(text: str) -> object | None:
             tool_name=str(payload.get("tool_name", "")),
             arg=str(payload.get("arg", "")),
             style=str(payload.get("style", "")),
+            badge_text=str(payload.get("badge_text", "")),
+            badge_style=str(payload.get("badge_style", "")),
         )
     if event_type == "text_block":
-        return TextBlockMsg(text=str(payload.get("text", "")))
+        return TextBlockMsg(
+            text=str(payload.get("text", "")),
+            badge_text=str(payload.get("badge_text", "")),
+            badge_style=str(payload.get("badge_style", "")),
+        )
     if event_type == "turn_complete":
         return TurnCompleteMsg(turn_number=int(payload.get("turn_number", 0) or 0))
     return None

@@ -180,12 +180,26 @@ class AssistantApp(App):
                         lw.write_phase_header(msg.phase_name, msg.budget, msg.model, msg.extra)
 
                 elif isinstance(msg, ToolLineMsg):
-                    transcript.append_tool_line(msg.tool_name, msg.arg, msg.style)
+                    transcript.append_tool_line(
+                        msg.tool_name,
+                        msg.arg,
+                        msg.style,
+                        msg.badge_text,
+                        msg.badge_style,
+                    )
                     if lw:
-                        lw.write_tool_line(msg.tool_name, msg.arg)
+                        display_name = (
+                            f"{msg.badge_text} {msg.tool_name}".strip()
+                            if msg.badge_text else msg.tool_name
+                        )
+                        lw.write_tool_line(display_name, msg.arg)
 
                 elif isinstance(msg, TextBlockMsg):
-                    transcript.append_text_block(msg.text)
+                    transcript.append_text_block(
+                        msg.text,
+                        msg.badge_text,
+                        msg.badge_style,
+                    )
                     if lw:
                         lw.write_text_block(msg.text)
 

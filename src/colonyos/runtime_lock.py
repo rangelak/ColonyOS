@@ -42,8 +42,11 @@ class RuntimeProcessRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RuntimeProcessRecord | None:
+        raw_pid = data.get("pid")
+        if raw_pid is None:
+            return None
         try:
-            pid = int(data.get("pid"))
+            pid = int(raw_pid)
         except (TypeError, ValueError):
             return None
         mode = str(data.get("mode") or "unknown")

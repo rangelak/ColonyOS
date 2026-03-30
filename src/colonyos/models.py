@@ -11,6 +11,25 @@ import click
 logger = logging.getLogger(__name__)
 
 
+def extract_result_text(artifacts: dict[str, Any] | None) -> str:
+    """Extract the primary textual result from PhaseResult artifacts.
+
+    Prefers the canonical ``"result"`` key. Falls back to the first string
+    value if the dict has exactly one entry (single-artifact phases).
+    Returns ``""`` when no usable text is found.
+    """
+    if not artifacts:
+        return ""
+    result = artifacts.get("result")
+    if result is not None:
+        return str(result)
+    if len(artifacts) == 1:
+        val = next(iter(artifacts.values()))
+        if isinstance(val, str):
+            return val
+    return ""
+
+
 class PreflightError(click.ClickException):
     """Raised when a pre-flight git state check fails.
 
@@ -143,7 +162,7 @@ class PhaseResult:
     session_id: str = ""
     model: str | None = None
     error: str | None = None
-    artifacts: dict[str, str] = field(default_factory=dict)
+    artifacts: dict[str, Any] = field(default_factory=dict)
     retry_info: RetryInfo | None = None
 
 

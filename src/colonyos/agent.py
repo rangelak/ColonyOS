@@ -10,7 +10,7 @@ import threading
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, TypeVar, cast
+from typing import TYPE_CHECKING, Callable, Literal, TypeAlias, TypeVar, cast
 
 from claude_agent_sdk import (
     AgentDefinition,
@@ -29,6 +29,14 @@ if TYPE_CHECKING:
     from colonyos.ui import NullUI, PhaseUI
 
 logger = logging.getLogger(__name__)
+
+PermissionMode: TypeAlias = Literal[
+    "default",
+    "acceptEdits",
+    "plan",
+    "bypassPermissions",
+    "dontAsk",
+]
 
 _ACTIVE_PHASE_CONTROLLERS_LOCK = threading.Lock()
 _ACTIVE_PHASE_CONTROLLERS: set["_SyncRunController"] = set()
@@ -275,7 +283,7 @@ async def run_phase(
     max_turns: int | None = None,
     agents: dict[str, AgentDefinition] | None = None,
     allowed_tools: list[str] | None = None,
-    permission_mode: str = "bypassPermissions",
+    permission_mode: PermissionMode = "bypassPermissions",
     ui: PhaseUI | NullUI | None = None,
     resume: str | None = None,
     retry_config: RetryConfig | None = None,
@@ -315,6 +323,7 @@ async def run_phase(
         passes.append((retry_config.fallback_model, max_attempts))
 
     overall_attempt = 0
+    current_model: str | None = model
     # resume is only valid for the first attempt — after a transient error kills
     # the query, the session is dead and retries must restart from scratch.
     current_resume = resume
@@ -547,7 +556,7 @@ def run_phase_sync(
     max_turns: int | None = None,
     agents: dict[str, AgentDefinition] | None = None,
     allowed_tools: list[str] | None = None,
-    permission_mode: str = "bypassPermissions",
+    permission_mode: PermissionMode = "bypassPermissions",
     ui: PhaseUI | NullUI | None = None,
     resume: str | None = None,
     retry_config: RetryConfig | None = None,

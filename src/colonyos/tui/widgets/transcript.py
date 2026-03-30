@@ -92,11 +92,16 @@ class TranscriptView(RichLog):
         name: str,
         arg: str,
         style: str | None = None,
+        badge_text: str = "",
+        badge_style: str = "",
     ) -> None:
         """Render a single tool-call line with a colored dot."""
         color = style or TOOL_COLORS.get(name, DEFAULT_TOOL_COLOR)
         line = Text()
         line.append("  ")
+        if badge_text:
+            badge_color = badge_style or COLOR_ACCENT
+            line.append(f"{badge_text} ", style=f"bold {badge_color}")
         line.append("● ", style=color)
         line.append(name, style=f"bold {color}")
         if arg:
@@ -104,19 +109,38 @@ class TranscriptView(RichLog):
         self.write(line)
         self._scroll_to_end()
 
-    def append_text_block(self, text: str) -> None:
+    def append_text_block(
+        self,
+        text: str,
+        badge_text: str = "",
+        badge_style: str = "",
+    ) -> None:
         """Render a block of agent text, using Markdown if appropriate."""
         text = text.strip()
         if not text:
             return
         if _looks_like_markdown(text):
+            if badge_text:
+                badge_line = Text()
+                badge_line.append("  ")
+                badge_line.append(
+                    f"{badge_text}",
+                    style=f"bold {badge_style or COLOR_ACCENT}",
+                )
+                self.write(badge_line)
             self.write(Markdown(text))
         else:
             for raw_line in text.splitlines():
                 stripped = raw_line.strip()
                 if stripped:
                     line = Text()
-                    line.append(f"  {stripped}", style=COLOR_DIM)
+                    line.append("  ")
+                    if badge_text:
+                        line.append(
+                            f"{badge_text} ",
+                            style=f"bold {badge_style or COLOR_ACCENT}",
+                        )
+                    line.append(stripped, style=COLOR_DIM)
                     self.write(line)
         self._scroll_to_end()
 

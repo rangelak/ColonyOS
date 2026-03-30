@@ -104,11 +104,19 @@ class TestCIWorkflow:
     def test_shellcheck_lints_formula_script(self):
         """Shellcheck job must lint generate-homebrew-formula.sh."""
         shellcheck_job = self.workflow["jobs"]["shellcheck"]
-        steps = shellcheck_job.get("steps", [])
-        step_texts = " ".join(str(s.get("run", "")) for s in steps)
-        assert "generate-homebrew-formula.sh" in step_texts, (
-            "Shellcheck must lint generate-homebrew-formula.sh"
+        matrix_scripts = (
+            shellcheck_job.get("strategy", {}).get("matrix", {}).get("script", [])
         )
+        if matrix_scripts:
+            assert any("generate-homebrew-formula.sh" in s for s in matrix_scripts), (
+                "Shellcheck matrix must include generate-homebrew-formula.sh"
+            )
+        else:
+            steps = shellcheck_job.get("steps", [])
+            step_texts = " ".join(str(s.get("run", "")) for s in steps)
+            assert "generate-homebrew-formula.sh" in step_texts, (
+                "Shellcheck must lint generate-homebrew-formula.sh"
+            )
 
 
 class TestReleaseWorkflow:
