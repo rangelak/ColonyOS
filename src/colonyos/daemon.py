@@ -57,6 +57,7 @@ _PID_FILE = ".colonyos/daemon.pid"
 
 # How often the main loop checks for work (seconds)
 _MAIN_LOOP_INTERVAL = 5
+_DAEMON_WATCH_ID = "daemon"
 
 
 class DaemonError(RuntimeError):
@@ -437,6 +438,11 @@ class Daemon:
                 failure_message,
                 operator_hint,
             )
+            self._post_execution_failure(
+                item,
+                failure_message=failure_message,
+                incident_path=str(incident_path) if incident_path is not None else None,
+            )
 
     def _next_pending_item(self) -> QueueItem | None:
         """Return the highest-priority pending item (lowest priority number, FIFO within tier)."""
@@ -764,14 +770,20 @@ class Daemon:
 
     def _reprioritize_queue(self) -> None:
         try:
-            from colonyos.prioritizer import reprioritize_queue_with_agent
+            from colonyos.models import QueueState
+            from colonyos.prioritizer import apply_priority_decisions, score_queue_with_agent
 
             with self._lock:
-                changed = reprioritize_queue_with_agent(
-                    self.repo_root,
-                    self.config,
-                    self._queue_state,
-                )
+                snapshot = QueueState.from_dict(self._queue_state.to_dict())
+            decisions = score_queue_with_agent(
+                self.repo_root,
+                self.config,
+                snapshot,
+            )
+            if not decisions:
+                return
+            with self._lock:
+                changed = apply_priority_decisions(self._queue_state, decisions)
                 if changed:
                     self._persist_queue()
         except Exception:
@@ -932,16 +944,15 @@ class Daemon:
         """Run Slack Socket Mode listener."""
         try:
             from colonyos.slack import (
-                SlackWatchState,
                 create_slack_app,
+                load_watch_state,
                 resolve_channel_names,
                 save_watch_state,
                 start_socket_mode,
             )
             from colonyos.slack_queue import SlackQueueEngine
 
-            watch_id = datetime.now(timezone.utc).strftime("daemon-watch-%Y%m%d_%H%M%S")
-            self._slack_watch_state = SlackWatchState(watch_id=watch_id)
+            self._slack_watch_state = self._load_or_create_daemon_watch_state()
             slack_app = create_slack_app(self.config.slack)
             auth_response = slack_app.client.auth_test()
             bot_user_id = auth_response["user_id"]
@@ -989,6 +1000,16 @@ class Daemon:
                 logger.debug("Failed to close daemon Slack handler", exc_info=True)
         except Exception:
             logger.exception("Slack listener thread failed")
+
+    def _make_daemon_watch_state(self) -> Any:
+        from colonyos.slack import SlackWatchState
+
+        return SlackWatchState(watch_id=_DAEMON_WATCH_ID)
+
+    def _load_or_create_daemon_watch_state(self) -> Any:
+        from colonyos.slack import load_watch_state
+
+        return load_watch_state(self.repo_root, _DAEMON_WATCH_ID) or self._make_daemon_watch_state()
 
     def _register_daemon_commands(self, slack_app: Any) -> None:
         """Register message handler on the Slack app for daemon control commands."""
@@ -1077,6 +1098,35 @@ class Daemon:
             status = "ok" if phase.success else "failed"
             lines.append(f"- {phase.phase.value}: {status}, ${phase_cost:.4f}")
         return lines
+
+    def _post_execution_failure(
+        self,
+        item: QueueItem,
+        *,
+        failure_message: str,
+        incident_path: str | None = None,
+    ) -> None:
+        notification = self._ensure_notification_thread(
+            item,
+            f":gear: *Starting {item.source_type} work*\n{item.summary or item.source_value[:160]}",
+        )
+        if notification is None:
+            return
+        client, channel, thread_ts = notification
+        details = failure_message[:500]
+        if incident_path:
+            details = f"{details}\nIncident: `{incident_path}`"
+        try:
+            from colonyos.slack import post_message
+
+            post_message(
+                client,
+                channel,
+                f":x: *{item.source_type} execution failed*\n{details}",
+                thread_ts=thread_ts,
+            )
+        except Exception:
+            logger.debug("Failed to post daemon failure notification", exc_info=True)
 
     def _post_queue_enqueued(self, item: QueueItem) -> None:
         if item.notification_thread_ts:

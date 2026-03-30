@@ -50,12 +50,23 @@ def reprioritize_queue_with_agent(
     config: ColonyConfig,
     queue_state: QueueState,
 ) -> bool:
+    decisions = score_queue_with_agent(repo_root, config, queue_state)
+    if not decisions:
+        return False
+    return apply_priority_decisions(queue_state, decisions)
+
+
+def score_queue_with_agent(
+    repo_root: Path,
+    config: ColonyConfig,
+    queue_state: QueueState,
+) -> list[PriorityDecision]:
     pending = [
         item for item in queue_state.items
         if item.status == QueueItemStatus.PENDING
     ]
     if len(pending) < 2:
-        return False
+        return []
 
     system, user = _build_prioritizer_prompt(queue_state)
     result = run_phase_sync(
@@ -72,31 +83,54 @@ def reprioritize_queue_with_agent(
         raw_text = next(iter(result.artifacts.values()), "")
     if not raw_text:
         logger.warning("Prioritizer returned no JSON output")
-        return False
+        return []
 
     try:
         payload = json.loads(raw_text)
     except json.JSONDecodeError:
         logger.warning("Prioritizer returned invalid JSON: %s", raw_text[:300])
-        return False
+        return []
 
-    by_id = {item.id: item for item in pending}
-    changed = False
+    by_id = {item.id for item in pending}
+    decisions: list[PriorityDecision] = []
     for entry in payload.get("decisions", []):
         item_id = str(entry.get("item_id", "")).strip()
         if item_id not in by_id:
             continue
-        item = by_id[item_id]
         try:
             urgency_score = float(entry.get("urgency_score", 0.0))
         except (TypeError, ValueError):
             urgency_score = 0.0
         urgency_score = max(0.0, min(1.0, urgency_score))
         reason = str(entry.get("reason", "")).strip()[:200]
-        item.urgency_score = urgency_score
+        decisions.append(
+            PriorityDecision(
+                item_id=item_id,
+                urgency_score=urgency_score,
+                reason=reason,
+            )
+        )
+    return decisions
+
+
+def apply_priority_decisions(
+    queue_state: QueueState,
+    decisions: list[PriorityDecision],
+) -> bool:
+    by_id = {
+        item.id: item
+        for item in queue_state.items
+        if item.status == QueueItemStatus.PENDING
+    }
+    changed = False
+    for decision in decisions:
+        item = by_id.get(decision.item_id)
+        if item is None:
+            continue
+        item.urgency_score = decision.urgency_score
         reprioritize_queue_item(item)
-        if reason:
+        if decision.reason:
             base = item.priority_reason or ""
-            item.priority_reason = f"{base}, agent:{reason}".strip(", ")
+            item.priority_reason = f"{base}, agent:{decision.reason}".strip(", ")
         changed = True
     return changed

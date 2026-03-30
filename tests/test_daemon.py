@@ -23,6 +23,7 @@ from colonyos.models import (
     RunStatus,
 )
 from colonyos.recovery import PreservationResult
+from colonyos.slack import SlackWatchState, save_watch_state
 
 
 @pytest.fixture
@@ -539,6 +540,32 @@ class TestSlackNotifications:
         assert mock_post.called
         mock_summary.assert_called_once()
 
+    def test_try_execute_next_posts_failure_to_slack_thread(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        daemon_instance._slack_client = MagicMock()
+        daemon_instance._queue_state.items = [
+            QueueItem(
+                id="issue-1",
+                source_type="issue",
+                source_value="1",
+                summary="Fix prod bug",
+                notification_channel="C1",
+                status=QueueItemStatus.PENDING,
+                priority=1,
+            )
+        ]
+        with patch.object(daemon_instance, "_execute_item", side_effect=RuntimeError("boom")), \
+             patch("colonyos.slack.post_message", return_value={"ts": "1234.5"}) as mock_post:
+            daemon_instance._try_execute_next()
+
+        item = daemon_instance._queue_state.items[0]
+        assert item.status == QueueItemStatus.FAILED
+        assert mock_post.called
+        assert any(
+            "execution failed" in str(call)
+            for call in mock_post.call_args_list
+        )
+
     def test_daily_digest_posts_top_three(self, daemon_instance: Daemon):
         daemon_instance.daemon_config = DaemonConfig(digest_hour_utc=0)
         daemon_instance._queue_state.items = [
@@ -554,6 +581,17 @@ class TestSlackNotifications:
         assert "Daily ColonyOS Queue Digest" in digest
         assert "Top 3 pending" in digest
         assert "Slack request" in digest
+
+    def test_load_or_create_daemon_watch_state_reuses_persisted_state(self, tmp_repo: Path, config: ColonyConfig):
+        persisted = SlackWatchState(watch_id="daemon")
+        persisted.mark_processed("C1", "1.0", "slack-1")
+        save_watch_state(tmp_repo, persisted)
+
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+        state = daemon._load_or_create_daemon_watch_state()
+
+        assert state.watch_id == "daemon"
+        assert state.is_processed("C1", "1.0")
 
 
 class TestOutcomePolling:
