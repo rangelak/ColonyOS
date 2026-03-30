@@ -719,6 +719,39 @@ class TestResolveLatestPrdPath:
         mock_direct.assert_called_once()
         mock_run.assert_not_called()
 
+    def test_launch_tui_sigint_requests_shared_cancel(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+
+        class FakeApp:
+            def __init__(self, **kwargs):
+                self.messages: list[object] = []
+                self.event_queue = SimpleNamespace(
+                    sync_q=SimpleNamespace(put=self.messages.append),
+                )
+
+            def call_from_thread(self, fn, *args):
+                return fn(*args)
+
+            def action_cancel_run(self):
+                self.cancelled = True
+
+            def run(self):
+                return None
+
+        with patch("colonyos.tui.app.AssistantApp", FakeApp), \
+             patch("colonyos.tui.log_writer.TranscriptLogWriter"), \
+             patch("colonyos.cli.request_cancel") as mock_cancel, \
+             patch("colonyos.cli.signal.getsignal", return_value=signal.SIG_DFL), \
+             patch("colonyos.cli.signal.signal") as mock_signal:
+            _launch_tui(tmp_path, config)
+            sigint_handler = next(
+                call.args[1]
+                for call in mock_signal.call_args_list
+                if call.args[0] == signal.SIGINT and callable(call.args[1])
+            )
+            sigint_handler(signal.SIGINT, object())
+            mock_cancel.assert_called_once_with("SIGINT received")
+
 
 def _make_config(tmp_path: Path) -> ColonyConfig:
     config = ColonyConfig(
@@ -1112,7 +1145,7 @@ class TestAuto:
              patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
             result = runner.invoke(app, ["auto", "--no-confirm"])
 
-        assert result.exit_code == 0
+        assert result.exit_code == 128 + signal.SIGTERM
         loop_state = _load_latest_loop_state(tmp_path)
         assert loop_state is not None
         assert loop_state.status == LoopStatus.INTERRUPTED

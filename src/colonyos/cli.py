@@ -24,6 +24,7 @@ from colonyos import __version__
 from colonyos.cancellation import (
     cancellation_scope,
     install_signal_cancel_handlers,
+    request_cancel,
 )
 from colonyos.config import ColonyConfig, load_config, save_config, runs_dir_path
 from colonyos.doctor import run_doctor_checks
@@ -2199,6 +2200,7 @@ def auto(
         click.echo("\nAutonomous loop interrupted.")
         loop_state.status = LoopStatus.INTERRUPTED
         _save_loop_state(repo_root, loop_state)
+        raise
     finally:
         # Mark loop completed if we finished all iterations
         if loop_state.current_iteration >= loop_count and loop_state.status == LoopStatus.RUNNING:
@@ -6374,6 +6376,7 @@ def _launch_tui(
     previous_handler = signal.getsignal(signal.SIGINT)
 
     def _sigint_handler(signum, frame) -> None:  # noqa: ANN001
+        request_cancel("SIGINT received")
         app_instance.call_from_thread(app_instance.action_cancel_run)
 
     signal.signal(signal.SIGINT, _sigint_handler)
