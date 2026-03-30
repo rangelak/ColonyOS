@@ -34,10 +34,10 @@
   - [x] 2.1 Write tests for new `outcome_poll_interval_minutes` field: test default value (30), test custom value from YAML, test validation (must be positive)
   - [x] 2.2 Add `outcome_poll_interval_minutes: int = 30` to `DaemonConfig` dataclass in `config.py`, add to DEFAULTS dict, add parsing/validation in `_parse_daemon_config`, add to `save_config` serialization
 
-- [ ] 3.0 Deliver phase integration — register PRs after creation
+- [x] 3.0 Deliver phase integration — register PRs after creation
   depends_on: [1.0]
-  - [ ] 3.1 Write tests for deliver phase integration: mock `track_pr()`, verify it is called with correct args after successful deliver in `run()`, verify it is NOT called when deliver fails, verify it handles track_pr exceptions gracefully (log and continue)
-  - [ ] 3.2 In `orchestrator.py` `run()` function (~line 4342-4344), after `pr_url` is extracted from deliver artifacts, call `track_pr()` with the run_id, PR number (extracted via regex from pr_url), pr_url, and branch_name. Wrap in try/except to avoid blocking the pipeline on tracking failures.
+  - [x] 3.1 Write tests for deliver phase integration: mock `track_pr()`, verify it is called with correct args after successful deliver in `run()`, verify it is NOT called when deliver fails, verify it handles track_pr exceptions gracefully (log and continue)
+  - [x] 3.2 In `orchestrator.py` `run()` function (~line 4342-4344), after `pr_url` is extracted from deliver artifacts, call `track_pr()` with the run_id, PR number (extracted via regex from pr_url), pr_url, and branch_name. Wrap in try/except to avoid blocking the pipeline on tracking failures.
 
 - [ ] 4.0 CEO prompt injection — inject outcome summary
   depends_on: [1.0]

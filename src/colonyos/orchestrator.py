@@ -43,6 +43,7 @@ from colonyos.naming import (
 )
 from colonyos.github import check_open_pr
 from colonyos.memory import MemoryCategory, MemoryStore, load_memory_for_injection
+from colonyos.outcomes import OutcomeStore
 from colonyos.recovery import (
     PreservationResult,
     checkout_branch,
@@ -3083,6 +3084,39 @@ def _extract_pr_number_from_log(log: RunLog) -> int | None:
     return None
 
 
+def _register_pr_outcome(
+    repo_root: Path,
+    run_id: str,
+    pr_url: str,
+    branch_name: str,
+) -> None:
+    """Register a newly created PR for outcome tracking.
+
+    Wraps :meth:`OutcomeStore.track_pr` in a try/except so tracking failures
+    never block the main pipeline.  Silently returns when *pr_url* is empty
+    or the PR number cannot be extracted from the URL.
+    """
+    if not pr_url:
+        return
+
+    match = re.search(r"/pull/(\d+)", pr_url)
+    if not match:
+        return
+
+    pr_number = int(match.group(1))
+
+    try:
+        with OutcomeStore(repo_root) as store:
+            store.track_pr(run_id, pr_number, pr_url, branch_name)
+        logger.info("Registered PR #%d for outcome tracking", pr_number)
+    except Exception:
+        logger.warning(
+            "Failed to register PR #%d for outcome tracking",
+            pr_number,
+            exc_info=True,
+        )
+
+
 def _run_ci_fix_loop(
     config: ColonyConfig,
     repo_root: Path,
@@ -4342,6 +4376,8 @@ def _run_pipeline(
             pr_url = deliver_result.artifacts.get("pr_url", "")
             if pr_url:
                 log.pr_url = pr_url
+                # Register the PR for outcome tracking (non-blocking)
+                _register_pr_outcome(repo_root, log.run_id, pr_url, branch_name)
 
             if not deliver_result.success:
                 recovered_result, recovery_log = _attempt_phase_recovery(
@@ -4360,6 +4396,8 @@ def _run_pipeline(
                 recovered_pr_url = recovered_result.artifacts.get("pr_url", "")
                 if recovered_pr_url:
                     log.pr_url = recovered_pr_url
+                    # Register the recovered PR for outcome tracking (non-blocking)
+                    _register_pr_outcome(repo_root, log.run_id, recovered_pr_url, branch_name)
 
         # --- CI Fix Phase (post-deliver) ---
         if config.ci_fix.enabled and config.phases.deliver:

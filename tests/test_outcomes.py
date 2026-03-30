@@ -372,3 +372,76 @@ class TestFormatOutcomeSummary:
         result = format_outcome_summary(tmp_repo)
         # ~500 tokens ≈ ~2000 chars
         assert len(result) <= 2000
+
+
+# ---------------------------------------------------------------------------
+# 3.1 Deliver phase integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterPrOutcome:
+    """Tests for _register_pr_outcome helper used by the deliver phase."""
+
+    def test_registers_pr_with_correct_args(self, tmp_repo: Path):
+        """track_pr is called with run_id, pr_number, pr_url, branch_name."""
+        from colonyos.orchestrator import _register_pr_outcome
+
+        with patch("colonyos.orchestrator.OutcomeStore") as MockStore:
+            mock_instance = MagicMock()
+            MockStore.return_value.__enter__ = MagicMock(return_value=mock_instance)
+            MockStore.return_value.__exit__ = MagicMock(return_value=False)
+
+            _register_pr_outcome(
+                repo_root=tmp_repo,
+                run_id="run-abc",
+                pr_url="https://github.com/org/repo/pull/99",
+                branch_name="colonyos/my-feature",
+            )
+
+            mock_instance.track_pr.assert_called_once_with(
+                "run-abc", 99, "https://github.com/org/repo/pull/99", "colonyos/my-feature",
+            )
+
+    def test_not_called_when_no_pr_url(self, tmp_repo: Path):
+        """_register_pr_outcome is a no-op when pr_url is empty."""
+        from colonyos.orchestrator import _register_pr_outcome
+
+        with patch("colonyos.orchestrator.OutcomeStore") as MockStore:
+            _register_pr_outcome(
+                repo_root=tmp_repo,
+                run_id="run-abc",
+                pr_url="",
+                branch_name="colonyos/my-feature",
+            )
+            MockStore.assert_not_called()
+
+    def test_not_called_when_pr_number_not_extractable(self, tmp_repo: Path):
+        """_register_pr_outcome is a no-op when PR number can't be parsed."""
+        from colonyos.orchestrator import _register_pr_outcome
+
+        with patch("colonyos.orchestrator.OutcomeStore") as MockStore:
+            _register_pr_outcome(
+                repo_root=tmp_repo,
+                run_id="run-abc",
+                pr_url="https://github.com/org/repo/not-a-pull-url",
+                branch_name="colonyos/my-feature",
+            )
+            MockStore.assert_not_called()
+
+    def test_handles_track_pr_exception_gracefully(self, tmp_repo: Path):
+        """Exceptions from track_pr are caught and logged, not raised."""
+        from colonyos.orchestrator import _register_pr_outcome
+
+        with patch("colonyos.orchestrator.OutcomeStore") as MockStore:
+            mock_instance = MagicMock()
+            mock_instance.track_pr.side_effect = Exception("DB locked")
+            MockStore.return_value.__enter__ = MagicMock(return_value=mock_instance)
+            MockStore.return_value.__exit__ = MagicMock(return_value=False)
+
+            # Should NOT raise
+            _register_pr_outcome(
+                repo_root=tmp_repo,
+                run_id="run-abc",
+                pr_url="https://github.com/org/repo/pull/99",
+                branch_name="colonyos/my-feature",
+            )
