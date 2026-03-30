@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import logging
+import queue as queue_module
 import threading
-from dataclasses import dataclass
+import uuid
+from contextlib import nullcontext
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -41,8 +44,8 @@ logger = logging.getLogger(__name__)
 
 
 def _generate_id(prefix: str) -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    return f"{prefix}-{stamp}"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    return f"{prefix}-{stamp}-{uuid.uuid4().hex[:8]}"
 
 
 @dataclass
@@ -62,13 +65,62 @@ class SlackQueueEngine:
     is_budget_exceeded: Callable[[], bool]
     is_daily_budget_exceeded: Callable[[], bool]
     dry_run: bool = False
+    agent_lock: threading.Lock | None = None
+    triage_queue_maxsize: int = 64
+    _triage_queue: queue_module.Queue[dict[str, Any]] = field(init=False, repr=False)
+    _pending_messages: set[str] = field(default_factory=set, init=False, repr=False)
+    _triage_worker_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _triage_worker: threading.Thread | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._triage_queue = queue_module.Queue(maxsize=self.triage_queue_maxsize)
 
     def register(self, bolt_app: Any) -> None:
+        self._ensure_triage_worker()
         bolt_app.event("app_mention")(self._handle_event)
         if self.config.slack.trigger_mode not in ("reaction", "all"):
             bolt_app.event("reaction_added")(lambda event, client: None)
             return
         bolt_app.event("reaction_added")(self._handle_reaction)
+
+    def _ensure_triage_worker(self) -> None:
+        with self._triage_worker_lock:
+            if self._triage_worker is not None and self._triage_worker.is_alive():
+                return
+            self._triage_worker = threading.Thread(
+                target=self._triage_worker_loop,
+                daemon=True,
+                name="slack-triage-worker",
+            )
+            self._triage_worker.start()
+
+    def _triage_worker_loop(self) -> None:
+        while not self.shutdown_event.is_set():
+            try:
+                task = self._triage_queue.get(timeout=0.5)
+            except queue_module.Empty:
+                continue
+            try:
+                self._triage_and_enqueue(**task)
+            except Exception:
+                logger.exception(
+                    "Unhandled failure in Slack triage worker for %s:%s",
+                    task.get("channel", "?"),
+                    task.get("ts", "?"),
+                )
+            finally:
+                with self.state_lock:
+                    self._release_pending_message(task.get("channel", ""), task.get("ts", ""))
+                self._triage_queue.task_done()
+
+    def _is_pending_message(self, channel: str, ts: str) -> bool:
+        return self.watch_state.message_key(channel, ts) in self._pending_messages
+
+    def _reserve_pending_message(self, channel: str, ts: str) -> None:
+        self._pending_messages.add(self.watch_state.message_key(channel, ts))
+
+    def _release_pending_message(self, channel: str, ts: str) -> None:
+        self._pending_messages.discard(self.watch_state.message_key(channel, ts))
 
     def _handle_reaction(self, event: dict[str, Any], client: SlackClient) -> None:
         item = event.get("item", {})
@@ -128,6 +180,9 @@ class SlackQueueEngine:
             if self.watch_state.is_processed(channel, ts):
                 logger.info("Message %s:%s already processed, skipping", channel, ts)
                 return
+            if self._is_pending_message(channel, ts):
+                logger.info("Message %s:%s already queued, skipping duplicate delivery", channel, ts)
+                return
             if not check_rate_limit(self.watch_state, self.config.slack):
                 logger.warning("Rate limit reached, skipping message %s:%s", channel, ts)
                 try:
@@ -140,8 +195,11 @@ class SlackQueueEngine:
                 except Exception:
                     logger.debug("Failed to post rate-limit message", exc_info=True)
                 return
+            self._reserve_pending_message(channel, ts)
 
         if self.dry_run:
+            with self.state_lock:
+                self._release_pending_message(channel, ts)
             logger.info("[DRY RUN] Would trigger pipeline for Slack prompt: %s", prompt_text[:120])
             return
 
@@ -150,18 +208,28 @@ class SlackQueueEngine:
         except Exception:
             logger.debug("Failed to add :eyes: reaction", exc_info=True)
 
-        threading.Thread(
-            target=self._triage_and_enqueue,
-            kwargs={
+        self._ensure_triage_worker()
+        try:
+            self._triage_queue.put_nowait({
                 "client": client,
                 "channel": channel,
                 "ts": ts,
                 "user": user,
                 "prompt_text": prompt_text,
-            },
-            daemon=True,
-            name=f"triage-{ts}",
-        ).start()
+            })
+        except queue_module.Full:
+            with self.state_lock:
+                self._release_pending_message(channel, ts)
+            logger.warning("Slack triage queue full, rejecting %s:%s", channel, ts)
+            try:
+                post_message(
+                    client,
+                    channel,
+                    ":warning: Triage backlog is full right now. Try again in a minute.",
+                    thread_ts=ts,
+                )
+            except Exception:
+                logger.debug("Failed to post triage backlog message", exc_info=True)
 
     def _triage_and_enqueue(
         self,
@@ -186,11 +254,12 @@ class SlackQueueEngine:
             triage_kwargs["triage_scope"] = self.config.slack.triage_scope
 
         try:
-            triage_result = triage_message(
-                prompt_text,
-                repo_root=self.repo_root,
-                **triage_kwargs,
-            )
+            with self.agent_lock or nullcontext():
+                triage_result = triage_message(
+                    prompt_text,
+                    repo_root=self.repo_root,
+                    **triage_kwargs,
+                )
         except Exception:
             logger.exception("Triage failed for message %s:%s", channel, ts)
             try:

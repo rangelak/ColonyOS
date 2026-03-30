@@ -1,0 +1,64 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from colonyos.tui.adapter import (
+    NoticeMsg,
+    PhaseCompleteMsg,
+    PhaseErrorMsg,
+    PhaseHeaderMsg,
+    TextBlockMsg,
+    ToolLineMsg,
+    TurnCompleteMsg,
+)
+
+MONITOR_EVENT_PREFIX = "__COLONYOS_TUI_EVENT__"
+
+
+def encode_monitor_event(payload: dict[str, Any]) -> str:
+    """Serialize a monitor event for transport over daemon stdout."""
+    return f"{MONITOR_EVENT_PREFIX}{json.dumps(payload, separators=(',', ':'), ensure_ascii=False)}"
+
+
+def decode_monitor_event_line(text: str) -> object | None:
+    """Decode a monitor event line into a TUI adapter message."""
+    if not text.startswith(MONITOR_EVENT_PREFIX):
+        return None
+    raw = text[len(MONITOR_EVENT_PREFIX):]
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    event_type = payload.get("type")
+    if event_type == "notice":
+        return NoticeMsg(text=str(payload.get("text", "")))
+    if event_type == "phase_header":
+        return PhaseHeaderMsg(
+            phase_name=str(payload.get("phase_name", "")),
+            budget=float(payload.get("budget", 0.0) or 0.0),
+            model=str(payload.get("model", "")),
+            extra=str(payload.get("extra", "")),
+        )
+    if event_type == "phase_complete":
+        return PhaseCompleteMsg(
+            cost=float(payload.get("cost", 0.0) or 0.0),
+            turns=int(payload.get("turns", 0) or 0),
+            duration_ms=int(payload.get("duration_ms", 0) or 0),
+        )
+    if event_type == "phase_error":
+        return PhaseErrorMsg(error=str(payload.get("error", "")))
+    if event_type == "tool_line":
+        return ToolLineMsg(
+            tool_name=str(payload.get("tool_name", "")),
+            arg=str(payload.get("arg", "")),
+            style=str(payload.get("style", "")),
+        )
+    if event_type == "text_block":
+        return TextBlockMsg(text=str(payload.get("text", "")))
+    if event_type == "turn_complete":
+        return TurnCompleteMsg(turn_number=int(payload.get("turn_number", 0) or 0))
+    return None

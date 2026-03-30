@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import signal
@@ -26,13 +27,14 @@ from colonyos.cli import (
     _run_direct_agent,
     _run_cleanup_loop,
     _resolve_latest_prd_path,
+    run_pipeline_for_queue_item,
     _save_loop_state,
     _resolve_latest_prd_path,
 )
 from colonyos.config import ColonyConfig, BudgetConfig, save_config
 from colonyos.models import (
     LoopState, LoopStatus, Persona, Phase, PhaseResult,
-    PreflightError, ProjectInfo, RunLog, RunStatus,
+    PreflightError, ProjectInfo, QueueItem, QueueItemStatus, RunLog, RunStatus,
 )
 from colonyos.persona_packs import PACKS
 from colonyos.tui.adapter import (
@@ -43,6 +45,7 @@ from colonyos.tui.adapter import (
     TextBlockMsg,
     ToolLineMsg,
 )
+from colonyos.tui.monitor_protocol import encode_monitor_event
 
 
 @pytest.fixture(autouse=True)
@@ -669,6 +672,18 @@ def _make_config(tmp_path: Path) -> ColonyConfig:
 
 
 class TestDaemonCommand:
+    def test_parse_daemon_tui_output_line_recognizes_structured_monitor_event(self):
+        msg = _parse_daemon_tui_output_line(encode_monitor_event({
+            "type": "tool_line",
+            "tool_name": "Read",
+            "arg": "src/app.py",
+            "style": "cyan",
+        }))
+        assert isinstance(msg, ToolLineMsg)
+        assert msg.tool_name == "Read"
+        assert msg.arg == "src/app.py"
+        assert msg.style == "cyan"
+
     def test_parse_daemon_tui_output_line_recognizes_tool_lines(self):
         msg = _parse_daemon_tui_output_line("  [3.0] ● Read src/app.py")
         assert isinstance(msg, ToolLineMsg)
@@ -734,9 +749,25 @@ class TestDaemonCommand:
 
         fake_proc = MagicMock()
         fake_proc.stdout = iter([
-            "──────────── Phase: Plan  $10.00 budget · opus · 7 persona subagents ────────────\n",
-            "  ● Read src/colonyos/daemon.py\n",
-            "  ✓ Phase completed  $0.12 · 2 turns · 14s\n",
+            encode_monitor_event({
+                "type": "phase_header",
+                "phase_name": "Plan",
+                "budget": 10.0,
+                "model": "opus",
+                "extra": "7 persona subagents",
+            }) + "\n",
+            encode_monitor_event({
+                "type": "tool_line",
+                "tool_name": "Read",
+                "arg": "src/colonyos/daemon.py",
+                "style": "cyan",
+            }) + "\n",
+            encode_monitor_event({
+                "type": "phase_complete",
+                "cost": 0.12,
+                "turns": 2,
+                "duration_ms": 14000,
+            }) + "\n",
             "[colonyos] starting daemon work\n",
             "line two\n",
         ])
@@ -772,6 +803,63 @@ class TestDaemonCommand:
         assert any(isinstance(msg, ToolLineMsg) for msg in messages)
         assert any(isinstance(msg, PhaseCompleteMsg) for msg in messages)
         assert any(isinstance(msg, TextBlockMsg) for msg in messages)
+
+
+class TestQueuePipelineExecution:
+    def test_slack_queue_item_uses_raw_prompt_for_branch_override(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        item = QueueItem(
+            id="slack-1",
+            source_type="slack",
+            source_value=(
+                "You are a code assistant working on behalf of the engineering team.\n"
+                "<slack_message>\nwrapped prompt\n</slack_message>"
+            ),
+            raw_prompt="Add Homebrew formula support",
+            status=QueueItemStatus.PENDING,
+        )
+        fake_log = RunLog(run_id="run-1", prompt="x", status=RunStatus.COMPLETED, phases=[])
+
+        with patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            result = run_pipeline_for_queue_item(
+                item=item,
+                repo_root=tmp_path,
+                config=config,
+            )
+
+        assert result is fake_log
+        assert mock_run.call_args.kwargs["branch_name_override"] == (
+            f"{config.branch_prefix}add_homebrew_formula_support_"
+            f"{hashlib.sha1(item.id.encode('utf-8')).hexdigest()[:10]}"
+        )
+
+    def test_slack_queue_items_get_distinct_branch_overrides(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        item_a = QueueItem(
+            id="slack-20260330_120000_123456-a1b2c3d4",
+            source_type="slack",
+            source_value="wrapped prompt",
+            raw_prompt="Add Homebrew formula support",
+            status=QueueItemStatus.PENDING,
+        )
+        item_b = QueueItem(
+            id="slack-20260330_120000_123456-e5f6a7b8",
+            source_type="slack",
+            source_value="wrapped prompt",
+            raw_prompt="Add Homebrew formula support",
+            status=QueueItemStatus.PENDING,
+        )
+        fake_log = RunLog(run_id="run-1", prompt="x", status=RunStatus.COMPLETED, phases=[])
+
+        with patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            run_pipeline_for_queue_item(item=item_a, repo_root=tmp_path, config=config)
+            override_a = mock_run.call_args.kwargs["branch_name_override"]
+            run_pipeline_for_queue_item(item=item_b, repo_root=tmp_path, config=config)
+            override_b = mock_run.call_args.kwargs["branch_name_override"]
+
+        assert override_a != override_b
+        assert override_a.startswith(f"{config.branch_prefix}add_homebrew_formula_support_")
+        assert override_b.startswith(f"{config.branch_prefix}add_homebrew_formula_support_")
 
     def test_launch_daemon_tui_stops_running_subprocess_on_exit(self, tmp_path: Path):
         config = _make_config(tmp_path)
