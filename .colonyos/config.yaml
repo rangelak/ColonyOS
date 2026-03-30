@@ -80,7 +80,6 @@ slack:
   trigger_mode: mention
   auto_approve: true
   max_runs_per_hour: 3
-  allowed_user_ids: []
   max_queue_depth: 20
   triage_verbose: false
   max_consecutive_failures: 3

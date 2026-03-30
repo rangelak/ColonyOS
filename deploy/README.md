@@ -44,18 +44,24 @@
 4. **Configure daemon** — edit `.colonyos/config.yaml`:
    ```yaml
    daemon:
-     daily_budget_usd: 50.0
-     allowed_control_user_ids:
-       - U12345678  # Your Slack user ID
+     daily_budget_usd: 500.0
+     allow_all_control_users: true
      github_poll_interval_seconds: 120
      ceo_cooldown_minutes: 60
    slack:
      enabled: true
      channels:
        - C12345678
-     allowed_user_ids:
-       - U12345678
    ```
+   `slack.allowed_user_ids` is optional. If you leave it unset, any human user in
+   the configured Slack channels can submit work into the queue. If you want to
+   restrict queue submission to specific people, add their Slack user IDs under
+   `slack.allowed_user_ids`.
+
+   `daemon.allowed_control_user_ids` is a separate control-path allowlist for
+   Slack pause/resume commands. Set `daemon.allow_all_control_users: true` if you
+   want every Slack user in the configured channels to be able to send daemon
+   control commands too.
 
 5. **Install and start the service**:
    ```bash
