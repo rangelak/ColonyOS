@@ -10,7 +10,6 @@ Architecture:
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
@@ -51,6 +50,7 @@ from colonyos.queue_runtime import (
     reprioritize_queue_item,
     select_next_pending_item,
 )
+from colonyos.runtime_lock import RepoRuntimeGuard, RuntimeBusyError
 from colonyos.tui.monitor_protocol import encode_monitor_event
 
 logger = logging.getLogger(__name__)
@@ -297,8 +297,8 @@ class Daemon:
         self._last_github_poll_time: float = 0.0
         self._last_reprioritize_time: float = 0.0
 
-        # PID lock file descriptor
-        self._pid_fd: int | None = None
+        # Repo runtime guard
+        self._runtime_guard: RepoRuntimeGuard | None = None
 
         # Outcome polling timestamp
         self._last_outcome_poll_time: float = 0.0
@@ -1428,38 +1428,28 @@ class Daemon:
     # ------------------------------------------------------------------
 
     def _acquire_pid_lock(self) -> None:
-        """Acquire PID lock file to prevent multiple daemon instances."""
+        """Acquire repo runtime lock and write daemon PID metadata."""
         pid_path = self.repo_root / _PID_FILE
         pid_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._pid_fd = os.open(str(pid_path), os.O_CREAT | os.O_RDWR, 0o644)
-            fcntl.flock(self._pid_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            os.write(self._pid_fd, f"{os.getpid()}\n".encode())
-            os.ftruncate(self._pid_fd, len(f"{os.getpid()}\n"))
-        except OSError:
-            if self._pid_fd is not None:
-                os.close(self._pid_fd)
-                self._pid_fd = None
+            self._runtime_guard = RepoRuntimeGuard(self.repo_root, "daemon").acquire()
+        except RuntimeBusyError as exc:
             raise DaemonError(
-                f"Another daemon instance is already running (lock file: {pid_path}). "
-                "Stop the existing instance first or remove the lock file."
-            )
+                f"Another daemon instance is already running ({exc})."
+            ) from exc
+
+        pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
 
     def _release_pid_lock(self) -> None:
-        """Release PID lock file."""
-        if self._pid_fd is not None:
-            try:
-                fcntl.flock(self._pid_fd, fcntl.LOCK_UN)
-                os.close(self._pid_fd)
-            except OSError:
-                pass
-            self._pid_fd = None
-
+        """Release daemon PID metadata and repo runtime lock."""
         pid_path = self.repo_root / _PID_FILE
         try:
             pid_path.unlink(missing_ok=True)
         except OSError:
             pass
+        if self._runtime_guard is not None:
+            self._runtime_guard.release()
+            self._runtime_guard = None
 
     # ------------------------------------------------------------------
     # State helpers

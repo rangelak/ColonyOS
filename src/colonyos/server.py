@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from colonyos import __version__
 from colonyos.config import load_config, runs_dir_path, save_config
 from colonyos.models import Persona
+from colonyos.runtime_lock import RepoRuntimeGuard, RuntimeBusyError
 from colonyos.sanitize import sanitize_untrusted_content
 from colonyos.show import (
     compute_show_result,
@@ -397,6 +398,12 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
         if not acquired:
             raise HTTPException(status_code=429, detail="A run is already in progress")
 
+        try:
+            runtime_guard = RepoRuntimeGuard(repo_root, "ui-run").acquire()
+        except RuntimeBusyError as exc:
+            active_run_semaphore.release()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
         def _run_in_background():
             try:
                 from colonyos.orchestrator import run as run_orchestrator
@@ -410,6 +417,7 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
             except Exception:
                 logger.exception("Background run failed")
             finally:
+                runtime_guard.release()
                 active_run_semaphore.release()
 
         try:
@@ -417,6 +425,7 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
             thread.start()
         except Exception:
             # Release semaphore if thread creation/start fails
+            runtime_guard.release()
             active_run_semaphore.release()
             raise HTTPException(status_code=500, detail="Failed to start background run")
 

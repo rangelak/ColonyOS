@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 import uuid
-from contextlib import redirect_stderr, redirect_stdout, suppress
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,9 +63,11 @@ from colonyos.queue_runtime import (
     select_next_pending_item,
     sorted_pending_items,
 )
+from colonyos.runtime_lock import RepoRuntimeGuard, RuntimeBusyError
 
 logger = logging.getLogger(__name__)
 _DAEMON_MONITOR_ENV = "COLONYOS_DAEMON_MONITOR"
+_ACTIVE_RUNTIME_SESSION_COUNTS: dict[str, int] = {}
 
 
 @dataclass(frozen=True)
@@ -262,6 +264,47 @@ def _format_budget_cap(cap: float | None) -> str:
     return f"${cap:.2f}/day"
 
 
+@contextmanager
+def _repo_runtime_guard(repo_root: Path, mode: str):
+    """Acquire the shared repo lock for repo-mutating ColonyOS runtimes."""
+    repo_key = str(repo_root.resolve())
+    if _ACTIVE_RUNTIME_SESSION_COUNTS.get(repo_key, 0) > 0:
+        yield None
+        return
+    guard = RepoRuntimeGuard(repo_root, mode)
+    try:
+        guard.acquire()
+    except RuntimeBusyError as exc:
+        raise click.ClickException(str(exc)) from exc
+    try:
+        yield guard
+    finally:
+        guard.release()
+
+
+@contextmanager
+def _mark_repo_runtime_session(repo_root: Path):
+    """Mark the current process as already holding the repo runtime lock."""
+    repo_key = str(repo_root.resolve())
+    _ACTIVE_RUNTIME_SESSION_COUNTS[repo_key] = _ACTIVE_RUNTIME_SESSION_COUNTS.get(repo_key, 0) + 1
+    try:
+        yield
+    finally:
+        remaining = _ACTIVE_RUNTIME_SESSION_COUNTS.get(repo_key, 0) - 1
+        if remaining > 0:
+            _ACTIVE_RUNTIME_SESSION_COUNTS[repo_key] = remaining
+        else:
+            _ACTIVE_RUNTIME_SESSION_COUNTS.pop(repo_key, None)
+
+
+@contextmanager
+def _repo_runtime_session(repo_root: Path, mode: str):
+    """Acquire the shared repo lock for an interactive session."""
+    with _repo_runtime_guard(repo_root, mode):
+        with _mark_repo_runtime_session(repo_root):
+            yield
+
+
 def _print_daemon_banner(
     *,
     repo_root: Path,
@@ -456,11 +499,13 @@ def app(ctx: click.Context) -> None:
             and _tui_available()
             and config.project is not None
         ):
-            _launch_tui(repo_root, config)
+            with _repo_runtime_session(repo_root, "interactive-tui"):
+                _launch_tui(repo_root, config)
             return
         _show_welcome()
         if sys.stdin.isatty():
-            _run_repl()
+            with _repo_runtime_session(repo_root, "interactive-repl"):
+                _run_repl()
 
 
 def _repl_command_names() -> set[str]:
@@ -1109,13 +1154,14 @@ def _run_repl() -> None:
 
                     if last_direct_session_id is not None:
                         click.echo(click.style("Continuing conversation...", dim=True))
-                    _success, _session_id = _run_direct_agent(
-                        stripped,
-                        repo_root=repo_root,
-                        config=config,
-                        ui=PhaseUI(verbose=True),
-                        resume_session_id=last_direct_session_id,
-                    )
+                    with _repo_runtime_guard(repo_root, "direct-agent"), install_signal_cancel_handlers():
+                        _success, _session_id = _run_direct_agent(
+                            stripped,
+                            repo_root=repo_root,
+                            config=config,
+                            ui=PhaseUI(verbose=True),
+                            resume_session_id=last_direct_session_id,
+                        )
                     if _success and _session_id:
                         last_direct_session_id = _session_id
                     continue
@@ -1160,14 +1206,15 @@ def _run_repl() -> None:
                     continue
 
             try:
-                log = run_orchestrator(
-                    stripped,
-                    repo_root=repo_root,
-                    config=config,
-                    skip_planning=skip_planning,
-                    from_prd=from_prd,
-                    verbose=True,
-                )
+                with _repo_runtime_guard(repo_root, "interactive-repl"), install_signal_cancel_handlers():
+                    log = run_orchestrator(
+                        stripped,
+                        repo_root=repo_root,
+                        config=config,
+                        skip_planning=skip_planning,
+                        from_prd=from_prd,
+                        verbose=True,
+                    )
                 session_cost += log.total_cost_usd
                 _print_run_summary(log)
             except KeyboardInterrupt:
@@ -1307,12 +1354,13 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
         and _interactive_stdio()
         and _tui_available()
     )
-    if use_tui:
-        _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
-        return
 
     try:
-        with install_signal_cancel_handlers():
+        with _repo_runtime_guard(repo_root, "run"), install_signal_cancel_handlers():
+            if use_tui:
+                with _mark_repo_runtime_session(repo_root):
+                    _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
+                return
             if resume_run_id:
                 resume_state = prepare_resume(repo_root, resume_run_id)
 
@@ -2064,7 +2112,7 @@ def auto(
     completed_iterations = 0
 
     try:
-        with install_signal_cancel_handlers():
+        with _repo_runtime_guard(repo_root, "auto"), install_signal_cancel_handlers():
             for iteration in range(start_iteration, loop_count + 1):
                 # --- Time cap check (total elapsed across all sessions) ---
                 elapsed_hours = _compute_elapsed_hours(loop_state)
@@ -2743,121 +2791,118 @@ def queue_start(
         _print_queue_summary(state)
         return
 
-    # Resolve caps
-    effective_max_cost = max_cost if max_cost is not None else config.budget.max_total_usd
-    effective_max_hours = max_hours if max_hours is not None else config.budget.max_duration_hours
-
-    # Set start time if not already set (resume case)
-    if not state.start_time_iso:
-        state.start_time_iso = datetime.now(timezone.utc).isoformat()
-    state.status = QueueStatus.RUNNING
-    _save_queue_state(repo_root, state)
-
-    click.echo(f"Starting queue {state.queue_id}: {len(pending_items)} pending item(s)")
-
-    # Track the item currently being processed so we can revert it on interrupt.
     current_item: QueueItem | None = None
 
     try:
-        while True:
-            item = select_next_pending_item(state)
-            if item is None:
-                break
+        with _repo_runtime_guard(repo_root, "queue-start"), install_signal_cancel_handlers():
+            effective_max_cost = max_cost if max_cost is not None else config.budget.max_total_usd
+            effective_max_hours = max_hours if max_hours is not None else config.budget.max_duration_hours
 
-            # --- Time cap check ---
-            elapsed = _compute_queue_elapsed_hours(state)
-            if elapsed >= effective_max_hours:
-                click.echo(
-                    f"\nTime limit reached ({elapsed:.1f}h / {effective_max_hours:.1f}h). "
-                    f"Halting queue."
-                )
-                state.status = QueueStatus.INTERRUPTED
-                _save_queue_state(repo_root, state)
-                break
-
-            # --- Budget cap check ---
-            if state.aggregate_cost_usd >= effective_max_cost:
-                click.echo(
-                    f"\nBudget limit reached (${state.aggregate_cost_usd:.2f} / "
-                    f"${effective_max_cost:.2f}). Halting queue."
-                )
-                state.status = QueueStatus.INTERRUPTED
-                _save_queue_state(repo_root, state)
-                break
-
-            # Mark item as running
-            item.status = QueueItemStatus.RUNNING
-            current_item = item
+            if not state.start_time_iso:
+                state.start_time_iso = datetime.now(timezone.utc).isoformat()
+            state.status = QueueStatus.RUNNING
             _save_queue_state(repo_root, state)
 
-            source_display = _format_queue_item_source(item)
-            click.echo(f"\n--- Processing: {source_display} ---")
+            click.echo(f"Starting queue {state.queue_id}: {len(pending_items)} pending item(s)")
+            while True:
+                item = select_next_pending_item(state)
+                if item is None:
+                    break
 
-            start_ms = int(time.time() * 1000)
+                # --- Time cap check ---
+                elapsed = _compute_queue_elapsed_hours(state)
+                if elapsed >= effective_max_hours:
+                    click.echo(
+                        f"\nTime limit reached ({elapsed:.1f}h / {effective_max_hours:.1f}h). "
+                        f"Halting queue."
+                    )
+                    state.status = QueueStatus.INTERRUPTED
+                    _save_queue_state(repo_root, state)
+                    break
 
-            try:
-                # Resolve prompt
-                if item.source_type == "issue":
-                    from colonyos.github import fetch_issue, format_issue_as_prompt
+                # --- Budget cap check ---
+                if state.aggregate_cost_usd >= effective_max_cost:
+                    click.echo(
+                        f"\nBudget limit reached (${state.aggregate_cost_usd:.2f} / "
+                        f"${effective_max_cost:.2f}). Halting queue."
+                    )
+                    state.status = QueueStatus.INTERRUPTED
+                    _save_queue_state(repo_root, state)
+                    break
 
-                    issue = fetch_issue(int(item.source_value), repo_root)
-                    prompt_text = format_issue_as_prompt(issue)
-                    source_issue = issue.number
-                    source_issue_url = issue.url
-                else:
-                    prompt_text = item.source_value
-                    source_issue = None
-                    source_issue_url = None
+                # Mark item as running
+                item.status = QueueItemStatus.RUNNING
+                current_item = item
+                _save_queue_state(repo_root, state)
 
-                log = run_orchestrator(
-                    prompt_text,
-                    repo_root=repo_root,
-                    config=config,
-                    verbose=verbose,
-                    quiet=quiet,
-                    source_issue=source_issue,
-                    source_issue_url=source_issue_url,
-                )
+                source_display = _format_queue_item_source(item)
+                click.echo(f"\n--- Processing: {source_display} ---")
 
-                end_ms = int(time.time() * 1000)
-                item.run_id = log.run_id
-                item.cost_usd = log.total_cost_usd
-                item.duration_ms = end_ms - start_ms
+                start_ms = int(time.time() * 1000)
 
-                # Determine outcome
-                if log.status == RunStatus.FAILED and _is_nogo_verdict(log):
-                    item.status = QueueItemStatus.REJECTED
-                    click.echo("  Item rejected (NO-GO verdict).")
-                elif log.status == RunStatus.FAILED:
+                try:
+                    # Resolve prompt
+                    if item.source_type == "issue":
+                        from colonyos.github import fetch_issue, format_issue_as_prompt
+
+                        issue = fetch_issue(int(item.source_value), repo_root)
+                        prompt_text = format_issue_as_prompt(issue)
+                        source_issue = issue.number
+                        source_issue_url = issue.url
+                    else:
+                        prompt_text = item.source_value
+                        source_issue = None
+                        source_issue_url = None
+
+                    log = run_orchestrator(
+                        prompt_text,
+                        repo_root=repo_root,
+                        config=config,
+                        verbose=verbose,
+                        quiet=quiet,
+                        source_issue=source_issue,
+                        source_issue_url=source_issue_url,
+                    )
+
+                    end_ms = int(time.time() * 1000)
+                    item.run_id = log.run_id
+                    item.cost_usd = log.total_cost_usd
+                    item.duration_ms = end_ms - start_ms
+
+                    # Determine outcome
+                    if log.status == RunStatus.FAILED and _is_nogo_verdict(log):
+                        item.status = QueueItemStatus.REJECTED
+                        click.echo("  Item rejected (NO-GO verdict).")
+                    elif log.status == RunStatus.FAILED:
+                        item.status = QueueItemStatus.FAILED
+                        item.error = "Pipeline failed"
+                        click.echo("  Item failed.")
+                    else:
+                        item.status = QueueItemStatus.COMPLETED
+                        item.pr_url = _extract_pr_url_from_log(log)
+                        click.echo(f"  Item completed. PR: {item.pr_url or 'N/A'}")
+
+                except Exception as exc:
+                    end_ms = int(time.time() * 1000)
                     item.status = QueueItemStatus.FAILED
-                    item.error = "Pipeline failed"
-                    click.echo("  Item failed.")
-                else:
-                    item.status = QueueItemStatus.COMPLETED
-                    item.pr_url = _extract_pr_url_from_log(log)
-                    click.echo(f"  Item completed. PR: {item.pr_url or 'N/A'}")
+                    # Truncate error to avoid persisting sensitive info from tracebacks.
+                    item.error = str(exc)[:500]
+                    item.duration_ms = end_ms - start_ms
+                    click.echo(f"  Item failed: {exc}", err=True)
 
-            except Exception as exc:
-                end_ms = int(time.time() * 1000)
-                item.status = QueueItemStatus.FAILED
-                # Truncate error to avoid persisting sensitive info from tracebacks.
-                item.error = str(exc)[:500]
-                item.duration_ms = end_ms - start_ms
-                click.echo(f"  Item failed: {exc}", err=True)
-
-            current_item = None
-            state.aggregate_cost_usd += item.cost_usd
-            _save_queue_state(repo_root, state)
-
-            # --- Post-item budget cap check ---
-            if state.aggregate_cost_usd >= effective_max_cost:
-                click.echo(
-                    f"\nBudget limit reached (${state.aggregate_cost_usd:.2f} / "
-                    f"${effective_max_cost:.2f}). Halting queue."
-                )
-                state.status = QueueStatus.INTERRUPTED
+                current_item = None
+                state.aggregate_cost_usd += item.cost_usd
                 _save_queue_state(repo_root, state)
-                break
+
+                # --- Post-item budget cap check ---
+                if state.aggregate_cost_usd >= effective_max_cost:
+                    click.echo(
+                        f"\nBudget limit reached (${state.aggregate_cost_usd:.2f} / "
+                        f"${effective_max_cost:.2f}). Halting queue."
+                    )
+                    state.status = QueueStatus.INTERRUPTED
+                    _save_queue_state(repo_root, state)
+                    break
 
     except KeyboardInterrupt:
         click.echo("\nQueue interrupted by user.")
@@ -4337,7 +4382,9 @@ def watch_slack(
     dry_run: bool,
 ) -> None:
     """Watch Slack channels and trigger pipeline runs from messages."""
-    _watch_slack_impl(max_hours, max_budget, verbose, quiet, dry_run)
+    repo_root = _find_repo_root()
+    with _repo_runtime_guard(repo_root, "watch-slack"):
+        _watch_slack_impl(max_hours, max_budget, verbose, quiet, dry_run)
 
 
 @app.command("watch")
@@ -4361,7 +4408,9 @@ def watch_legacy(
         ),
         err=True,
     )
-    _watch_slack_impl(max_hours, max_budget, verbose, quiet, dry_run)
+    repo_root = _find_repo_root()
+    with _repo_runtime_guard(repo_root, "watch-slack"):
+        _watch_slack_impl(max_hours, max_budget, verbose, quiet, dry_run)
 
 
 # ---------------------------------------------------------------------------
@@ -4841,79 +4890,80 @@ def ci_fix(
     )
     branch_name = branch_result.stdout.strip() or "unknown"
 
-    for attempt in range(1, max_retries + 1):
-        click.echo(f"[colonyos] CI fix attempt {attempt}/{max_retries} for PR #{pr_number}")
+    with _repo_runtime_guard(repo_root, "ci-fix"), install_signal_cancel_handlers():
+        for attempt in range(1, max_retries + 1):
+            click.echo(f"[colonyos] CI fix attempt {attempt}/{max_retries} for PR #{pr_number}")
 
-        # Fetch current checks
-        checks = fetch_pr_checks(pr_number, repo_root)
-        if all_checks_pass(checks):
-            click.echo(f"[colonyos] All CI checks pass on PR #{pr_number}!")
-            log.status = RunStatus.COMPLETED
-            log.mark_finished()
-            _save_run_log(repo_root, log)
-            return
+            # Fetch current checks
+            checks = fetch_pr_checks(pr_number, repo_root)
+            if all_checks_pass(checks):
+                click.echo(f"[colonyos] All CI checks pass on PR #{pr_number}!")
+                log.status = RunStatus.COMPLETED
+                log.mark_finished()
+                _save_run_log(repo_root, log)
+                return
 
-        # Collect logs from failed checks (shared helper)
-        failures_for_prompt = collect_ci_failure_context(
-            checks, repo_root, config.ci_fix.log_char_cap,
-        )
-        ci_failure_context = format_ci_failures_as_prompt(failures_for_prompt)
-
-        # Build prompt and run agent
-        system, user = _build_ci_fix_prompt(
-            config, branch_name, ci_failure_context, attempt, max_retries,
-        )
-
-        from colonyos.agent import run_phase_sync as _run_phase
-        from colonyos.models import Phase
-        phase_result = _run_phase(
-            Phase.CI_FIX,
-            user,
-            cwd=repo_root,
-            system_prompt=system,
-            model=config.get_model(Phase.CI_FIX),
-            budget_usd=config.budget.per_phase,
-            ui=None,
-        )
-        log.phases.append(phase_result)
-
-        if not phase_result.success:
-            click.echo(f"[colonyos] CI fix agent failed: {phase_result.error}", err=True)
-            if attempt >= max_retries:
-                break
-            continue
-
-        click.echo("[colonyos] CI fix agent completed. Pushing changes...")
-
-        # Push the fix commit — abort on failure to avoid wasting retries
-        push_result = subprocess.run(
-            ["git", "push"],
-            capture_output=True, text=True, timeout=60, cwd=repo_root,
-        )
-        if push_result.returncode != 0:
-            click.echo(
-                f"[colonyos] Failed to push: {push_result.stderr.strip()}",
-                err=True,
+            # Collect logs from failed checks (shared helper)
+            failures_for_prompt = collect_ci_failure_context(
+                checks, repo_root, config.ci_fix.log_char_cap,
             )
-            log.status = RunStatus.COMPLETED
-            log.mark_finished()
-            _save_run_log(repo_root, log)
-            sys.exit(1)
+            ci_failure_context = format_ci_failures_as_prompt(failures_for_prompt)
 
-        # If --wait, poll for CI results (unified logic for all attempts)
-        if wait:
-            click.echo(f"[colonyos] Waiting for CI checks (timeout: {wait_timeout}s)...")
-            try:
-                final_checks = poll_pr_checks(pr_number, repo_root, timeout=wait_timeout)
-                if all_checks_pass(final_checks):
-                    click.echo(f"[colonyos] CI checks now pass on PR #{pr_number}!")
-                    log.status = RunStatus.COMPLETED
-                    log.mark_finished()
-                    _save_run_log(repo_root, log)
-                    return
-                click.echo("[colonyos] CI still failing after fix attempt.")
-            except click.ClickException as exc:
-                click.echo(f"[colonyos] {exc.message}", err=True)
+            # Build prompt and run agent
+            system, user = _build_ci_fix_prompt(
+                config, branch_name, ci_failure_context, attempt, max_retries,
+            )
+
+            from colonyos.agent import run_phase_sync as _run_phase
+            from colonyos.models import Phase
+            phase_result = _run_phase(
+                Phase.CI_FIX,
+                user,
+                cwd=repo_root,
+                system_prompt=system,
+                model=config.get_model(Phase.CI_FIX),
+                budget_usd=config.budget.per_phase,
+                ui=None,
+            )
+            log.phases.append(phase_result)
+
+            if not phase_result.success:
+                click.echo(f"[colonyos] CI fix agent failed: {phase_result.error}", err=True)
+                if attempt >= max_retries:
+                    break
+                continue
+
+            click.echo("[colonyos] CI fix agent completed. Pushing changes...")
+
+            # Push the fix commit — abort on failure to avoid wasting retries
+            push_result = subprocess.run(
+                ["git", "push"],
+                capture_output=True, text=True, timeout=60, cwd=repo_root,
+            )
+            if push_result.returncode != 0:
+                click.echo(
+                    f"[colonyos] Failed to push: {push_result.stderr.strip()}",
+                    err=True,
+                )
+                log.status = RunStatus.COMPLETED
+                log.mark_finished()
+                _save_run_log(repo_root, log)
+                sys.exit(1)
+
+            # If --wait, poll for CI results (unified logic for all attempts)
+            if wait:
+                click.echo(f"[colonyos] Waiting for CI checks (timeout: {wait_timeout}s)...")
+                try:
+                    final_checks = poll_pr_checks(pr_number, repo_root, timeout=wait_timeout)
+                    if all_checks_pass(final_checks):
+                        click.echo(f"[colonyos] CI checks now pass on PR #{pr_number}!")
+                        log.status = RunStatus.COMPLETED
+                        log.mark_finished()
+                        _save_run_log(repo_root, log)
+                        return
+                    click.echo("[colonyos] CI still failing after fix attempt.")
+                except click.ClickException as exc:
+                    click.echo(f"[colonyos] {exc.message}", err=True)
 
     # Retries exhausted
     click.echo(
@@ -5135,11 +5185,12 @@ def _run_cleanup_scan_impl(
         prompt = synthesize_refactor_prompt(refactor_file, scan_results=results)
         click.echo(f"Delegating refactoring to `colonyos run`:\n\n{prompt}\n")
         try:
-            log = run_orchestrator(
-                prompt,
-                repo_root=repo_root,
-                config=config,
-            )
+            with _repo_runtime_guard(repo_root, "cleanup-refactor"), install_signal_cancel_handlers():
+                log = run_orchestrator(
+                    prompt,
+                    repo_root=repo_root,
+                    config=config,
+                )
             _print_run_summary(log)
         except PreflightError as exc:
             click.echo(f"Preflight error: {exc.format_message()}", err=True)
@@ -5320,6 +5371,9 @@ def sweep(path: str | None, execute: bool, plan_only: bool, max_tasks: int | Non
         )
         sys.exit(1)
 
+    runtime_guard = _repo_runtime_guard(repo_root, "sweep") if execute else nullcontext()
+    signal_guard = install_signal_cancel_handlers() if execute else nullcontext()
+
     try:
         from colonyos.orchestrator import run_sweep as _run_sweep, parse_sweep_findings
 
@@ -5329,18 +5383,19 @@ def sweep(path: str | None, execute: bool, plan_only: bool, max_tasks: int | Non
 
             ui = PhaseUI(verbose=verbose)
 
-        findings_text, phase_result = _run_sweep(
-            repo_root,
-            config,
-            target_path=path,
-            max_tasks=max_tasks,
-            execute=execute,
-            plan_only=plan_only,
-            verbose=verbose,
-            quiet=quiet,
-            force=force,
-            ui=ui,
-        )
+        with runtime_guard, signal_guard:
+            findings_text, phase_result = _run_sweep(
+                repo_root,
+                config,
+                target_path=path,
+                max_tasks=max_tasks,
+                execute=execute,
+                plan_only=plan_only,
+                verbose=verbose,
+                quiet=quiet,
+                force=force,
+                ui=ui,
+            )
 
         if not phase_result.success:
             click.echo(f"Sweep analysis failed: {phase_result.error}", err=True)
@@ -5733,77 +5788,29 @@ def pr_review(
 
         return fixes_applied
 
-    # Single run or watch mode
-    if watch:
-        click.echo("[colonyos] Watch mode enabled. Press Ctrl+C to stop.")
-        try:
-            while True:
-                # Re-check PR state each cycle
-                try:
-                    pr_state = fetch_pr_state(pr_number, repo_root)
-                    if pr_state.state in ("merged", "closed"):
-                        click.echo(f"[colonyos] PR #{pr_number} is now {pr_state.state}. Exiting watch mode.")
-                        break
-                except Exception as exc:
-                    # Log the error but continue watching - transient network issues
-                    # shouldn't stop the watch loop. Log for debugging.
-                    logger.warning(
-                        "Failed to check PR #%d state during watch: %s",
-                        pr_number, exc,
-                    )
-                    # Continue watching
-
-                # Skip processing if circuit breaker is open (still cooling down)
-                if state.queue_paused:
-                    # Check if cooldown has expired for auto-recovery
-                    if state.queue_paused_at:
-                        try:
-                            paused_at = datetime.fromisoformat(state.queue_paused_at)
-                            cooldown_sec = config.pr_review.circuit_breaker_cooldown_minutes * 60
-                            elapsed = (datetime.now(timezone.utc) - paused_at).total_seconds()
-                            if elapsed >= cooldown_sec:
-                                # Auto-recover
-                                state.queue_paused = False
-                                state.queue_paused_at = None
-                                state.consecutive_failures = 0
-                                save_pr_review_state(repo_root, state)
-                                click.echo("[colonyos] Circuit breaker auto-recovered after cooldown.")
-                            else:
-                                remaining = (cooldown_sec - elapsed) / 60
-                                if not quiet:
-                                    click.echo(f"[colonyos] Circuit breaker paused. {remaining:.0f} minutes remaining.")
-                                time.sleep(effective_poll_interval)
-                                continue
-                        except (ValueError, TypeError):
-                            # Malformed timestamp; remain paused
-                            time.sleep(effective_poll_interval)
-                            continue
-
-                fixes = process_comments()
-
-                # Post summary if fixes were applied (FR-6)
-                if fixes:
-                    summary_msg = format_summary_message(fixes)
-                    post_pr_summary_comment(pr_number, summary_msg, repo_root)
-
-                # Check safety guards before sleeping
-                if not check_budget_cap(state, effective_budget):
-                    click.echo("[colonyos] Budget exhausted. Exiting watch mode.")
-                    break
-
-                # Circuit breaker with cooldown/recovery (FR-13)
-                if not check_circuit_breaker(state, config.pr_review.circuit_breaker_threshold):
-                    if not state.queue_paused:
-                        # First trigger: set pause timestamp
-                        state.queue_paused = True
-                        state.queue_paused_at = datetime.now(timezone.utc).isoformat()
-                        save_pr_review_state(repo_root, state)
-                        cooldown = config.pr_review.circuit_breaker_cooldown_minutes
-                        click.echo(
-                            f"[colonyos] Circuit breaker triggered ({state.consecutive_failures} "
-                            f"consecutive failures). Will auto-recover after {cooldown} minutes."
+    with _repo_runtime_guard(repo_root, "pr-review"), install_signal_cancel_handlers():
+        # Single run or watch mode
+        if watch:
+            click.echo("[colonyos] Watch mode enabled. Press Ctrl+C to stop.")
+            try:
+                while True:
+                    # Re-check PR state each cycle
+                    try:
+                        pr_state = fetch_pr_state(pr_number, repo_root)
+                        if pr_state.state in ("merged", "closed"):
+                            click.echo(f"[colonyos] PR #{pr_number} is now {pr_state.state}. Exiting watch mode.")
+                            break
+                    except Exception as exc:
+                        # Log the error but continue watching - transient network issues
+                        # shouldn't stop the watch loop. Log for debugging.
+                        logger.warning(
+                            "Failed to check PR #%d state during watch: %s",
+                            pr_number, exc,
                         )
-                    else:
+                        # Continue watching
+
+                    # Skip processing if circuit breaker is open (still cooling down)
+                    if state.queue_paused:
                         # Check if cooldown has expired for auto-recovery
                         if state.queue_paused_at:
                             try:
@@ -5817,25 +5824,74 @@ def pr_review(
                                     state.consecutive_failures = 0
                                     save_pr_review_state(repo_root, state)
                                     click.echo("[colonyos] Circuit breaker auto-recovered after cooldown.")
+                                else:
+                                    remaining = (cooldown_sec - elapsed) / 60
+                                    if not quiet:
+                                        click.echo(f"[colonyos] Circuit breaker paused. {remaining:.0f} minutes remaining.")
+                                    time.sleep(effective_poll_interval)
+                                    continue
                             except (ValueError, TypeError):
-                                pass  # Malformed timestamp; remain paused
-                    # Sleep during pause, then loop to re-check
+                                # Malformed timestamp; remain paused
+                                time.sleep(effective_poll_interval)
+                                continue
+
+                    fixes = process_comments()
+
+                    # Post summary if fixes were applied (FR-6)
+                    if fixes:
+                        summary_msg = format_summary_message(fixes)
+                        post_pr_summary_comment(pr_number, summary_msg, repo_root)
+
+                    # Check safety guards before sleeping
+                    if not check_budget_cap(state, effective_budget):
+                        click.echo("[colonyos] Budget exhausted. Exiting watch mode.")
+                        break
+
+                    # Circuit breaker with cooldown/recovery (FR-13)
+                    if not check_circuit_breaker(state, config.pr_review.circuit_breaker_threshold):
+                        if not state.queue_paused:
+                            # First trigger: set pause timestamp
+                            state.queue_paused = True
+                            state.queue_paused_at = datetime.now(timezone.utc).isoformat()
+                            save_pr_review_state(repo_root, state)
+                            cooldown = config.pr_review.circuit_breaker_cooldown_minutes
+                            click.echo(
+                                f"[colonyos] Circuit breaker triggered ({state.consecutive_failures} "
+                                f"consecutive failures). Will auto-recover after {cooldown} minutes."
+                            )
+                        else:
+                            # Check if cooldown has expired for auto-recovery
+                            if state.queue_paused_at:
+                                try:
+                                    paused_at = datetime.fromisoformat(state.queue_paused_at)
+                                    cooldown_sec = config.pr_review.circuit_breaker_cooldown_minutes * 60
+                                    elapsed = (datetime.now(timezone.utc) - paused_at).total_seconds()
+                                    if elapsed >= cooldown_sec:
+                                        # Auto-recover
+                                        state.queue_paused = False
+                                        state.queue_paused_at = None
+                                        state.consecutive_failures = 0
+                                        save_pr_review_state(repo_root, state)
+                                        click.echo("[colonyos] Circuit breaker auto-recovered after cooldown.")
+                                except (ValueError, TypeError):
+                                    pass  # Malformed timestamp; remain paused
+                        # Sleep during pause, then loop to re-check
+                        time.sleep(effective_poll_interval)
+                        continue
+
                     time.sleep(effective_poll_interval)
-                    continue
 
-                time.sleep(effective_poll_interval)
-
-        except KeyboardInterrupt:
-            click.echo("\n[colonyos] Watch mode stopped.")
-    else:
-        # Single run
-        fixes = process_comments()
-        if fixes:
-            summary_msg = format_summary_message(fixes)
-            post_pr_summary_comment(pr_number, summary_msg, repo_root)
-            click.echo(f"[colonyos] Applied {len(fixes)} fix(es).")
+            except KeyboardInterrupt:
+                click.echo("\n[colonyos] Watch mode stopped.")
         else:
-            click.echo("[colonyos] No fixes applied.")
+            # Single run
+            fixes = process_comments()
+            if fixes:
+                summary_msg = format_summary_message(fixes)
+                post_pr_summary_comment(pr_number, summary_msg, repo_root)
+                click.echo(f"[colonyos] Applied {len(fixes)} fix(es).")
+            else:
+                click.echo("[colonyos] No fixes applied.")
 
     # Final state save
     save_pr_review_state(repo_root, state)
@@ -6027,13 +6083,14 @@ def _launch_tui(
                 if last_direct_session_id is not None:
                     queue.sync_q.put(TextBlockMsg(text="Continuing conversation..."))
 
-                success, session_id = _run_direct_agent(
-                    text,
-                    repo_root=repo_root,
-                    config=config,
-                    ui=adapter,
-                    resume_session_id=last_direct_session_id,
-                )
+                with _repo_runtime_guard(repo_root, "direct-agent"):
+                    success, session_id = _run_direct_agent(
+                        text,
+                        repo_root=repo_root,
+                        config=config,
+                        ui=adapter,
+                        resume_session_id=last_direct_session_id,
+                    )
                 if success and session_id:
                     last_direct_session_id = session_id
                 elif not success:
@@ -6066,16 +6123,17 @@ def _launch_tui(
                 from_prd = _resolve_latest_prd_path(repo_root, config)
                 queue.sync_q.put(CommandOutputMsg(text=f"Using latest PRD: {from_prd}"))
 
-            run_orchestrator(
-                text,
-                repo_root=repo_root,
-                config=config,
-                verbose=verbose,
-                ui_factory=_ui_factory,
-                skip_planning=route_outcome.skip_planning,
-                from_prd=from_prd,
-                user_injection_provider=adapter.drain_user_injections,
-            )
+            with _repo_runtime_guard(repo_root, "interactive-tui"):
+                run_orchestrator(
+                    text,
+                    repo_root=repo_root,
+                    config=config,
+                    verbose=verbose,
+                    ui_factory=_ui_factory,
+                    skip_planning=route_outcome.skip_planning,
+                    from_prd=from_prd,
+                    user_injection_provider=adapter.drain_user_injections,
+                )
         except PreflightError as exc:
             logger.info("TUI run blocked by preflight: %s", exc)
             if exc.code == "dirty_worktree":
@@ -6340,7 +6398,8 @@ def tui(prompt: str | None, verbose: bool) -> None:
 
     click.echo(click.style("`colonyos tui` is deprecated; use `colonyos run` instead.", dim=True))
     try:
-        _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
+        with _repo_runtime_session(repo_root, "tui"):
+            _launch_tui(repo_root, config, prompt=prompt, verbose=verbose)
     except ImportError as exc:
         click.echo(
             f"Error: {exc}\n\nInstall the TUI extra: pip install colonyos[tui]",

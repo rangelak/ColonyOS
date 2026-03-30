@@ -25,3 +25,17 @@ class TestInstallSignalCancelHandlers:
 
         mock_cancel.assert_called_once_with("SIGINT received")
         assert observed == [(signal.SIGINT, "SIGINT")]
+
+    def test_sigterm_preserves_exit_code_semantics(self) -> None:
+        with patch("colonyos.cancellation.request_cancel") as mock_cancel, \
+             patch("colonyos.cancellation.signal.getsignal", return_value=signal.SIG_DFL), \
+             patch("colonyos.cancellation.signal.signal") as mock_signal:
+            with install_signal_cancel_handlers():
+                handler = mock_signal.call_args_list[1].args[1]
+                try:
+                    handler(signal.SIGTERM, object())
+                    raise AssertionError("SIGTERM handler should exit")
+                except SystemExit as exc:
+                    assert exc.code == 128 + signal.SIGTERM
+
+        mock_cancel.assert_called_once_with("SIGTERM received")

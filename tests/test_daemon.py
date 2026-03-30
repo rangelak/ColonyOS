@@ -23,6 +23,7 @@ from colonyos.models import (
     RunStatus,
 )
 from colonyos.recovery import PreservationResult
+from colonyos.runtime_lock import RuntimeBusyError
 from colonyos.slack import SlackWatchState, save_watch_state
 
 
@@ -252,18 +253,16 @@ class TestPidLock:
         d = Daemon(tmp_repo, config, dry_run=True)
         d._acquire_pid_lock()
         pid_path = tmp_repo / ".colonyos" / "daemon.pid"
+        runtime_lock = tmp_repo / ".colonyos" / "runtime.lock"
         assert pid_path.exists()
+        assert runtime_lock.exists()
         d._release_pid_lock()
 
     def test_second_instance_fails(self, tmp_repo: Path, config: ColonyConfig):
-        d1 = Daemon(tmp_repo, config, dry_run=True)
-        d1._acquire_pid_lock()
-        try:
-            d2 = Daemon(tmp_repo, config, dry_run=True)
+        d2 = Daemon(tmp_repo, config, dry_run=True)
+        with patch("colonyos.daemon.RepoRuntimeGuard.acquire", side_effect=RuntimeBusyError(tmp_repo)):
             with pytest.raises(DaemonError, match="Another daemon instance"):
                 d2._acquire_pid_lock()
-        finally:
-            d1._release_pid_lock()
 
 
 class TestHealthReport:

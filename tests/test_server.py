@@ -276,6 +276,33 @@ class TestReadOnly:
         resp = client.put("/api/config", json={})
         assert resp.status_code == 403
 
+    def test_post_runs_returns_conflict_when_repo_runtime_busy(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.setenv("COLONYOS_WRITE_ENABLED", "1")
+        from colonyos.runtime_lock import RuntimeBusyError, RuntimeProcessRecord
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, auth_token = create_app(tmp_repo)
+        client = TestClient(app)
+        busy = RuntimeBusyError(
+            tmp_repo,
+            RuntimeProcessRecord(
+                pid=7001,
+                mode="daemon",
+                cwd=str(tmp_repo),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos daemon",
+            ),
+        )
+        with patch("colonyos.server.RepoRuntimeGuard.acquire", side_effect=busy):
+            resp = client.post(
+                "/api/runs",
+                json={"prompt": "Add feature"},
+                headers={"Authorization": f"Bearer {auth_token}"},
+            )
+
+        assert resp.status_code == 409
+
     def test_delete_run_not_allowed(self, tmp_repo: Path):
         from colonyos.server import create_app
         from starlette.testclient import TestClient

@@ -37,6 +37,7 @@ from colonyos.models import (
     PreflightError, ProjectInfo, QueueItem, QueueItemStatus, RunLog, RunStatus,
 )
 from colonyos.persona_packs import PACKS
+from colonyos.runtime_lock import RuntimeBusyError, RuntimeProcessRecord
 from colonyos.tui.adapter import (
     NoticeMsg,
     PhaseCompleteMsg,
@@ -104,6 +105,29 @@ class TestRootCommand:
             result = runner.invoke(app, [], input="exit\n")
         assert result.exit_code == 0
         assert "ColonyOS" in result.output
+
+    def test_bare_colonyos_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=3131,
+                mode="daemon",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos daemon",
+            ),
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=True), \
+             patch("colonyos.cli._interactive_stdio", return_value=True), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy), \
+             patch("colonyos.cli._launch_tui") as mock_launch:
+            result = runner.invoke(app, [])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
+        mock_launch.assert_not_called()
 
 
 class TestStatus:
@@ -255,6 +279,26 @@ class TestRun:
         assert result.exit_code == 0
         mock_direct.assert_called_once()
         mock_run.assert_not_called()
+
+    def test_run_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=4242,
+                mode="daemon",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos daemon",
+            ),
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=False), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy):
+            result = runner.invoke(app, ["run", "Add feature"])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
 
 
 class TestRunDirectAgentSessionResume:
@@ -943,12 +987,79 @@ class TestQueuePipelineExecution:
 class TestWatchSlackCommand:
     def test_watch_alias_calls_watch_slack(self, runner: CliRunner, tmp_path: Path):
         _make_config(tmp_path)
-        with patch("colonyos.cli._watch_slack_impl") as mock_watch:
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._watch_slack_impl") as mock_watch:
             result = runner.invoke(app, ["watch"], catch_exceptions=False)
 
         assert result.exit_code == 0
         assert "deprecated" in result.output.lower()
         mock_watch.assert_called_once()
+
+    def test_watch_slack_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=5151,
+                mode="daemon",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos daemon",
+            ),
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy), \
+             patch("colonyos.cli._watch_slack_impl") as mock_watch:
+            result = runner.invoke(app, ["watch-slack"])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
+        mock_watch.assert_not_called()
+
+
+class TestQueueCommand:
+    def test_queue_start_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        queue_path = tmp_path / ".colonyos" / "queue.json"
+        queue_path.parent.mkdir(parents=True, exist_ok=True)
+        queue_path.write_text(
+            json.dumps(
+                {
+                    "queue_id": "queue-test",
+                    "items": [
+                        {
+                            "schema_version": 4,
+                            "id": "item-1",
+                            "source_type": "prompt",
+                            "source_value": "Do work",
+                            "status": "pending",
+                            "priority": 1,
+                            "added_at": "2026-03-30T00:00:00+00:00",
+                        }
+                    ],
+                    "aggregate_cost_usd": 0.0,
+                    "start_time_iso": None,
+                    "status": "pending",
+                }
+            ),
+            encoding="utf-8",
+        )
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=6262,
+                mode="watch-slack",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos watch-slack",
+            ),
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy):
+            result = runner.invoke(app, ["queue", "start"])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
 
 
 class TestAuto:
@@ -957,6 +1068,25 @@ class TestAuto:
             result = runner.invoke(app, ["auto"])
         assert result.exit_code != 0
         assert "colonyos init" in result.output
+
+    def test_auto_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=7171,
+                mode="watch-slack",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos watch-slack",
+            ),
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy):
+            result = runner.invoke(app, ["auto"])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
 
     def test_propose_only_mode(self, runner: CliRunner, tmp_path: Path):
         _make_config(tmp_path)
@@ -2505,6 +2635,27 @@ class TestCIFixCommand:
         assert "--wait-timeout" in result.output
         assert "PR_REF" in result.output
 
+    def test_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=8181,
+                mode="daemon",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos daemon",
+            ),
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.load_config", return_value=ColonyConfig()), \
+             patch("colonyos.ci.subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+             patch("colonyos.ci.fetch_pr_checks", return_value=[]), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy):
+            result = runner.invoke(app, ["ci-fix", "42"])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
+
     def test_all_checks_pass(self, runner: CliRunner, tmp_path: Path):
         """When all checks pass, ci-fix exits successfully."""
         from colonyos.ci import CheckResult
@@ -2603,6 +2754,32 @@ class TestCIFixCommand:
                  patch("colonyos.orchestrator._save_run_log"):
                 result = runner.invoke(app, ["ci-fix", "42"])
         assert "WARNING" in result.output or "mallory" in result.output
+
+
+class TestPRReviewCommand:
+    def test_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        config = _make_config(tmp_path)
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=9191,
+                mode="watch-slack",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos watch-slack",
+            ),
+        )
+        pr_state = SimpleNamespace(state="open", head_ref="feature/test", head_sha="abc123", url="https://example.com/pr/1")
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.load_config", return_value=config), \
+             patch("colonyos.pr_review.fetch_pr_state", return_value=pr_state), \
+             patch("colonyos.pr_review.load_pr_review_state", return_value=None), \
+             patch("colonyos.pr_review.save_pr_review_state"), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy):
+            result = runner.invoke(app, ["pr-review", "1"])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
 
 
 # ---------------------------------------------------------------------------
