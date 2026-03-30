@@ -106,6 +106,7 @@ DEFAULTS = {
         "issue_labels": [],
         "allowed_control_user_ids": [],
         "allow_all_control_users": False,
+        "auto_recover_dirty_worktree": False,
     },
 }
 
@@ -262,6 +263,7 @@ class DaemonConfig:
     issue_labels: list[str] = field(default_factory=list)
     allowed_control_user_ids: list[str] = field(default_factory=list)
     allow_all_control_users: bool = False
+    auto_recover_dirty_worktree: bool = False
 
 
 @dataclass
@@ -780,6 +782,9 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
         allow_all_control_users=bool(
             raw.get("allow_all_control_users", d["allow_all_control_users"])
         ),
+        auto_recover_dirty_worktree=bool(
+            raw.get("auto_recover_dirty_worktree", d["auto_recover_dirty_worktree"])
+        ),
     )
 
 
@@ -1127,6 +1132,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         or config.daemon.issue_labels
         or config.daemon.allowed_control_user_ids
         or config.daemon.allow_all_control_users
+        or config.daemon.auto_recover_dirty_worktree != daemon_defaults["auto_recover_dirty_worktree"]
     ):
         data["daemon"] = {
             "daily_budget_usd": config.daemon.daily_budget_usd,
@@ -1142,6 +1148,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "issue_labels": list(config.daemon.issue_labels),
             "allowed_control_user_ids": list(config.daemon.allowed_control_user_ids),
             "allow_all_control_users": config.daemon.allow_all_control_users,
+            "auto_recover_dirty_worktree": config.daemon.auto_recover_dirty_worktree,
         }
 
     if not config.directions_auto_update:

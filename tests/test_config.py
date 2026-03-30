@@ -845,6 +845,7 @@ class TestSlackConfigTriageFields:
 class TestDaemonConfigBudgetAndControl:
     def test_default_daily_budget_is_500(self) -> None:
         assert DEFAULTS["daemon"]["daily_budget_usd"] == 500.0
+        assert DEFAULTS["daemon"]["auto_recover_dirty_worktree"] is False
 
     def test_parses_unlimited_daemon_budget(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
@@ -867,6 +868,16 @@ class TestDaemonConfigBudgetAndControl:
         loaded = load_config(tmp_repo)
         assert loaded.daemon.daily_budget_usd is None
         assert loaded.daemon.allow_all_control_users is True
+
+    def test_roundtrip_auto_recover_dirty_worktree(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            daemon=DaemonConfig(
+                auto_recover_dirty_worktree=True,
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.auto_recover_dirty_worktree is True
 
     def test_roundtrip_retry_ceo_profiles_and_max_log_files(self, tmp_repo: Path) -> None:
         original = ColonyConfig(
