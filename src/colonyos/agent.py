@@ -7,6 +7,7 @@ import random
 import re
 import sys
 import threading
+import time
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +42,18 @@ PermissionMode: TypeAlias = Literal[
 _ACTIVE_PHASE_CONTROLLERS_LOCK = threading.Lock()
 _ACTIVE_PHASE_CONTROLLERS: set["_SyncRunController"] = set()
 _T = TypeVar("_T")
+
+
+class PhaseTimeoutError(RuntimeError):
+    """Raised when a phase exceeds its wall-clock timeout."""
+
+    def __init__(self, phase_label: str, timeout_seconds: int) -> None:
+        self.phase_label = phase_label
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"Phase '{phase_label}' timed out after {timeout_seconds}s"
+        )
+
 
 _API_KEY_SOURCE_LABELS = {
     "none": "Claude subscription (no API key)",
@@ -491,8 +504,17 @@ def _run_async_sync(
     coro_factory: Callable[[], Awaitable[_T]],
     *,
     label: str,
+    timeout_seconds: int | None = None,
 ) -> _T:
-    """Run an async coroutine in a worker thread that supports cancellation."""
+    """Run an async coroutine in a worker thread that supports cancellation.
+
+    Parameters
+    ----------
+    timeout_seconds:
+        Wall-clock timeout in seconds. When exceeded the async task is
+        cancelled and :class:`PhaseTimeoutError` is raised. ``None``
+        means no timeout.
+    """
     controller = _SyncRunController(label=label)
     done = threading.Event()
     outcome: dict[str, object] = {}
@@ -522,6 +544,7 @@ def _run_async_sync(
                 loop.close()
                 done.set()
 
+    deadline = (time.monotonic() + timeout_seconds) if timeout_seconds else None
     worker = threading.Thread(target=_worker, name=f"agent-{label}", daemon=True)
     _register_active_phase_controller(controller)
     try:
@@ -529,7 +552,23 @@ def _run_async_sync(
             worker.start()
             try:
                 while not done.wait(0.1):
-                    pass
+                    if deadline is not None and time.monotonic() > deadline:
+                        logger.warning(
+                            "Phase %s exceeded wall-clock timeout of %ds, cancelling",
+                            label,
+                            timeout_seconds,
+                        )
+                        controller.cancel(
+                            f"Phase timed out after {timeout_seconds}s"
+                        )
+                        worker.join(timeout=10)
+                        if worker.is_alive():
+                            logger.warning(
+                                "Worker thread for %s still alive after cancel+join; "
+                                "it will be abandoned as a daemon thread",
+                                label,
+                            )
+                        raise PhaseTimeoutError(label, timeout_seconds)  # type: ignore[arg-type]
             except KeyboardInterrupt:
                 controller.cancel("Interrupted by user (Ctrl+C)")
                 worker.join(timeout=10)
@@ -560,26 +599,49 @@ def run_phase_sync(
     ui: PhaseUI | NullUI | None = None,
     resume: str | None = None,
     retry_config: RetryConfig | None = None,
+    timeout_seconds: int | None = None,
 ) -> PhaseResult:
-    """Synchronous wrapper around run_phase for use in non-async contexts."""
-    return _run_async_sync(
-        lambda: run_phase(
-            phase,
-            prompt,
-            cwd=cwd,
-            system_prompt=system_prompt,
+    """Synchronous wrapper around run_phase for use in non-async contexts.
+
+    Parameters
+    ----------
+    timeout_seconds:
+        Wall-clock timeout in seconds for the entire phase. When exceeded
+        the phase is cancelled and a failed :class:`PhaseResult` is
+        returned. ``None`` means no timeout.
+    """
+    try:
+        return _run_async_sync(
+            lambda: run_phase(
+                phase,
+                prompt,
+                cwd=cwd,
+                system_prompt=system_prompt,
+                model=model,
+                budget_usd=budget_usd,
+                max_turns=max_turns,
+                agents=agents,
+                allowed_tools=allowed_tools,
+                permission_mode=permission_mode,
+                ui=ui,
+                resume=resume,
+                retry_config=retry_config,
+            ),
+            label=f"phase-{phase.value}",
+            timeout_seconds=timeout_seconds,
+        )
+    except PhaseTimeoutError as exc:
+        error_msg = str(exc)
+        if ui is not None:
+            ui.phase_error(error_msg)
+        else:
+            _log(error_msg)
+        return PhaseResult(
+            phase=phase,
+            success=False,
             model=model,
-            budget_usd=budget_usd,
-            max_turns=max_turns,
-            agents=agents,
-            allowed_tools=allowed_tools,
-            permission_mode=permission_mode,
-            ui=ui,
-            resume=resume,
-            retry_config=retry_config,
-        ),
-        label=f"phase-{phase.value}",
-    )
+            error=error_msg,
+        )
 
 
 async def run_phases_parallel(

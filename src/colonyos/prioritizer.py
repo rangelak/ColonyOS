@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from colonyos.agent import run_phase_sync
-from colonyos.config import ColonyConfig
+from colonyos.config import ColonyConfig, LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS
 from colonyos.models import Phase, QueueItem, QueueItemStatus, QueueState, extract_result_text
 from colonyos.queue_runtime import reprioritize_queue_item
 from colonyos.ui import NullUI, PhaseUI
@@ -82,6 +82,7 @@ def score_queue_with_agent(
         budget_usd=0.20,
         allowed_tools=[],
         ui=ui,
+        timeout_seconds=LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS,
     )
     raw_text = extract_result_text(result.artifacts)
     if not raw_text:

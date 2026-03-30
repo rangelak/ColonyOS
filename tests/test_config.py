@@ -1481,3 +1481,73 @@ class TestDaemonOutcomePollInterval:
         save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.daemon.outcome_poll_interval_minutes == 45
+
+
+class TestPhaseTimeoutConfig:
+    """Tests for budget.phase_timeout_seconds config field."""
+
+    def test_default_value(self) -> None:
+        assert DEFAULTS["budget"]["phase_timeout_seconds"] == 1800
+        assert BudgetConfig().phase_timeout_seconds == 1800
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"budget": {"phase_timeout_seconds": 900}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.budget.phase_timeout_seconds == 900
+
+    def test_validation_too_low_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"budget": {"phase_timeout_seconds": 10}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="phase_timeout_seconds must be >= 30"):
+            load_config(tmp_repo)
+
+    def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(budget=BudgetConfig(phase_timeout_seconds=600))
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.budget.phase_timeout_seconds == 600
+
+
+class TestPipelineTimeoutConfig:
+    """Tests for daemon.pipeline_timeout_seconds config field."""
+
+    def test_default_value(self) -> None:
+        assert DEFAULTS["daemon"]["pipeline_timeout_seconds"] == 7200
+        assert DaemonConfig().pipeline_timeout_seconds == 7200
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"pipeline_timeout_seconds": 3600}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.pipeline_timeout_seconds == 3600
+
+    def test_validation_too_low_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"pipeline_timeout_seconds": 30}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="pipeline_timeout_seconds must be >= 60"):
+            load_config(tmp_repo)
+
+    def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            daemon=DaemonConfig(pipeline_timeout_seconds=3600),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.pipeline_timeout_seconds == 3600

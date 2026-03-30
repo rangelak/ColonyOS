@@ -868,6 +868,7 @@ def _run_sequential_implement(
                 budget_usd=per_task_budget,
                 ui=ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
         except Exception as exc:
             _log(f"Task {task_id} raised exception: {exc}")
@@ -1070,6 +1071,7 @@ def _run_parallel_implement(
                 budget_usd=budget_usd,
                 ui=task_ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
 
             # Add task_id to artifacts for tracking (FR-10)
@@ -1110,6 +1112,7 @@ def _run_parallel_implement(
                 budget_usd=budget_usd,
                 ui=conflict_ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
 
             return result
@@ -1705,6 +1708,7 @@ def run_preflight_recovery(
         allowed_tools=["Read", "Glob", "Grep", "Bash", "Write", "Edit"],
         ui=ui,
         retry_config=config.retry,
+        timeout_seconds=config.budget.phase_timeout_seconds,
     )
 
     if not phase_result.success:
@@ -1824,6 +1828,7 @@ def run_auto_recovery(
         allowed_tools=["Read", "Glob", "Grep", "Bash", "Write", "Edit"],
         ui=ui,
         retry_config=config.retry,
+        timeout_seconds=config.budget.phase_timeout_seconds,
     )
 
 
@@ -1879,6 +1884,7 @@ def run_nuke_summary(
         allowed_tools=["Read", "Glob", "Grep"],
         ui=ui,
         retry_config=config.retry,
+        timeout_seconds=config.budget.phase_timeout_seconds,
     )
 
 
@@ -2219,6 +2225,7 @@ def run_ceo(
         allowed_tools=["Read", "Glob", "Grep"],
         ui=ui,
         retry_config=config.retry,
+        timeout_seconds=config.budget.phase_timeout_seconds,
     )
 
     proposal_text = result.artifacts.get("result", "")
@@ -2275,6 +2282,7 @@ def update_directions_after_ceo(
             allowed_tools=[],
             ui=ui,
             retry_config=config.retry,
+            timeout_seconds=config.budget.phase_timeout_seconds,
         )
         cost = result.cost_usd or 0.0
         updated = result.artifacts.get("result", "")
@@ -2440,6 +2448,7 @@ def run_sweep(
         allowed_tools=["Read", "Glob", "Grep"],
         ui=ui,
         retry_config=config.retry,
+        timeout_seconds=config.budget.phase_timeout_seconds,
     )
 
     findings_text = result.artifacts.get("result", "")
@@ -3162,6 +3171,7 @@ def run_standalone_review(
                 budget_usd=config.budget.per_phase,
                 ui=fix_ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
             phase_results.append(fix_result)
             total_cost += fix_result.cost_usd or 0
@@ -3199,6 +3209,7 @@ def run_standalone_review(
                 allowed_tools=["Read", "Glob", "Grep", "Bash"],
                 ui=decision_ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
             phase_results.append(decision_result)
             total_cost += decision_result.cost_usd or 0
@@ -3285,6 +3296,7 @@ def _run_learn_phase(
             allowed_tools=["Read", "Glob", "Grep"],
             ui=learn_ui,
             retry_config=config.retry,
+            timeout_seconds=config.budget.phase_timeout_seconds,
         )
         log.phases.append(learn_result)
         _save_run_log(repo_root, log)
@@ -3456,6 +3468,7 @@ def _run_ci_fix_loop(
             budget_usd=min(config.budget.per_phase, remaining),
             ui=None,
             retry_config=config.retry,
+            timeout_seconds=config.budget.phase_timeout_seconds,
         )
         log.phases.append(phase_result)
 
@@ -3742,6 +3755,7 @@ def run_thread_fix(
             budget_usd=config.budget.per_phase,
             ui=impl_ui,
             retry_config=config.retry,
+            timeout_seconds=config.budget.phase_timeout_seconds,
         )
         log.phases.append(impl_result)
 
@@ -3776,6 +3790,7 @@ def run_thread_fix(
             ui=verify_ui,
             allowed_tools=["Read", "Bash", "Glob", "Grep"],
             retry_config=config.retry,
+            timeout_seconds=config.budget.phase_timeout_seconds,
         )
         log.phases.append(verify_result)
 
@@ -3807,6 +3822,7 @@ def run_thread_fix(
                 budget_usd=config.budget.per_phase,
                 ui=deliver_ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
             log.phases.append(deliver_result)
 
@@ -4304,6 +4320,7 @@ def _run_pipeline(
                 agents=persona_agents,
                 ui=plan_ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
             _append_phase(plan_result)
             _capture_phase_memory(memory_store, plan_result, log.run_id, config)
@@ -4425,6 +4442,7 @@ def _run_pipeline(
                     budget_usd=config.budget.per_phase,
                     ui=impl_ui,
                     retry_config=config.retry,
+                    timeout_seconds=config.budget.phase_timeout_seconds,
                 )
                 return attempt_result
 
@@ -4594,6 +4612,7 @@ def _run_pipeline(
                             budget_usd=config.budget.per_phase,
                             ui=fix_ui,
                             retry_config=config.retry,
+                            timeout_seconds=config.budget.phase_timeout_seconds,
                         )
                         _append_phase(fix_result)
                         _capture_phase_memory(memory_store, fix_result, log.run_id, config)
@@ -4620,6 +4639,7 @@ def _run_pipeline(
                     allowed_tools=["Read", "Glob", "Grep", "Bash"],
                     ui=decision_ui,
                     retry_config=config.retry,
+                    timeout_seconds=config.budget.phase_timeout_seconds,
                 )
                 _append_phase(decision_result)
 
@@ -4673,6 +4693,7 @@ def _run_pipeline(
                     budget_usd=config.budget.per_phase,
                     ui=deliver_ui,
                     retry_config=config.retry,
+                    timeout_seconds=config.budget.phase_timeout_seconds,
                 )
 
             deliver_result = _execute_deliver_phase()

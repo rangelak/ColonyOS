@@ -32,6 +32,7 @@ DEFAULTS = {
         "per_run": 15.0,
         "max_duration_hours": 8.0,
         "max_total_usd": 500.0,
+        "phase_timeout_seconds": 1800,
     },
     "phases": {"plan": True, "implement": True, "review": True, "deliver": True},
     "branch_prefix": "colonyos/",
@@ -107,8 +108,13 @@ DEFAULTS = {
         "allowed_control_user_ids": [],
         "allow_all_control_users": False,
         "auto_recover_dirty_worktree": False,
+        "pipeline_timeout_seconds": 7200,
     },
 }
+
+
+LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS: int = 120
+QA_PHASE_TIMEOUT_SECONDS: int = 300
 
 
 @dataclass
@@ -117,6 +123,7 @@ class BudgetConfig:
     per_run: float = 15.0
     max_duration_hours: float = 8.0
     max_total_usd: float = 500.0
+    phase_timeout_seconds: int = 1800
 
 
 @dataclass
@@ -264,6 +271,7 @@ class DaemonConfig:
     allowed_control_user_ids: list[str] = field(default_factory=list)
     allow_all_control_users: bool = False
     auto_recover_dirty_worktree: bool = False
+    pipeline_timeout_seconds: int = 7200
 
 
 @dataclass
@@ -764,6 +772,12 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
     outcome_poll = _int("outcome_poll_interval_minutes")
     _require_positive("outcome_poll_interval_minutes", outcome_poll)
 
+    pipeline_timeout = _int("pipeline_timeout_seconds")
+    if pipeline_timeout < 60:
+        raise ValueError(
+            f"daemon.pipeline_timeout_seconds must be >= 60, got {pipeline_timeout}"
+        )
+
     return DaemonConfig(
         daily_budget_usd=daily_budget_usd,
         github_poll_interval_seconds=poll_interval,
@@ -785,6 +799,7 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
         auto_recover_dirty_worktree=bool(
             raw.get("auto_recover_dirty_worktree", d["auto_recover_dirty_worktree"])
         ),
+        pipeline_timeout_seconds=pipeline_timeout,
     )
 
 
@@ -805,6 +820,15 @@ def _parse_sweep_config(raw: dict) -> SweepConfig:
         max_files_per_task=max_files_per_task,
         default_categories=default_categories,
     )
+
+
+def _parse_phase_timeout(budget_raw: dict) -> int:
+    val = int(budget_raw.get("phase_timeout_seconds", DEFAULTS["budget"]["phase_timeout_seconds"]))
+    if val < 30:
+        raise ValueError(
+            f"budget.phase_timeout_seconds must be >= 30, got {val}"
+        )
+    return val
 
 
 def load_config(repo_root: Path) -> ColonyConfig:
@@ -866,6 +890,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
             per_run=float(budget_raw.get("per_run", DEFAULTS["budget"]["per_run"])),
             max_duration_hours=float(budget_raw.get("max_duration_hours", DEFAULTS["budget"]["max_duration_hours"])),
             max_total_usd=float(budget_raw.get("max_total_usd", DEFAULTS["budget"]["max_total_usd"])),
+            phase_timeout_seconds=_parse_phase_timeout(budget_raw),
         ),
         phases=PhasesConfig(
             plan=bool(phases_raw.get("plan", True)),
@@ -936,6 +961,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         "per_run": config.budget.per_run,
         "max_duration_hours": config.budget.max_duration_hours,
         "max_total_usd": config.budget.max_total_usd,
+        "phase_timeout_seconds": config.budget.phase_timeout_seconds,
     }
     data["phases"] = {
         "plan": config.phases.plan,
@@ -1133,6 +1159,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         or config.daemon.allowed_control_user_ids
         or config.daemon.allow_all_control_users
         or config.daemon.auto_recover_dirty_worktree != daemon_defaults["auto_recover_dirty_worktree"]
+        or config.daemon.pipeline_timeout_seconds != daemon_defaults["pipeline_timeout_seconds"]
     ):
         data["daemon"] = {
             "daily_budget_usd": config.daemon.daily_budget_usd,
@@ -1149,6 +1176,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "allowed_control_user_ids": list(config.daemon.allowed_control_user_ids),
             "allow_all_control_users": config.daemon.allow_all_control_users,
             "auto_recover_dirty_worktree": config.daemon.auto_recover_dirty_worktree,
+            "pipeline_timeout_seconds": config.daemon.pipeline_timeout_seconds,
         }
 
     if not config.directions_auto_update:

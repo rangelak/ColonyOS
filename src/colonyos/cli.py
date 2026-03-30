@@ -672,6 +672,7 @@ def _run_direct_agent(
         budget_usd=budget,
         ui=ui,
         resume=resume_session_id,
+        timeout_seconds=config.budget.phase_timeout_seconds,
     )
 
     # Graceful fallback: if the run failed and we were resuming a session,
@@ -686,6 +687,7 @@ def _run_direct_agent(
             budget_usd=budget,
             ui=ui,
             resume=None,
+            timeout_seconds=config.budget.phase_timeout_seconds,
         )
 
     return (result.success, result.session_id or None)
@@ -5337,6 +5339,7 @@ def _run_cleanup_scan_impl(
                 model=config.get_model(Phase.REVIEW),
                 budget_usd=config.budget.per_phase,
                 allowed_tools=["Read", "Glob", "Grep", "Agent"],
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
 
             if phase_result.success and phase_result.artifacts.get("result"):

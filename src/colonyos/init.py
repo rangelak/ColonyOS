@@ -504,6 +504,7 @@ def run_ai_init(
                 max_turns=3,
                 allowed_tools=["Read", "Glob", "Grep"],
                 permission_mode="default",
+                timeout_seconds=_AI_INIT_TIMEOUT_SECONDS,
             )
         finally:
             if _has_alarm and old_handler is not None:
@@ -796,6 +797,7 @@ def generate_directions(
                 budget_usd=min(config.budget.per_phase, 2.0),
                 allowed_tools=["Read", "Glob", "Grep", "Bash"],
                 ui=ui,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
         except Exception as exc:
             console.print(f"\n  [red]✗[/red] Directions generation failed: {exc}", highlight=False)
