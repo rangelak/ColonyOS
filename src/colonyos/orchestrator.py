@@ -43,7 +43,7 @@ from colonyos.naming import (
 )
 from colonyos.github import check_open_pr
 from colonyos.memory import MemoryCategory, MemoryStore, load_memory_for_injection
-from colonyos.outcomes import OutcomeStore
+from colonyos.outcomes import OutcomeStore, format_outcome_summary
 from colonyos.recovery import (
     PreservationResult,
     checkout_branch,
@@ -1922,8 +1922,6 @@ def _build_ceo_prompt(
     # Inject PR outcome history so the CEO can calibrate based on merge rate (non-blocking)
     outcomes_section = ""
     try:
-        from colonyos.outcomes import format_outcome_summary
-
         outcome_summary = format_outcome_summary(repo_root)
         if outcome_summary:
             outcomes_section = (
@@ -1931,9 +1929,7 @@ def _build_ceo_prompt(
                 f"{outcome_summary}\n\n"
             )
     except Exception:
-        import logging as _logging
-
-        _logging.getLogger(__name__).warning(
+        logger.warning(
             "Failed to compute PR outcome summary for CEO context, proceeding without."
         )
 
@@ -3377,6 +3373,11 @@ def run_thread_fix(
         source_type=source_type,
         review_comment_id=review_comment_id,
     )
+
+    # FR-3.2: Register the PR for outcome tracking.  Uses INSERT OR IGNORE
+    # so duplicate registrations (e.g. from the main run() path) are safe.
+    if pr_url:
+        _register_pr_outcome(repo_root, run_id, pr_url, branch_name)
 
     # --- Defense-in-depth: validate branch name at point of use ---
     if not is_valid_git_ref(branch_name):

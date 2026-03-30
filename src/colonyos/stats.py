@@ -476,9 +476,23 @@ def compute_delivery_outcomes(repo_root: Path) -> DeliveryOutcomeStats:
 
 
 def compute_stats(
-    runs: list[dict], phase_filter: str | None = None
+    runs: list[dict],
+    phase_filter: str | None = None,
+    repo_root: Path | None = None,
 ) -> StatsResult:
-    """Compute all stats sections and return the assembled result."""
+    """Compute all stats sections and return the assembled result.
+
+    Parameters
+    ----------
+    repo_root:
+        When provided, also computes delivery outcome stats from the
+        ``OutcomeStore``.  Optional so callers without a repo context
+        (e.g. the web server) still work.
+    """
+    delivery = DeliveryOutcomeStats()
+    if repo_root is not None:
+        delivery = compute_delivery_outcomes(repo_root)
+
     return StatsResult(
         summary=compute_run_summary(runs),
         cost_breakdown=compute_cost_breakdown(runs),
@@ -490,6 +504,7 @@ def compute_stats(
         phase_filter=phase_filter,
         model_usage=compute_model_usage(runs),
         parallelism_stats=compute_parallelism_stats(runs),
+        delivery_outcomes=delivery,
     )
 
 

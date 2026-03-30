@@ -279,6 +279,13 @@ flowchart TD
 | `colonyos pr-review PR --poll-interval N` | Poll interval in seconds (default: 60) |
 | `colonyos pr-review PR --max-cost USD` | Override per-PR budget cap (default: $5) |
 
+### PR outcome tracking
+
+| Command | Description |
+|---|---|
+| `colonyos outcomes` | Show tracked PR outcomes (merge/close status) |
+| `colonyos outcomes poll` | Manually poll GitHub for open PR status updates |
+
 ### Analytics & inspection
 
 | Command | Description |

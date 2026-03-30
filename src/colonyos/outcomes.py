@@ -47,7 +47,7 @@ class OutcomeStore:
         self.repo_root = repo_root
         self._db_path = repo_root / ".colonyos" / MEMORY_DB
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path))
+        self._conn = sqlite3.connect(str(self._db_path), timeout=10)
         self._conn.row_factory = sqlite3.Row
         self._init_db()
 
@@ -73,7 +73,7 @@ class OutcomeStore:
             CREATE TABLE IF NOT EXISTS pr_outcomes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT NOT NULL,
-                pr_number INTEGER NOT NULL,
+                pr_number INTEGER NOT NULL UNIQUE,
                 pr_url TEXT NOT NULL,
                 branch_name TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'open',
@@ -105,11 +105,13 @@ class OutcomeStore:
         """Register a newly created PR for outcome tracking.
 
         Inserts a record with status ``'open'`` and the current UTC timestamp.
+        If a record for this PR number already exists, the insert is silently
+        ignored (``INSERT OR IGNORE``) to prevent duplicate rows.
         """
         now = datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             """
-            INSERT INTO pr_outcomes (run_id, pr_number, pr_url, branch_name, status, created_at)
+            INSERT OR IGNORE INTO pr_outcomes (run_id, pr_number, pr_url, branch_name, status, created_at)
             VALUES (?, ?, ?, ?, 'open', ?)
             """,
             (run_id, pr_number, pr_url, branch_name, now),
@@ -230,15 +232,26 @@ def _extract_close_context(data: dict[str, Any]) -> str:
 def _extract_ci_passed(data: dict[str, Any]) -> Optional[bool]:
     """Determine overall CI pass/fail from statusCheckRollup.
 
-    Returns True if all checks passed, False if any failed, None if no checks.
+    Returns True if all completed checks passed, False if any failed,
+    None if no checks exist or any check is still in progress
+    (conclusion is None/empty — GitHub Actions sets this while running).
+
+    Assumes GitHub Actions as the CI provider (SUCCESS/NEUTRAL/SKIPPED
+    are the passing conclusion values).
     """
     checks = data.get("statusCheckRollup") or []
     if not checks:
         return None
-    # GitHub Actions uses "SUCCESS" for conclusion; treat anything else as fail
+
+    # Filter out in-progress checks (conclusion is None or empty string)
+    completed = [c for c in checks if c.get("conclusion")]
+    if len(completed) < len(checks):
+        # Some checks still running — we can't determine pass/fail yet
+        return None
+
     return all(
-        c.get("conclusion", "").upper() in ("SUCCESS", "NEUTRAL", "SKIPPED")
-        for c in checks
+        c["conclusion"].upper() in ("SUCCESS", "NEUTRAL", "SKIPPED")
+        for c in completed
     )
 
 
@@ -405,41 +418,56 @@ def format_outcome_summary(repo_root: Path) -> str:
 
     The summary is capped at ~500 tokens (~2000 chars) to respect the
     CEO prompt budget.
+
+    Uses a single ``OutcomeStore`` connection for both stats computation
+    and close-context retrieval to avoid redundant SQLite connections.
     """
-    stats = compute_outcome_stats(repo_root)
-
-    if stats["total_tracked"] == 0:
-        return ""
-
-    parts: list[str] = []
-    total = stats["total_tracked"]
-    merged = stats["merged_count"]
-    closed = stats["closed_count"]
-    open_count = stats["open_count"]
-    merge_rate = stats["merge_rate"]
-    avg_hours = stats["avg_time_to_merge_hours"]
-
-    parts.append(f"Tracked PRs: {total}")
-    if merged > 0:
-        parts.append(f"{merged} merged")
-        if avg_hours > 0:
-            parts.append(f"avg {avg_hours:.1f}h to merge")
-    if open_count > 0:
-        parts.append(f"{open_count} still open")
-    if closed > 0:
-        parts.append(f"{closed} closed without merge")
-    if merged + closed > 0:
-        parts.append(f"merge rate: {merge_rate:.0%}")
-
-    summary = "Your PR history: " + ", ".join(parts) + "."
-
-    # Include close contexts for recent closed PRs (up to 3)
     store = OutcomeStore(repo_root)
     try:
         outcomes = store.get_outcomes()
     finally:
         store.close()
 
+    if not outcomes:
+        return ""
+
+    # Compute stats inline from the fetched outcomes (avoids a second connection)
+    merged_count = sum(1 for o in outcomes if o["status"] == "merged")
+    closed_count = sum(1 for o in outcomes if o["status"] == "closed")
+    open_count = sum(1 for o in outcomes if o["status"] == "open")
+    total = len(outcomes)
+    resolved = merged_count + closed_count
+    merge_rate = merged_count / resolved if resolved > 0 else 0.0
+
+    # Average time to merge (hours)
+    merge_durations: list[float] = []
+    for o in outcomes:
+        if o["status"] == "merged" and o["merged_at"] and o["created_at"]:
+            try:
+                created = datetime.fromisoformat(o["created_at"])
+                merged = datetime.fromisoformat(o["merged_at"])
+                delta = (merged - created).total_seconds() / 3600.0
+                merge_durations.append(delta)
+            except (ValueError, TypeError):
+                pass
+    avg_hours = sum(merge_durations) / len(merge_durations) if merge_durations else 0.0
+
+    parts: list[str] = []
+    parts.append(f"Tracked PRs: {total}")
+    if merged_count > 0:
+        parts.append(f"{merged_count} merged")
+        if avg_hours > 0:
+            parts.append(f"avg {avg_hours:.1f}h to merge")
+    if open_count > 0:
+        parts.append(f"{open_count} still open")
+    if closed_count > 0:
+        parts.append(f"{closed_count} closed without merge")
+    if merged_count + closed_count > 0:
+        parts.append(f"merge rate: {merge_rate:.0%}")
+
+    summary = "Your PR history: " + ", ".join(parts) + "."
+
+    # Include close contexts for recent closed PRs (up to 3)
     closed_with_context = [
         o for o in outcomes
         if o["status"] == "closed" and o["close_context"]

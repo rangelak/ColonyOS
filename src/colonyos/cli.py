@@ -2837,7 +2837,7 @@ def stats(last: int | None, phase: str | None) -> None:
     from rich.console import Console as RichConsole
 
     console = RichConsole()
-    result = compute_stats(runs, phase_filter=phase)
+    result = compute_stats(runs, phase_filter=phase, repo_root=repo_root)
     render_dashboard(console, result)
 
 
