@@ -29,10 +29,10 @@
   - [x] 1.7 Implement `poll_outcomes()` function: query all open outcomes, call `gh pr view <number> --json state,mergedAt,closedAt,reviews,comments,statusCheckRollup,labels` for each, update records. Extract close_context from last comment/review for closed PRs, sanitize with `sanitize_ci_logs`, cap at 500 chars.
   - [x] 1.8 Implement `compute_outcome_stats()` and `format_outcome_summary()`: aggregate metrics from the pr_outcomes table, format a compact CEO-injection string
 
-- [ ] 2.0 Config — add outcome_poll_interval_minutes to DaemonConfig
+- [x] 2.0 Config — add outcome_poll_interval_minutes to DaemonConfig
   depends_on: []
-  - [ ] 2.1 Write tests for new `outcome_poll_interval_minutes` field: test default value (30), test custom value from YAML, test validation (must be positive)
-  - [ ] 2.2 Add `outcome_poll_interval_minutes: int = 30` to `DaemonConfig` dataclass in `config.py`, add to DEFAULTS dict, add parsing/validation in `_parse_daemon_config`, add to `save_config` serialization
+  - [x] 2.1 Write tests for new `outcome_poll_interval_minutes` field: test default value (30), test custom value from YAML, test validation (must be positive)
+  - [x] 2.2 Add `outcome_poll_interval_minutes: int = 30` to `DaemonConfig` dataclass in `config.py`, add to DEFAULTS dict, add parsing/validation in `_parse_daemon_config`, add to `save_config` serialization
 
 - [ ] 3.0 Deliver phase integration — register PRs after creation
   depends_on: [1.0]
