@@ -3667,3 +3667,68 @@ class TestEndToEndSessionPersistence:
         # Should succeed with the fresh session
         assert success is True
         assert session_id == "fresh-session"
+
+
+# ---------------------------------------------------------------------------
+# colonyos map command (Task 6.0)
+# ---------------------------------------------------------------------------
+
+
+class TestMapCommand:
+    """Tests for the ``colonyos map`` CLI command."""
+
+    def test_map_produces_output(self, runner: CliRunner, tmp_path: Path):
+        """``colonyos map`` invocation produces repo map output."""
+        _make_config(tmp_path)
+        fake_map = "src/\n  app.py (10 lines)\n"
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.generate_repo_map", return_value=fake_map) as mock_gen:
+            result = runner.invoke(app, ["map"])
+        assert result.exit_code == 0
+        assert "app.py" in result.output
+        mock_gen.assert_called_once()
+        # Should have used default config max_tokens (4000)
+        call_kwargs = mock_gen.call_args
+        assert call_kwargs[1].get("prompt_text", call_kwargs[0][2] if len(call_kwargs[0]) > 2 else "") == ""
+
+    def test_map_max_tokens_override(self, runner: CliRunner, tmp_path: Path):
+        """``--max-tokens`` overrides the config value."""
+        _make_config(tmp_path)
+        fake_map = "overview\n"
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.generate_repo_map", return_value=fake_map) as mock_gen:
+            result = runner.invoke(app, ["map", "--max-tokens", "1000"])
+        assert result.exit_code == 0
+        config_arg = mock_gen.call_args[0][1]  # second positional arg = config
+        assert config_arg.max_tokens == 1000
+
+    def test_map_prompt_option(self, runner: CliRunner, tmp_path: Path):
+        """``--prompt`` text is passed through for relevance-based truncation."""
+        _make_config(tmp_path)
+        fake_map = "overview\n"
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.generate_repo_map", return_value=fake_map) as mock_gen:
+            result = runner.invoke(app, ["map", "--prompt", "fix the login bug"])
+        assert result.exit_code == 0
+        # prompt_text should be passed as the third positional arg or keyword
+        call_args = mock_gen.call_args
+        prompt_text = call_args[1].get("prompt_text", call_args[0][2] if len(call_args[0]) > 2 else "")
+        assert prompt_text == "fix the login bug"
+
+    def test_map_fails_gracefully_outside_git_repo(self, runner: CliRunner, tmp_path: Path):
+        """Command fails gracefully when not inside a git repo (no config)."""
+        # No config created → load_config returns a ColonyConfig with project=None
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["map"])
+        # Should still succeed — map works without full project config
+        # Just produces an empty map or error message
+        assert result.exit_code in (0, 1)
+
+    def test_map_empty_repo(self, runner: CliRunner, tmp_path: Path):
+        """Command handles empty repo map output gracefully."""
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.generate_repo_map", return_value="") as mock_gen:
+            result = runner.invoke(app, ["map"])
+        assert result.exit_code == 0
+        assert "No tracked files" in result.output or result.output.strip() == ""

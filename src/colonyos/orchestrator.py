@@ -44,6 +44,7 @@ from colonyos.naming import (
     summary_artifact_path,
 )
 from colonyos.github import check_open_pr
+from colonyos.repo_map import generate_repo_map
 from colonyos.memory import MemoryCategory, MemoryStore, load_memory_for_injection
 from colonyos.outcomes import OutcomeStore, format_outcome_summary
 from colonyos.recovery import (
@@ -205,6 +206,20 @@ def _inject_memory_block(
         _log(f"Injected {line_count} memories ({len(memory_block)} chars) for phase {phase}")
         system += f"\n\n{memory_block}"
     return system
+
+
+def _inject_repo_map(system: str, repo_map_text: str) -> str:
+    """Append a repository structure block to the system prompt.
+
+    Follows the same pattern as :func:`_inject_memory_block` — appends
+    after the existing system prompt with a ``## Repository Structure``
+    header (FR-18).  Returns *system* unchanged when *repo_map_text* is
+    empty or whitespace-only.
+    """
+    if not repo_map_text or not repo_map_text.strip():
+        return system
+    _log(f"Injected repo map ({len(repo_map_text)} chars)")
+    return system + f"\n\n## Repository Structure\n\n{repo_map_text}"
 
 
 def _get_current_branch(repo_root: Path) -> str:
@@ -758,6 +773,7 @@ def _run_sequential_implement(
     _make_ui,
     memory_store: MemoryStore | None = None,
     user_injection_provider: Callable[[], list[str]] | None = None,
+    repo_map_text: str = "",
 ) -> PhaseResult | None:
     """Run sequential implementation: one task at a time in topological order.
 
@@ -849,7 +865,8 @@ def _run_sequential_implement(
             repo_root=repo_root,
         )
 
-        # Inject semantic memory and external context (Slack/GitHub)
+        # Inject repo map, semantic memory, and external context (Slack/GitHub)
+        system = _inject_repo_map(system, repo_map_text)
         system = _inject_memory_block(system, memory_store, "implement", user, config)
         user += _drain_injected_context(user_injection_provider)
 
@@ -2216,6 +2233,14 @@ def run_ceo(
     proposal_filename = names.proposal_filename
 
     system, user = _build_ceo_prompt(config, proposal_filename, repo_root, persona=ceo_persona)
+
+    # Inject repo map into CEO phase (FR-15: all phases).
+    if config.repo_map.enabled:
+        try:
+            ceo_repo_map_text = generate_repo_map(repo_root, config.repo_map)
+            system = _inject_repo_map(system, ceo_repo_map_text)
+        except Exception as exc:
+            _log(f"Warning: repo map generation failed for CEO phase: {exc}")
 
     if ui is not None:
         ui.phase_header("CEO", config.budget.per_phase, config.get_model(Phase.CEO))
@@ -4119,6 +4144,17 @@ def _run_pipeline(
     """Execute the pipeline phases. Extracted from run() for try/finally branch rollback."""
     try:
 
+        # Generate repo map once for the entire pipeline run (FR-15).
+        # The prompt text is passed for relevance ranking (FR-8, Task 5.5).
+        repo_map_text = ""
+        if config.repo_map.enabled:
+            try:
+                repo_map_text = generate_repo_map(
+                    repo_root, config.repo_map, prompt_text=prompt
+                )
+            except Exception as exc:
+                _log(f"Warning: repo map generation failed: {exc}")
+
         def _append_phase(result: PhaseResult) -> None:
             """Append a phase result and persist immediately so progress survives crashes."""
             log.phases.append(result)
@@ -4315,6 +4351,7 @@ def _run_pipeline(
                 source_issue=log.source_issue,
                 source_issue_url=log.source_issue_url,
             )
+            system = _inject_repo_map(system, repo_map_text)
             system = _inject_memory_block(system, memory_store, "plan", user, config)
             plan_result = run_phase_sync(
                 Phase.PLAN,
@@ -4406,6 +4443,7 @@ def _run_pipeline(
                         _make_ui=_make_ui,
                         memory_store=memory_store,
                         user_injection_provider=user_injection_provider,
+                        repo_map_text=repo_map_text,
                     )
                     if attempt_result is not None:
                         _log(
@@ -4437,6 +4475,7 @@ def _run_pipeline(
                     branch_name,
                     repo_root=repo_root,
                 )
+                system = _inject_repo_map(system, repo_map_text)
                 system = _inject_memory_block(system, memory_store, "implement", user, config)
                 user += _drain_injected_context(user_injection_provider)
                 attempt_result = run_phase_sync(
@@ -4515,6 +4554,7 @@ def _run_pipeline(
                         sys_prompt, usr_prompt = _build_persona_review_prompt(
                             persona, config, prd_rel, branch_name
                         )
+                        sys_prompt = _inject_repo_map(sys_prompt, repo_map_text)
                         # FR-3: Inject memory context into review phase prompts
                         sys_prompt = _inject_memory_block(sys_prompt, memory_store, "review", usr_prompt, config)
                         usr_prompt += _drain_injected_context(user_injection_provider)
@@ -4598,6 +4638,7 @@ def _run_pipeline(
                             iteration + 1,
                             repo_root=repo_root,
                         )
+                        fix_system = _inject_repo_map(fix_system, repo_map_text)
                         fix_system = _inject_memory_block(fix_system, memory_store, "fix", fix_user, config)
                         fix_user += _drain_injected_context(user_injection_provider)
                         fix_ui = _make_ui()
@@ -4635,6 +4676,7 @@ def _run_pipeline(
                 else:
                     _log("=== Decision Gate ===")
                 system, user = _build_decision_prompt(config, prd_rel, branch_name)
+                system = _inject_repo_map(system, repo_map_text)
                 user += _drain_injected_context(user_injection_provider)
                 decision_result = run_phase_sync(
                     Phase.DECISION,
@@ -4690,6 +4732,7 @@ def _run_pipeline(
                     source_issue=log.source_issue,
                     base_branch=base_branch,
                 )
+                system = _inject_repo_map(system, repo_map_text)
                 user += _drain_injected_context(user_injection_provider)
                 return run_phase_sync(
                     Phase.DELIVER,

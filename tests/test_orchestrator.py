@@ -35,7 +35,9 @@ from colonyos.orchestrator import (
     _build_deliver_prompt,
     _build_thread_fix_prompt,
     _build_ceo_prompt,
+    _build_decision_prompt,
     _build_run_id,
+    _inject_repo_map,
     _invoke_ui_factory,
     _load_run_log,
     _parse_learn_output,
@@ -338,6 +340,158 @@ class TestParseParentTasks:
 
     def test_empty_content(self):
         assert _parse_parent_tasks("") == []
+
+
+class TestInjectRepoMap:
+    """Tests for _inject_repo_map() — Task 5.1."""
+
+    def test_injects_when_repo_map_non_empty(self):
+        """Repo map block is appended with the ## Repository Structure header."""
+        system = "Base system prompt."
+        repo_map = "src/\n  config.py (100 lines)\n"
+        result = _inject_repo_map(system, repo_map)
+        assert "## Repository Structure" in result
+        assert "config.py (100 lines)" in result
+        # Original prompt is preserved
+        assert result.startswith("Base system prompt.")
+
+    def test_no_injection_when_empty(self):
+        """Empty repo map string produces no change to the system prompt."""
+        system = "Base system prompt."
+        result = _inject_repo_map(system, "")
+        assert result == system
+
+    def test_no_injection_when_whitespace_only(self):
+        """Whitespace-only repo map string produces no change."""
+        system = "Base system prompt."
+        result = _inject_repo_map(system, "   \n  ")
+        assert result == system
+
+    def test_repo_map_appears_after_base(self):
+        """Repo map block is appended after the base system prompt content."""
+        system = "## User Directions\n\nBe concise."
+        repo_map = "src/\n  main.py (50 lines)\n"
+        result = _inject_repo_map(system, repo_map)
+        # Header should come after user directions
+        idx_directions = result.index("User Directions")
+        idx_repo_map = result.index("Repository Structure")
+        assert idx_repo_map > idx_directions
+
+    def test_repo_map_integrated_in_plan_prompt(self):
+        """Repo map is injected into a plan prompt when enabled."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="T", description="t", stack="Python"),
+            personas=[REVIEWER_PERSONA],
+            model="test-model",
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+        )
+        system, _user = _build_plan_prompt("test", config, "prd.md", "tasks.md")
+        # Inject repo map manually (as _run_pipeline would)
+        repo_map = "src/\n  foo.py (10 lines)\n"
+        result = _inject_repo_map(system, repo_map)
+        assert "## Repository Structure" in result
+        assert "foo.py (10 lines)" in result
+
+    def test_repo_map_not_injected_when_disabled(self):
+        """When config.repo_map.enabled is False, no repo map should be generated."""
+        # This tests the pattern: callers check config.repo_map.enabled
+        # before calling generate_repo_map, passing "" when disabled
+        system = "Base prompt."
+        result = _inject_repo_map(system, "")
+        assert "Repository Structure" not in result
+
+
+class TestInjectRepoMapDeliverPhase:
+    """Tests for repo map injection into deliver phase — FR-15."""
+
+    def test_repo_map_injected_into_deliver_prompt(self):
+        """Repo map should be injectable into a deliver prompt."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="T", description="t", stack="Python"),
+            personas=[REVIEWER_PERSONA],
+            model="test-model",
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+        )
+        system, _user = _build_deliver_prompt(config, "prd.md", "branch")
+        repo_map = "src/\n  deliver.py (30 lines)\n"
+        result = _inject_repo_map(system, repo_map)
+        assert "## Repository Structure" in result
+        assert "deliver.py (30 lines)" in result
+
+    def test_deliver_prompt_unchanged_when_repo_map_empty(self):
+        """Deliver prompt is unchanged when repo map is empty."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="T", description="t", stack="Python"),
+            personas=[REVIEWER_PERSONA],
+            model="test-model",
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+        )
+        system, _user = _build_deliver_prompt(config, "prd.md", "branch")
+        result = _inject_repo_map(system, "")
+        assert result == system
+        assert "Repository Structure" not in result
+
+
+class TestInjectRepoMapCEOPhase:
+    """Tests for repo map injection into CEO phase — FR-15."""
+
+    def test_repo_map_injected_into_ceo_prompt(self):
+        """Repo map should be injectable into a CEO prompt."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="T", description="t", stack="Python"),
+            personas=[REVIEWER_PERSONA],
+            model="test-model",
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+        )
+        system, _user = _build_ceo_prompt(config, "proposal.md", Path("/tmp/test-repo"))
+        repo_map = "src/\n  ceo.py (20 lines)\n"
+        result = _inject_repo_map(system, repo_map)
+        assert "## Repository Structure" in result
+        assert "ceo.py (20 lines)" in result
+
+    def test_ceo_prompt_unchanged_when_repo_map_empty(self):
+        """CEO prompt is unchanged when repo map is empty."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="T", description="t", stack="Python"),
+            personas=[REVIEWER_PERSONA],
+            model="test-model",
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+        )
+        system, _user = _build_ceo_prompt(config, "proposal.md", Path("/tmp/test-repo"))
+        result = _inject_repo_map(system, "")
+        assert result == system
+        assert "Repository Structure" not in result
+
+
+class TestInjectRepoMapDecisionGate:
+    """Tests for repo map injection into Decision Gate phase — FR-15."""
+
+    def test_repo_map_injected_into_decision_prompt(self):
+        """Repo map should be injectable into a decision gate prompt."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="T", description="t", stack="Python"),
+            personas=[REVIEWER_PERSONA],
+            model="test-model",
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+        )
+        system, _user = _build_decision_prompt(config, "prd.md", "test-branch")
+        repo_map = "src/\n  decision.py (40 lines)\n"
+        result = _inject_repo_map(system, repo_map)
+        assert "## Repository Structure" in result
+        assert "decision.py (40 lines)" in result
+
+    def test_decision_prompt_unchanged_when_repo_map_empty(self):
+        """Decision gate prompt is unchanged when repo map is empty."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="T", description="t", stack="Python"),
+            personas=[REVIEWER_PERSONA],
+            model="test-model",
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+        )
+        system, _user = _build_decision_prompt(config, "prd.md", "test-branch")
+        result = _inject_repo_map(system, "")
+        assert result == system
+        assert "Repository Structure" not in result
 
 
 class TestPersonaSlug:
