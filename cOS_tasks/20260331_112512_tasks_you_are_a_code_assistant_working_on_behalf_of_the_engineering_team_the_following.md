@@ -67,11 +67,11 @@
   - [ ] 5.3 Update `web/src/components/RunList.tsx` — add source type badge column, add PR URL link column, improve prompt display
   - [ ] 5.4 Update `web/src/components/StatsPanel.tsx` — add failure rate card, avg cost per run card, review loop stats (first-pass approval rate)
 
-- [ ] 6.0 Improved Phase Timeline
+- [x] 6.0 Improved Phase Timeline
   depends_on: [1.0]
-  - [ ] 6.1 Write Vitest tests for improved PhaseTimeline (renders vertical connector, duration bars, Lucide icons, expandable errors)
-  - [ ] 6.2 Rewrite `web/src/components/PhaseTimeline.tsx` — vertical connector line between phases, proportional duration bars (width relative to longest phase), Lucide icons (CheckCircle/XCircle/SkipForward) replacing unicode, expandable error details on click
-  - [ ] 6.3 Add visual grouping for review/fix loop iterations (indent or group repeated REVIEW+FIX phases with a loop indicator)
+  - [x] 6.1 Write Vitest tests for improved PhaseTimeline (renders vertical connector, duration bars, Lucide icons, expandable errors)
+  - [x] 6.2 Rewrite `web/src/components/PhaseTimeline.tsx` — vertical connector line between phases, proportional duration bars (width relative to longest phase), Lucide icons (CheckCircle/XCircle/SkipForward) replacing unicode, expandable error details on click
+  - [x] 6.3 Add visual grouping for review/fix loop iterations (indent or group repeated REVIEW+FIX phases with a loop indicator)
 
 - [ ] 7.0 Backend: Daemon-embedded server and pause/resume endpoints
   depends_on: []
