@@ -248,7 +248,7 @@ def _ensure_branch_exists(repo_root: Path, branch_name: str) -> None:
     _log(f"Created feature branch '{branch_name}' for parallel implement")
 
 
-_COLONYOS_OUTPUT_PREFIXES = (
+COLONYOS_OUTPUT_PREFIXES = (
     "cOS_prds/",
     "cOS_tasks/",
     "cOS_reviews/",
@@ -287,7 +287,7 @@ def _check_working_tree_clean(
         if ignore_colonyos_dirs:
             lines = [
                 ln for ln in lines
-                if not any(ln[3:].startswith(p) for p in _COLONYOS_OUTPUT_PREFIXES)
+                if not any(ln[3:].startswith(p) for p in COLONYOS_OUTPUT_PREFIXES)
             ]
         dirty_output = "\n".join(lines)
         return (not dirty_output, dirty_output)
@@ -1324,13 +1324,15 @@ def _parse_task_results_artifact(raw: object) -> dict[str, dict[str, object]]:
             if isinstance(task_id, str) and isinstance(info, dict):
                 normalized[task_id] = dict(info)
         return normalized
+    if not isinstance(raw, (str, bytes, bytearray)):
+        return {}
     try:
         parsed = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (ValueError, json.JSONDecodeError):
         return {}
     if not isinstance(parsed, dict):
         return {}
-    normalized: dict[str, dict[str, object]] = {}
+    normalized = dict[str, dict[str, object]]()
     for task_id, info in parsed.items():
         if isinstance(task_id, str) and isinstance(info, dict):
             normalized[task_id] = dict(info)

@@ -309,6 +309,7 @@ class TestDirtyWorktreeRecovery:
 
     def test_try_execute_next_does_not_auto_recover_when_disabled(self, daemon_instance: Daemon):
         daemon_instance.dry_run = False
+        daemon_instance.daemon_config.auto_recover_dirty_worktree = False
         item = QueueItem(
             id="item-3",
             source_type="prompt",
@@ -1054,3 +1055,294 @@ class TestPipelineWatchdog:
             log = d._run_pipeline_for_item(item)
 
         assert log.status == RunStatus.COMPLETED
+
+
+class TestCeoCleanupGating:
+    """CEO and cleanup scheduling should be blocked when the daemon is degraded."""
+
+    def test_tick_skips_ceo_when_circuit_breaker_active(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.ceo_cooldown_minutes = 0
+        daemon_instance._state.activate_circuit_breaker(30)
+        daemon_instance._pipeline_running = False
+        daemon_instance._last_ceo_time = 0.0
+        daemon_instance._last_github_poll_time = time.monotonic()
+        daemon_instance._last_cleanup_time = time.monotonic()
+        daemon_instance._last_reprioritize_time = time.monotonic()
+        daemon_instance._last_heartbeat_time = time.monotonic()
+        daemon_instance._last_outcome_poll_time = time.monotonic()
+        with patch.object(daemon_instance, "_try_execute_next", return_value=False), \
+             patch.object(daemon_instance, "_schedule_ceo") as mock_ceo, \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_post_daily_digest_if_due"):
+            daemon_instance._tick()
+        mock_ceo.assert_not_called()
+
+    def test_tick_skips_cleanup_when_circuit_breaker_active(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.cleanup_interval_hours = 0
+        daemon_instance._state.activate_circuit_breaker(30)
+        daemon_instance._pipeline_running = False
+        daemon_instance._last_cleanup_time = 0.0
+        daemon_instance._last_github_poll_time = time.monotonic()
+        daemon_instance._last_ceo_time = time.monotonic()
+        daemon_instance._last_reprioritize_time = time.monotonic()
+        daemon_instance._last_heartbeat_time = time.monotonic()
+        daemon_instance._last_outcome_poll_time = time.monotonic()
+        with patch.object(daemon_instance, "_try_execute_next", return_value=False), \
+             patch.object(daemon_instance, "_schedule_cleanup") as mock_cleanup, \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_post_daily_digest_if_due"):
+            daemon_instance._tick()
+        mock_cleanup.assert_not_called()
+
+    def test_tick_skips_ceo_when_paused(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.ceo_cooldown_minutes = 0
+        daemon_instance._state.paused = True
+        daemon_instance._pipeline_running = False
+        daemon_instance._last_ceo_time = 0.0
+        daemon_instance._last_github_poll_time = time.monotonic()
+        daemon_instance._last_cleanup_time = time.monotonic()
+        daemon_instance._last_reprioritize_time = time.monotonic()
+        daemon_instance._last_heartbeat_time = time.monotonic()
+        daemon_instance._last_outcome_poll_time = time.monotonic()
+        with patch.object(daemon_instance, "_try_execute_next", return_value=False), \
+             patch.object(daemon_instance, "_schedule_ceo") as mock_ceo, \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_post_daily_digest_if_due"):
+            daemon_instance._tick()
+        mock_ceo.assert_not_called()
+
+    def test_tick_allows_ceo_when_healthy(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.ceo_cooldown_minutes = 0
+        daemon_instance._pipeline_running = False
+        daemon_instance._last_ceo_time = 0.0
+        daemon_instance._last_github_poll_time = time.monotonic()
+        daemon_instance._last_cleanup_time = time.monotonic()
+        daemon_instance._last_reprioritize_time = time.monotonic()
+        daemon_instance._last_heartbeat_time = time.monotonic()
+        daemon_instance._last_outcome_poll_time = time.monotonic()
+        with patch.object(daemon_instance, "_try_execute_next", return_value=False), \
+             patch.object(daemon_instance, "_schedule_ceo") as mock_ceo, \
+             patch.object(daemon_instance, "_pending_count", return_value=0), \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_post_daily_digest_if_due"):
+            daemon_instance._tick()
+        mock_ceo.assert_called_once()
+
+
+class TestSystemicFailureDetection:
+    """Daemon should auto-pause when all recent failures share the same error code."""
+
+    def test_is_systemic_failure_all_same_code(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.max_consecutive_failures = 3
+        daemon_instance._recent_failure_codes = ["dirty_worktree", "dirty_worktree", "dirty_worktree"]
+        assert daemon_instance._is_systemic_failure() is True
+
+    def test_is_systemic_failure_mixed_codes(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.max_consecutive_failures = 3
+        daemon_instance._recent_failure_codes = ["dirty_worktree", "auth_error", "dirty_worktree"]
+        assert daemon_instance._is_systemic_failure() is False
+
+    def test_is_systemic_failure_not_enough_codes(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.max_consecutive_failures = 3
+        daemon_instance._recent_failure_codes = ["dirty_worktree", "dirty_worktree"]
+        assert daemon_instance._is_systemic_failure() is False
+
+    def test_auto_pauses_on_systemic_failure(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        daemon_instance.daemon_config.max_consecutive_failures = 3
+        daemon_instance.daemon_config.auto_recover_dirty_worktree = False
+        item = QueueItem(
+            id="item-sys",
+            source_type="prompt",
+            source_value="test",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+        daemon_instance._state.consecutive_failures = 2
+        daemon_instance._recent_failure_codes = ["dirty_worktree", "dirty_worktree"]
+
+        dirty_error = PreflightError(
+            "Uncommitted changes detected",
+            code="dirty_worktree",
+            details={"dirty_output": " M src/dirty.py"},
+        )
+
+        with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=dirty_error), \
+             patch.object(daemon_instance, "_post_execution_failure"), \
+             patch.object(daemon_instance, "_post_systemic_failure_alert") as mock_alert:
+            daemon_instance._try_execute_next()
+
+        assert daemon_instance._state.paused is True
+        mock_alert.assert_called_once_with("dirty_worktree", 3)
+
+    def test_circuit_breaker_on_non_systemic_failure(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        daemon_instance.daemon_config.max_consecutive_failures = 3
+        daemon_instance.daemon_config.auto_recover_dirty_worktree = False
+        item = QueueItem(
+            id="item-varied",
+            source_type="prompt",
+            source_value="test",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+        daemon_instance._state.consecutive_failures = 2
+        daemon_instance._recent_failure_codes = ["auth_error", "timeout"]
+
+        error = RuntimeError("connection_reset")
+
+        with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=error), \
+             patch.object(daemon_instance, "_post_execution_failure"), \
+             patch.object(daemon_instance, "_post_systemic_failure_alert"):
+            daemon_instance._try_execute_next()
+
+        assert daemon_instance._state.paused is False
+        assert daemon_instance._state.is_circuit_breaker_active() is True
+
+    def test_escalating_cb_auto_pauses_after_three_activations(self, daemon_instance: Daemon):
+        """After 3 CB activations without a success, the daemon should auto-pause."""
+        daemon_instance.dry_run = False
+        daemon_instance.daemon_config.max_consecutive_failures = 3
+        daemon_instance.daemon_config.auto_recover_dirty_worktree = False
+
+        for cycle in range(3):
+            daemon_instance._state.consecutive_failures = 2
+            daemon_instance._state.circuit_breaker_until = None
+            daemon_instance._recent_failure_codes = [f"err_{cycle}", f"other_{cycle}"]
+            item = QueueItem(
+                id=f"item-esc-{cycle}",
+                source_type="prompt",
+                source_value="test",
+                status=QueueItemStatus.PENDING,
+                priority=1,
+            )
+            daemon_instance._queue_state.items = [item]
+
+            with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=RuntimeError("fail")), \
+                 patch.object(daemon_instance, "_post_execution_failure"), \
+                 patch.object(daemon_instance, "_post_systemic_failure_alert"):
+                daemon_instance._try_execute_next()
+
+        assert daemon_instance._state.circuit_breaker_activations == 3
+        assert daemon_instance._state.paused is True
+
+    def test_success_clears_recent_failure_codes(self, daemon_instance: Daemon):
+        daemon_instance.dry_run = False
+        daemon_instance._recent_failure_codes = ["dirty_worktree", "dirty_worktree"]
+        item = QueueItem(
+            id="item-ok",
+            source_type="prompt",
+            source_value="test",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+
+        fake_log = RunLog(
+            run_id="run-ok",
+            prompt="test",
+            status=RunStatus.COMPLETED,
+            total_cost_usd=0.1,
+        )
+
+        with patch("colonyos.cli.run_pipeline_for_queue_item", return_value=fake_log):
+            daemon_instance._try_execute_next()
+
+        assert daemon_instance._recent_failure_codes == []
+
+
+class TestPreExecWorktreeCheck:
+    """Pre-execution dirty worktree check should prevent item-level failures."""
+
+    def test_skips_execution_when_dirty_and_no_auto_recover(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.auto_recover_dirty_worktree = False
+        daemon_instance._queue_state.items = [
+            QueueItem(id="item", source_type="prompt", source_value="x", status=QueueItemStatus.PENDING, priority=1),
+        ]
+        with patch.object(daemon_instance, "_is_worktree_dirty", return_value=True):
+            result = daemon_instance._try_execute_next()
+        assert result is False
+        assert daemon_instance._queue_state.items[0].status == QueueItemStatus.PENDING
+
+    def test_recovers_and_proceeds_when_dirty_and_auto_recover(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.auto_recover_dirty_worktree = True
+        item = QueueItem(
+            id="item",
+            source_type="prompt",
+            source_value="x",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+
+        fake_log = RunLog(
+            run_id="run-1",
+            prompt="x",
+            status=RunStatus.COMPLETED,
+            total_cost_usd=0.0,
+        )
+
+        with patch.object(daemon_instance, "_is_worktree_dirty", return_value=True), \
+             patch.object(daemon_instance, "_recover_dirty_worktree_preemptive") as mock_recover, \
+             patch("colonyos.cli.run_pipeline_for_queue_item", return_value=fake_log):
+            result = daemon_instance._try_execute_next()
+
+        assert result is True
+        mock_recover.assert_called_once()
+        assert item.status == QueueItemStatus.COMPLETED
+
+    def test_skips_execution_when_recovery_fails(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.auto_recover_dirty_worktree = True
+        daemon_instance._queue_state.items = [
+            QueueItem(id="item", source_type="prompt", source_value="x", status=QueueItemStatus.PENDING, priority=1),
+        ]
+        with patch.object(daemon_instance, "_is_worktree_dirty", return_value=True), \
+             patch.object(daemon_instance, "_recover_dirty_worktree_preemptive", return_value=False):
+            result = daemon_instance._try_execute_next()
+        assert result is False
+        assert daemon_instance._queue_state.items[0].status == QueueItemStatus.PENDING
+
+    def test_proceeds_when_worktree_clean(self, daemon_instance: Daemon):
+        item = QueueItem(
+            id="item",
+            source_type="prompt",
+            source_value="x",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+
+        fake_log = RunLog(
+            run_id="run-1",
+            prompt="x",
+            status=RunStatus.COMPLETED,
+            total_cost_usd=0.0,
+        )
+
+        with patch.object(daemon_instance, "_is_worktree_dirty", return_value=False), \
+             patch("colonyos.cli.run_pipeline_for_queue_item", return_value=fake_log):
+            result = daemon_instance._try_execute_next()
+
+        assert result is True
+        assert item.status == QueueItemStatus.COMPLETED
+
+    def test_skips_worktree_check_while_paused(self, daemon_instance: Daemon):
+        daemon_instance._state.paused = True
+        daemon_instance._queue_state.items = [
+            QueueItem(id="item", source_type="prompt", source_value="x", status=QueueItemStatus.PENDING, priority=1),
+        ]
+
+        with patch.object(daemon_instance, "_is_worktree_dirty") as mock_dirty:
+            result = daemon_instance._try_execute_next()
+
+        assert result is False
+        mock_dirty.assert_not_called()
+
+    def test_skips_worktree_check_when_queue_is_empty(self, daemon_instance: Daemon):
+        with patch.object(daemon_instance, "_is_worktree_dirty") as mock_dirty:
+            result = daemon_instance._try_execute_next()
+
+        assert result is False
+        mock_dirty.assert_not_called()

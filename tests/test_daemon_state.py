@@ -110,6 +110,44 @@ class TestDaemonState:
         state = DaemonState(circuit_breaker_until=past)
         assert state.is_circuit_breaker_active() is False
 
+    def test_circuit_breaker_escalating_cooldowns(self):
+        state = DaemonState()
+        result1 = state.activate_circuit_breaker(30)
+        assert result1 is not None
+        assert state.circuit_breaker_activations == 1
+        assert state.is_circuit_breaker_active() is True
+
+        state.circuit_breaker_until = None
+        result2 = state.activate_circuit_breaker(30)
+        assert result2 is not None
+        assert state.circuit_breaker_activations == 2
+
+        result3 = state.activate_circuit_breaker(30)
+        assert result3 is None
+        assert state.circuit_breaker_activations == 3
+
+    def test_record_success_resets_circuit_breaker_activations(self):
+        state = DaemonState(
+            consecutive_failures=5,
+            circuit_breaker_activations=2,
+        )
+        state.activate_circuit_breaker(30)
+        state.record_success()
+        assert state.circuit_breaker_activations == 0
+        assert state.consecutive_failures == 0
+        assert state.circuit_breaker_until is None
+
+    def test_circuit_breaker_activations_serialization(self):
+        state = DaemonState(circuit_breaker_activations=2)
+        d = state.to_dict()
+        assert d["circuit_breaker_activations"] == 2
+        restored = DaemonState.from_dict(d)
+        assert restored.circuit_breaker_activations == 2
+
+    def test_circuit_breaker_activations_default_from_old_state(self):
+        state = DaemonState.from_dict({"daily_spend_usd": 5.0})
+        assert state.circuit_breaker_activations == 0
+
     def test_touch_heartbeat(self):
         state = DaemonState()
         assert state.last_heartbeat is None

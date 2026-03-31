@@ -107,7 +107,7 @@ DEFAULTS = {
         "issue_labels": [],
         "allowed_control_user_ids": [],
         "allow_all_control_users": False,
-        "auto_recover_dirty_worktree": False,
+        "auto_recover_dirty_worktree": True,
         "pipeline_timeout_seconds": 7200,
     },
 }
@@ -270,7 +270,7 @@ class DaemonConfig:
     issue_labels: list[str] = field(default_factory=list)
     allowed_control_user_ids: list[str] = field(default_factory=list)
     allow_all_control_users: bool = False
-    auto_recover_dirty_worktree: bool = False
+    auto_recover_dirty_worktree: bool = True
     pipeline_timeout_seconds: int = 7200
 
 
