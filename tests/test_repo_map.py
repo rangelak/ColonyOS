@@ -28,6 +28,8 @@ from colonyos.repo_map import (
     truncate_to_budget,
 )
 
+REAL_SUBPROCESS_RUN = subprocess.run
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -42,12 +44,12 @@ def config() -> RepoMapConfig:
 @pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
     """Create a minimal git repository for integration-style tests."""
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
-    subprocess.run(
+    REAL_SUBPROCESS_RUN(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    REAL_SUBPROCESS_RUN(
         ["git", "config", "user.email", "test@test.com"],
         cwd=tmp_path, capture_output=True, check=True,
     )
-    subprocess.run(
+    REAL_SUBPROCESS_RUN(
         ["git", "config", "user.name", "Test"],
         cwd=tmp_path, capture_output=True, check=True,
     )
@@ -60,8 +62,8 @@ def _add_and_commit(repo: Path, files: dict[str, str]) -> None:
         full = repo / rel_path
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text(content)
-    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True, check=True)
-    subprocess.run(
+    REAL_SUBPROCESS_RUN(["git", "add", "."], cwd=repo, capture_output=True, check=True)
+    REAL_SUBPROCESS_RUN(
         ["git", "commit", "-m", "test"],
         cwd=repo, capture_output=True, check=True,
     )
@@ -102,6 +104,14 @@ class TestGetTrackedFiles:
         assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
         assert env["GIT_CONFIG_VALUE_0"] == "/github/workspace"
         assert "GIT_DIR" not in env
+
+    def test_ignores_leaked_global_subprocess_run_mock(
+        self, git_repo: Path, config: RepoMapConfig
+    ):
+        _add_and_commit(git_repo, {"src/app.py": "pass"})
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
+            files = get_tracked_files(git_repo, config)
+        assert files == ["src/app.py"]
 
     def test_filters_sensitive_env_files(self, git_repo: Path, config: RepoMapConfig):
         _add_and_commit(git_repo, {
@@ -188,12 +198,12 @@ class TestGetTrackedFiles:
         assert files == []
 
     def test_returns_empty_on_timeout(self, git_repo: Path, config: RepoMapConfig):
-        with patch("colonyos.repo_map.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=30)):
+        with patch("colonyos.repo_map._run_subprocess", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=30)):
             files = get_tracked_files(git_repo, config)
         assert files == []
 
     def test_returns_empty_on_os_error(self, git_repo: Path, config: RepoMapConfig):
-        with patch("colonyos.repo_map.subprocess.run", side_effect=OSError("no git")):
+        with patch("colonyos.repo_map._run_subprocess", side_effect=OSError("no git")):
             files = get_tracked_files(git_repo, config)
         assert files == []
 

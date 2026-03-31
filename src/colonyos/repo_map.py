@@ -20,6 +20,7 @@ from pathlib import Path
 from colonyos.config import RepoMapConfig
 
 logger = logging.getLogger(__name__)
+_run_subprocess = subprocess.run
 
 # Maximum file size (in bytes) to read for symbol extraction.  Files larger
 # than this threshold are recorded with size metadata only — no AST/regex
@@ -110,7 +111,7 @@ def get_tracked_files(repo_root: Path, config: RepoMapConfig) -> list[str]:
         Relative file paths from the repository root.
     """
     try:
-        result = subprocess.run(
+        result = _run_subprocess(
             ["git", "-C", str(repo_root), "ls-files"],
             capture_output=True,
             text=True,
