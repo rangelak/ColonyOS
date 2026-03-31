@@ -1315,16 +1315,20 @@ def _load_task_outline(repo_root: Path, task_rel: str) -> list[tuple[str, str]]:
 
 
 def _format_task_outline_note(tasks: list[tuple[str, str]]) -> str:
-    """Summarize the planned task list for the implement phase."""
+    """Summarize the planned task list for the implement phase.
+
+    Returns a Slack mrkdwn formatted bullet list with a bold header line,
+    one ``•`` bullet per task (up to 6), and a ``+N more`` overflow line.
+    """
     if not tasks:
         return ""
-    rendered: list[str] = []
+    lines: list[str] = [f"*Implement tasks ({len(tasks)}):*"]
     for task_id, description in tasks[:6]:
         short = description if len(description) <= 72 else f"{description[:69]}..."
-        rendered.append(f"`{task_id}` {short}")
+        lines.append(f"\u2022 `{task_id}` {short}")
     if len(tasks) > 6:
-        rendered.append(f"+{len(tasks) - 6} more")
-    return f"Implement tasks ({len(tasks)}): " + "; ".join(rendered)
+        lines.append(f"+{len(tasks) - 6} more")
+    return "\n".join(lines)
 
 
 def _normalize_task_status(raw: object) -> str:

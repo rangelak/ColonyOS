@@ -112,7 +112,6 @@ class TestFormatTaskOutlineNote:
         assert "A" * 100 not in result
         assert "..." in result
 
-    @pytest.mark.xfail(reason="Bullet formatting not yet implemented (task 2.0)", strict=True)
     def test_uses_bullet_format(self):
         """Output should use bullet points with newlines, not semicolons."""
         tasks = [("1.0", "First task"), ("2.0", "Second task")]
@@ -120,6 +119,8 @@ class TestFormatTaskOutlineNote:
         # Should use bullet format with newlines
         assert "\u2022" in result  # bullet character
         assert "\n" in result
+        # Should NOT use semicolons
+        assert "; " not in result
 
 
 # ===================================================================

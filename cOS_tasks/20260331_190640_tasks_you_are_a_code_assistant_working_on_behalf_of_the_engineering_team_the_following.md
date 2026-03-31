@@ -20,10 +20,10 @@
   - [x] 1.4 Add a test for `_extract_review_findings_summary()` (new helper) covering: well-formatted FINDINGS section, missing FINDINGS section (fallback to first line), empty text, very long findings (truncation).
   - [x] 1.5 Add a test that verifies no single formatted message exceeds 3,000 characters when given pathologically long inputs.
 
-- [ ] 2.0 Reformat task outline to use bullet list (FR-2)
+- [x] 2.0 Reformat task outline to use bullet list (FR-2)
   depends_on: []
-  - [ ] 2.1 Modify `_format_task_outline_note()` in `orchestrator.py` (line 1317) to output newline-separated bullet points with `•` prefix instead of `"; ".join()`. Add bold header `*Implement tasks (N):*` on its own line. Keep 72-char truncation and `+N more` overflow.
-  - [ ] 2.2 Run existing tests to verify no regressions.
+  - [x] 2.1 Modify `_format_task_outline_note()` in `orchestrator.py` (line 1317) to output newline-separated bullet points with `•` prefix instead of `"; ".join()`. Add bold header `*Implement tasks (N):*` on its own line. Keep 72-char truncation and `+N more` overflow.
+  - [x] 2.2 Run existing tests to verify no regressions.
 
 - [ ] 3.0 Include task descriptions in completion and result messages (FR-1, FR-3)
   depends_on: []
