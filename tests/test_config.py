@@ -13,6 +13,7 @@ from colonyos.config import (
     DEFAULTS,
     LearningsConfig,
     PhasesConfig,
+    PRSyncConfig,
     RecoveryConfig,
     RetryConfig,
     RouterConfig,
@@ -1576,3 +1577,99 @@ class TestDashboardWriteEnabledConfig:
         save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.daemon.dashboard_write_enabled is True
+
+
+class TestPRSyncConfig:
+    """Tests for PRSyncConfig parsing, defaults, validation, and serialization."""
+
+    def test_default_values(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.daemon.pr_sync.enabled is False
+        assert config.daemon.pr_sync.interval_minutes == 60
+        assert config.daemon.pr_sync.max_sync_failures == 3
+
+    def test_parsed_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "daemon": {
+                    "pr_sync": {
+                        "enabled": True,
+                        "interval_minutes": 30,
+                        "max_sync_failures": 5,
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.pr_sync.enabled is True
+        assert config.daemon.pr_sync.interval_minutes == 30
+        assert config.daemon.pr_sync.max_sync_failures == 5
+
+    def test_missing_section_gets_defaults(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"daily_budget_usd": 100.0}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.pr_sync.enabled is False
+        assert config.daemon.pr_sync.interval_minutes == 60
+        assert config.daemon.pr_sync.max_sync_failures == 3
+
+    def test_interval_minutes_below_one_raises(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"pr_sync": {"interval_minutes": 0}}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="pr_sync.interval_minutes must be >= 1"):
+            load_config(tmp_repo)
+
+    def test_max_sync_failures_below_one_raises(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"pr_sync": {"max_sync_failures": 0}}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="pr_sync.max_sync_failures must be >= 1"):
+            load_config(tmp_repo)
+
+    def test_roundtrip(self, tmp_repo: Path):
+        original = ColonyConfig(
+            daemon=DaemonConfig(
+                pr_sync=PRSyncConfig(
+                    enabled=True, interval_minutes=45, max_sync_failures=7
+                ),
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.pr_sync.enabled is True
+        assert loaded.daemon.pr_sync.interval_minutes == 45
+        assert loaded.daemon.pr_sync.max_sync_failures == 7
+
+    def test_non_default_values_included_in_save(self, tmp_repo: Path):
+        original = ColonyConfig(
+            daemon=DaemonConfig(
+                pr_sync=PRSyncConfig(enabled=True, interval_minutes=30),
+            ),
+        )
+        save_config(tmp_repo, original)
+        config_path = tmp_repo / ".colonyos" / "config.yaml"
+        saved_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "daemon" in saved_data
+        assert "pr_sync" in saved_data["daemon"]
+        assert saved_data["daemon"]["pr_sync"]["enabled"] is True
+        assert saved_data["daemon"]["pr_sync"]["interval_minutes"] == 30
+
+    def test_defaults_dict_has_pr_sync(self):
+        assert "pr_sync" in DEFAULTS["daemon"]
+        assert DEFAULTS["daemon"]["pr_sync"]["enabled"] is False
+        assert DEFAULTS["daemon"]["pr_sync"]["interval_minutes"] == 60
+        assert DEFAULTS["daemon"]["pr_sync"]["max_sync_failures"] == 3
