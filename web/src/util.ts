@@ -114,6 +114,49 @@ export function healthStatusColor(status: string): string {
   }
 }
 
+/** Source type badge color (Tailwind classes). */
+export function sourceTypeBg(sourceType: string | null): string {
+  switch (sourceType) {
+    case "issue":
+      return "bg-blue-400/20 text-blue-400";
+    case "slack":
+    case "slack_fix":
+      return "bg-purple-400/20 text-purple-400";
+    case "pr_review_fix":
+      return "bg-orange-400/20 text-orange-400";
+    case "ceo":
+      return "bg-red-400/20 text-red-400";
+    case "prompt":
+      return "bg-gray-400/20 text-gray-400";
+    default:
+      return "bg-gray-400/20 text-gray-400";
+  }
+}
+
+/** Human-readable source type label. */
+export function sourceTypeLabel(sourceType: string | null): string {
+  switch (sourceType) {
+    case "issue":
+      return "Issue";
+    case "slack":
+      return "Slack";
+    case "slack_fix":
+      return "Slack Fix";
+    case "pr_review_fix":
+      return "PR Review";
+    case "ceo":
+      return "CEO";
+    case "prompt":
+      return "Prompt";
+    case "cleanup":
+      return "Cleanup";
+    case "refactor":
+      return "Refactor";
+    default:
+      return sourceType ?? "Unknown";
+  }
+}
+
 /** Daemon health status dot color (Tailwind bg classes). */
 export function healthStatusDot(status: string): string {
   switch (status) {

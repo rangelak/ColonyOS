@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import type { RunLog } from "../types";
-import { formatDuration, statusColor, statusIcon } from "../util";
+import { formatDuration, statusColor, statusIcon, sourceTypeBg, sourceTypeLabel } from "../util";
 
 export default function RunList({ runs }: { runs: RunLog[] }) {
   if (runs.length === 0) {
@@ -20,11 +20,13 @@ export default function RunList({ runs }: { runs: RunLog[] }) {
         <thead>
           <tr className="border-b border-gray-800 text-left text-gray-500 uppercase text-xs tracking-wider">
             <th className="px-4 py-3">Status</th>
+            <th className="px-4 py-3">Source</th>
             <th className="px-4 py-3">Run ID</th>
             <th className="px-4 py-3">Prompt</th>
             <th className="px-4 py-3 text-right">Cost</th>
             <th className="px-4 py-3 text-right">Duration</th>
             <th className="px-4 py-3 text-right">Phases</th>
+            <th className="px-4 py-3">PR</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-800">
@@ -37,6 +39,11 @@ export default function RunList({ runs }: { runs: RunLog[] }) {
                 <td className="px-4 py-3">
                   <span className={`font-medium ${statusColor(run.status)}`}>
                     {statusIcon(run.status)} {run.status}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
+                  <span className={`inline-block text-xs px-1.5 py-0.5 rounded font-medium ${sourceTypeBg(run.source_type)}`}>
+                    {sourceTypeLabel(run.source_type)}
                   </span>
                 </td>
                 <td className="px-4 py-3">
@@ -58,6 +65,20 @@ export default function RunList({ runs }: { runs: RunLog[] }) {
                 </td>
                 <td className="px-4 py-3 text-right text-gray-400">
                   {run.phases.length}
+                </td>
+                <td className="px-4 py-3">
+                  {run.pr_url ? (
+                    <a
+                      href={run.pr_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-emerald-400 hover:text-emerald-300 text-xs font-medium"
+                    >
+                      PR ↗
+                    </a>
+                  ) : (
+                    <span className="text-gray-600">—</span>
+                  )}
                 </td>
               </tr>
             );

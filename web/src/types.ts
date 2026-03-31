@@ -13,6 +13,8 @@ export interface RunLog {
   task_rel: string | null;
   source_issue: number | null;
   source_issue_url: string | null;
+  source_type: string | null;
+  pr_url: string | null;
 }
 
 export interface PhaseEntry {
