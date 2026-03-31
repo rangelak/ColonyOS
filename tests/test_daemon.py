@@ -1061,6 +1061,7 @@ class TestCeoCleanupGating:
     """CEO and cleanup scheduling should be blocked when the daemon is degraded."""
 
     def test_tick_skips_ceo_when_circuit_breaker_active(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.ceo_cooldown_minutes = 0
         daemon_instance._state.activate_circuit_breaker(30)
         daemon_instance._pipeline_running = False
         daemon_instance._last_ceo_time = 0.0
@@ -1077,6 +1078,7 @@ class TestCeoCleanupGating:
         mock_ceo.assert_not_called()
 
     def test_tick_skips_cleanup_when_circuit_breaker_active(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.cleanup_interval_hours = 0
         daemon_instance._state.activate_circuit_breaker(30)
         daemon_instance._pipeline_running = False
         daemon_instance._last_cleanup_time = 0.0
@@ -1093,6 +1095,7 @@ class TestCeoCleanupGating:
         mock_cleanup.assert_not_called()
 
     def test_tick_skips_ceo_when_paused(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.ceo_cooldown_minutes = 0
         daemon_instance._state.paused = True
         daemon_instance._pipeline_running = False
         daemon_instance._last_ceo_time = 0.0
@@ -1109,6 +1112,7 @@ class TestCeoCleanupGating:
         mock_ceo.assert_not_called()
 
     def test_tick_allows_ceo_when_healthy(self, daemon_instance: Daemon):
+        daemon_instance.daemon_config.ceo_cooldown_minutes = 0
         daemon_instance._pipeline_running = False
         daemon_instance._last_ceo_time = 0.0
         daemon_instance._last_github_poll_time = time.monotonic()
