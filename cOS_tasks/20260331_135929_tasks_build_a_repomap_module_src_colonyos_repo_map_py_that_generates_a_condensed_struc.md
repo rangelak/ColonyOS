@@ -48,13 +48,13 @@
   - [x] 4.7 Implement `truncate_to_budget(overview, ranked_files, max_tokens)` that greedily adds files until the `chars/4` budget is exhausted. Overview is always included first.
   - [x] 4.8 Implement top-level `generate_repo_map(repo_root, config, prompt_text="")` function that orchestrates: `get_tracked_files` → `extract_file_symbols` (for each) → `rank_by_relevance` → `truncate_to_budget` → return formatted string
 
-- [ ] 5.0 Integrate repo map into the orchestrator pipeline
+- [x] 5.0 Integrate repo map into the orchestrator pipeline
   depends_on: [1.0, 4.0]
-  - [ ] 5.1 Write tests in `tests/test_orchestrator.py` for: repo map injection into system prompt when `enabled=True`, no injection when `enabled=False`, repo map appears after user_directions and before phase template, prompt text passed for relevance ranking
-  - [ ] 5.2 Add `_inject_repo_map()` helper function in `orchestrator.py` following the pattern of `_inject_memory_block()`: takes system prompt string + repo map string, appends with `## Repository Structure` header, returns modified system prompt
-  - [ ] 5.3 Generate the repo map once in `_run_pipeline()` before the first phase. Store it as a local variable passed to prompt-building functions.
-  - [ ] 5.4 Call `_inject_repo_map()` in `_format_base()` or at each prompt-building call site (whichever is cleaner), injecting after user_directions. Skip when `config.repo_map.enabled` is False.
-  - [ ] 5.5 Pass the current task/feature description as `prompt_text` to `generate_repo_map()` so relevance ranking works against the actual user request
+  - [x] 5.1 Write tests in `tests/test_orchestrator.py` for: repo map injection into system prompt when `enabled=True`, no injection when `enabled=False`, repo map appears after user_directions and before phase template, prompt text passed for relevance ranking
+  - [x] 5.2 Add `_inject_repo_map()` helper function in `orchestrator.py` following the pattern of `_inject_memory_block()`: takes system prompt string + repo map string, appends with `## Repository Structure` header, returns modified system prompt
+  - [x] 5.3 Generate the repo map once in `_run_pipeline()` before the first phase. Store it as a local variable passed to prompt-building functions.
+  - [x] 5.4 Call `_inject_repo_map()` in `_format_base()` or at each prompt-building call site (whichever is cleaner), injecting after user_directions. Skip when `config.repo_map.enabled` is False.
+  - [x] 5.5 Pass the current task/feature description as `prompt_text` to `generate_repo_map()` so relevance ranking works against the actual user request
 
 - [x] 6.0 Add `colonyos map` CLI command
   depends_on: [4.0]
