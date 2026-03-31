@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Component } from "react";
+import type { ErrorInfo, ReactNode } from "react";
 import { fetchStats } from "../api";
 import type { StatsResult } from "../types";
 import CostChart from "../components/CostChart";
@@ -68,17 +69,23 @@ export default function Analytics() {
 
       {/* Cost trend */}
       <ChartCard title="Cost Trend" subtitle="Cost per recent run">
-        <CostChart data={stats.recent_trend} />
+        <ChartErrorBoundary fallbackLabel="Cost Trend">
+          <CostChart data={stats.recent_trend} />
+        </ChartErrorBoundary>
       </ChartCard>
 
       {/* Phase breakdown + failure hotspots side by side */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <ChartCard title="Phase Cost Breakdown" subtitle="Total and average cost per phase">
-          <PhaseCostChart data={stats.cost_breakdown} />
+          <ChartErrorBoundary fallbackLabel="Phase Cost Breakdown">
+            <PhaseCostChart data={stats.cost_breakdown} />
+          </ChartErrorBoundary>
         </ChartCard>
 
         <ChartCard title="Failure Hotspots" subtitle="Failure rate by phase">
-          <FailureHotspotsChart data={stats.failure_hotspots} />
+          <ChartErrorBoundary fallbackLabel="Failure Hotspots">
+            <FailureHotspotsChart data={stats.failure_hotspots} />
+          </ChartErrorBoundary>
         </ChartCard>
       </div>
 
@@ -99,6 +106,45 @@ export default function Analytics() {
       </ChartCard>
     </div>
   );
+}
+
+/** Error boundary that catches render errors in chart children. */
+interface ChartErrorBoundaryProps {
+  children: ReactNode;
+  fallbackLabel?: string;
+}
+interface ChartErrorBoundaryState {
+  error: Error | null;
+}
+
+class ChartErrorBoundary extends Component<ChartErrorBoundaryProps, ChartErrorBoundaryState> {
+  constructor(props: ChartErrorBoundaryProps) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ChartErrorBoundaryState {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    // eslint-disable-next-line no-console
+    console.error("Chart render error:", error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div
+          className="text-red-400 text-sm text-center py-8"
+          data-testid="chart-error-boundary"
+        >
+          Failed to render chart{this.props.fallbackLabel ? `: ${this.props.fallbackLabel}` : ""}.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function SummaryCard({

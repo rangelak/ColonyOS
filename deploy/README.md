@@ -175,9 +175,21 @@ In `.colonyos/config.yaml`:
 
 ```yaml
 daemon:
-  dashboard_enabled: true   # set to false to disable the web dashboard
-  dashboard_port: 8741      # port the dashboard listens on
+  dashboard_enabled: true          # set to false to disable the web dashboard
+  dashboard_port: 8741             # port the dashboard listens on
+  dashboard_write_enabled: false   # set to true to enable pause/resume from UI
 ```
+
+### Bearer Token Lifecycle
+
+When `dashboard_write_enabled: true`, the daemon generates a random bearer token
+on startup. This token is printed to the log (masked) and is required for all
+write operations (pause, resume, config changes).
+
+**The token is ephemeral** — it lives only in memory and changes every time the
+daemon restarts. There is no way to recover a lost token; simply restart the
+daemon to generate a new one. This is intentional: short-lived, unguessable
+tokens reduce the blast radius if a token is leaked.
 
 ## Monitoring
 

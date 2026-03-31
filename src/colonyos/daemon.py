@@ -443,9 +443,9 @@ class Daemon:
 
         def _serve() -> None:
             try:
-                if write_enabled:
-                    os.environ.setdefault("COLONYOS_WRITE_ENABLED", "1")
-                app, auth_token = create_app(self.repo_root)
+                app, auth_token = create_app(
+                    self.repo_root, write_enabled=write_enabled
+                )
                 app.state.daemon_instance = self
                 masked = auth_token[-4:] if len(auth_token) >= 4 else "****"
                 logger.info(

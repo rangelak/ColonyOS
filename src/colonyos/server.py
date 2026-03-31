@@ -68,11 +68,19 @@ def _config_to_dict(config: Any) -> dict[str, Any]:
     return raw
 
 
-def create_app(repo_root: Path) -> tuple[FastAPI, str]:
+def create_app(
+    repo_root: Path,
+    *,
+    write_enabled: bool | None = None,
+) -> tuple[FastAPI, str]:
     """Create and configure the FastAPI application.
 
     Args:
         repo_root: Path to the repository root containing ``.colonyos/``.
+        write_enabled: Explicitly enable/disable write endpoints.
+            When ``None`` (default), falls back to the
+            ``COLONYOS_WRITE_ENABLED`` environment variable for
+            backward compatibility.
 
     Returns:
         A tuple of (FastAPI app, bearer token for write endpoints).
@@ -86,7 +94,9 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
 
     # Generate auth token for write endpoints
     auth_token = secrets.token_urlsafe(32)
-    write_enabled = bool(os.environ.get("COLONYOS_WRITE_ENABLED"))
+    if write_enabled is None:
+        write_enabled = bool(os.environ.get("COLONYOS_WRITE_ENABLED"))
+    write_enabled = bool(write_enabled)
 
     # Semaphore for rate limiting: max 1 concurrent run
     active_run_semaphore = threading.Semaphore(1)

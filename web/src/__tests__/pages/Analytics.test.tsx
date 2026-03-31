@@ -123,4 +123,37 @@ describe("Analytics page", () => {
     renderAnalytics();
     expect(screen.getByText(/loading analytics/i)).toBeDefined();
   });
+
+  it("renders chart error boundary when a chart throws", async () => {
+    // Mock CostChart to throw during render
+    const CostChartMock = await import("../../components/CostChart");
+    const original = CostChartMock.default;
+    // Replace with a component that throws
+    vi.spyOn(CostChartMock, "default").mockImplementation(() => {
+      throw new Error("Chart render boom");
+    });
+
+    // Suppress console.error from React error boundary
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(sampleStats),
+      })
+    );
+
+    renderAnalytics();
+
+    await waitFor(() => {
+      const boundaries = screen.getAllByTestId("chart-error-boundary");
+      expect(boundaries.length).toBeGreaterThanOrEqual(1);
+      expect(boundaries[0].textContent).toContain("Failed to render chart");
+    });
+
+    consoleSpy.mockRestore();
+    // Restore original
+    (CostChartMock.default as any).mockRestore?.();
+  });
 });

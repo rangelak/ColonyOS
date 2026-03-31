@@ -690,3 +690,44 @@ class TestSPAPathTraversal:
         resp = client.get("/..%2F..%2Fetc%2Fpasswd")
         # Should return 200 with index.html, not serve arbitrary files
         assert resp.status_code == 200
+
+
+class TestCreateAppWriteEnabledParam:
+    """Verify that ``create_app`` accepts an explicit ``write_enabled`` kwarg
+    so callers don't need to rely on ``os.environ``."""
+
+    def test_write_enabled_explicit_true(self, tmp_repo: Path, monkeypatch):
+        """Passing ``write_enabled=True`` enables write endpoints regardless of env."""
+        monkeypatch.delenv("COLONYOS_WRITE_ENABLED", raising=False)
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, auth_token = create_app(tmp_repo, write_enabled=True)
+        client = TestClient(app)
+        resp = client.get("/api/health")
+        assert resp.json()["write_enabled"] == "true"
+
+    def test_write_enabled_explicit_false(self, tmp_repo: Path, monkeypatch):
+        """Passing ``write_enabled=False`` disables write endpoints even if env is set."""
+        monkeypatch.setenv("COLONYOS_WRITE_ENABLED", "1")
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, _ = create_app(tmp_repo, write_enabled=False)
+        client = TestClient(app)
+        resp = client.get("/api/health")
+        assert resp.json()["write_enabled"] == "false"
+        # Write endpoint should be blocked
+        resp = client.post("/api/daemon/pause")
+        assert resp.status_code == 403
+
+    def test_write_enabled_none_falls_back_to_env(self, tmp_repo: Path, monkeypatch):
+        """When ``write_enabled`` is not passed, falls back to ``COLONYOS_WRITE_ENABLED``."""
+        monkeypatch.setenv("COLONYOS_WRITE_ENABLED", "1")
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, _ = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get("/api/health")
+        assert resp.json()["write_enabled"] == "true"
