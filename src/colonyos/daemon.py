@@ -356,6 +356,7 @@ class Daemon:
 
         # Outcome polling timestamp
         self._last_outcome_poll_time: float = 0.0
+        self._last_pr_sync_time: float = 0.0
         self._last_digest_date: str | None = None
 
         # Budget alert flags (reset on daily budget reset)
@@ -584,6 +585,17 @@ class Daemon:
         if now - self._last_outcome_poll_time >= outcome_interval:
             self._poll_pr_outcomes()
             self._last_outcome_poll_time = now
+
+        # 7. PR sync — keep ColonyOS PRs up-to-date with main
+        pr_sync_cfg = self.daemon_config.pr_sync
+        if (
+            pr_sync_cfg.enabled
+            and not self._state.paused
+            and not self._pipeline_running
+            and now - self._last_pr_sync_time >= pr_sync_cfg.interval_minutes * 60
+        ):
+            self._sync_stale_prs()
+            self._last_pr_sync_time = now
 
     # ------------------------------------------------------------------
     # Queue execution
@@ -1071,6 +1083,27 @@ class Daemon:
             logger.debug("PR outcome poll completed")
         except Exception:
             logger.warning("Error polling PR outcomes", exc_info=True)
+
+    def _sync_stale_prs(self) -> None:
+        """Sync a stale ColonyOS PR with main (concern #7).
+
+        Wraps :func:`~colonyos.pr_sync.sync_stale_prs` in try/except so
+        a failure never crashes the daemon.  Follows the same pattern as
+        :meth:`_poll_pr_outcomes`.
+        """
+        try:
+            from colonyos.pr_sync import sync_stale_prs
+
+            sync_stale_prs(
+                repo_root=self.repo_root,
+                config=self.config,
+                queue_state_items=self._queue_state.items,
+                post_slack_fn=self._post_slack_message,
+                write_enabled=self.daemon_config.dashboard_write_enabled,
+            )
+            logger.debug("PR sync check completed")
+        except Exception:
+            logger.warning("Error during PR sync", exc_info=True)
 
     # ------------------------------------------------------------------
     # CEO Idle-Fill (FR-4)

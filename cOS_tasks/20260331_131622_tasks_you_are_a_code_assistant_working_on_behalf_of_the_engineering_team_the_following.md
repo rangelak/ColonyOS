@@ -66,18 +66,18 @@
     - Always: tear down worktree in a `finally` block
   - [x] 4.4 Add structured logging for each sync operation: branch name, PR number, pre/post HEAD SHA, outcome
 
-- [ ] 5.0 Daemon integration: Wire sync into the tick loop
+- [x] 5.0 Daemon integration: Wire sync into the tick loop
   depends_on: [4.0]
-  - [ ] 5.1 Write tests in `tests/test_daemon.py`: add `TestPRSync` class testing:
+  - [x] 5.1 Write tests in `tests/test_daemon.py`: add `TestPRSync` class testing:
     - `test_sync_called_on_interval` — sync function is called when interval elapses
     - `test_sync_not_called_when_disabled` — sync function is not called when `pr_sync.enabled` is False
     - `test_sync_not_called_when_paused` — sync is skipped when daemon is paused
     - `test_sync_not_called_during_pipeline` — sync is skipped when `_pipeline_running` is True
     - `test_sync_exception_caught` — exceptions in sync do not crash the daemon
-  - [ ] 5.2 Add `_last_pr_sync_time: float` instance variable to `Daemon.__init__()`, initialized to `0.0`
-  - [ ] 5.3 Add `_sync_stale_prs()` method to `Daemon` class that wraps `pr_sync.sync_stale_prs()` in try/except (matching the `_poll_pr_outcomes` pattern at line 1060)
-  - [ ] 5.4 Add concern #7 to `_tick()` after PR outcome polling (line 586): check interval elapsed, not paused, not pipeline running, then call `_sync_stale_prs()`
-  - [ ] 5.5 Gate the sync call on `write_enabled` (the `dashboard_write_enabled` config field or `COLONYOS_WRITE_ENABLED` env var)
+  - [x] 5.2 Add `_last_pr_sync_time: float` instance variable to `Daemon.__init__()`, initialized to `0.0`
+  - [x] 5.3 Add `_sync_stale_prs()` method to `Daemon` class that wraps `pr_sync.sync_stale_prs()` in try/except (matching the `_poll_pr_outcomes` pattern at line 1060)
+  - [x] 5.4 Add concern #7 to `_tick()` after PR outcome polling (line 586): check interval elapsed, not paused, not pipeline running, then call `_sync_stale_prs()`
+  - [x] 5.5 Gate the sync call on `write_enabled` (the `dashboard_write_enabled` config field or `COLONYOS_WRITE_ENABLED` env var)
 
 - [ ] 6.0 End-to-end verification and documentation
   depends_on: [5.0]
