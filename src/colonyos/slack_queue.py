@@ -4,7 +4,6 @@ import logging
 import queue as queue_module
 import threading
 import uuid
-from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -254,12 +253,11 @@ class SlackQueueEngine:
             triage_kwargs["triage_scope"] = self.config.slack.triage_scope
 
         try:
-            with self.agent_lock or nullcontext():
-                triage_result = triage_message(
-                    prompt_text,
-                    repo_root=self.repo_root,
-                    **triage_kwargs,
-                )
+            triage_result = triage_message(
+                prompt_text,
+                repo_root=self.repo_root,
+                **triage_kwargs,
+            )
         except Exception:
             logger.exception("Triage failed for message %s:%s", channel, ts)
             try:

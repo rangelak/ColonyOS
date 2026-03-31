@@ -110,17 +110,16 @@ def test_triage_merges_similar_request_into_existing_item(tmp_path: Path) -> Non
     assert client.chat_postMessage.called
 
 
-def test_triage_waits_for_agent_lock_before_calling_agent(tmp_path: Path) -> None:
+def test_triage_completes_while_agent_lock_is_held(tmp_path: Path) -> None:
+    """Triage must NOT acquire agent_lock — it should complete even when the lock is held."""
     queue_state = QueueState(queue_id="q")
     watch_state = SlackWatchState(watch_id="w")
     agent_lock = threading.Lock()
     engine = _make_engine(tmp_path, queue_state, watch_state, agent_lock=agent_lock)
     client = MagicMock()
-    started = threading.Event()
     finished = threading.Event()
 
     def _triage(*args, **kwargs):
-        started.set()
         finished.set()
         return TriageResult(
             actionable=True,
@@ -130,25 +129,57 @@ def test_triage_waits_for_agent_lock_before_calling_agent(tmp_path: Path) -> Non
             reasoning="clear feature request",
         )
 
+    # Hold the agent_lock (simulating a running pipeline)
     agent_lock.acquire()
-    worker = threading.Thread(
-        target=engine._triage_and_enqueue,
-        kwargs={
-            "client": client,
-            "channel": "C1",
-            "ts": "3.0",
-            "user": "U1",
-            "prompt_text": "Add brew installation support",
-        },
-    )
-    with patch("colonyos.slack_queue.triage_message", side_effect=_triage):
-        worker.start()
-        assert not started.wait(timeout=0.1)
+    try:
+        worker = threading.Thread(
+            target=engine._triage_and_enqueue,
+            kwargs={
+                "client": client,
+                "channel": "C1",
+                "ts": "3.0",
+                "user": "U1",
+                "prompt_text": "Add brew installation support",
+            },
+        )
+        with patch("colonyos.slack_queue.triage_message", side_effect=_triage):
+            worker.start()
+            # Triage should complete within 1s even though agent_lock is held
+            assert finished.wait(timeout=1), "Triage blocked on agent_lock"
+            worker.join(timeout=2)
+    finally:
         agent_lock.release()
-        worker.join(timeout=1)
 
-    assert finished.is_set()
     assert len(queue_state.items) == 1
+
+
+def test_triage_completes_when_agent_lock_is_none(tmp_path: Path) -> None:
+    """Triage must work when agent_lock is None (the default)."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state, agent_lock=None)
+    client = MagicMock()
+
+    with patch(
+        "colonyos.slack_queue.triage_message",
+        return_value=TriageResult(
+            actionable=True,
+            confidence=0.95,
+            summary="Add brew install support",
+            base_branch=None,
+            reasoning="clear feature request",
+        ),
+    ):
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="4.0",
+            user="U1",
+            prompt_text="Add brew installation support",
+        )
+
+    assert len(queue_state.items) == 1
+    assert watch_state.is_processed("C1", "4.0")
 
 
 def test_generate_id_is_unique_with_same_timestamp() -> None:
