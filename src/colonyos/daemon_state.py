@@ -186,8 +186,14 @@ def load_daemon_state(repo_root: Path) -> DaemonState:
         return DaemonState()
     try:
         data = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            logger.warning(
+                "Daemon state file is not a JSON object, starting fresh (got %s)",
+                type(data).__name__,
+            )
+            return DaemonState()
         return DaemonState.from_dict(data)
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         logger.warning("Corrupt daemon state file, starting fresh: %s", exc)
         return DaemonState()
 

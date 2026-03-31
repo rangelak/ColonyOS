@@ -20,7 +20,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from colonyos.cancellation import cancellation_scope, request_cancel
 from colonyos.config import ColonyConfig, load_config
@@ -314,6 +314,8 @@ class Daemon:
 
         # Shared mutable state — protected by _lock
         self._lock = threading.Lock()
+        self._notification_thread_locks: dict[str, threading.Lock] = {}
+        self._notification_thread_locks_guard = threading.Lock()
         self._state = load_daemon_state(repo_root)
         self._queue_state = self._load_or_create_queue()
         self._pipeline_running = False
@@ -560,7 +562,21 @@ class Daemon:
         # Only inspect or recover git state when there is actual runnable work.
         # This avoids mutating the repo while the daemon is paused, cooling down,
         # or simply idle with an empty queue.
-        if self._is_worktree_dirty():
+        worktree_state, worktree_detail = self._preexec_worktree_state()
+        if worktree_state == "indeterminate":
+            logger.error(
+                "Pre-execution worktree check failed (fail-closed); blocking execution: %s",
+                worktree_detail,
+            )
+            self._pause_for_pre_execution_blocker(
+                item,
+                "Could not run `git status` to verify the worktree (fail-closed). "
+                f"{worktree_detail} "
+                "Fix git access from the daemon's repo root (permissions, install, or hung/broken repo), "
+                "confirm `git status --porcelain` succeeds, then resume.",
+            )
+            return False
+        if worktree_state == "dirty":
             if self.daemon_config.auto_recover_dirty_worktree:
                 logger.warning("Dirty worktree detected pre-execution, auto-recovering")
                 if not self._recover_dirty_worktree_preemptive():
@@ -682,7 +698,7 @@ class Daemon:
                         self._state.paused = True
                         logger.error(
                             "Auto-paused: %d consecutive failures with same error (%s). "
-                            "Use 'colonyos daemon resume' or Slack /resume to unpause.",
+                            "Send 'resume' in the configured Slack channel to unpause.",
                             failures,
                             error_code,
                         )
@@ -1260,28 +1276,22 @@ class Daemon:
         except Exception:
             logger.exception("Error during git state recovery")
 
-    def _is_worktree_dirty(self) -> bool:
-        """Fast check for uncommitted changes before picking a queue item."""
-        try:
-            result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                cwd=self.repo_root,
-            )
-            if result.returncode != 0:
-                return False
-            from colonyos.orchestrator import COLONYOS_OUTPUT_PREFIXES
+    def _preexec_worktree_state(
+        self,
+    ) -> tuple[Literal["clean", "dirty", "indeterminate"], str]:
+        """Classify worktree before execution: clean, dirty, or indeterminate (fail-closed).
 
-            for line in result.stdout.strip().splitlines():
-                path = line[3:].strip().strip('"')
-                if not any(path.startswith(p) for p in COLONYOS_OUTPUT_PREFIXES):
-                    return True
-            return False
-        except Exception:
-            logger.debug("Pre-execution worktree check failed", exc_info=True)
-            return False
+        Uses the same rules as pipeline preflight (including ignoring ColonyOS output dirs).
+        If ``git status`` errors or times out, returns ``indeterminate`` with a short detail
+        string instead of assuming clean.
+        """
+        from colonyos.orchestrator import _check_working_tree_clean
+
+        try:
+            is_clean, _dirty_out = _check_working_tree_clean(self.repo_root)
+            return ("clean" if is_clean else "dirty", "")
+        except PreflightError as exc:
+            return ("indeterminate", str(exc).strip() or exc.__class__.__name__)
 
     def _recover_dirty_worktree_preemptive(self) -> bool:
         """Preserve and reset a dirty worktree before any item is picked.
@@ -1669,6 +1679,14 @@ class Daemon:
             logger.debug("Failed to create Slack WebClient", exc_info=True)
             return None
 
+    def _notification_thread_lock_for(self, item_id: str) -> threading.Lock:
+        with self._notification_thread_locks_guard:
+            lock = self._notification_thread_locks.get(item_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._notification_thread_locks[item_id] = lock
+            return lock
+
     def _ensure_notification_thread(self, item: QueueItem, intro_text: str) -> tuple[Any, str, str] | None:
         client = self._get_notification_client()
         channel = item.notification_channel or self._default_notification_channel()
@@ -1676,20 +1694,28 @@ class Daemon:
             return None
         if item.notification_thread_ts:
             return client, channel, item.notification_thread_ts
-        try:
-            from colonyos.slack import post_message
+        item_lock = self._notification_thread_lock_for(item.id)
+        with item_lock:
+            with self._lock:
+                if item.notification_thread_ts:
+                    return client, channel, item.notification_thread_ts
+            try:
+                from colonyos.slack import post_message
 
-            response = post_message(client, channel, intro_text)
+                response = post_message(client, channel, intro_text)
+            except Exception:
+                logger.debug("Failed to create notification thread", exc_info=True)
+                return None
             thread_ts = response.get("ts")
             if not thread_ts:
                 return None
-            item.notification_channel = channel
-            item.notification_thread_ts = thread_ts
-            self._persist_queue()
+            with self._lock:
+                if item.notification_thread_ts:
+                    return client, channel, item.notification_thread_ts
+                item.notification_channel = channel
+                item.notification_thread_ts = thread_ts
+                self._persist_queue()
             return client, channel, thread_ts
-        except Exception:
-            logger.debug("Failed to create notification thread", exc_info=True)
-            return None
 
     def _format_phase_breakdown(self, log: Any) -> list[str]:
         from colonyos.slack import format_phase_breakdown_line
@@ -2019,7 +2045,7 @@ class Daemon:
             f":rotating_light: *Daemon auto-paused (same error)*\n"
             f"{failures} consecutive failures with the same error: `{error_code}`\n"
             f"The daemon will not process any more items until manually resumed.\n"
-            f"Use `colonyos daemon resume` or send `resume` in this channel to unpause."
+            "Send `resume` in this channel to unpause."
         )
 
     def _post_circuit_breaker_cooldown_notice(
@@ -2047,11 +2073,18 @@ class Daemon:
             f"Breaker activation #{activation_count} without an intervening success "
             f"(last trip after {consecutive_failures} consecutive failures). "
             f"This is not the same-error systemic case.\n"
-            f"Use `colonyos daemon resume` or send `resume` in this channel to unpause."
+            "Send `resume` in this channel to unpause."
         )
 
     def _pause_for_pre_execution_blocker(self, item: QueueItem, reason: str) -> None:
         """Pause the daemon when pre-execution repo health blocks forward progress."""
+        with self._lock:
+            if self._state.paused or self._state.is_circuit_breaker_active():
+                return
+            self._state.paused = True
+            self._state.circuit_breaker_until = None
+            self._persist_state()
+
         incident_path = self._record_runtime_incident(
             label_prefix="daemon-preexec-blocked",
             summary=(
@@ -2068,16 +2101,12 @@ class Daemon:
                 "reason": reason,
             },
         )
-        with self._lock:
-            self._state.paused = True
-            self._state.circuit_breaker_until = None
-            self._persist_state()
         self._post_slack_message(
             ":rotating_light: *Daemon auto-paused before execution*\n"
             f"{reason}\n"
             f"Pending item: `{item.id}`\n"
             f"Incident summary: `{incident_path}`\n"
-            "Fix the repo state, then use `colonyos daemon resume` or send `resume` in Slack."
+            "Fix the repo state, then send `resume` in Slack."
         )
 
     def _failure_summary(self, exc: Exception) -> str:
