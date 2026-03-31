@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import re
 import subprocess
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
@@ -271,3 +272,150 @@ def _format_expr(node: ast.expr | None) -> str:
         if isinstance(node, ast.Constant):
             return repr(node.value)
         return "..."
+
+
+# ---------------------------------------------------------------------------
+# JS/TS regex patterns for top-level export extraction (FR-3)
+# ---------------------------------------------------------------------------
+
+# export function foo(...) / export async function foo(...)
+_RE_EXPORT_FUNCTION = re.compile(
+    r"^export\s+(?:default\s+)?(?:async\s+)?function\s+(\w+)", re.MULTILINE
+)
+# export class Foo
+_RE_EXPORT_CLASS = re.compile(
+    r"^export\s+(?:default\s+)?class\s+(\w+)", re.MULTILINE
+)
+# export const/let/var NAME
+_RE_EXPORT_VARIABLE = re.compile(
+    r"^export\s+(?:const|let|var)\s+(\w+)", re.MULTILINE
+)
+# export { foo, bar, baz }
+_RE_EXPORT_NAMED = re.compile(
+    r"^export\s+\{([^}]+)\}", re.MULTILINE
+)
+# export interface Foo (TypeScript)
+_RE_EXPORT_INTERFACE = re.compile(
+    r"^export\s+interface\s+(\w+)", re.MULTILINE
+)
+# export type Foo (TypeScript)
+_RE_EXPORT_TYPE = re.compile(
+    r"^export\s+type\s+(\w+)", re.MULTILINE
+)
+
+# File extensions recognized as JS/TS
+JS_TS_EXTENSIONS: frozenset[str] = frozenset({".js", ".jsx", ".ts", ".tsx"})
+
+
+def extract_js_ts_symbols(file_path: Path) -> FileSymbols:
+    """Extract exported symbols from a JavaScript/TypeScript file using regex.
+
+    Extracts top-level ``export`` declarations: functions, classes, variables,
+    named exports, interfaces, and types. Does not parse nested class methods.
+
+    Parameters
+    ----------
+    file_path:
+        Path to the ``.js``, ``.jsx``, ``.ts``, or ``.tsx`` file.
+
+    Returns
+    -------
+    FileSymbols
+        Extracted symbols for the file.
+    """
+    result = FileSymbols(path=str(file_path))
+
+    try:
+        source = file_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("Could not read %s: %s", file_path, exc)
+        return result
+
+    result.line_count = len(source.splitlines())
+    result.size_bytes = len(source.encode("utf-8"))
+
+    seen: set[str] = set()
+
+    def _add(name: str, kind: str) -> None:
+        if name not in seen:
+            seen.add(name)
+            result.symbols.append(Symbol(name=name, kind=kind))
+
+    # Functions (including async and default)
+    for m in _RE_EXPORT_FUNCTION.finditer(source):
+        _add(m.group(1), "function")
+
+    # Classes
+    for m in _RE_EXPORT_CLASS.finditer(source):
+        _add(m.group(1), "class")
+
+    # Variables (const/let/var)
+    for m in _RE_EXPORT_VARIABLE.finditer(source):
+        _add(m.group(1), "variable")
+
+    # Named exports: export { foo, bar }
+    for m in _RE_EXPORT_NAMED.finditer(source):
+        for name in m.group(1).split(","):
+            name = name.strip().split(" as ")[0].strip()
+            if name:
+                _add(name, "export")
+
+    # TypeScript interfaces
+    for m in _RE_EXPORT_INTERFACE.finditer(source):
+        _add(m.group(1), "interface")
+
+    # TypeScript types
+    for m in _RE_EXPORT_TYPE.finditer(source):
+        _add(m.group(1), "type")
+
+    return result
+
+
+def extract_other_file_info(file_path: Path) -> FileSymbols:
+    """Extract basic file info (path + size) for non-code files (FR-4).
+
+    Parameters
+    ----------
+    file_path:
+        Path to any file that is not Python or JS/TS.
+
+    Returns
+    -------
+    FileSymbols
+        Contains path and size_bytes; symbols list is empty.
+    """
+    result = FileSymbols(path=str(file_path))
+
+    try:
+        result.size_bytes = file_path.stat().st_size
+    except OSError as exc:
+        logger.warning("Could not stat %s: %s", file_path, exc)
+
+    return result
+
+
+def extract_file_symbols(file_path: Path) -> FileSymbols:
+    """Dispatch to the appropriate extractor based on file extension.
+
+    Routes ``.py`` files to :func:`extract_python_symbols`,
+    ``.js/.jsx/.ts/.tsx`` files to :func:`extract_js_ts_symbols`,
+    and everything else to :func:`extract_other_file_info`.
+
+    Parameters
+    ----------
+    file_path:
+        Path to the file to extract symbols from.
+
+    Returns
+    -------
+    FileSymbols
+        Extracted symbols (or just path + size for unknown file types).
+    """
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".py":
+        return extract_python_symbols(file_path)
+    elif suffix in JS_TS_EXTENSIONS:
+        return extract_js_ts_symbols(file_path)
+    else:
+        return extract_other_file_info(file_path)

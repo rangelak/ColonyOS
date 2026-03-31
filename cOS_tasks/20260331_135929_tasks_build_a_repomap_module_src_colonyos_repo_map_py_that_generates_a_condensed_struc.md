@@ -29,13 +29,13 @@
   - [x] 2.4 Implement `extract_python_symbols(file_path)` using `ast.parse()`: return a structured list of symbols (classes with methods, functions, module docstring). Handle `SyntaxError` gracefully by returning empty result with a warning.
   - [x] 2.5 Define data structures: `FileSymbols` (path, symbols list, line_count), `Symbol` (name, kind: class/function/method, params, bases), `RepoMap` (files: list[FileSymbols], overview: str)
 
-- [ ] 3.0 Build JS/TS regex extraction and other-file handling
+- [x] 3.0 Build JS/TS regex extraction and other-file handling
   depends_on: []
-  - [ ] 3.1 Write tests for JS/TS extraction: `export function foo()`, `export class Bar`, `export default`, `export const/let/var`, `export { named }`, TypeScript `export interface`, `export type`. Test with `.js`, `.jsx`, `.ts`, `.tsx` extensions.
-  - [ ] 3.2 Write tests for other-file handling: files like `.yaml`, `.md`, `.json` produce path + size only
-  - [ ] 3.3 Implement `extract_js_ts_symbols(file_path)` using regex patterns. Return list of `Symbol` objects for exported declarations. Handle file read errors gracefully.
-  - [ ] 3.4 Implement `extract_other_file_info(file_path)` returning path and file size in bytes.
-  - [ ] 3.5 Implement `extract_file_symbols(file_path)` dispatcher that routes to `extract_python_symbols`, `extract_js_ts_symbols`, or `extract_other_file_info` based on file extension.
+  - [x] 3.1 Write tests for JS/TS extraction: `export function foo()`, `export class Bar`, `export default`, `export const/let/var`, `export { named }`, TypeScript `export interface`, `export type`. Test with `.js`, `.jsx`, `.ts`, `.tsx` extensions.
+  - [x] 3.2 Write tests for other-file handling: files like `.yaml`, `.md`, `.json` produce path + size only
+  - [x] 3.3 Implement `extract_js_ts_symbols(file_path)` using regex patterns. Return list of `Symbol` objects for exported declarations. Handle file read errors gracefully.
+  - [x] 3.4 Implement `extract_other_file_info(file_path)` returning path and file size in bytes.
+  - [x] 3.5 Implement `extract_file_symbols(file_path)` dispatcher that routes to `extract_python_symbols`, `extract_js_ts_symbols`, or `extract_other_file_info` based on file extension.
 
 - [ ] 4.0 Build tree formatting, relevance ranking, and token-budget truncation
   depends_on: [2.0, 3.0]
