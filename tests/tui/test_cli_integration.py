@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -64,6 +65,23 @@ class TestTuiCommand:
             assert result.exit_code != 0
             assert "init" in result.output.lower()
 
+    def test_tui_installs_signal_cancel_handlers(self, runner: CliRunner, tmp_path: Path):
+        config_dir = tmp_path / ".colonyos"
+        config_dir.mkdir()
+        mock_cfg = MagicMock()
+        mock_cfg.project = MagicMock()
+        with (
+            patch("colonyos.cli._find_repo_root", return_value=tmp_path),
+            patch("colonyos.cli.load_config", return_value=mock_cfg),
+            patch("colonyos.cli.install_signal_cancel_handlers", return_value=nullcontext()) as mock_handlers,
+            patch("colonyos.cli._launch_tui") as mock_launch,
+        ):
+            result = runner.invoke(app, ["tui"])
+
+        assert result.exit_code == 0
+        mock_handlers.assert_called_once_with(include_sighup=True)
+        mock_launch.assert_called_once()
+
 
 class TestTuiFlag:
     """Tests for the TUI-related flags on the ``run`` command."""
@@ -96,6 +114,29 @@ class TestTuiFlag:
             mock_launch.assert_called_once()
             call_kwargs = mock_launch.call_args
             assert call_kwargs is not None
+
+    def test_run_interactive_tui_installs_signal_cancel_handlers(self, runner: CliRunner, tmp_path: Path):
+        config_dir = tmp_path / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "project:\n  name: test\nreviewers: []\n"
+        )
+        with (
+            patch("colonyos.cli._find_repo_root", return_value=tmp_path),
+            patch("colonyos.cli._interactive_stdio", return_value=True),
+            patch("colonyos.cli._tui_available", return_value=True),
+            patch("colonyos.cli.load_config") as mock_config,
+            patch("colonyos.cli.install_signal_cancel_handlers", return_value=nullcontext()) as mock_handlers,
+            patch("colonyos.cli._launch_tui") as mock_launch,
+        ):
+            mock_cfg = MagicMock()
+            mock_cfg.project = MagicMock()
+            mock_config.return_value = mock_cfg
+            result = runner.invoke(app, ["run", "test prompt"])
+
+        assert result.exit_code == 0
+        mock_handlers.assert_called_once_with(include_sighup=True)
+        mock_launch.assert_called_once()
 
 
 class TestMakeUiOverride:

@@ -5,10 +5,33 @@ Extracted into its own module to avoid circular imports between
 """
 from __future__ import annotations
 
+import importlib
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+
+def detect_install_method() -> tuple[str, str]:
+    """Detect how ColonyOS was installed and return (method, upgrade_hint).
+
+    Returns one of:
+    - ("homebrew", "brew upgrade colonyos")
+    - ("pipx", "pipx upgrade colonyos")
+    - ("pip", "pip install --upgrade colonyos")
+    """
+    exe_path = sys.executable
+
+    # Homebrew installs Python inside its Cellar directory
+    if "/Cellar/" in exe_path:
+        return ("homebrew", "brew upgrade colonyos")
+
+    # pipx installs packages in its own venvs directory
+    if "/pipx/venvs/" in exe_path:
+        return ("pipx", "pipx upgrade colonyos")
+
+    # Fallback: assume pip
+    return ("pip", "pip install --upgrade colonyos")
 
 
 def run_doctor_checks(repo_root: Path) -> list[tuple[str, bool, str]]:
@@ -21,13 +44,28 @@ def run_doctor_checks(repo_root: Path) -> list[tuple[str, bool, str]]:
 
     results: list[tuple[str, bool, str]] = []
 
+    # Detect install method for accurate upgrade instructions
+    install_method, upgrade_hint = detect_install_method()
+
     # 0. ColonyOS version — flag degraded state when using fallback version
     version_ok = "dev" not in __version__ and __version__ != "0.0.0"
     results.append((
         f"ColonyOS v{__version__}",
         version_ok,
         "Version appears to be a development fallback. "
-        "Reinstall with: pipx install colonyos" if not version_ok else "",
+        f"Reinstall with: {upgrade_hint}" if not version_ok else "",
+    ))
+
+    # 0b. Install method (informational — always passes)
+    method_labels = {
+        "homebrew": "Homebrew",
+        "pipx": "pipx",
+        "pip": "pip",
+    }
+    results.append((
+        f"Install method: {method_labels.get(install_method, install_method)}",
+        True,
+        f"Upgrade with: {upgrade_hint}",
     ))
 
     # 1. Python >= 3.11
@@ -127,6 +165,19 @@ def run_doctor_checks(repo_root: Path) -> list[tuple[str, bool, str]]:
                 False,
                 f"Missing environment variables: {', '.join(missing)}. "
                 "Set them before running `colonyos watch`.",
+            ))
+
+        try:
+            importlib.import_module("slack_bolt")
+            importlib.import_module("slack_bolt.adapter.socket_mode")
+            results.append(("Slack dependencies", True, ""))
+        except Exception as exc:
+            results.append((
+                "Slack dependencies",
+                False,
+                f"Slack SDK import failed ({exc.__class__.__name__}). "
+                "Reinstall with `pip install 'colonyos[slack]'` and prefer "
+                "Python 3.11-3.13 for Slack-enabled deployments.",
             ))
 
     return results

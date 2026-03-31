@@ -66,6 +66,12 @@ class TestDaemonState:
         assert state.daily_spend_usd == 0.0
         assert state.total_items_today == 0
 
+    def test_check_daily_budget_unlimited(self):
+        state = DaemonState(daily_spend_usd=123.45)
+        allowed, remaining = state.check_daily_budget(None)
+        assert allowed is True
+        assert remaining is None
+
     def test_record_spend(self):
         state = DaemonState()
         state.record_spend(5.0)
@@ -103,6 +109,44 @@ class TestDaemonState:
         past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         state = DaemonState(circuit_breaker_until=past)
         assert state.is_circuit_breaker_active() is False
+
+    def test_circuit_breaker_escalating_cooldowns(self):
+        state = DaemonState()
+        result1 = state.activate_circuit_breaker(30)
+        assert result1 is not None
+        assert state.circuit_breaker_activations == 1
+        assert state.is_circuit_breaker_active() is True
+
+        state.circuit_breaker_until = None
+        result2 = state.activate_circuit_breaker(30)
+        assert result2 is not None
+        assert state.circuit_breaker_activations == 2
+
+        result3 = state.activate_circuit_breaker(30)
+        assert result3 is None
+        assert state.circuit_breaker_activations == 3
+
+    def test_record_success_resets_circuit_breaker_activations(self):
+        state = DaemonState(
+            consecutive_failures=5,
+            circuit_breaker_activations=2,
+        )
+        state.activate_circuit_breaker(30)
+        state.record_success()
+        assert state.circuit_breaker_activations == 0
+        assert state.consecutive_failures == 0
+        assert state.circuit_breaker_until is None
+
+    def test_circuit_breaker_activations_serialization(self):
+        state = DaemonState(circuit_breaker_activations=2)
+        d = state.to_dict()
+        assert d["circuit_breaker_activations"] == 2
+        restored = DaemonState.from_dict(d)
+        assert restored.circuit_breaker_activations == 2
+
+    def test_circuit_breaker_activations_default_from_old_state(self):
+        state = DaemonState.from_dict({"daily_spend_usd": 5.0})
+        assert state.circuit_breaker_activations == 0
 
     def test_touch_heartbeat(self):
         state = DaemonState()
@@ -156,3 +200,24 @@ class TestLoadSaveDaemonState:
         state_path.write_text("not json{{{", encoding="utf-8")
         state = load_daemon_state(tmp_repo)
         assert state.daily_spend_usd == 0.0
+
+    def test_load_returns_fresh_on_valid_json_non_object(self, tmp_repo: Path):
+        state_path = tmp_repo / ".colonyos" / "daemon_state.json"
+        state_path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+        state = load_daemon_state(tmp_repo)
+        assert state.daily_spend_usd == 0.0
+
+    def test_load_returns_fresh_on_valid_json_wrong_numeric_types(self, tmp_repo: Path):
+        state_path = tmp_repo / ".colonyos" / "daemon_state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "daily_spend_usd": "not-a-number",
+                    "consecutive_failures": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        state = load_daemon_state(tmp_repo)
+        assert state.daily_spend_usd == 0.0
+        assert state.consecutive_failures == 0

@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
+from colonyos.models import extract_result_text
 from colonyos.sanitize import sanitize_display_text, sanitize_untrusted_content
 
 logger = logging.getLogger(__name__)
@@ -357,7 +358,7 @@ def choose_tui_mode(
 ) -> ModeAgentDecision:
     """Select the best TUI operating mode for a user request."""
     from colonyos.agent import run_phase_sync
-    from colonyos.config import RouterConfig, load_config
+    from colonyos.config import LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS, RouterConfig, load_config
     from colonyos.models import Phase
 
     heuristic = _heuristic_mode_decision(
@@ -392,11 +393,10 @@ def choose_tui_mode(
         model=resolved_model,
         budget_usd=0.05,
         allowed_tools=[],
+        timeout_seconds=LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS,
     )
 
-    raw_text = ""
-    if result.artifacts:
-        raw_text = next(iter(result.artifacts.values()), "")
+    raw_text = extract_result_text(result.artifacts)
     if not raw_text and result.error:
         logger.warning("Mode-selection call failed from %s: %s", source, result.error[:200])
         return ModeAgentDecision(
@@ -714,7 +714,7 @@ def route_query(
         RouterResult with the classification.
     """
     from colonyos.agent import run_phase_sync
-    from colonyos.config import RouterConfig, load_config
+    from colonyos.config import LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS, RouterConfig, load_config
     from colonyos.models import Phase
 
     cwd = repo_root if repo_root is not None else Path.cwd()
@@ -741,14 +741,13 @@ def route_query(
         model=resolved_model,
         budget_usd=0.05,  # tiny budget for routing
         allowed_tools=[],  # no tool access
+        timeout_seconds=LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS,
     )
 
     # Extract text from artifacts. run_phase_sync returns a single-entry dict
     # keyed by artifact name; we take the first (and only) value. If the SDK
     # ever returns multiple artifacts, revisit to use a well-known key.
-    raw_text = ""
-    if result.artifacts:
-        raw_text = next(iter(result.artifacts.values()), "")
+    raw_text = extract_result_text(result.artifacts)
     if not raw_text and result.error:
         logger.warning("Router LLM call failed: %s", result.error[:200])
         return RouterResult(
@@ -840,6 +839,7 @@ def answer_question(
         The answer as a string, or an error message if the call failed.
     """
     from colonyos.agent import run_phase_sync
+    from colonyos.config import QA_PHASE_TIMEOUT_SECONDS
     from colonyos.models import Phase
 
     cwd = repo_root if repo_root is not None else Path.cwd()
@@ -862,13 +862,13 @@ def answer_question(
         model=model,
         budget_usd=qa_budget,
         allowed_tools=read_only_tools,
+        timeout_seconds=QA_PHASE_TIMEOUT_SECONDS,
     )
 
     # Extract answer from artifacts (single-entry dict; see route_query comment).
-    if result.artifacts:
-        answer = next(iter(result.artifacts.values()), "")
-        if answer:
-            return answer
+    answer = extract_result_text(result.artifacts)
+    if answer:
+        return answer
 
     if result.error:
         logger.warning("Q&A agent call failed: %s", result.error[:200])

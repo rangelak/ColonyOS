@@ -127,6 +127,61 @@ class WorktreeManager:
         except subprocess.SubprocessError as e:
             raise WorktreeError(f"Failed to create worktree: {e}") from e
 
+    def create_detached_worktree(self, task_id: str, ref: str) -> Path:
+        """Create a detached worktree on an existing ref.
+
+        Unlike :meth:`create_worktree` which creates a new branch, this
+        creates a ``--detach`` worktree suitable for checking out an
+        existing remote branch (e.g. for PR sync).
+
+        Args:
+            task_id: The task identifier (e.g., "pr-sync-42").
+            ref: The git ref to base the worktree on (e.g., "origin/feat-x").
+
+        Returns:
+            Path to the created worktree.
+
+        Raises:
+            ValueError: If task_id contains invalid characters.
+            WorktreeError: If worktree creation fails.
+        """
+        self._validate_task_id(task_id)
+
+        worktree_path = self.get_worktree_path(task_id)
+
+        # Ensure parent directory exists
+        self._worktree_base.mkdir(parents=True, exist_ok=True)
+
+        # Remove existing worktree if present
+        if worktree_path.exists():
+            self._remove_worktree(worktree_path)
+
+        try:
+            result = subprocess.run(
+                [
+                    "git", "worktree", "add",
+                    str(worktree_path),
+                    ref,
+                    "--detach",
+                ],
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise WorktreeError(
+                    f"Failed to create detached worktree: {result.stderr}"
+                )
+
+            logger.info(
+                "Created detached worktree for task %s at %s (ref=%s)",
+                task_id, worktree_path, ref,
+            )
+            return worktree_path
+
+        except subprocess.SubprocessError as e:
+            raise WorktreeError(f"Failed to create detached worktree: {e}") from e
+
     def cleanup_worktree(self, task_id: str) -> None:
         """Remove a worktree for a task.
 

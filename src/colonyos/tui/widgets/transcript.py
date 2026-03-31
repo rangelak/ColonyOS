@@ -8,10 +8,9 @@ renderables for color-coded, structured output.
 from __future__ import annotations
 
 import re
-from io import StringIO
 
 from rich import box
-from rich.console import Console, Group
+from rich.console import Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
@@ -92,11 +91,16 @@ class TranscriptView(RichLog):
         name: str,
         arg: str,
         style: str | None = None,
+        badge_text: str = "",
+        badge_style: str = "",
     ) -> None:
         """Render a single tool-call line with a colored dot."""
         color = style or TOOL_COLORS.get(name, DEFAULT_TOOL_COLOR)
         line = Text()
         line.append("  ")
+        if badge_text:
+            badge_color = badge_style or COLOR_ACCENT
+            line.append(f"{badge_text} ", style=f"bold {badge_color}")
         line.append("● ", style=color)
         line.append(name, style=f"bold {color}")
         if arg:
@@ -104,19 +108,38 @@ class TranscriptView(RichLog):
         self.write(line)
         self._scroll_to_end()
 
-    def append_text_block(self, text: str) -> None:
+    def append_text_block(
+        self,
+        text: str,
+        badge_text: str = "",
+        badge_style: str = "",
+    ) -> None:
         """Render a block of agent text, using Markdown if appropriate."""
         text = text.strip()
         if not text:
             return
         if _looks_like_markdown(text):
+            if badge_text:
+                badge_line = Text()
+                badge_line.append("  ")
+                badge_line.append(
+                    f"{badge_text}",
+                    style=f"bold {badge_style or COLOR_ACCENT}",
+                )
+                self.write(badge_line)
             self.write(Markdown(text))
         else:
             for raw_line in text.splitlines():
                 stripped = raw_line.strip()
                 if stripped:
                     line = Text()
-                    line.append(f"  {stripped}", style=COLOR_DIM)
+                    line.append("  ")
+                    if badge_text:
+                        line.append(
+                            f"{badge_text} ",
+                            style=f"bold {badge_style or COLOR_ACCENT}",
+                        )
+                    line.append(stripped, style=COLOR_DIM)
                     self.write(line)
         self._scroll_to_end()
 
@@ -194,28 +217,7 @@ class TranscriptView(RichLog):
     def append_welcome_banner(self) -> None:
         """Render the initial welcome card on first launch."""
         self.write(Text())
-        logo_lines_raw = [
-            " ██████╗  ██████╗  ██╗      ██████╗  ███╗   ██╗ ██╗   ██╗  ██████╗  ███████╗",
-            "██╔════╝ ██╔═══██╗ ██║     ██╔═══██╗ ████╗  ██║ ╚██╗ ██╔╝ ██╔═══██╗ ██╔════╝",
-            "██║      ██║   ██║ ██║     ██║   ██║ ██╔██╗ ██║  ╚████╔╝  ██║   ██║ ███████╗",
-            "██║      ██║   ██║ ██║     ██║   ██║ ██║╚██╗██║   ╚██╔╝   ██║   ██║ ╚════██║",
-            "╚██████╗ ╚██████╔╝ ███████╗╚██████╔╝ ██║ ╚████║    ██║    ╚██████╔╝ ███████║",
-            " ╚═════╝  ╚═════╝  ╚══════╝ ╚═════╝  ╚═╝  ╚═══╝    ╚═╝     ╚═════╝  ╚══════╝",
-        ]
-        logo_lines: list[Text] = []
-        split_at = 58
-        for raw_line in logo_lines_raw:
-            line = Text(justify="center")
-            for index, char in enumerate(raw_line):
-                if char == " ":
-                    line.append(char)
-                elif index < split_at:
-                    line.append(char, style="bold #c8d1dc")
-                else:
-                    line.append(char, style="bold #f0a030")
-            logo_lines.append(line)
-
-        logo_group = Group(*logo_lines, Text(""))
+        logo_group = _colony_logo_group()
         prompt = Text(
             "Enter a prompt below to dispatch work",
             style=COLOR_DIM,
@@ -239,18 +241,36 @@ class TranscriptView(RichLog):
         self.write(Text())
         self._scroll_to_end()
 
+    def append_daemon_monitor_banner(self) -> None:
+        """Render the daemon monitor banner used by TUI daemon mode."""
+        self.write(Text())
+        summary = Text("Monitoring the autonomous daemon and its active work.", style=COLOR_DIM, justify="center")
+        shortcuts = Text(
+            "Ctrl+C stop daemon   Ctrl+L clear transcript   Ctrl+S export",
+            style=COLOR_DIM,
+            justify="center",
+        )
+        panel = Panel(
+            Group(_colony_logo_group(), summary, shortcuts),
+            border_style=COLOR_COLONY,
+            box=box.ROUNDED,
+            padding=(1, 2),
+            title="Daemon Monitor",
+            subtitle="workers active",
+            expand=True,
+        )
+        self.write(panel, expand=True)
+        self.write(Text())
+        self._scroll_to_end()
+
     def get_plain_text(self) -> str:
         """Return all transcript content as plain text (for transcript export).
 
-        Uses Rich's Console to render each line without markup.
+        ``RichLog.lines`` contains Textual ``Strip`` objects (not Rich
+        renderables), so we extract the plain text via ``Strip.text``
+        which joins the underlying ``Segment.text`` values.
         """
-        parts: list[str] = []
-        for line_entry in self.lines:
-            buf = StringIO()
-            console = Console(file=buf, width=200, no_color=True, highlight=False)
-            console.print(line_entry, end="")
-            parts.append(buf.getvalue())
-        return "\n".join(parts)
+        return "\n".join(strip.text for strip in self.lines)
 
     def re_enable_auto_scroll(self) -> None:
         """Re-enable auto-scroll and jump to the bottom."""
@@ -275,3 +295,28 @@ _MD_PATTERN = re.compile(
 def _looks_like_markdown(text: str) -> bool:
     """Return True if text contains markdown formatting worth rendering."""
     return bool(_MD_PATTERN.search(text))
+
+
+def _colony_logo_group() -> Group:
+    """Return the shared ColonyOS ASCII logo renderable."""
+    logo_lines_raw = [
+        " ██████╗  ██████╗  ██╗      ██████╗  ███╗   ██╗ ██╗   ██╗  ██████╗  ███████╗",
+        "██╔════╝ ██╔═══██╗ ██║     ██╔═══██╗ ████╗  ██║ ╚██╗ ██╔╝ ██╔═══██╗ ██╔════╝",
+        "██║      ██║   ██║ ██║     ██║   ██║ ██╔██╗ ██║  ╚████╔╝  ██║   ██║ ███████╗",
+        "██║      ██║   ██║ ██║     ██║   ██║ ██║╚██╗██║   ╚██╔╝   ██║   ██║ ╚════██║",
+        "╚██████╗ ╚██████╔╝ ███████╗╚██████╔╝ ██║ ╚████║    ██║    ╚██████╔╝ ███████║",
+        " ╚═════╝  ╚═════╝  ╚══════╝ ╚═════╝  ╚═╝  ╚═══╝    ╚═╝     ╚═════╝  ╚══════╝",
+    ]
+    logo_lines: list[Text] = []
+    split_at = 58
+    for raw_line in logo_lines_raw:
+        line = Text(justify="center")
+        for index, char in enumerate(raw_line):
+            if char == " ":
+                line.append(char)
+            elif index < split_at:
+                line.append(char, style="bold #c8d1dc")
+            else:
+                line.append(char, style="bold #f0a030")
+        logo_lines.append(line)
+    return Group(*logo_lines, Text(""))

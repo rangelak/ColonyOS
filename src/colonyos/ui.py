@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypedDict
 
 from rich.console import Console
@@ -70,12 +71,16 @@ class PhaseUI:
         verbose: bool = False,
         prefix: str = "",
         task_id: str | None = None,
+        badge: "StreamBadge | None" = None,
     ) -> None:
         self._verbose = verbose
         self._task_id = task_id
-        # If task_id is provided, generate a colored prefix
-        if task_id is not None:
-            self._prefix = make_task_prefix(task_id)
+        self._badge = badge
+        # If task_id is provided, generate a colored prefix.
+        if self._badge is None and task_id is not None:
+            self._badge = make_task_badge(task_id)
+        if self._badge is not None:
+            self._prefix = f"{self._badge.markup} "
         else:
             self._prefix = prefix
         self._tool_name: str | None = None
@@ -120,6 +125,14 @@ class PhaseUI:
             f"\n  [red]✗[/red] Phase failed: {error}\n",
             highlight=False,
         )
+
+    def phase_note(self, text: str) -> None:
+        if not text.strip():
+            return
+        console.print(f"  [dim]{text}[/dim]", highlight=False)
+
+    def slack_note(self, text: str) -> None:
+        """Milestone note sent only to Slack.  No-op for terminal-only UIs."""
 
     # -- streaming callbacks ------------------------------------------------
 
@@ -214,11 +227,28 @@ class NullUI:
     def phase_header(self, *a: object, **kw: object) -> None: ...
     def phase_complete(self, *a: object, **kw: object) -> None: ...
     def phase_error(self, *a: object, **kw: object) -> None: ...
+    def phase_note(self, *a: object, **kw: object) -> None: ...
+    def slack_note(self, *a: object, **kw: object) -> None: ...
     def on_tool_start(self, *a: object) -> None: ...
     def on_tool_input_delta(self, *a: object) -> None: ...
     def on_tool_done(self) -> None: ...
     def on_text_delta(self, *a: object) -> None: ...
     def on_turn_complete(self) -> None: ...
+
+
+# -- stream badge helpers --------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StreamBadge:
+    """A short styled label that identifies a parallel reviewer or task."""
+
+    text: str
+    style: str
+
+    @property
+    def markup(self) -> str:
+        return f"[{self.style}]{self.text}[/{self.style}]"
 
 
 # -- reviewer tag helpers --------------------------------------------------
@@ -233,10 +263,14 @@ def _reviewer_color(index: int) -> str:
     return REVIEWER_COLORS[index % len(REVIEWER_COLORS)]
 
 
+def make_reviewer_badge(index: int) -> StreamBadge:
+    """Return a stable reviewer badge like ``R1`` with its assigned color."""
+    return StreamBadge(text=f"R{index + 1}", style=_reviewer_color(index))
+
+
 def make_reviewer_prefix(index: int) -> str:
     """Build a short numbered prefix like '[cyan]R1[/cyan] '."""
-    color = _reviewer_color(index)
-    return f"[{color}]R{index + 1}[/{color}] "
+    return f"{make_reviewer_badge(index).markup} "
 
 
 def print_reviewer_legend(reviewers: list[tuple[int, str]]) -> None:
@@ -277,9 +311,13 @@ def _parse_task_index(task_id: str) -> int:
 
 def make_task_prefix(task_id: str) -> str:
     """Build a colored prefix like '[cyan][3.0][/cyan] ' for a task ID."""
+    return f"{make_task_badge(task_id).markup} "
+
+
+def make_task_badge(task_id: str) -> StreamBadge:
+    """Return a stable task badge like ``[3.0]`` with its assigned color."""
     index = _parse_task_index(task_id)
-    color = _task_color(index)
-    return f"[{color}][{task_id}][/{color}] "
+    return StreamBadge(text=f"[{task_id}]", style=_task_color(index))
 
 
 def print_task_legend(tasks: list[tuple[str, str]]) -> None:
@@ -533,8 +571,9 @@ class ParallelProgressLine:
             "failed": self._ICON_FAILED,
         }.get(status, "?")
 
+        label = make_reviewer_badge(idx).markup
         self._console.print(
-            f"  R{idx + 1} {icon} {name} ({status}) ${cost:.2f} in {duration_str}",
+            f"  {label} {icon} {name} ({status}) ${cost:.2f} in {duration_str}",
             highlight=False,
         )
 

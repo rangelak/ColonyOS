@@ -80,7 +80,6 @@ slack:
   trigger_mode: mention
   auto_approve: true
   max_runs_per_hour: 3
-  allowed_user_ids: []
   max_queue_depth: 20
   triage_verbose: false
   max_consecutive_failures: 3
@@ -100,3 +99,6 @@ router:
   confidence_threshold: 0.7
   small_fix_threshold: 0.85
   qa_budget: 0.5
+daemon:
+  daily_budget_usd: 500.0
+  allow_all_control_users: true

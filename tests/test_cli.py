@@ -1,6 +1,9 @@
+import hashlib
 import json
 import os
+import signal
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,24 +17,37 @@ from click.testing import CliRunner
 from colonyos.cli import (
     app,
     RouteOutcome,
+    _launch_daemon_tui,
     _compute_elapsed_hours,
     _launch_tui,
     _load_latest_loop_state,
     _NEW_CONVERSATION_SIGNAL,
+    _parse_daemon_tui_output_line,
     _SAFE_TUI_COMMANDS,
     _handle_tui_command,
     _run_direct_agent,
     _run_cleanup_loop,
     _resolve_latest_prd_path,
+    run_pipeline_for_queue_item,
     _save_loop_state,
     _resolve_latest_prd_path,
 )
 from colonyos.config import ColonyConfig, BudgetConfig, save_config
 from colonyos.models import (
     LoopState, LoopStatus, Persona, Phase, PhaseResult,
-    PreflightError, ProjectInfo, RunLog, RunStatus,
+    PreflightError, ProjectInfo, QueueItem, QueueItemStatus, RunLog, RunStatus,
 )
 from colonyos.persona_packs import PACKS
+from colonyos.runtime_lock import RuntimeBusyError, RuntimeProcessRecord
+from colonyos.tui.adapter import (
+    NoticeMsg,
+    PhaseCompleteMsg,
+    PhaseErrorMsg,
+    PhaseHeaderMsg,
+    TextBlockMsg,
+    ToolLineMsg,
+)
+from colonyos.tui.monitor_protocol import encode_monitor_event
 
 
 @pytest.fixture(autouse=True)
@@ -90,6 +106,42 @@ class TestRootCommand:
             result = runner.invoke(app, [], input="exit\n")
         assert result.exit_code == 0
         assert "ColonyOS" in result.output
+
+    def test_bare_colonyos_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=3131,
+                mode="daemon",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos daemon",
+            ),
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=True), \
+             patch("colonyos.cli._interactive_stdio", return_value=True), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy), \
+             patch("colonyos.cli._launch_tui") as mock_launch:
+            result = runner.invoke(app, [])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
+        mock_launch.assert_not_called()
+
+    def test_bare_colonyos_tui_installs_signal_cancel_handlers(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=True), \
+             patch("colonyos.cli._interactive_stdio", return_value=True), \
+             patch("colonyos.cli.install_signal_cancel_handlers", return_value=nullcontext()) as mock_handlers, \
+             patch("colonyos.cli._launch_tui") as mock_launch:
+            result = runner.invoke(app, [])
+
+        assert result.exit_code == 0
+        mock_handlers.assert_called_once_with(include_sighup=True)
+        mock_launch.assert_called_once()
 
 
 class TestStatus:
@@ -241,6 +293,26 @@ class TestRun:
         assert result.exit_code == 0
         mock_direct.assert_called_once()
         mock_run.assert_not_called()
+
+    def test_run_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=4242,
+                mode="daemon",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos daemon",
+            ),
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._tui_available", return_value=False), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy):
+            result = runner.invoke(app, ["run", "Add feature"])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
 
 
 class TestRunDirectAgentSessionResume:
@@ -420,7 +492,7 @@ class TestCleanupLoop:
         fail_result_2 = PhaseResult(
             phase=Phase.QA,
             success=False,
-            session_id=None,
+            session_id="",
             error="another error",
             artifacts={"result": ""},
         )
@@ -647,6 +719,43 @@ class TestResolveLatestPrdPath:
         mock_direct.assert_called_once()
         mock_run.assert_not_called()
 
+    def test_launch_tui_sigint_delegates_to_action_cancel_run(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        app_holder: dict[str, object] = {}
+
+        class FakeApp:
+            def __init__(self, **kwargs):
+                self.messages: list[object] = []
+                self.cancel_calls = 0
+                self.event_queue = SimpleNamespace(
+                    sync_q=SimpleNamespace(put=self.messages.append),
+                )
+                app_holder["instance"] = self
+
+            def call_from_thread(self, fn, *args):
+                return fn(*args)
+
+            def action_cancel_run(self):
+                self.cancel_calls += 1
+
+            def run(self):
+                return None
+
+        with patch("colonyos.tui.app.AssistantApp", FakeApp), \
+             patch("colonyos.tui.log_writer.TranscriptLogWriter"), \
+             patch("colonyos.cli.signal.getsignal", return_value=signal.SIG_DFL), \
+             patch("colonyos.cli.signal.signal") as mock_signal:
+            _launch_tui(tmp_path, config)
+            sigint_handler = next(
+                call.args[1]
+                for call in mock_signal.call_args_list
+                if call.args[0] == signal.SIGINT and callable(call.args[1])
+            )
+            sigint_handler(signal.SIGINT, object())
+            fake_app = app_holder["instance"]
+            assert isinstance(fake_app, FakeApp)
+            assert fake_app.cancel_calls == 1
+
 
 def _make_config(tmp_path: Path) -> ColonyConfig:
     config = ColonyConfig(
@@ -657,12 +766,393 @@ def _make_config(tmp_path: Path) -> ColonyConfig:
     return config
 
 
+class TestDaemonCommand:
+    def test_parse_daemon_tui_output_line_recognizes_structured_monitor_event(self):
+        msg = _parse_daemon_tui_output_line(encode_monitor_event({
+            "type": "tool_line",
+            "tool_name": "Read",
+            "arg": "src/app.py",
+            "style": "cyan",
+        }))
+        assert isinstance(msg, ToolLineMsg)
+        assert msg.tool_name == "Read"
+        assert msg.arg == "src/app.py"
+        assert msg.style == "cyan"
+
+    def test_parse_daemon_tui_output_line_recognizes_tool_lines(self):
+        msg = _parse_daemon_tui_output_line("  [3.0] ● Read src/app.py")
+        assert isinstance(msg, ToolLineMsg)
+        assert msg.tool_name == "[3.0] Read"
+        assert msg.arg == "src/app.py"
+        assert msg.style == "cyan"
+
+    def test_parse_daemon_tui_output_line_recognizes_phase_completion(self):
+        msg = _parse_daemon_tui_output_line("  ✓ Phase completed  $0.37 · 4 turns · 2m 03s")
+        assert isinstance(msg, PhaseCompleteMsg)
+        assert msg.cost == pytest.approx(0.37)
+        assert msg.turns == 4
+        assert msg.duration_ms == 123000
+
+    def test_parse_daemon_tui_output_line_recognizes_phase_error(self):
+        msg = _parse_daemon_tui_output_line("  ✗ Phase failed: branch restore failed")
+        assert isinstance(msg, PhaseErrorMsg)
+        assert msg.error == "branch restore failed"
+
+    def test_daemon_uses_tui_when_available(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._interactive_stdio", return_value=True), \
+             patch("colonyos.cli._tui_available", return_value=True), \
+             patch("colonyos.cli._launch_daemon_tui") as mock_launch:
+            result = runner.invoke(app, ["daemon"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        mock_launch.assert_called_once()
+
+    def test_daemon_no_tui_starts_headless(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.daemon.Daemon.start") as mock_start:
+            result = runner.invoke(app, ["daemon", "--no-tui"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        mock_start.assert_called_once()
+
+    def test_daemon_monitor_mode_skips_banner(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch.dict("os.environ", {"COLONYOS_DAEMON_MONITOR": "1"}), \
+             patch("colonyos.cli._print_daemon_banner") as mock_banner, \
+             patch("colonyos.daemon.Daemon.start") as mock_start:
+            result = runner.invoke(app, ["daemon", "--no-tui"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        mock_start.assert_called_once()
+        mock_banner.assert_not_called()
+
+    def test_launch_daemon_tui_spawns_subprocess(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        messages: list[object] = []
+
+        class FakeApp:
+            def __init__(self, **kwargs):
+                self.run_callback = kwargs["run_callback"]
+                self.cancel_callback = kwargs["cancel_callback"]
+                self.event_queue = SimpleNamespace(
+                    sync_q=SimpleNamespace(put=messages.append),
+                )
+
+            def run(self):
+                self.run_callback("daemon-monitor")
+
+        fake_proc = MagicMock()
+        fake_proc.stdout = iter([
+            encode_monitor_event({
+                "type": "phase_header",
+                "phase_name": "Plan",
+                "budget": 10.0,
+                "model": "opus",
+                "extra": "7 persona subagents",
+            }) + "\n",
+            encode_monitor_event({
+                "type": "tool_line",
+                "tool_name": "Read",
+                "arg": "src/colonyos/daemon.py",
+                "style": "cyan",
+            }) + "\n",
+            encode_monitor_event({
+                "type": "phase_complete",
+                "cost": 0.12,
+                "turns": 2,
+                "duration_ms": 14000,
+            }) + "\n",
+            "[colonyos] starting daemon work\n",
+            "line two\n",
+        ])
+        fake_proc.wait.return_value = 0
+        fake_proc.pid = 12345
+        fake_proc.poll.return_value = 0
+
+        with patch("colonyos.tui.app.AssistantApp", FakeApp), \
+             patch("colonyos.tui.log_writer.TranscriptLogWriter"), \
+             patch("colonyos.cli.subprocess.Popen", return_value=fake_proc) as mock_popen, \
+             patch("colonyos.cli.signal.getsignal", return_value=signal.SIG_DFL), \
+             patch("colonyos.cli.signal.signal"):
+            _launch_daemon_tui(
+                tmp_path,
+                config,
+                max_budget=25.0,
+                unlimited_budget=False,
+                max_hours=8.0,
+                allow_all_control_users=True,
+                verbose=True,
+                dry_run=True,
+            )
+
+        command = mock_popen.call_args.args[0]
+        env = mock_popen.call_args.kwargs["env"]
+        assert "--no-tui" in command
+        assert "--allow-all-control-users" in command
+        assert "--dry-run" in command
+        assert "--verbose" in command
+        assert env["COLONYOS_DAEMON_MONITOR"] == "1"
+        assert any(isinstance(msg, NoticeMsg) for msg in messages)
+        assert any(isinstance(msg, PhaseHeaderMsg) for msg in messages)
+        assert any(isinstance(msg, ToolLineMsg) for msg in messages)
+        assert any(isinstance(msg, PhaseCompleteMsg) for msg in messages)
+        assert any(isinstance(msg, TextBlockMsg) for msg in messages)
+
+
+class TestQueuePipelineExecution:
+    def test_slack_queue_item_uses_raw_prompt_for_branch_override(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        item = QueueItem(
+            id="slack-1",
+            source_type="slack",
+            source_value=(
+                "You are a code assistant working on behalf of the engineering team.\n"
+                "<slack_message>\nwrapped prompt\n</slack_message>"
+            ),
+            raw_prompt="Add Homebrew formula support",
+            status=QueueItemStatus.PENDING,
+        )
+        fake_log = RunLog(run_id="run-1", prompt="x", status=RunStatus.COMPLETED, phases=[])
+
+        with patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            result = run_pipeline_for_queue_item(
+                item=item,
+                repo_root=tmp_path,
+                config=config,
+            )
+
+        assert result is fake_log
+        assert mock_run.call_args.kwargs["branch_name_override"] == (
+            f"{config.branch_prefix}add_homebrew_formula_support_"
+            f"{hashlib.sha1(item.id.encode('utf-8')).hexdigest()[:10]}"
+        )
+
+    def test_slack_queue_items_get_distinct_branch_overrides(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        item_a = QueueItem(
+            id="slack-20260330_120000_123456-a1b2c3d4",
+            source_type="slack",
+            source_value="wrapped prompt",
+            raw_prompt="Add Homebrew formula support",
+            status=QueueItemStatus.PENDING,
+        )
+        item_b = QueueItem(
+            id="slack-20260330_120000_123456-e5f6a7b8",
+            source_type="slack",
+            source_value="wrapped prompt",
+            raw_prompt="Add Homebrew formula support",
+            status=QueueItemStatus.PENDING,
+        )
+        fake_log = RunLog(run_id="run-1", prompt="x", status=RunStatus.COMPLETED, phases=[])
+
+        with patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
+            run_pipeline_for_queue_item(item=item_a, repo_root=tmp_path, config=config)
+            override_a = mock_run.call_args.kwargs["branch_name_override"]
+            run_pipeline_for_queue_item(item=item_b, repo_root=tmp_path, config=config)
+            override_b = mock_run.call_args.kwargs["branch_name_override"]
+
+        assert override_a != override_b
+        assert override_a.startswith(f"{config.branch_prefix}add_homebrew_formula_support_")
+        assert override_b.startswith(f"{config.branch_prefix}add_homebrew_formula_support_")
+
+    def test_launch_daemon_tui_stops_running_subprocess_on_exit(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+
+        class FakeApp:
+            def __init__(self, **kwargs):
+                self.run_callback = kwargs["run_callback"]
+                self.cancel_callback = kwargs["cancel_callback"]
+                self.messages: list[object] = []
+                self.event_queue = SimpleNamespace(
+                    sync_q=SimpleNamespace(put=self.messages.append),
+                )
+
+            def run(self):
+                self.run_callback("daemon-monitor")
+
+        fake_proc = MagicMock()
+        fake_proc.stdout = iter(["line one\n"])
+        fake_proc.wait.return_value = 0
+        fake_proc.pid = 12345
+        fake_proc.poll.return_value = None
+
+        with patch("colonyos.tui.app.AssistantApp", FakeApp), \
+             patch("colonyos.tui.log_writer.TranscriptLogWriter"), \
+             patch("colonyos.cli.subprocess.Popen", return_value=fake_proc), \
+             patch("colonyos.cli.os.killpg") as mock_killpg, \
+             patch("colonyos.cli.signal.getsignal", return_value=signal.SIG_DFL), \
+             patch("colonyos.cli.signal.signal"):
+            _launch_daemon_tui(
+                tmp_path,
+                config,
+                max_budget=None,
+                unlimited_budget=False,
+                max_hours=None,
+                allow_all_control_users=False,
+                verbose=False,
+                dry_run=False,
+            )
+
+        mock_killpg.assert_called_with(12345, signal.SIGTERM)
+
+    def test_launch_daemon_tui_ignores_kill_errors_during_shutdown(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+
+        class FakeApp:
+            def __init__(self, **kwargs):
+                self.run_callback = kwargs["run_callback"]
+                self.cancel_callback = kwargs["cancel_callback"]
+                self.messages: list[object] = []
+                self.event_queue = SimpleNamespace(
+                    sync_q=SimpleNamespace(put=self.messages.append),
+                )
+
+            def run(self):
+                self.run_callback("daemon-monitor")
+
+        fake_proc = MagicMock()
+        fake_proc.stdout = iter(["line one\n"])
+        fake_proc.wait.return_value = 0
+        fake_proc.pid = 12345
+        fake_proc.poll.return_value = None
+
+        with patch("colonyos.tui.app.AssistantApp", FakeApp), \
+             patch("colonyos.tui.log_writer.TranscriptLogWriter"), \
+             patch("colonyos.cli.subprocess.Popen", return_value=fake_proc), \
+             patch("colonyos.cli.os.killpg", side_effect=PermissionError("no permission")), \
+             patch("colonyos.cli.signal.getsignal", return_value=signal.SIG_DFL), \
+             patch("colonyos.cli.signal.signal"):
+            _launch_daemon_tui(
+                tmp_path,
+                config,
+                max_budget=None,
+                unlimited_budget=False,
+                max_hours=None,
+                allow_all_control_users=False,
+                verbose=False,
+                dry_run=False,
+            )
+
+
+class TestWatchSlackCommand:
+    def test_watch_alias_calls_watch_slack(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli._watch_slack_impl") as mock_watch:
+            result = runner.invoke(app, ["watch"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert "deprecated" in result.output.lower()
+        mock_watch.assert_called_once()
+
+    def test_watch_slack_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=5151,
+                mode="daemon",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos daemon",
+            ),
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy), \
+             patch("colonyos.cli._watch_slack_impl") as mock_watch:
+            result = runner.invoke(app, ["watch-slack"])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
+        mock_watch.assert_not_called()
+
+
+class TestQueueCommand:
+    def test_queue_start_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        queue_path = tmp_path / ".colonyos" / "queue.json"
+        queue_path.parent.mkdir(parents=True, exist_ok=True)
+        queue_path.write_text(
+            json.dumps(
+                {
+                    "queue_id": "queue-test",
+                    "items": [
+                        {
+                            "schema_version": 4,
+                            "id": "item-1",
+                            "source_type": "prompt",
+                            "source_value": "Do work",
+                            "status": "pending",
+                            "priority": 1,
+                            "added_at": "2026-03-30T00:00:00+00:00",
+                        }
+                    ],
+                    "aggregate_cost_usd": 0.0,
+                    "start_time_iso": None,
+                    "status": "pending",
+                }
+            ),
+            encoding="utf-8",
+        )
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=6262,
+                mode="watch-slack",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos watch-slack",
+            ),
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy):
+            result = runner.invoke(app, ["queue", "start"])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
+
+
 class TestAuto:
     def test_no_config(self, runner: CliRunner, tmp_path: Path):
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
             result = runner.invoke(app, ["auto"])
         assert result.exit_code != 0
         assert "colonyos init" in result.output
+
+    def test_auto_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=7171,
+                mode="watch-slack",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos watch-slack",
+            ),
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy):
+            result = runner.invoke(app, ["auto"])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
+
+    def test_sigterm_marks_loop_interrupted(self, runner: CliRunner, tmp_path: Path):
+        _make_config(tmp_path)
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch(
+                 "colonyos.cli._run_single_iteration",
+                 side_effect=SystemExit(128 + signal.SIGTERM),
+             ), \
+             patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
+            result = runner.invoke(app, ["auto", "--no-confirm"])
+
+        assert result.exit_code == 128 + signal.SIGTERM
+        loop_state = _load_latest_loop_state(tmp_path)
+        assert loop_state is not None
+        assert loop_state.status == LoopStatus.INTERRUPTED
 
     def test_propose_only_mode(self, runner: CliRunner, tmp_path: Path):
         _make_config(tmp_path)
@@ -826,6 +1316,7 @@ class TestInitWithPacks:
         ])
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.doctor.subprocess.run", return_value=MagicMock(returncode=0)), \
              patch("colonyos.doctor.sys.version_info", type("V", (), {"major": 3, "minor": 12})()), \
              patch("colonyos.init._collect_strategic_goals", return_value=""):
@@ -850,6 +1341,7 @@ class TestInitCliRouting:
 
     def test_default_calls_ai_init(self, runner: CliRunner, tmp_path: Path):
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.cli.run_ai_init") as mock_ai:
             mock_ai.return_value = ColonyConfig()
             result = runner.invoke(app, ["init"])
@@ -858,6 +1350,7 @@ class TestInitCliRouting:
 
     def test_manual_calls_run_init(self, runner: CliRunner, tmp_path: Path):
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.cli.run_init") as mock_manual:
             mock_manual.return_value = ColonyConfig()
             result = runner.invoke(app, ["init", "--manual"], input="n\n")
@@ -866,6 +1359,7 @@ class TestInitCliRouting:
 
     def test_quick_calls_run_init(self, runner: CliRunner, tmp_path: Path):
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.cli.run_init") as mock_manual:
             mock_manual.return_value = ColonyConfig()
             result = runner.invoke(app, ["init", "--quick", "--name", "Test"])
@@ -876,6 +1370,7 @@ class TestInitCliRouting:
 
     def test_personas_calls_run_init(self, runner: CliRunner, tmp_path: Path):
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.cli.run_init") as mock_manual:
             mock_manual.return_value = ColonyConfig()
             result = runner.invoke(app, ["init", "--personas"], input="1\ny\nn\n")
@@ -1644,6 +2139,7 @@ class TestInitDoctorPreCheck:
             ]
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.doctor.run_doctor_checks", fake_checks):
             result = runner.invoke(app, ["init", "--quick", "--name", "Test"])
 
@@ -1663,6 +2159,7 @@ class TestInitDoctorPreCheck:
             ]
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.doctor.run_doctor_checks", fake_checks):
             result = runner.invoke(app, [
                 "init", "--quick", "--name", "Test",
@@ -2211,6 +2708,27 @@ class TestCIFixCommand:
         assert "--wait-timeout" in result.output
         assert "PR_REF" in result.output
 
+    def test_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=8181,
+                mode="daemon",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos daemon",
+            ),
+        )
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.load_config", return_value=ColonyConfig()), \
+             patch("colonyos.ci.subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+             patch("colonyos.ci.fetch_pr_checks", return_value=[]), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy):
+            result = runner.invoke(app, ["ci-fix", "42"])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
+
     def test_all_checks_pass(self, runner: CliRunner, tmp_path: Path):
         """When all checks pass, ci-fix exits successfully."""
         from colonyos.ci import CheckResult
@@ -2309,6 +2827,32 @@ class TestCIFixCommand:
                  patch("colonyos.orchestrator._save_run_log"):
                 result = runner.invoke(app, ["ci-fix", "42"])
         assert "WARNING" in result.output or "mallory" in result.output
+
+
+class TestPRReviewCommand:
+    def test_rejects_busy_repo_runtime(self, runner: CliRunner, tmp_path: Path):
+        config = _make_config(tmp_path)
+        busy = RuntimeBusyError(
+            tmp_path,
+            RuntimeProcessRecord(
+                pid=9191,
+                mode="watch-slack",
+                cwd=str(tmp_path),
+                started_at="2026-03-30T00:00:00+00:00",
+                command="colonyos watch-slack",
+            ),
+        )
+        pr_state = SimpleNamespace(state="open", head_ref="feature/test", head_sha="abc123", url="https://example.com/pr/1")
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.cli.load_config", return_value=config), \
+             patch("colonyos.pr_review.fetch_pr_state", return_value=pr_state), \
+             patch("colonyos.pr_review.load_pr_review_state", return_value=None), \
+             patch("colonyos.pr_review.save_pr_review_state"), \
+             patch("colonyos.cli.RepoRuntimeGuard.acquire", side_effect=busy):
+            result = runner.invoke(app, ["pr-review", "1"])
+
+        assert result.exit_code != 0
+        assert "Another ColonyOS runtime is already active" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -3089,7 +3633,7 @@ class TestEndToEndSessionPersistence:
         call_args: list[dict] = []
 
         def mock_run_phase_sync(phase, prompt, *, cwd, system_prompt, model,
-                                 budget_usd, ui, resume=None):
+                                 budget_usd, ui, resume=None, **kwargs):
             call_args.append({"resume": resume})
             if resume is not None:
                 # Simulate resume failure

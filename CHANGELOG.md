@@ -1,5 +1,110 @@
 # Changelog
 
+## 20260331_140000 — Daemon PR Sync: Keep ColonyOS PRs Up-to-Date with Main
+
+Adds a new daemon concern that automatically detects open ColonyOS-authored PRs that have fallen behind `main`, merges the latest `main` into those branches via isolated worktrees, and pushes the result — keeping PRs perpetually merge-ready. Conflict failures are reported via Slack and PR comments with automatic retry capping.
+
+**Created:**
+- `src/colonyos/pr_sync.py` — Core sync logic: detection, worktree-based merge, failure tracking, and notifications
+- `src/colonyos/worktree.py` — Ephemeral worktree manager for isolated git operations
+- `tests/test_pr_sync.py` — Comprehensive unit/integration tests for PR sync
+- `tests/test_config.py` — Config tests for new `pr_sync` section
+- `tests/test_github.py` — Tests for `post_pr_comment()` helper
+- `tests/test_outcomes.py` — Tests for new sync tracking columns
+
+**Modified:**
+- `src/colonyos/config.py` — Added `PRSyncConfig` with `enabled`, `interval_minutes`, `max_sync_failures`
+- `src/colonyos/daemon.py` — Wired PR sync into daemon tick loop as concern #7
+- `src/colonyos/github.py` — Added `post_pr_comment()` helper
+- `src/colonyos/outcomes.py` — Added `last_sync_at`, `sync_failures`, `mergeStateStatus` columns
+- `README.md` — Documentation for PR sync feature
+
+**PRD:** `cOS_prds/20260331_131622_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260331_131622_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
+## 20260330_193500 — Homebrew Global Installation & VM-Ready Deployment
+
+Adds a working Homebrew distribution channel (`brew install rangelak/colonyos/colonyos`) and a single-command VM provisioning script for Ubuntu 22.04+. The release workflow now auto-updates the tap formula on every tagged release, and `colonyos doctor` detects the install method to show correct upgrade instructions.
+
+**Created:**
+- `scripts/generate-homebrew-formula.sh` — Generates a complete Homebrew formula with all Python dependency resource blocks
+- `docs/homebrew-tap-setup.md` — Setup guide for the `rangelak/homebrew-colonyos` tap repository
+- `deploy/provision.sh` — Single-command VM provisioning script (Ubuntu 22.04+)
+- `.github/workflows/release.yml` — Release workflow with auto-updating Homebrew tap job
+- `tests/test_e2e_validation.py` — End-to-end validation tests for Homebrew install and VM deploy
+- `tests/test_generate_formula.sh` — Shell tests for formula generation script
+- `tests/test_doctor.py` — Tests for install-method detection in doctor command
+
+**Modified:**
+- `Formula/colonyos.rb` — Updated formula with proper dependency resources and test block
+- `src/colonyos/doctor.py` — Install-method detection (brew/pipx/pip/dev)
+- `src/colonyos/cli.py` — Doctor command integration updates
+- `src/colonyos/init.py` — Non-git-repo guard for `colonyos init`
+- `README.md` — Homebrew install and VM deployment quickstart sections
+- `deploy/README.md` — Updated with provisioning script documentation
+- `.github/workflows/ci.yml` — CI updates for new test coverage
+- `tests/test_ci_workflows.py` — Additional CI workflow tests
+
+**PRD:** `cOS_prds/20260330_182656_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260330_182656_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
+## 20260330_154500 — Enforce Repo Runtime Exclusivity and Shutdown Cleanup
+
+Hardens ColonyOS against overlapping repo-bound runtimes by introducing a shared runtime lock across daemon, Slack watcher, queue, auto, TUI, and related entrypoints. This prevents concurrent work on the same checkout, improves cancellation cleanup for Ctrl+C and SIGTERM paths, and documents the generated runtime lock artifacts.
+
+**Created:**
+- `src/colonyos/runtime_lock.py` — Shared repo runtime lock, active-process registry, and related process-tree shutdown helpers
+- `tests/test_runtime_lock.py` — Regression coverage for lock acquisition, registry cleanup, and runtime termination
+
+**Modified:**
+- `src/colonyos/cancellation.py` — Shared signal fan-out with preserved SIGTERM exit semantics
+- `src/colonyos/cli.py` — Guard repo-bound runtimes, harden TUI and auto shutdown paths, and align interactive signal handling
+- `src/colonyos/daemon.py` — Move daemon instance locking onto the shared repo runtime guard
+- `src/colonyos/server.py` — Reject dashboard-launched runs when a repo runtime is already active
+- `README.md` — Document repo runtime exclusivity and watcher/daemon mutual exclusion
+- `deploy/README.md` — Document runtime lock files in deployment troubleshooting guidance
+- `.gitignore` — Ignore generated runtime lock and process registry artifacts
+- `tests/test_cancellation.py`, `tests/test_cli.py`, `tests/test_daemon.py`, `tests/test_server.py`, `tests/test_sweep.py`, `tests/tui/test_cli_integration.py` — Add regression coverage for guarded runtimes and interactive signal behavior
+
+## 20260330_103500 — PR Outcome Tracking System
+
+Closes the feedback loop on ColonyOS-created PRs by tracking their fate (merged/closed/open), feeding outcome data back into the CEO prompt, memory system, and analytics dashboard so the pipeline improves over time.
+
+**Created:**
+- `src/colonyos/outcomes.py` — Core outcomes module with SQLite persistence, GitHub polling via `gh`, and aggregate stats
+- `tests/test_outcomes.py` — Comprehensive test coverage for outcome tracking, polling, and stats
+- `tests/test_ceo.py` — Tests for CEO prompt injection of outcome history
+- `tests/test_stats.py` — Tests for delivery outcomes section in stats dashboard
+
+**Modified:**
+- `src/colonyos/cli.py` — Added `colonyos outcomes` and `colonyos outcomes poll` CLI commands
+- `src/colonyos/config.py` — Added `outcome_poll_interval_minutes` to DaemonConfig
+- `src/colonyos/daemon.py` — Automatic PR outcome polling in daemon `_tick()`
+- `src/colonyos/orchestrator.py` — Deliver phase integration to track PRs at creation time
+- `src/colonyos/stats.py` — Delivery Outcomes section in stats dashboard
+- `README.md` — Updated with outcome tracking documentation
+
+**PRD:** `cOS_prds/20260330_091744_prd_add_a_pr_outcome_tracking_system_that_monitors_the_fate_of_prs_created_by_colony.md`
+**Tasks:** `cOS_tasks/20260330_091744_tasks_add_a_pr_outcome_tracking_system_that_monitors_the_fate_of_prs_created_by_colony.md`
+
+## 20260330_091900 — Harden Daemon Monitor UI and Slack Control Defaults
+
+Improves the autonomous daemon experience by cleaning up the TUI monitor, restoring a single daemon-specific banner, removing misleading interactive controls in monitor mode, and translating daemon phase headers into native TUI events instead of dumping raw headless CLI layout into the transcript. This release also finishes the shared cancellation/control plumbing, documents open Slack queue access, and removes tracked runtime log artifacts from git.
+
+**Created:**
+- `src/colonyos/cancellation.py` — Shared cancellation bus for daemon, CLI, TUI, and active phase runs
+- `tests/test_cancellation.py` — Regression coverage for signal fan-out into shared cancellation
+
+**Modified:**
+- `src/colonyos/agent.py` — Make sync phase wrappers cancellable and tighten typing around streamed tool names/results
+- `src/colonyos/cli.py` — Add daemon monitor subprocess handling, monitor-mode logging, and native TUI event mapping for daemon output
+- `src/colonyos/config.py` — Preserve daemon/retry fields and allow all Slack control users via config
+- `src/colonyos/daemon.py` — Improve shutdown handling, diagnostics, and budget/recovery reporting
+- `src/colonyos/init.py` — Preserve existing config on re-init and align runtime-state `.gitignore` entries
+- `src/colonyos/tui/app.py` — Add dedicated monitor mode and clean daemon cancel ordering
+- `src/colonyos/tui/widgets/transcript.py` — Add dedicated daemon monitor banner and cleaner transcript spacing
+- `deploy/README.md` — Document daemon Slack allowlist behavior and open queue submission semantics
+- `tests/test_agent.py`, `tests/test_cli.py`, `tests/test_config.py`, `tests/test_daemon.py`, `tests/test_init.py`, `tests/tui/test_app.py` — Add regression coverage for cancellation, daemon monitor UX, config round-tripping, and init preservation
 ## 20260330_002500 — Handle 529 Overloaded Errors with Retry and Optional Model Fallback
 
 Adds a transport-level retry layer with exponential backoff and jitter inside `run_phase()` so that transient API 529/503 errors are handled transparently without triggering the orchestrator's heavyweight recovery. Includes optional model fallback (hard-blocked on safety-critical phases), full observability via `PhaseResult.retry_info`, and configurable `RetryConfig` in `config.yaml`.

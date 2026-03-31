@@ -8,6 +8,7 @@ messages in the transcript.
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import patch
 
 import pytest
 
@@ -31,6 +32,7 @@ pytestmark = pytest.mark.skipif(
 if _tui_available():
     from colonyos.tui.adapter import (
         CommandOutputMsg,
+        NoticeMsg,
         PhaseCompleteMsg,
         PhaseErrorMsg,
         PhaseHeaderMsg,
@@ -90,6 +92,17 @@ class TestAppMounts:
             assert "auto --no-confirm" in rendered
             assert "status" in rendered
             assert "help" in rendered
+
+    @pytest.mark.asyncio
+    async def test_monitor_mode_hides_welcome_and_input_widgets(self) -> None:
+        """Daemon monitor mode should not mount the interactive welcome/input chrome."""
+        app = AssistantApp(monitor_mode=True)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            transcript = app.query_one(TranscriptView)
+            assert len(transcript.lines) == 0
+            assert list(app.query(Composer)) == []
+            assert list(app.query(HintBar)) == []
 
 
 class TestQueueToTranscript:
@@ -168,6 +181,18 @@ class TestQueueToTranscript:
             await pilot.pause()
             transcript = app.query_one(TranscriptView)
             assert len(transcript.lines) >= 5
+
+    @pytest.mark.asyncio
+    async def test_notice_renders_without_command_block_spacing(self) -> None:
+        """NoticeMsg should render through the transcript notice path."""
+        app = AssistantApp(monitor_mode=True)
+        async with app.run_test() as pilot:
+            app.event_queue.sync_q.put(NoticeMsg(text="Daemon monitor mode"))
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+            transcript = app.query_one(TranscriptView)
+            assert len(transcript.lines) > 0
 
     @pytest.mark.asyncio
     async def test_phase_complete_renders(self) -> None:
@@ -450,7 +475,8 @@ class TestKeybindings:
         async with app.run_test() as pilot:
             await pilot.pause()
             # Trigger cancel action directly (Ctrl+C binding may be intercepted by test harness)
-            app.action_cancel_run()
+            with patch("colonyos.tui.app.request_cancel") as mock_cancel:
+                app.action_cancel_run()
             await pilot.pause()
             status = app.query_one(StatusBar)
             transcript = app.query_one(TranscriptView)
@@ -458,6 +484,7 @@ class TestKeybindings:
             assert "cancel" in status.error_msg.lower()
             # Transcript should have the cancel message
             assert len(transcript.lines) > 0
+            mock_cancel.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_queue_user_injection_renders(self) -> None:

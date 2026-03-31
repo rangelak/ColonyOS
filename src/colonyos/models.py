@@ -11,6 +11,25 @@ import click
 logger = logging.getLogger(__name__)
 
 
+def extract_result_text(artifacts: dict[str, Any] | None) -> str:
+    """Extract the primary textual result from PhaseResult artifacts.
+
+    Prefers the canonical ``"result"`` key. Falls back to the first string
+    value if the dict has exactly one entry (single-artifact phases).
+    Returns ``""`` when no usable text is found.
+    """
+    if not artifacts:
+        return ""
+    result = artifacts.get("result")
+    if result is not None:
+        return str(result)
+    if len(artifacts) == 1:
+        val = next(iter(artifacts.values()))
+        if isinstance(val, str):
+            return val
+    return ""
+
+
 class PreflightError(click.ClickException):
     """Raised when a pre-flight git state check fails.
 
@@ -143,7 +162,7 @@ class PhaseResult:
     session_id: str = ""
     model: str | None = None
     error: str | None = None
-    artifacts: dict[str, str] = field(default_factory=dict)
+    artifacts: dict[str, Any] = field(default_factory=dict)
     retry_info: RetryInfo | None = None
 
 
@@ -327,35 +346,60 @@ class LoopState:
         )
 
 
-# Priority tier constants (lower number = higher priority)
-PRIORITY_BUG: int = 0      # P0: User-reported bugs
-PRIORITY_FEATURE: int = 1  # P1: User features / issues
-PRIORITY_CEO: int = 2      # P2: CEO-proposed work
-PRIORITY_CLEANUP: int = 3  # P3: Cleanup / maintenance
+# Backward-compatible public priority constants.
+# These are still used by tests and external imports.
+PRIORITY_BUG: int = 0
+PRIORITY_FEATURE: int = 1
+PRIORITY_CEO: int = 2
+PRIORITY_CLEANUP: int = 3
+
+# Internal runtime queue tiers (lower number = higher priority).
+PRIORITY_SLACK: int = 0
+PRIORITY_ISSUE: int = 1
+PRIORITY_AUTO: int = 2
 
 _BUG_SIGNAL_WORDS = frozenset({"bug", "fix", "broken", "crash", "error", "regression", "hotfix"})
 
 
 def compute_priority(source_type: str, labels: list[str] | None = None) -> int:
-    """Compute deterministic priority tier from source type and labels.
-
-    Returns P0-P3 integer where lower = higher priority.
-    """
+    """Compute the legacy public priority tier from source type and labels."""
     labels = labels or []
     lower_labels = [lbl.lower() for lbl in labels]
 
+    if source_type == "issue":
+        for lbl in lower_labels:
+            if any(word in lbl for word in _BUG_SIGNAL_WORDS):
+                return PRIORITY_BUG
+        return PRIORITY_FEATURE
     if source_type == "ceo":
         return PRIORITY_CEO
-    if source_type == "cleanup":
+    if source_type in {"cleanup", "refactor"}:
         return PRIORITY_CLEANUP
 
-    # Check for bug signals in labels
     for lbl in lower_labels:
         if any(word in lbl for word in _BUG_SIGNAL_WORDS):
             return PRIORITY_BUG
-
-    # Default: user feature (slack, issue, prompt)
     return PRIORITY_FEATURE
+
+
+def compute_runtime_priority(source_type: str, labels: list[str] | None = None) -> int:
+    """Compute runtime queue priority for scheduling decisions."""
+    labels = labels or []
+    lower_labels = [lbl.lower() for lbl in labels]
+
+    if source_type in {"slack", "slack_fix", "prompt", "pr_review_fix"}:
+        for lbl in lower_labels:
+            if any(word in lbl for word in _BUG_SIGNAL_WORDS):
+                return PRIORITY_SLACK
+        return PRIORITY_SLACK
+    if source_type == "issue":
+        for lbl in lower_labels:
+            if any(word in lbl for word in _BUG_SIGNAL_WORDS):
+                return PRIORITY_SLACK
+        return PRIORITY_ISSUE
+    if source_type in {"ceo", "cleanup", "refactor"}:
+        return PRIORITY_AUTO
+    return PRIORITY_ISSUE
 
 
 class QueueItemStatus(str, Enum):
@@ -385,7 +429,7 @@ class QueueItem:
     - "cleanup": Cleanup / maintenance
     """
 
-    SCHEMA_VERSION: ClassVar[int] = 4  # class-level constant; bump on structural changes
+    SCHEMA_VERSION: ClassVar[int] = 4  # class-level constant; kept stable for backward compatibility
 
     id: str
     source_type: str  # "prompt", "issue", "slack", "slack_fix", "pr_review_fix", "ceo", or "cleanup"
@@ -410,6 +454,15 @@ class QueueItem:
     raw_prompt: str | None = None
     review_comment_id: str | None = None  # For pr_review_fix source_type
     priority: int = 1
+    summary: str | None = None
+    priority_reason: str | None = None
+    urgency_score: float = 0.0
+    demand_count: int = 1
+    related_item_ids: list[str] = field(default_factory=list)
+    merged_sources: list[dict[str, Any]] = field(default_factory=list)
+    last_reprioritized_at: str | None = None
+    notification_channel: str | None = None
+    notification_thread_ts: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -435,6 +488,15 @@ class QueueItem:
             "raw_prompt": self.raw_prompt,
             "review_comment_id": self.review_comment_id,
             "priority": self.priority,
+            "summary": self.summary,
+            "priority_reason": self.priority_reason,
+            "urgency_score": self.urgency_score,
+            "demand_count": self.demand_count,
+            "related_item_ids": list(self.related_item_ids),
+            "merged_sources": list(self.merged_sources),
+            "last_reprioritized_at": self.last_reprioritized_at,
+            "notification_channel": self.notification_channel,
+            "notification_thread_ts": self.notification_thread_ts,
         }
 
     @classmethod
@@ -477,6 +539,15 @@ class QueueItem:
             raw_prompt=data.get("raw_prompt"),
             review_comment_id=data.get("review_comment_id"),
             priority=data.get("priority", 1),
+            summary=data.get("summary"),
+            priority_reason=data.get("priority_reason"),
+            urgency_score=float(data.get("urgency_score", 0.0) or 0.0),
+            demand_count=max(1, int(data.get("demand_count", 1) or 1)),
+            related_item_ids=list(data.get("related_item_ids", [])),
+            merged_sources=list(data.get("merged_sources", [])),
+            last_reprioritized_at=data.get("last_reprioritized_at"),
+            notification_channel=data.get("notification_channel"),
+            notification_thread_ts=data.get("notification_thread_ts"),
         )
 
 

@@ -13,6 +13,8 @@ export interface RunLog {
   task_rel: string | null;
   source_issue: number | null;
   source_issue_url: string | null;
+  source_type: string | null;
+  pr_url: string | null;
 }
 
 export interface PhaseEntry {
@@ -183,6 +185,18 @@ export interface ConfigResult {
   personas: Persona[];
 }
 
+export interface DaemonHealth {
+  status: "healthy" | "degraded" | "stopped";
+  heartbeat_age_seconds: number | null;
+  queue_depth: number;
+  daily_spend_usd: number;
+  daily_budget_remaining_usd: number;
+  circuit_breaker_active: boolean;
+  paused: boolean;
+  total_items_today: number;
+  consecutive_failures: number;
+}
+
 export interface QueueItem {
   id: string;
   source_type: string;
@@ -195,6 +209,13 @@ export interface QueueItem {
   pr_url: string | null;
   error: string | null;
   issue_title: string | null;
+  priority: number;
+  demand_count: number;
+  urgency_score: number;
+  summary: string | null;
+  notification_channel: string | null;
+  related_item_ids: string[];
+  merged_sources: Record<string, unknown>[];
 }
 
 export interface QueueState {

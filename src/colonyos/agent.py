@@ -6,9 +6,12 @@ import os
 import random
 import re
 import sys
-from dataclasses import dataclass
+import threading
+import time
+from collections.abc import Awaitable
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Literal, TypeAlias, TypeVar, cast
 
 from claude_agent_sdk import (
     AgentDefinition,
@@ -19,6 +22,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import StreamEvent, SystemMessage
 
+from colonyos.cancellation import cancellation_scope, request_cancel
 from colonyos.config import RetryConfig, _SAFETY_CRITICAL_PHASES
 from colonyos.models import Phase, PhaseResult, RetryInfo
 
@@ -26,6 +30,30 @@ if TYPE_CHECKING:
     from colonyos.ui import NullUI, PhaseUI
 
 logger = logging.getLogger(__name__)
+
+PermissionMode: TypeAlias = Literal[
+    "default",
+    "acceptEdits",
+    "plan",
+    "bypassPermissions",
+    "dontAsk",
+]
+
+_ACTIVE_PHASE_CONTROLLERS_LOCK = threading.Lock()
+_ACTIVE_PHASE_CONTROLLERS: set["_SyncRunController"] = set()
+_T = TypeVar("_T")
+
+
+class PhaseTimeoutError(RuntimeError):
+    """Raised when a phase exceeds its wall-clock timeout."""
+
+    def __init__(self, phase_label: str, timeout_seconds: int) -> None:
+        self.phase_label = phase_label
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"Phase '{phase_label}' timed out after {timeout_seconds}s"
+        )
+
 
 _API_KEY_SOURCE_LABELS = {
     "none": "Claude subscription (no API key)",
@@ -113,6 +141,80 @@ class _AttemptResult:
     error: Exception | None = None
 
 
+@dataclass(eq=False)
+class _SyncRunController:
+    """Thread-safe cancellation bridge for sync wrappers around async runs."""
+
+    label: str
+    _loop: asyncio.AbstractEventLoop | None = None
+    _task: asyncio.Task[PhaseResult | list[PhaseResult]] | None = None
+    _cancel_requested: bool = False
+    _cancel_reason: str = "Cancelled by user"
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def attach(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        task: asyncio.Task[PhaseResult | list[PhaseResult]],
+    ) -> None:
+        with self._lock:
+            self._loop = loop
+            self._task = task
+            cancel_requested = self._cancel_requested
+            cancel_reason = self._cancel_reason
+        if cancel_requested:
+            self.cancel(cancel_reason)
+
+    def cancel(self, reason: str = "Cancelled by user") -> None:
+        with self._lock:
+            self._cancel_requested = True
+            self._cancel_reason = reason
+            loop = self._loop
+            task = self._task
+        if loop is None or task is None or task.done():
+            return
+        if loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            logger.debug(
+                "Cancellation for %s arrived after the event loop closed",
+                self.label,
+                exc_info=True,
+            )
+
+    def detach(self) -> None:
+        with self._lock:
+            self._loop = None
+            self._task = None
+
+    @property
+    def cancel_reason(self) -> str:
+        with self._lock:
+            return self._cancel_reason
+
+
+def request_active_phase_cancel(reason: str = "Cancelled by user") -> int:
+    """Request cancellation of all in-flight sync phase runs.
+
+    Returns the number of active runs that were signaled.
+    """
+    with _ACTIVE_PHASE_CONTROLLERS_LOCK:
+        controllers = list(_ACTIVE_PHASE_CONTROLLERS)
+    for controller in controllers:
+        controller.cancel(reason)
+    return len(controllers)
+
+
+def _register_active_phase_controller(controller: _SyncRunController) -> None:
+    with _ACTIVE_PHASE_CONTROLLERS_LOCK:
+        _ACTIVE_PHASE_CONTROLLERS.add(controller)
+
+
+def _unregister_active_phase_controller(controller: _SyncRunController) -> None:
+    with _ACTIVE_PHASE_CONTROLLERS_LOCK:
+        _ACTIVE_PHASE_CONTROLLERS.discard(controller)
 async def _run_phase_attempt(
     *,
     phase: Phase,
@@ -152,7 +254,8 @@ async def _run_phase_attempt(
                 if etype == "content_block_start":
                     cb = event.get("content_block", {})
                     if cb.get("type") == "tool_use":
-                        current_tool = cb.get("name", "unknown")
+                        tool_name = cb.get("name")
+                        current_tool = tool_name if isinstance(tool_name, str) and tool_name else "unknown"
                         ui.on_tool_start(current_tool)
 
                 elif etype == "content_block_delta":
@@ -191,7 +294,7 @@ async def run_phase(
     max_turns: int | None = None,
     agents: dict[str, AgentDefinition] | None = None,
     allowed_tools: list[str] | None = None,
-    permission_mode: str = "bypassPermissions",
+    permission_mode: PermissionMode = "bypassPermissions",
     ui: PhaseUI | NullUI | None = None,
     resume: str | None = None,
     retry_config: RetryConfig | None = None,
@@ -231,6 +334,7 @@ async def run_phase(
         passes.append((retry_config.fallback_model, max_attempts))
 
     overall_attempt = 0
+    current_model: str | None = model
     # resume is only valid for the first attempt — after a transient error kills
     # the query, the session is dead and retries must restart from scratch.
     current_resume = resume
@@ -394,6 +498,90 @@ async def run_phase(
     )
 
 
+def _run_async_sync(
+    coro_factory: Callable[[], Awaitable[_T]],
+    *,
+    label: str,
+    timeout_seconds: int | None = None,
+) -> _T:
+    """Run an async coroutine in a worker thread that supports cancellation.
+
+    Parameters
+    ----------
+    timeout_seconds:
+        Wall-clock timeout in seconds. When exceeded the async task is
+        cancelled and :class:`PhaseTimeoutError` is raised. ``None``
+        means no timeout.
+    """
+    controller = _SyncRunController(label=label)
+    done = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def _worker() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        task = loop.create_task(coro_factory())  # type: ignore[arg-type]
+        controller.attach(loop, task)
+        try:
+            outcome["result"] = loop.run_until_complete(task)
+        except asyncio.CancelledError:
+            outcome["cancelled"] = controller.cancel_reason
+        except BaseException as exc:
+            outcome["error"] = exc
+        finally:
+            try:
+                pending = [item for item in asyncio.all_tasks(loop) if not item.done()]
+                for pending_task in pending:
+                    pending_task.cancel()
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+            finally:
+                controller.detach()
+                loop.close()
+                done.set()
+
+    deadline = (time.monotonic() + timeout_seconds) if timeout_seconds else None
+    worker = threading.Thread(target=_worker, name=f"agent-{label}", daemon=True)
+    _register_active_phase_controller(controller)
+    try:
+        with cancellation_scope(controller.cancel):
+            worker.start()
+            try:
+                while not done.wait(0.1):
+                    if deadline is not None and time.monotonic() > deadline:
+                        logger.warning(
+                            "Phase %s exceeded wall-clock timeout of %ds, cancelling",
+                            label,
+                            timeout_seconds,
+                        )
+                        controller.cancel(
+                            f"Phase timed out after {timeout_seconds}s"
+                        )
+                        worker.join(timeout=10)
+                        if worker.is_alive():
+                            logger.warning(
+                                "Worker thread for %s still alive after cancel+join; "
+                                "it will be abandoned as a daemon thread",
+                                label,
+                            )
+                        raise PhaseTimeoutError(label, timeout_seconds)  # type: ignore[arg-type]
+            except KeyboardInterrupt:
+                controller.cancel("Interrupted by user (Ctrl+C)")
+                worker.join(timeout=10)
+                raise
+    finally:
+        _unregister_active_phase_controller(controller)
+
+    worker.join(timeout=0.1)
+    if "error" in outcome:
+        raise outcome["error"]  # type: ignore[misc]
+    if "cancelled" in outcome:
+        raise KeyboardInterrupt(str(outcome["cancelled"]))
+    return cast(_T, outcome["result"])
+
+
 def run_phase_sync(
     phase: Phase,
     prompt: str,
@@ -405,29 +593,53 @@ def run_phase_sync(
     max_turns: int | None = None,
     agents: dict[str, AgentDefinition] | None = None,
     allowed_tools: list[str] | None = None,
-    permission_mode: str = "bypassPermissions",
+    permission_mode: PermissionMode = "bypassPermissions",
     ui: PhaseUI | NullUI | None = None,
     resume: str | None = None,
     retry_config: RetryConfig | None = None,
+    timeout_seconds: int | None = None,
 ) -> PhaseResult:
-    """Synchronous wrapper around run_phase for use in non-async contexts."""
-    return asyncio.run(
-        run_phase(
-            phase,
-            prompt,
-            cwd=cwd,
-            system_prompt=system_prompt,
-            model=model,
-            budget_usd=budget_usd,
-            max_turns=max_turns,
-            agents=agents,
-            allowed_tools=allowed_tools,
-            permission_mode=permission_mode,
-            ui=ui,
-            resume=resume,
-            retry_config=retry_config,
+    """Synchronous wrapper around run_phase for use in non-async contexts.
+
+    Parameters
+    ----------
+    timeout_seconds:
+        Wall-clock timeout in seconds for the entire phase. When exceeded
+        the phase is cancelled and a failed :class:`PhaseResult` is
+        returned. ``None`` means no timeout.
+    """
+    try:
+        return _run_async_sync(
+            lambda: run_phase(
+                phase,
+                prompt,
+                cwd=cwd,
+                system_prompt=system_prompt,
+                model=model,
+                budget_usd=budget_usd,
+                max_turns=max_turns,
+                agents=agents,
+                allowed_tools=allowed_tools,
+                permission_mode=permission_mode,
+                ui=ui,
+                resume=resume,
+                retry_config=retry_config,
+            ),
+            label=f"phase-{phase.value}",
+            timeout_seconds=timeout_seconds,
         )
-    )
+    except PhaseTimeoutError as exc:
+        error_msg = str(exc)
+        if ui is not None:
+            ui.phase_error(error_msg)
+        else:
+            _log(error_msg)
+        return PhaseResult(
+            phase=phase,
+            success=False,
+            model=model,
+            error=error_msg,
+        )
 
 
 async def run_phases_parallel(
@@ -460,17 +672,24 @@ async def run_phases_parallel(
     results: dict[int, PhaseResult] = {}
     pending = {task for _, task in tasks_with_indices}
 
-    while pending:
-        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            idx = task_to_index[task]
-            result = task.result()
-            results[idx] = result
-            if on_complete is not None:
-                try:
-                    on_complete(idx, result)
-                except Exception:
-                    logger.exception("Progress callback failed for index %d", idx)
+    try:
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                idx = task_to_index[task]
+                result = task.result()
+                results[idx] = result
+                if on_complete is not None:
+                    try:
+                        on_complete(idx, result)
+                    except Exception:
+                        logger.exception("Progress callback failed for index %d", idx)
+    except asyncio.CancelledError:
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        raise
 
     # Return results in original call order
     return [results[i] for i in range(len(calls))]
@@ -489,4 +708,7 @@ def run_phases_parallel_sync(
     Returns:
         Results in the same order as the input calls list.
     """
-    return asyncio.run(run_phases_parallel(calls, on_complete=on_complete))
+    return _run_async_sync(
+        lambda: run_phases_parallel(calls, on_complete=on_complete),
+        label="parallel-phases",
+    )

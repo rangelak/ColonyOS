@@ -852,3 +852,155 @@ class TestDashboardIncludesParallelism:
         render_dashboard(console, result)
         output = _get_output(console)
         assert "Parallelism" in output
+
+
+# ---------------------------------------------------------------------------
+# Task 6.0: Delivery Outcome Stats tests
+# ---------------------------------------------------------------------------
+
+
+class TestDeliveryOutcomeStatsDataclass:
+    """Test the DeliveryOutcomeStats dataclass."""
+
+    def test_defaults(self):
+        from colonyos.stats import DeliveryOutcomeStats
+        s = DeliveryOutcomeStats()
+        assert s.total_tracked == 0
+        assert s.merged_count == 0
+        assert s.closed_count == 0
+        assert s.open_count == 0
+        assert s.merge_rate == 0.0
+        assert s.avg_time_to_merge_hours == 0.0
+
+    def test_custom_values(self):
+        from colonyos.stats import DeliveryOutcomeStats
+        s = DeliveryOutcomeStats(
+            total_tracked=10,
+            merged_count=7,
+            closed_count=2,
+            open_count=1,
+            merge_rate=0.778,
+            avg_time_to_merge_hours=3.5,
+        )
+        assert s.total_tracked == 10
+        assert s.merged_count == 7
+        assert s.merge_rate == pytest.approx(0.778)
+
+
+class TestComputeDeliveryOutcomes:
+    """Test compute_delivery_outcomes() reads from OutcomeStore."""
+
+    def test_no_outcomes(self, tmp_path: Path):
+        from colonyos.stats import compute_delivery_outcomes
+        stats = compute_delivery_outcomes(tmp_path)
+        assert stats.total_tracked == 0
+        assert stats.merge_rate == 0.0
+
+    def test_with_outcomes(self, tmp_path: Path):
+        from colonyos.outcomes import OutcomeStore
+        from colonyos.stats import compute_delivery_outcomes
+
+        store = OutcomeStore(tmp_path)
+        store.track_pr("run-1", 1, "https://github.com/foo/bar/pull/1", "branch-a")
+        store.track_pr("run-2", 2, "https://github.com/foo/bar/pull/2", "branch-b")
+        store.track_pr("run-3", 3, "https://github.com/foo/bar/pull/3", "branch-c")
+        store.update_outcome(1, "merged", merged_at="2026-03-17T14:00:00+00:00")
+        store.update_outcome(2, "closed", closed_at="2026-03-17T15:00:00+00:00")
+        store.close()
+
+        stats = compute_delivery_outcomes(tmp_path)
+        assert stats.total_tracked == 3
+        assert stats.merged_count == 1
+        assert stats.closed_count == 1
+        assert stats.open_count == 1
+        assert stats.merge_rate == pytest.approx(0.5)
+
+    def test_merge_time_calculation(self, tmp_path: Path):
+        from colonyos.outcomes import OutcomeStore
+        from colonyos.stats import compute_delivery_outcomes
+
+        store = OutcomeStore(tmp_path)
+        store.track_pr("run-1", 10, "https://github.com/foo/bar/pull/10", "branch-x")
+        # Manually set created_at to a known time for predictable test
+        store._conn.execute(
+            "UPDATE pr_outcomes SET created_at = ? WHERE pr_number = ?",
+            ("2026-03-17T12:00:00+00:00", 10),
+        )
+        store._conn.commit()
+        store.update_outcome(10, "merged", merged_at="2026-03-17T14:00:00+00:00")
+        store.close()
+
+        stats = compute_delivery_outcomes(tmp_path)
+        assert stats.avg_time_to_merge_hours == pytest.approx(2.0, abs=0.1)
+
+
+class TestRenderDeliveryOutcomes:
+    """Test render_delivery_outcomes() produces expected Rich Panel."""
+
+    def test_empty_stats_shows_no_data_message(self):
+        from colonyos.stats import DeliveryOutcomeStats, render_delivery_outcomes
+        console = _capture_console()
+        stats = DeliveryOutcomeStats()
+        render_delivery_outcomes(console, stats)
+        output = _get_output(console)
+        assert "Delivery Outcomes" in output
+        assert "No PRs tracked" in output
+
+    def test_with_data(self):
+        from colonyos.stats import DeliveryOutcomeStats, render_delivery_outcomes
+        console = _capture_console()
+        stats = DeliveryOutcomeStats(
+            total_tracked=10,
+            merged_count=7,
+            closed_count=2,
+            open_count=1,
+            merge_rate=0.778,
+            avg_time_to_merge_hours=3.5,
+        )
+        render_delivery_outcomes(console, stats)
+        output = _get_output(console)
+        assert "Delivery Outcomes" in output
+        assert "10" in output
+        assert "77.8%" in output
+        assert "3.5" in output
+
+    def test_zero_merge_rate(self):
+        from colonyos.stats import DeliveryOutcomeStats, render_delivery_outcomes
+        console = _capture_console()
+        stats = DeliveryOutcomeStats(
+            total_tracked=2,
+            closed_count=2,
+            merge_rate=0.0,
+        )
+        render_delivery_outcomes(console, stats)
+        output = _get_output(console)
+        assert "0.0%" in output
+
+
+class TestDashboardIncludesDeliveryOutcomes:
+    """Test that render_dashboard includes delivery outcomes when present."""
+
+    def test_dashboard_renders_delivery_outcomes(self):
+        from colonyos.stats import DeliveryOutcomeStats
+        console = _capture_console()
+        result = StatsResult(
+            delivery_outcomes=DeliveryOutcomeStats(
+                total_tracked=5,
+                merged_count=3,
+                closed_count=1,
+                open_count=1,
+                merge_rate=0.75,
+                avg_time_to_merge_hours=2.0,
+            ),
+        )
+        render_dashboard(console, result)
+        output = _get_output(console)
+        assert "Delivery Outcomes" in output
+
+    def test_dashboard_skips_empty_delivery_outcomes(self):
+        console = _capture_console()
+        result = StatsResult()  # Default: no delivery_outcomes data
+        render_dashboard(console, result)
+        output = _get_output(console)
+        # Should not crash, and should not show "Delivery Outcomes" panel
+        assert "Run Summary" in output

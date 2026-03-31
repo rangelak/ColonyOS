@@ -33,6 +33,7 @@ class DaemonState:
     )
     consecutive_failures: int = 0
     circuit_breaker_until: str | None = None
+    circuit_breaker_activations: int = 0
     total_items_today: int = 0
     daemon_started_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
@@ -46,6 +47,7 @@ class DaemonState:
             "daily_reset_date": self.daily_reset_date,
             "consecutive_failures": self.consecutive_failures,
             "circuit_breaker_until": self.circuit_breaker_until,
+            "circuit_breaker_activations": self.circuit_breaker_activations,
             "total_items_today": self.total_items_today,
             "daemon_started_at": self.daemon_started_at,
             "last_heartbeat": self.last_heartbeat,
@@ -62,6 +64,7 @@ class DaemonState:
             ),
             consecutive_failures=int(data.get("consecutive_failures", 0)),
             circuit_breaker_until=data.get("circuit_breaker_until"),
+            circuit_breaker_activations=int(data.get("circuit_breaker_activations", 0)),
             total_items_today=int(data.get("total_items_today", 0)),
             daemon_started_at=data.get(
                 "daemon_started_at",
@@ -71,13 +74,15 @@ class DaemonState:
             paused=bool(data.get("paused", False)),
         )
 
-    def check_daily_budget(self, cap: float) -> tuple[bool, float]:
+    def check_daily_budget(self, cap: float | None) -> tuple[bool, float | None]:
         """Check if a new run is allowed under the daily budget.
 
         Returns (allowed, remaining_usd). Automatically resets counters
         if the UTC date has rolled over.
         """
         self._maybe_reset_daily()
+        if cap is None:
+            return True, None
         remaining = cap - self.daily_spend_usd
         return remaining > 0, max(remaining, 0.0)
 
@@ -93,15 +98,26 @@ class DaemonState:
         return self.consecutive_failures
 
     def record_success(self) -> None:
-        """Reset consecutive failure counter on success."""
+        """Reset consecutive failure counter and circuit breaker on success."""
         self.consecutive_failures = 0
         self.circuit_breaker_until = None
+        self.circuit_breaker_activations = 0
 
-    def activate_circuit_breaker(self, cooldown_minutes: int) -> str:
-        """Set circuit breaker expiry. Returns the expiry ISO timestamp."""
+    def activate_circuit_breaker(self, cooldown_minutes: int) -> str | None:
+        """Set circuit breaker expiry with escalating cooldowns.
+
+        Returns the expiry ISO timestamp on success, or ``None`` if the
+        circuit breaker has been activated too many times without a
+        success (indicating a structural problem that requires a pause).
+        """
         from datetime import timedelta
 
-        expiry = datetime.now(timezone.utc) + timedelta(minutes=cooldown_minutes)
+        self.circuit_breaker_activations += 1
+        if self.circuit_breaker_activations >= 3:
+            return None
+        multiplier = 2 ** (self.circuit_breaker_activations - 1)
+        cooldown = cooldown_minutes * multiplier
+        expiry = datetime.now(timezone.utc) + timedelta(minutes=cooldown)
         self.circuit_breaker_until = expiry.isoformat()
         return self.circuit_breaker_until
 
@@ -162,16 +178,22 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 def load_daemon_state(repo_root: Path) -> DaemonState:
     """Load daemon state from ``.colonyos/daemon_state.json``.
 
-    Returns a fresh ``DaemonState`` if the file does not exist or is
-    corrupt.
+    Returns a fresh ``DaemonState`` if the file does not exist, is not a
+    JSON object (e.g. an array), or is otherwise unusable.
     """
     state_path = repo_root / ".colonyos" / "daemon_state.json"
     if not state_path.exists():
         return DaemonState()
     try:
         data = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            logger.warning(
+                "Daemon state file is not a JSON object, starting fresh (got %s)",
+                type(data).__name__,
+            )
+            return DaemonState()
         return DaemonState.from_dict(data)
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         logger.warning("Corrupt daemon state file, starting fresh: %s", exc)
         return DaemonState()
 

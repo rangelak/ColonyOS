@@ -32,6 +32,7 @@ DEFAULTS = {
         "per_run": 15.0,
         "max_duration_hours": 8.0,
         "max_total_usd": 500.0,
+        "phase_timeout_seconds": 1800,
     },
     "phases": {"plan": True, "implement": True, "review": True, "deliver": True},
     "branch_prefix": "colonyos/",
@@ -93,7 +94,7 @@ DEFAULTS = {
         "incident_char_cap": 4000,
     },
     "daemon": {
-        "daily_budget_usd": 50.0,
+        "daily_budget_usd": 500.0,
         "github_poll_interval_seconds": 120,
         "ceo_cooldown_minutes": 60,
         "cleanup_interval_hours": 24,
@@ -102,10 +103,26 @@ DEFAULTS = {
         "digest_hour_utc": 14,
         "max_consecutive_failures": 3,
         "circuit_breaker_cooldown_minutes": 30,
+        "outcome_poll_interval_minutes": 30,
         "issue_labels": [],
         "allowed_control_user_ids": [],
+        "allow_all_control_users": False,
+        "auto_recover_dirty_worktree": True,
+        "pipeline_timeout_seconds": 7200,
+        "dashboard_enabled": True,
+        "dashboard_port": 8741,
+        "dashboard_write_enabled": False,
+        "pr_sync": {
+            "enabled": False,
+            "interval_minutes": 60,
+            "max_sync_failures": 3,
+        },
     },
 }
+
+
+LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS: int = 120
+QA_PHASE_TIMEOUT_SECONDS: int = 300
 
 
 @dataclass
@@ -114,6 +131,7 @@ class BudgetConfig:
     per_run: float = 15.0
     max_duration_hours: float = 8.0
     max_total_usd: float = 500.0
+    phase_timeout_seconds: int = 1800
 
 
 @dataclass
@@ -244,10 +262,19 @@ class SlackConfig:
 
 
 @dataclass
+class PRSyncConfig:
+    """Configuration for automatic PR sync with main."""
+
+    enabled: bool = False
+    interval_minutes: int = 60
+    max_sync_failures: int = 3
+
+
+@dataclass
 class DaemonConfig:
     """Configuration for daemon mode (FR-12)."""
 
-    daily_budget_usd: float = 50.0
+    daily_budget_usd: float | None = 500.0
     github_poll_interval_seconds: int = 120
     ceo_cooldown_minutes: int = 60
     cleanup_interval_hours: int = 24
@@ -256,8 +283,16 @@ class DaemonConfig:
     digest_hour_utc: int = 14
     max_consecutive_failures: int = 3
     circuit_breaker_cooldown_minutes: int = 30
+    outcome_poll_interval_minutes: int = 30
     issue_labels: list[str] = field(default_factory=list)
     allowed_control_user_ids: list[str] = field(default_factory=list)
+    allow_all_control_users: bool = False
+    auto_recover_dirty_worktree: bool = True
+    pipeline_timeout_seconds: int = 7200
+    dashboard_enabled: bool = True
+    dashboard_port: int = 8741
+    dashboard_write_enabled: bool = False
+    pr_sync: PRSyncConfig = field(default_factory=PRSyncConfig)
 
 
 @dataclass
@@ -693,6 +728,28 @@ def _parse_recovery_config(raw: dict) -> RecoveryConfig:
     )
 
 
+def _parse_pr_sync_config(raw: dict) -> PRSyncConfig:
+    """Parse the ``pr_sync`` section from the daemon config."""
+    if not raw:
+        return PRSyncConfig()
+    d = DEFAULTS["daemon"]["pr_sync"]
+    interval_minutes = int(raw.get("interval_minutes", d["interval_minutes"]))
+    if interval_minutes < 1:
+        raise ValueError(
+            f"pr_sync.interval_minutes must be >= 1, got {interval_minutes}"
+        )
+    max_sync_failures = int(raw.get("max_sync_failures", d["max_sync_failures"]))
+    if max_sync_failures < 1:
+        raise ValueError(
+            f"pr_sync.max_sync_failures must be >= 1, got {max_sync_failures}"
+        )
+    return PRSyncConfig(
+        enabled=bool(raw.get("enabled", d["enabled"])),
+        interval_minutes=interval_minutes,
+        max_sync_failures=max_sync_failures,
+    )
+
+
 def _parse_daemon_config(raw: dict) -> DaemonConfig:
     """Parse the ``daemon`` section from config.yaml."""
     if not raw:
@@ -702,17 +759,25 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
     def _int(key: str) -> int:
         return int(raw.get(key, d[key]))
 
-    def _float(key: str) -> float:
-        return float(raw.get(key, d[key]))
-
     def _require_positive(name: str, val: float | int) -> None:
         if val < 1:
             raise ValueError(
                 f"daemon.{name} must be positive, got {val}"
             )
 
-    daily_budget_usd = _float("daily_budget_usd")
-    if daily_budget_usd <= 0:
+    daily_budget_raw = raw.get("daily_budget_usd", d["daily_budget_usd"])
+    daily_budget_usd: float | None
+    if daily_budget_raw is None:
+        daily_budget_usd = None
+    elif isinstance(daily_budget_raw, str):
+        normalized = daily_budget_raw.strip().lower()
+        if normalized in {"unlimited", "none", "null", "infinite", "inf"}:
+            daily_budget_usd = None
+        else:
+            daily_budget_usd = float(daily_budget_raw)
+    else:
+        daily_budget_usd = float(daily_budget_raw)
+    if daily_budget_usd is not None and daily_budget_usd <= 0:
         raise ValueError(
             f"daemon.daily_budget_usd must be positive, got {daily_budget_usd}"
         )
@@ -747,6 +812,15 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
     cb_cooldown = _int("circuit_breaker_cooldown_minutes")
     _require_positive("circuit_breaker_cooldown_minutes", cb_cooldown)
 
+    outcome_poll = _int("outcome_poll_interval_minutes")
+    _require_positive("outcome_poll_interval_minutes", outcome_poll)
+
+    pipeline_timeout = _int("pipeline_timeout_seconds")
+    if pipeline_timeout < 60:
+        raise ValueError(
+            f"daemon.pipeline_timeout_seconds must be >= 60, got {pipeline_timeout}"
+        )
+
     return DaemonConfig(
         daily_budget_usd=daily_budget_usd,
         github_poll_interval_seconds=poll_interval,
@@ -757,10 +831,22 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
         digest_hour_utc=digest_hour,
         max_consecutive_failures=max_failures,
         circuit_breaker_cooldown_minutes=cb_cooldown,
+        outcome_poll_interval_minutes=outcome_poll,
         issue_labels=list(raw.get("issue_labels", d["issue_labels"])),
         allowed_control_user_ids=list(
             raw.get("allowed_control_user_ids", d["allowed_control_user_ids"])
         ),
+        allow_all_control_users=bool(
+            raw.get("allow_all_control_users", d["allow_all_control_users"])
+        ),
+        auto_recover_dirty_worktree=bool(
+            raw.get("auto_recover_dirty_worktree", d["auto_recover_dirty_worktree"])
+        ),
+        pipeline_timeout_seconds=pipeline_timeout,
+        dashboard_enabled=bool(raw.get("dashboard_enabled", True)),
+        dashboard_port=int(raw.get("dashboard_port", 8741)),
+        dashboard_write_enabled=bool(raw.get("dashboard_write_enabled", False)),
+        pr_sync=_parse_pr_sync_config(raw.get("pr_sync", {})),
     )
 
 
@@ -781,6 +867,15 @@ def _parse_sweep_config(raw: dict) -> SweepConfig:
         max_files_per_task=max_files_per_task,
         default_categories=default_categories,
     )
+
+
+def _parse_phase_timeout(budget_raw: dict) -> int:
+    val = int(budget_raw.get("phase_timeout_seconds", DEFAULTS["budget"]["phase_timeout_seconds"]))
+    if val < 30:
+        raise ValueError(
+            f"budget.phase_timeout_seconds must be >= 30, got {val}"
+        )
+    return val
 
 
 def load_config(repo_root: Path) -> ColonyConfig:
@@ -842,6 +937,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
             per_run=float(budget_raw.get("per_run", DEFAULTS["budget"]["per_run"])),
             max_duration_hours=float(budget_raw.get("max_duration_hours", DEFAULTS["budget"]["max_duration_hours"])),
             max_total_usd=float(budget_raw.get("max_total_usd", DEFAULTS["budget"]["max_total_usd"])),
+            phase_timeout_seconds=_parse_phase_timeout(budget_raw),
         ),
         phases=PhasesConfig(
             plan=bool(phases_raw.get("plan", True)),
@@ -886,6 +982,14 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
 
     data: dict = {}
 
+    def _persona_to_dict(persona: Persona) -> dict[str, Any]:
+        return {
+            "role": persona.role,
+            "expertise": persona.expertise,
+            "perspective": persona.perspective,
+            "reviewer": persona.reviewer,
+        }
+
     if config.project:
         data["project"] = {
             "name": config.project.name,
@@ -894,15 +998,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         }
 
     if config.personas:
-        data["personas"] = [
-            {
-                "role": p.role,
-                "expertise": p.expertise,
-                "perspective": p.perspective,
-                "reviewer": p.reviewer,
-            }
-            for p in config.personas
-        ]
+        data["personas"] = [_persona_to_dict(p) for p in config.personas]
 
     data["model"] = config.model
     if config.phase_models:
@@ -912,6 +1008,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         "per_run": config.budget.per_run,
         "max_duration_hours": config.budget.max_duration_hours,
         "max_total_usd": config.budget.max_total_usd,
+        "phase_timeout_seconds": config.budget.phase_timeout_seconds,
     }
     data["phases"] = {
         "plan": config.phases.plan,
@@ -991,10 +1088,20 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         }
 
     if config.ceo_persona:
-        data["ceo_persona"] = {
-            "role": config.ceo_persona.role,
-            "expertise": config.ceo_persona.expertise,
-            "perspective": config.ceo_persona.perspective,
+        data["ceo_persona"] = _persona_to_dict(config.ceo_persona)
+
+    retry_defaults = DEFAULTS["retry"]
+    if (
+        config.retry.max_attempts != retry_defaults["max_attempts"]
+        or config.retry.base_delay_seconds != retry_defaults["base_delay_seconds"]
+        or config.retry.max_delay_seconds != retry_defaults["max_delay_seconds"]
+        or config.retry.fallback_model != retry_defaults["fallback_model"]
+    ):
+        data["retry"] = {
+            "max_attempts": config.retry.max_attempts,
+            "base_delay_seconds": config.retry.base_delay_seconds,
+            "max_delay_seconds": config.retry.max_delay_seconds,
+            "fallback_model": config.retry.fallback_model,
         }
 
     if config.vision:
@@ -1094,10 +1201,20 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         or config.daemon.digest_hour_utc != daemon_defaults["digest_hour_utc"]
         or config.daemon.max_consecutive_failures != daemon_defaults["max_consecutive_failures"]
         or config.daemon.circuit_breaker_cooldown_minutes != daemon_defaults["circuit_breaker_cooldown_minutes"]
+        or config.daemon.outcome_poll_interval_minutes != daemon_defaults["outcome_poll_interval_minutes"]
         or config.daemon.issue_labels
         or config.daemon.allowed_control_user_ids
+        or config.daemon.allow_all_control_users
+        or config.daemon.auto_recover_dirty_worktree != daemon_defaults["auto_recover_dirty_worktree"]
+        or config.daemon.pipeline_timeout_seconds != daemon_defaults["pipeline_timeout_seconds"]
+        or config.daemon.dashboard_enabled != daemon_defaults.get("dashboard_enabled", True)
+        or config.daemon.dashboard_port != daemon_defaults.get("dashboard_port", 8741)
+        or config.daemon.dashboard_write_enabled != daemon_defaults.get("dashboard_write_enabled", False)
+        or config.daemon.pr_sync.enabled != daemon_defaults["pr_sync"]["enabled"]
+        or config.daemon.pr_sync.interval_minutes != daemon_defaults["pr_sync"]["interval_minutes"]
+        or config.daemon.pr_sync.max_sync_failures != daemon_defaults["pr_sync"]["max_sync_failures"]
     ):
-        data["daemon"] = {
+        daemon_data: dict[str, Any] = {
             "daily_budget_usd": config.daemon.daily_budget_usd,
             "github_poll_interval_seconds": config.daemon.github_poll_interval_seconds,
             "ceo_cooldown_minutes": config.daemon.ceo_cooldown_minutes,
@@ -1107,12 +1224,31 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "digest_hour_utc": config.daemon.digest_hour_utc,
             "max_consecutive_failures": config.daemon.max_consecutive_failures,
             "circuit_breaker_cooldown_minutes": config.daemon.circuit_breaker_cooldown_minutes,
+            "outcome_poll_interval_minutes": config.daemon.outcome_poll_interval_minutes,
             "issue_labels": list(config.daemon.issue_labels),
             "allowed_control_user_ids": list(config.daemon.allowed_control_user_ids),
+            "allow_all_control_users": config.daemon.allow_all_control_users,
+            "auto_recover_dirty_worktree": config.daemon.auto_recover_dirty_worktree,
+            "pipeline_timeout_seconds": config.daemon.pipeline_timeout_seconds,
+            "dashboard_enabled": config.daemon.dashboard_enabled,
+            "dashboard_port": config.daemon.dashboard_port,
+            "dashboard_write_enabled": config.daemon.dashboard_write_enabled,
+            "pr_sync": {
+                "enabled": config.daemon.pr_sync.enabled,
+                "interval_minutes": config.daemon.pr_sync.interval_minutes,
+                "max_sync_failures": config.daemon.pr_sync.max_sync_failures,
+            },
         }
+        data["daemon"] = daemon_data
 
     if not config.directions_auto_update:
         data["directions_auto_update"] = False
+
+    if config.ceo_profiles:
+        data["ceo_profiles"] = [_persona_to_dict(profile) for profile in config.ceo_profiles]
+
+    if config.max_log_files != 50:
+        data["max_log_files"] = config.max_log_files
 
     config_path = config_dir / CONFIG_FILE
     config_path.write_text(

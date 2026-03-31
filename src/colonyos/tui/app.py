@@ -19,12 +19,15 @@ from typing import Any, Callable, Sequence
 import janus
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.css.query import NoMatches
 
+from colonyos.cancellation import request_cancel
 from colonyos.models import PreflightError
 from colonyos.tui.adapter import (
     CommandOutputMsg,
     IterationHeaderMsg,
     LoopCompleteMsg,
+    NoticeMsg,
     PhaseCompleteMsg,
     PhaseErrorMsg,
     PhaseHeaderMsg,
@@ -81,6 +84,7 @@ class AssistantApp(App):
         initial_prompt: str | None = None,
         command_hints: Sequence[str] | None = None,
         log_writer: Any | None = None,
+        monitor_mode: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -91,6 +95,7 @@ class AssistantApp(App):
         self._initial_prompt = initial_prompt
         self._command_hints = list(command_hints or [])
         self._log_writer = log_writer
+        self._monitor_mode = monitor_mode
         self._event_queue: janus.Queue[object] | None = None
         self._consumer_task: asyncio.Task[None] | None = None
         self._run_active = False
@@ -114,20 +119,22 @@ class AssistantApp(App):
         """Build the widget tree."""
         yield StatusBar()
         yield TranscriptView()
-        yield Composer()
-        yield HintBar()
+        if not self._monitor_mode:
+            yield Composer()
+            yield HintBar()
 
     async def on_mount(self) -> None:
         """Create the event queue, start the consumer, and auto-submit initial prompt."""
         self._event_queue = janus.Queue()
         self._consumer_task = asyncio.create_task(self._consume_queue())
-        self.query_one(HintBar).set_command_hints(self._command_hints)
+        if not self._monitor_mode:
+            self.query_one(HintBar).set_command_hints(self._command_hints)
 
         if self._initial_prompt and self._run_callback is not None:
             transcript = self.query_one(TranscriptView)
             transcript.append_user_message(self._initial_prompt)
             self._start_run(self._initial_prompt)
-        else:
+        elif not self._monitor_mode:
             self.query_one(TranscriptView).append_welcome_banner()
 
     async def on_unmount(self) -> None:
@@ -173,12 +180,26 @@ class AssistantApp(App):
                         lw.write_phase_header(msg.phase_name, msg.budget, msg.model, msg.extra)
 
                 elif isinstance(msg, ToolLineMsg):
-                    transcript.append_tool_line(msg.tool_name, msg.arg, msg.style)
+                    transcript.append_tool_line(
+                        msg.tool_name,
+                        msg.arg,
+                        msg.style,
+                        msg.badge_text,
+                        msg.badge_style,
+                    )
                     if lw:
-                        lw.write_tool_line(msg.tool_name, msg.arg)
+                        display_name = (
+                            f"{msg.badge_text} {msg.tool_name}".strip()
+                            if msg.badge_text else msg.tool_name
+                        )
+                        lw.write_tool_line(display_name, msg.arg)
 
                 elif isinstance(msg, TextBlockMsg):
-                    transcript.append_text_block(msg.text)
+                    transcript.append_text_block(
+                        msg.text,
+                        msg.badge_text,
+                        msg.badge_style,
+                    )
                     if lw:
                         lw.write_text_block(msg.text)
 
@@ -186,6 +207,11 @@ class AssistantApp(App):
                     transcript.append_command_output(msg.text)
                     if lw:
                         lw.write_text_block(msg.text)
+
+                elif isinstance(msg, NoticeMsg):
+                    transcript.append_notice(msg.text)
+                    if lw:
+                        lw.write_notice(msg.text)
 
                 elif isinstance(msg, PhaseCompleteMsg):
                     duration_s = msg.duration_ms / 1000.0
@@ -273,9 +299,12 @@ class AssistantApp(App):
             raise SystemExit(1)
         self._last_cancel_at = now
 
-        # First press — graceful stop: signal the auto loop to break between
-        # iterations and cancel running workers, but keep the TUI alive.
+        # First press — graceful stop: signal the daemon or orchestrator first so
+        # worker cancellation does not block on a still-running child process.
         self._stop_event.set()
+        request_cancel("Cancelled by user from TUI")
+        if self._cancel_callback is not None:
+            self._cancel_callback()
         self.workers.cancel_all()
         status_bar = self.query_one(StatusBar)
         status_bar.set_error("Cancelled by user")
@@ -283,8 +312,6 @@ class AssistantApp(App):
         transcript.append_notice("Run cancelled by user (press Ctrl+C again within 2s to exit TUI)")
         self._run_active = False
         self._auto_loop_active = False
-        if self._cancel_callback is not None:
-            self._cancel_callback()
 
     def action_clear_transcript(self) -> None:
         """Clear all entries from the transcript."""
@@ -292,7 +319,12 @@ class AssistantApp(App):
 
     def action_focus_composer(self) -> None:
         """Return focus to the composer text area."""
-        composer = self.query_one(Composer)
+        if self._monitor_mode:
+            return
+        try:
+            composer = self.query_one(Composer)
+        except NoMatches:
+            return
         ta = composer.query_one("TextArea")
         ta.focus()
 

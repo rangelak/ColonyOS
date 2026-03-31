@@ -96,3 +96,38 @@ _Date: 2026-03-30 | Feature: the_following_github_issue_is_the_source_feature_de
 - **[architecture]** Rich console renderers should accept a `Console` instance, not create their own, to enable test output capture.
 - **[testing]** `useEffect` polling with stale closures (state in dependency array) causes interval churn; use `useRef` for latest value.
 - **[security]** CORS allow-origin for dev hosts (e.g., localhost:5173) must be conditional on a dev/debug flag, not unconditional.
+
+## Run: run-20260330_091744-320de775ff
+_Date: 2026-03-30 | Feature: add_a_pr_outcome_tracking_system_that_monitors_the_fate_of_p_
+
+- **[code-quality]** Duplicated logic (e.g., verdict regexes, duration formatting) across modules causes silent divergence; extract to shared utils.
+- **[architecture]** Prompt templates using natural-language directory descriptions are fragile for LLMs; use explicit glob patterns and concrete paths.
+- **[code-quality]** `from_dict()`/deserialization helpers that raise raw KeyError on malformed input need try/except with fallback defaults.
+- **[testing]** Rich console renderers that create their own `Console()` instance break test output capture; accept console as a parameter.
+- **[security]** External API string fields interpolated into XML/prompt structural attributes (not just body) must be escaped separately.
+
+## Run: run-20260330_182656-36e04103ef
+_Date: 2026-03-30 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
+
+- **[code-quality]** Single `os.write()` calls for serialization can exceed pipe/fd buffer limits; use `os.fdopen()` + buffered `.write()`.
+- **[code-quality]** Optional config fields compared with `<`/`>` without None guards raise TypeError; validate non-None before arithmetic.
+- **[architecture]** Superseded dataclasses kept alongside their replacements accumulate dead abstractions; remove the old type promptly.
+- **[testing]** Auth token validation that catches network errors as "success" silently accepts any token when the server is unreachable.
+- **[architecture]** Instruction/prompt templates describing file locations in prose are fragile; use explicit glob patterns or concrete paths.
+- **[code-quality]** Single `os.write()` calls for serialization can exceed pipe/fd buffer limits; use `os.fdopen()` + buffered `.write()`.
+- **[code-quality]** Optional config fields compared with `<`/`>` without None guards raise TypeError; validate non-None before arithmetic.
+- **[architecture]** Superseded dataclasses kept alongside their replacements accumulate dead abstractions; remove the old type promptly.
+- **[testing]** Auth validation that catches network errors as "success" silently accepts any token when the server is unreachable.
+- **[code-quality]** Single `os.write()` for large payloads can exceed fd buffer limits; use `os.fdopen()` with buffered `.write()` instead.
+- **[code-quality]** Optional config fields compared with arithmetic operators without None guards raise TypeError at runtime.
+- **[architecture]** Superseded dataclasses kept alongside replacements accumulate dead abstractions; remove the old type promptly.
+- **[testing]** Auth validation catching network errors as "success" silently accepts any token when the server is unreachable.
+
+## Run: run-20260331_131622-df4825679a
+_Date: 2026-03-31 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
+
+- **[security]** Format-string interpolation of untrusted LLM output (`str.format()`) causes KeyError crashes and config value leakage.
+- **[code-quality]** Budget guard arithmetic must account for full fix-cycle cost (fix + review + decision), not just a single phase.
+- **[security]** Fix-loop re-invocations of review agents must carry the same `allowed_tools` restrictions as the initial review call.
+- **[code-quality]** Falsy-zero bugs (`max_budget or default`) silently discard explicit zero values; use `is None` checks for optional numerics.
+- **[architecture]** Extract repeated fix-loop and cost-computation logic into dedicated helpers; inline duplication causes silent divergence.

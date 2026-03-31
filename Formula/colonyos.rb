@@ -1,12 +1,16 @@
-# Homebrew formula for ColonyOS
-# Install: brew tap colonyos/tap && brew install colonyos
-# Or:      brew install colonyos/tap/colonyos
+# Homebrew formula for ColonyOS — DEVELOPMENT REFERENCE ONLY
 #
-# NOTE: The url and sha256 below are automatically updated by the
-# release workflow (.github/workflows/release.yml) on each tagged release.
-# Before the first release, sha256 is a placeholder and `brew install` will
-# fail with a checksum mismatch. This is intentional — the formula becomes
-# functional after the first `v*` tag triggers the release workflow.
+# The canonical formula lives in the Homebrew tap repository:
+#   https://github.com/rangelak/homebrew-colonyos
+#
+# Install: brew install rangelak/colonyos/colonyos
+#
+# This in-repo copy is kept for reference only. The release workflow
+# auto-generates the tap formula using scripts/generate-homebrew-formula.sh
+# which includes all Python dependency resource blocks required by Homebrew.
+#
+# To regenerate the formula locally:
+#   scripts/generate-homebrew-formula.sh <version> <sha256>
 class Colonyos < Formula
   include Language::Python::Virtualenv
 

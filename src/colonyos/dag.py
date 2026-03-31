@@ -70,9 +70,12 @@ def parse_task_file(content: str) -> dict[str, list[str]]:
         # Check if this line starts a new task
         task_match = TASK_LINE_PATTERN.match(line)
         if task_match:
-            current_task_id = task_match.group(1)
+            task_id = task_match.group(1)
+            if task_id is None:
+                continue
+            current_task_id = task_id
             # Initialize with empty dependencies (may be overwritten)
-            dependencies[current_task_id] = []
+            dependencies[task_id] = []
             continue
 
         # Check if this line has a depends_on annotation

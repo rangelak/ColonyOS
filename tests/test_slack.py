@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from colonyos.config import ColonyConfig, SlackConfig, load_config, save_config
+from colonyos.models import Phase, PhaseResult
 from colonyos.sanitize import XML_TAG_RE, sanitize_untrusted_content
 from colonyos.slack import (
     SlackUI,
@@ -17,9 +18,11 @@ from colonyos.slack import (
     _build_triage_prompt,
     _parse_triage_response,
     check_rate_limit,
+    create_slack_app,
     extract_base_branch,
     extract_prompt_from_mention,
     extract_raw_from_formatted_prompt,
+    format_phase_breakdown_line,
     format_acknowledgment,
     format_phase_update,
     format_run_summary,
@@ -31,6 +34,7 @@ from colonyos.slack import (
     sanitize_slack_content,
     save_watch_state,
     should_process_message,
+    start_socket_mode,
     triage_message,
     wait_for_approval,
 )
@@ -138,6 +142,41 @@ class TestSlackConfigParsing:
             (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
         )
         assert "slack" not in raw
+
+
+class TestCreateSlackApp:
+    def test_import_failure_surfaces_actionable_runtime_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        original_import = __import__
+
+        def fake_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
+            if name in ("slack_bolt", "slack_sdk"):
+                raise KeyError("slack_sdk")
+            return original_import(name, globals, locals, fromlist, level)
+
+        caplog.set_level("DEBUG", logger="colonyos.slack")
+        with patch("builtins.__import__", side_effect=fake_import):
+            with pytest.raises(RuntimeError, match="Slack dependencies failed to import cleanly"):
+                create_slack_app(SlackConfig(enabled=True))
+
+        assert "Slack dependency import crashed unexpectedly" in caplog.text
+        assert "python=" in caplog.text
+        assert "slack_sdk=" in caplog.text
+
+    def test_socket_mode_import_failure_surfaces_actionable_runtime_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        original_import = __import__
+
+        def fake_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
+            if name in ("slack_bolt.adapter.socket_mode", "slack_sdk"):
+                raise KeyError("slack_sdk")
+            return original_import(name, globals, locals, fromlist, level)
+
+        caplog.set_level("DEBUG", logger="colonyos.slack")
+        with patch("builtins.__import__", side_effect=fake_import):
+            with pytest.raises(RuntimeError, match="Slack dependencies failed to import cleanly"):
+                start_socket_mode(MagicMock())
+
+        assert "socket mode startup" in caplog.text
+        assert "slack_bolt.adapter.socket_mode=" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +352,37 @@ class TestFormatRunSummary:
         assert ":x:" in result
 
 
+class TestFormatPhaseBreakdownLine:
+    def test_implement_includes_task_counts(self) -> None:
+        phase = PhaseResult(
+            phase=Phase.IMPLEMENT,
+            success=True,
+            cost_usd=1.23,
+            duration_ms=1000,
+            artifacts={"completed": "3", "total_tasks": "4", "failed": "1", "blocked": "0"},
+        )
+
+        result = format_phase_breakdown_line(phase)
+
+        assert "implement" in result
+        assert "tasks 3/4" in result
+        assert "1 failed" in result
+
+    def test_review_includes_verdict(self) -> None:
+        phase = PhaseResult(
+            phase=Phase.REVIEW,
+            success=True,
+            cost_usd=0.42,
+            duration_ms=1000,
+            artifacts={"result": "VERDICT: request-changes\n\nFINDINGS:\n- test"},
+        )
+
+        result = format_phase_breakdown_line(phase)
+
+        assert "review" in result
+        assert "request-changes" in result
+
+
 # ---------------------------------------------------------------------------
 # SlackUI tests (Task 4.3)
 # ---------------------------------------------------------------------------
@@ -332,17 +402,29 @@ class TestSlackUI:
     def test_phase_complete_posts_message(self) -> None:
         client = MagicMock()
         ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_header("implement", 5.0, "sonnet")
         ui.phase_complete(1.5, 10, 30000)
-        client.chat_postMessage.assert_called_once()
+        call_kwargs = client.chat_postMessage.call_args[1]
+        assert "implement" in call_kwargs["text"]
+        assert "completed" in call_kwargs["text"]
 
     def test_phase_error_posts_generic_message(self) -> None:
         client = MagicMock()
         ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_header("review", 5.0, "sonnet")
         ui.phase_error("something broke")
         call_kwargs = client.chat_postMessage.call_args[1]
         # Error details must NOT be echoed to Slack (security)
         assert "something broke" not in call_kwargs["text"]
+        assert "review" in call_kwargs["text"]
         assert "Check server logs" in call_kwargs["text"]
+
+    def test_phase_note_posts_message(self) -> None:
+        client = MagicMock()
+        ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_note("Review round 1: 2 approved, 1 requested changes.")
+        call_kwargs = client.chat_postMessage.call_args[1]
+        assert "Review round 1" in call_kwargs["text"]
 
     def test_noop_methods(self) -> None:
         """Streaming callbacks are no-ops and don't raise."""
@@ -508,6 +590,28 @@ class TestDoctorSlackCheck:
         results = run_doctor_checks(tmp_repo)
         slack_checks = [n for n, _, _ in results if n == "Slack tokens"]
         assert len(slack_checks) == 0
+
+    def test_slack_dependency_check_reports_import_failure(self, tmp_repo: Path, mock_doctor_subprocess: object) -> None:
+        import yaml
+        from colonyos.doctor import run_doctor_checks
+
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"enabled": True}}),
+            encoding="utf-8",
+        )
+
+        with patch.dict("os.environ", {
+            "COLONYOS_SLACK_BOT_TOKEN": "xoxb-fake",
+            "COLONYOS_SLACK_APP_TOKEN": "xapp-fake",
+        }), patch("colonyos.doctor.importlib.import_module", side_effect=KeyError("slack_sdk")):
+            results = run_doctor_checks(tmp_repo)
+
+        dependency_checks = [(n, p, h) for n, p, h in results if n == "Slack dependencies"]
+        assert len(dependency_checks) == 1
+        assert dependency_checks[0][1] is False
+        assert "Slack SDK import failed" in dependency_checks[0][2]
 
 
 # ---------------------------------------------------------------------------

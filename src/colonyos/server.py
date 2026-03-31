@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import threading
+import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from colonyos import __version__
 from colonyos.config import load_config, runs_dir_path, save_config
 from colonyos.models import Persona
+from colonyos.runtime_lock import RepoRuntimeGuard, RuntimeBusyError
 from colonyos.sanitize import sanitize_untrusted_content
 from colonyos.show import (
     compute_show_result,
@@ -65,11 +68,19 @@ def _config_to_dict(config: Any) -> dict[str, Any]:
     return raw
 
 
-def create_app(repo_root: Path) -> tuple[FastAPI, str]:
+def create_app(
+    repo_root: Path,
+    *,
+    write_enabled: bool | None = None,
+) -> tuple[FastAPI, str]:
     """Create and configure the FastAPI application.
 
     Args:
         repo_root: Path to the repository root containing ``.colonyos/``.
+        write_enabled: Explicitly enable/disable write endpoints.
+            When ``None`` (default), falls back to the
+            ``COLONYOS_WRITE_ENABLED`` environment variable for
+            backward compatibility.
 
     Returns:
         A tuple of (FastAPI app, bearer token for write endpoints).
@@ -83,17 +94,48 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
 
     # Generate auth token for write endpoints
     auth_token = secrets.token_urlsafe(32)
-    write_enabled = bool(os.environ.get("COLONYOS_WRITE_ENABLED"))
+    if write_enabled is None:
+        write_enabled = bool(os.environ.get("COLONYOS_WRITE_ENABLED"))
+    write_enabled = bool(write_enabled)
 
     # Semaphore for rate limiting: max 1 concurrent run
     active_run_semaphore = threading.Semaphore(1)
 
-    # CORS for local dev only (Vite dev server on a different port)
+    # Rate limiter for state-changing daemon endpoints (pause/resume)
+    _last_state_change: dict[str, float] = {}
+    _STATE_CHANGE_COOLDOWN = 5.0  # seconds
+
+    # Build CORS origins list from env vars
+    cors_origins: list[str] = []
+
+    # Dev origins (Vite dev server on a different port)
     if os.environ.get("COLONYOS_DEV"):
+        cors_origins.extend(["http://localhost:5173", "http://127.0.0.1:5173"])
+
+    # Configurable extra origins for subdomain deployment
+    _ORIGIN_RE = re.compile(r"^https?://[a-zA-Z0-9._\-]+(:\d+)?$")
+    allowed_origins_env = os.environ.get("COLONYOS_ALLOWED_ORIGINS", "").strip()
+    subdomain_mode = False
+    if allowed_origins_env:
+        for origin in allowed_origins_env.split(","):
+            origin = origin.strip()
+            if not origin:
+                continue
+            if origin == "*" or not _ORIGIN_RE.match(origin):
+                logger.warning(
+                    "Ignoring invalid CORS origin %r — must be scheme://host[:port]",
+                    origin,
+                )
+                continue
+            if origin not in cors_origins:
+                cors_origins.append(origin)
+        subdomain_mode = bool(cors_origins)
+
+    if cors_origins:
         allowed_methods = ["GET", "PUT", "POST"] if write_enabled else ["GET"]
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+            allow_origins=cors_origins,
             allow_methods=allowed_methods,
             allow_headers=["Content-Type", "Accept", "Authorization"],
         )
@@ -125,13 +167,26 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
     # Live daemon reference — set by Daemon.start() when running in daemon mode
     app.state.daemon_instance = None
 
+    @app.get("/api/healthz")
     @app.get("/healthz")
-    async def healthz() -> JSONResponse:
+    async def healthz(request: Request) -> JSONResponse:
         """Daemon health check endpoint (FR-10).
 
         Uses the live daemon instance's in-memory state when available,
         falling back to reading from disk for standalone server mode.
+        Requires auth when deployed in subdomain mode (COLONYOS_ALLOWED_ORIGINS set).
         """
+        if subdomain_mode:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                provided_token = auth_header[7:]
+                if not secrets.compare_digest(provided_token, auth_token):
+                    raise HTTPException(status_code=401, detail="Invalid bearer token")
+            else:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Authentication required for health endpoint in subdomain mode",
+                )
         daemon = app.state.daemon_instance
         if daemon is not None:
             body = daemon.get_health()
@@ -371,6 +426,64 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
         _require_write_auth(request)
         return {"status": "ok"}
 
+    def _check_state_change_cooldown(action: str) -> None:
+        """Enforce a cooldown period between state-changing operations."""
+        now = time.monotonic()
+        last = _last_state_change.get(action, 0.0)
+        if now - last < _STATE_CHANGE_COOLDOWN:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limited — wait {_STATE_CHANGE_COOLDOWN:.0f}s between {action} calls",
+            )
+        _last_state_change[action] = now
+
+    @app.post("/api/daemon/pause")
+    async def daemon_pause(request: Request) -> JSONResponse:
+        """Pause the daemon — stop picking up new work (FR-8)."""
+        _require_write_auth(request)
+        _check_state_change_cooldown("pause")
+
+        client_ip = request.client.host if request.client else "unknown"
+        logger.info("AUDIT: pause requested from %s", client_ip)
+
+        daemon = app.state.daemon_instance
+        if daemon is not None:
+            daemon.pause()
+            body = daemon.get_health()
+        else:
+            # Standalone server: toggle on disk
+            from colonyos.daemon_state import load_daemon_state, save_daemon_state
+
+            state = load_daemon_state(repo_root)
+            state.paused = True
+            save_daemon_state(repo_root, state)
+            body = {"paused": True}
+
+        return JSONResponse(content=body)
+
+    @app.post("/api/daemon/resume")
+    async def daemon_resume(request: Request) -> JSONResponse:
+        """Resume the daemon — start picking up work again (FR-8)."""
+        _require_write_auth(request)
+        _check_state_change_cooldown("resume")
+
+        client_ip = request.client.host if request.client else "unknown"
+        logger.info("AUDIT: resume requested from %s", client_ip)
+
+        daemon = app.state.daemon_instance
+        if daemon is not None:
+            daemon.resume()
+            body = daemon.get_health()
+        else:
+            from colonyos.daemon_state import load_daemon_state, save_daemon_state
+
+            state = load_daemon_state(repo_root)
+            state.paused = False
+            save_daemon_state(repo_root, state)
+            body = {"paused": False}
+
+        return JSONResponse(content=body)
+
     @app.post("/api/runs")
     async def launch_run(request: Request) -> dict[str, Any]:
         """Launch an agent run in a background thread.
@@ -397,6 +510,12 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
         if not acquired:
             raise HTTPException(status_code=429, detail="A run is already in progress")
 
+        try:
+            runtime_guard = RepoRuntimeGuard(repo_root, "ui-run").acquire()
+        except RuntimeBusyError as exc:
+            active_run_semaphore.release()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
         def _run_in_background():
             try:
                 from colonyos.orchestrator import run as run_orchestrator
@@ -410,6 +529,7 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
             except Exception:
                 logger.exception("Background run failed")
             finally:
+                runtime_guard.release()
                 active_run_semaphore.release()
 
         try:
@@ -417,6 +537,7 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
             thread.start()
         except Exception:
             # Release semaphore if thread creation/start fails
+            runtime_guard.release()
             active_run_semaphore.release()
             raise HTTPException(status_code=500, detail="Failed to start background run")
 

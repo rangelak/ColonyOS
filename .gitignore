@@ -11,7 +11,12 @@ build/
 .colonyos/queue.json
 .colonyos/memory.db
 .colonyos/daemon_state.json
+.colonyos/runtime.lock
+.colonyos/runtime_processes.json
+.colonyos/logs/
+.colonyos/recovery/
 web/node_modules/
 src/colonyos/web_dist/
 generated/
 .DS_Store
+node_modules/

@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation">Installation</a> · <a href="#quickstart">Quickstart</a> · <a href="#how-it-works">How It Works</a> · <a href="#cli-reference">CLI</a> · <a href="#configuration-reference">Config</a> · <a href="#slack-integration">Slack</a> · <a href="#web-dashboard">Dashboard</a> · <a href="#architecture">Architecture</a>
+  <a href="#installation">Installation</a> · <a href="#quickstart">Quickstart</a> · <a href="#how-it-works">How It Works</a> · <a href="#cli-reference">CLI</a> · <a href="#configuration-reference">Config</a> · <a href="#slack-integration">Slack</a> · <a href="#web-dashboard">Dashboard</a> · <a href="#vm-deployment">VM Deploy</a> · <a href="#architecture">Architecture</a>
 </p>
 
 ---
@@ -44,12 +44,20 @@ Under the hood it orchestrates [Claude](https://www.anthropic.com/claude) agent 
 
 ### Install ColonyOS
 
+**macOS (Homebrew)**:
+
 ```bash
-# Recommended — handles everything (installs pipx if needed, then colonyos)
+brew install rangelak/colonyos/colonyos
+```
+
+**Cross-platform (curl installer)**:
+
+```bash
+# Handles everything — installs pipx if needed, then colonyos
 curl -sSL https://raw.githubusercontent.com/rangelak/ColonyOS/main/install.sh | sh
 ```
 
-Or install directly if you already have pip:
+**pip** (if you already have it):
 
 ```bash
 pip install colonyos
@@ -67,6 +75,10 @@ pip install "colonyos[ui]"
 # Development (tests, pre-commit hooks, dashboard)
 pip install "colonyos[dev]"
 ```
+
+Slack-enabled deployments are best on Python 3.11-3.13. The core package supports
+newer Python versions, but third-party Slack dependencies may lag new interpreter
+releases.
 
 ### Verify your environment
 
@@ -279,6 +291,13 @@ flowchart TD
 | `colonyos pr-review PR --poll-interval N` | Poll interval in seconds (default: 60) |
 | `colonyos pr-review PR --max-cost USD` | Override per-PR budget cap (default: $5) |
 
+### PR outcome tracking
+
+| Command | Description |
+|---|---|
+| `colonyos outcomes` | Show tracked PR outcomes (merge/close status) |
+| `colonyos outcomes poll` | Manually poll GitHub for open PR status updates |
+
 ### Analytics & inspection
 
 | Command | Description |
@@ -311,13 +330,21 @@ flowchart TD
 | `colonyos daemon --max-budget N` | Daily budget cap in USD |
 | `colonyos daemon --max-hours N` | Maximum wall-clock hours before exit |
 | `colonyos daemon --dry-run` | Log what would run without executing |
-| `colonyos watch` | Watch Slack channels and trigger runs from messages |
-| `colonyos watch --dry-run` | Log triggers without executing |
-| `colonyos watch --max-hours N` | Wall-clock limit for the watcher |
-| `colonyos watch --max-budget N` | Aggregate USD spend limit |
+| `colonyos watch-slack` | Watch Slack channels and trigger runs from messages |
+| `colonyos watch-slack --dry-run` | Log triggers without executing |
+| `colonyos watch-slack --max-hours N` | Wall-clock limit for the watcher |
+| `colonyos watch-slack --max-budget N` | Aggregate USD spend limit |
+| `colonyos watch` | Deprecated alias for `watch-slack` |
 | `colonyos ui` | Launch the local web dashboard |
 | `colonyos ui --port N` | Custom port (default: 7400) |
 | `colonyos ui --no-open` | Don't auto-open the browser |
+
+Repo runtime exclusivity: ColonyOS allows only one repo-bound runtime per checkout at a time. If `colonyos daemon` is already active for a repository, a separate `watch-slack`, `queue start`, `auto`, or other guarded runtime started against that same repo will fail fast instead of racing on branches, queue state, or Slack intake. The guard writes transient local state to `.colonyos/runtime.lock` and `.colonyos/runtime_processes.json`; both files are generated at runtime and are gitignored.
+
+For dedicated daemon checkouts, `daemon.auto_recover_dirty_worktree: true` enables
+an opt-in preserve-and-reset recovery path when queue execution hits a dirty-worktree
+preflight failure. Leave it off for shared human/dev checkouts, because it may
+stash/reset local edits so queued work can continue.
 
 ### Global flags
 
@@ -437,6 +464,39 @@ pr_review:
   circuit_breaker_cooldown_minutes: 15
 ```
 
+### PR Sync
+
+Keeps open `colonyos/` PRs up-to-date with `main` by automatically merging
+the latest `main` into stale branches. The daemon detects PRs that are behind
+`main` (via `mergeStateStatus` from the GitHub API) and performs the merge in
+an isolated ephemeral worktree — the main working tree is never touched.
+
+**How to enable:**
+
+1. Set `COLONYOS_WRITE_ENABLED=1` (or `dashboard_write_enabled: true` in config) — PR sync pushes to remote branches, so write access is required.
+2. Enable PR sync in your config:
+
+```yaml
+pr_sync:
+  enabled: true                # default: false (opt-in)
+  interval_minutes: 60         # how often to check for stale PRs
+  max_sync_failures: 3         # per-PR retry cap before giving up
+```
+
+**Behavior:**
+
+- Runs as concern #7 in the daemon tick loop on its own timer (separate from outcome polling).
+- Processes at most 1 PR per tick, consistent with the daemon's sequential model.
+- Only syncs branches matching the configured `branch_prefix` (default: `colonyos/`).
+- Skips PRs whose branch has a RUNNING queue item to avoid conflicts with active pipelines.
+- Uses `git merge origin/main --no-edit` (never rebase or force-push) to preserve review state.
+
+**On merge conflicts:**
+
+- The merge is aborted cleanly (`git merge --abort`) and the branch is left untouched.
+- A Slack notification is sent with the list of conflicting files.
+- A PR comment is posted detailing the conflict.
+- The `sync_failures` counter is incremented. After `max_sync_failures` consecutive failures, the PR is skipped until manually resolved.
 ### Retry on transient API errors
 
 ```yaml
@@ -573,10 +633,15 @@ slack:
 pip install "colonyos[slack]"
 
 # Start watching
-colonyos watch
+colonyos watch-slack
 ```
 
+If Slack imports fail on startup, run `colonyos doctor`, reinstall the Slack extra,
+and prefer Python 3.11-3.13 for the watcher or daemon process.
+
 The watcher runs as a long-lived process using Slack Bolt SDK with Socket Mode (no public URL required). When someone mentions `@ColonyOS fix the login bug` in a configured channel, the watcher sanitizes the input, triggers a pipeline run, and posts threaded progress updates back to the Slack thread.
+
+`watch-slack` is mutually exclusive with other repo-bound runtimes for the same checkout. If the daemon is already running and watching Slack, do not start a second standalone watcher for that repo; ColonyOS will reject it with a runtime-busy error instead of letting both processes mutate the same branch or queue.
 
 **Trigger modes:**
 
@@ -725,6 +790,20 @@ git tag v0.2.0
 git push origin v0.2.0
 # CI automatically: runs tests → builds → publishes to PyPI → creates GitHub Release
 ```
+
+---
+
+## VM Deployment
+
+Deploy ColonyOS as an always-on daemon on a fresh Ubuntu 22.04+ VM:
+
+```bash
+git clone https://github.com/rangelak/ColonyOS.git /tmp/colonyos-setup
+cd /tmp/colonyos-setup
+sudo bash deploy/provision.sh
+```
+
+The provisioning script installs all dependencies (Python 3.11+, Node.js, GitHub CLI, pipx), creates a `colonyos` system user, configures the systemd service, and runs `colonyos doctor` to verify the setup. See [`deploy/README.md`](deploy/README.md) for full options including `--dry-run`, `--slack`, and non-interactive mode.
 
 ---
 

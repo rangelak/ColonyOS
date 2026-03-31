@@ -9,9 +9,11 @@ from colonyos.config import (
     CIFixConfig,
     ColonyConfig,
     BudgetConfig,
+    DaemonConfig,
     DEFAULTS,
     LearningsConfig,
     PhasesConfig,
+    PRSyncConfig,
     RecoveryConfig,
     RetryConfig,
     RouterConfig,
@@ -841,6 +843,73 @@ class TestSlackConfigTriageFields:
         assert loaded.slack.circuit_breaker_cooldown_minutes == 45
 
 
+class TestDaemonConfigBudgetAndControl:
+    def test_default_daily_budget_is_500(self) -> None:
+        assert DEFAULTS["daemon"]["daily_budget_usd"] == 500.0
+        assert DEFAULTS["daemon"]["auto_recover_dirty_worktree"] is True
+
+    def test_parses_unlimited_daemon_budget(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"daily_budget_usd": "unlimited"}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.daily_budget_usd is None
+
+    def test_roundtrip_allow_all_control_users(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            daemon=DaemonConfig(
+                daily_budget_usd=None,
+                allow_all_control_users=True,
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.daily_budget_usd is None
+        assert loaded.daemon.allow_all_control_users is True
+
+    def test_roundtrip_auto_recover_dirty_worktree(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            daemon=DaemonConfig(
+                auto_recover_dirty_worktree=True,
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.auto_recover_dirty_worktree is True
+
+    def test_roundtrip_retry_ceo_profiles_and_max_log_files(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            retry=RetryConfig(
+                max_attempts=5,
+                base_delay_seconds=20.0,
+                max_delay_seconds=300.0,
+                fallback_model="sonnet",
+            ),
+            ceo_profiles=[
+                Persona(
+                    role="CEO One",
+                    expertise="Strategy",
+                    perspective="Move faster",
+                    reviewer=True,
+                )
+            ],
+            max_log_files=12,
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.retry.max_attempts == 5
+        assert loaded.retry.base_delay_seconds == 20.0
+        assert loaded.retry.max_delay_seconds == 300.0
+        assert loaded.retry.fallback_model == "sonnet"
+        assert len(loaded.ceo_profiles) == 1
+        assert loaded.ceo_profiles[0].role == "CEO One"
+        assert loaded.ceo_profiles[0].reviewer is True
+        assert loaded.max_log_files == 12
+
+
 class TestSlackMaxFixRoundsPerThread:
     """Tests for SlackConfig.max_fix_rounds_per_thread."""
 
@@ -1364,3 +1433,243 @@ class TestRetryConfig:
         assert DEFAULTS["retry"]["base_delay_seconds"] == 10.0
         assert DEFAULTS["retry"]["max_delay_seconds"] == 120.0
         assert DEFAULTS["retry"]["fallback_model"] is None
+
+
+class TestDaemonOutcomePollInterval:
+    """Tests for DaemonConfig.outcome_poll_interval_minutes."""
+
+    def test_default_value_is_30(self) -> None:
+        config = DaemonConfig()
+        assert config.outcome_poll_interval_minutes == 30
+
+    def test_defaults_dict_has_outcome_poll_interval(self) -> None:
+        assert DEFAULTS["daemon"]["outcome_poll_interval_minutes"] == 30
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"outcome_poll_interval_minutes": 15}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.outcome_poll_interval_minutes == 15
+
+    def test_validation_zero_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"outcome_poll_interval_minutes": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="outcome_poll_interval_minutes must be positive"):
+            load_config(tmp_repo)
+
+    def test_validation_negative_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"outcome_poll_interval_minutes": -5}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="outcome_poll_interval_minutes must be positive"):
+            load_config(tmp_repo)
+
+    def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            daemon=DaemonConfig(outcome_poll_interval_minutes=45),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.outcome_poll_interval_minutes == 45
+
+
+class TestPhaseTimeoutConfig:
+    """Tests for budget.phase_timeout_seconds config field."""
+
+    def test_default_value(self) -> None:
+        assert DEFAULTS["budget"]["phase_timeout_seconds"] == 1800
+        assert BudgetConfig().phase_timeout_seconds == 1800
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"budget": {"phase_timeout_seconds": 900}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.budget.phase_timeout_seconds == 900
+
+    def test_validation_too_low_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"budget": {"phase_timeout_seconds": 10}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="phase_timeout_seconds must be >= 30"):
+            load_config(tmp_repo)
+
+    def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(budget=BudgetConfig(phase_timeout_seconds=600))
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.budget.phase_timeout_seconds == 600
+
+
+class TestPipelineTimeoutConfig:
+    """Tests for daemon.pipeline_timeout_seconds config field."""
+
+    def test_default_value(self) -> None:
+        assert DEFAULTS["daemon"]["pipeline_timeout_seconds"] == 7200
+        assert DaemonConfig().pipeline_timeout_seconds == 7200
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"pipeline_timeout_seconds": 3600}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.pipeline_timeout_seconds == 3600
+
+    def test_validation_too_low_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"pipeline_timeout_seconds": 30}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="pipeline_timeout_seconds must be >= 60"):
+            load_config(tmp_repo)
+
+    def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            daemon=DaemonConfig(pipeline_timeout_seconds=3600),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.pipeline_timeout_seconds == 3600
+
+
+class TestDashboardWriteEnabledConfig:
+    """Tests for daemon.dashboard_write_enabled config field."""
+
+    def test_default_is_false(self) -> None:
+        assert DaemonConfig().dashboard_write_enabled is False
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"dashboard_write_enabled": True}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.dashboard_write_enabled is True
+
+    def test_roundtrip(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            daemon=DaemonConfig(dashboard_write_enabled=True),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.dashboard_write_enabled is True
+
+
+class TestPRSyncConfig:
+    """Tests for PRSyncConfig parsing, defaults, validation, and serialization."""
+
+    def test_default_values(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.daemon.pr_sync.enabled is False
+        assert config.daemon.pr_sync.interval_minutes == 60
+        assert config.daemon.pr_sync.max_sync_failures == 3
+
+    def test_parsed_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "daemon": {
+                    "pr_sync": {
+                        "enabled": True,
+                        "interval_minutes": 30,
+                        "max_sync_failures": 5,
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.pr_sync.enabled is True
+        assert config.daemon.pr_sync.interval_minutes == 30
+        assert config.daemon.pr_sync.max_sync_failures == 5
+
+    def test_missing_section_gets_defaults(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"daily_budget_usd": 100.0}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.pr_sync.enabled is False
+        assert config.daemon.pr_sync.interval_minutes == 60
+        assert config.daemon.pr_sync.max_sync_failures == 3
+
+    def test_interval_minutes_below_one_raises(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"pr_sync": {"interval_minutes": 0}}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="pr_sync.interval_minutes must be >= 1"):
+            load_config(tmp_repo)
+
+    def test_max_sync_failures_below_one_raises(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"pr_sync": {"max_sync_failures": 0}}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="pr_sync.max_sync_failures must be >= 1"):
+            load_config(tmp_repo)
+
+    def test_roundtrip(self, tmp_repo: Path):
+        original = ColonyConfig(
+            daemon=DaemonConfig(
+                pr_sync=PRSyncConfig(
+                    enabled=True, interval_minutes=45, max_sync_failures=7
+                ),
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.pr_sync.enabled is True
+        assert loaded.daemon.pr_sync.interval_minutes == 45
+        assert loaded.daemon.pr_sync.max_sync_failures == 7
+
+    def test_non_default_values_included_in_save(self, tmp_repo: Path):
+        original = ColonyConfig(
+            daemon=DaemonConfig(
+                pr_sync=PRSyncConfig(enabled=True, interval_minutes=30),
+            ),
+        )
+        save_config(tmp_repo, original)
+        config_path = tmp_repo / ".colonyos" / "config.yaml"
+        saved_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "daemon" in saved_data
+        assert "pr_sync" in saved_data["daemon"]
+        assert saved_data["daemon"]["pr_sync"]["enabled"] is True
+        assert saved_data["daemon"]["pr_sync"]["interval_minutes"] == 30
+
+    def test_defaults_dict_has_pr_sync(self):
+        assert "pr_sync" in DEFAULTS["daemon"]
+        assert DEFAULTS["daemon"]["pr_sync"]["enabled"] is False
+        assert DEFAULTS["daemon"]["pr_sync"]["interval_minutes"] == 60
+        assert DEFAULTS["daemon"]["pr_sync"]["max_sync_failures"] == 3

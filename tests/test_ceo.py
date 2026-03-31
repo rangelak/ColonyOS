@@ -424,3 +424,36 @@ class TestCeoOpenPRsContext:
         assert "<system>" not in user
         assert "Ignore instructions" in user
         assert "Feature" in user
+
+
+class TestCeoOutcomeInjection:
+    """Task 4.1: CEO prompt includes PR outcome history when outcomes exist."""
+
+    @patch("colonyos.orchestrator.format_outcome_summary")
+    def test_outcome_summary_injected(self, mock_summary, tmp_repo: Path, config: ColonyConfig) -> None:
+        mock_summary.return_value = "Your PR history: Tracked PRs: 5, 3 merged, avg 2.1h to merge, 1 still open, 1 closed without merge, merge rate: 75%."
+        _, user = _build_ceo_prompt(config, "proposal.md", tmp_repo)
+        assert "## PR Outcome History" in user
+        assert "Your PR history:" in user
+        assert "merge rate: 75%" in user
+
+    @patch("colonyos.orchestrator.format_outcome_summary")
+    def test_no_outcomes_no_section(self, mock_summary, tmp_repo: Path, config: ColonyConfig) -> None:
+        mock_summary.return_value = ""
+        _, user = _build_ceo_prompt(config, "proposal.md", tmp_repo)
+        assert "## PR Outcome History" not in user
+
+    @patch("colonyos.outcomes.format_outcome_summary", side_effect=RuntimeError("DB locked"))
+    def test_failure_non_blocking(self, mock_summary, tmp_repo: Path, config: ColonyConfig) -> None:
+        """format_outcome_summary failure doesn't break CEO prompt."""
+        _, user = _build_ceo_prompt(config, "proposal.md", tmp_repo)
+        assert "Analyze this project" in user
+        assert "## PR Outcome History" not in user
+
+    @patch("colonyos.orchestrator.format_outcome_summary")
+    def test_outcomes_appear_after_prs_before_issues(self, mock_summary, tmp_repo: Path, config: ColonyConfig) -> None:
+        mock_summary.return_value = "Your PR history: 5 tracked."
+        _, user = _build_ceo_prompt(config, "proposal.md", tmp_repo)
+        outcome_pos = user.index("PR Outcome History")
+        analyze_pos = user.index("Analyze this project")
+        assert outcome_pos < analyze_pos

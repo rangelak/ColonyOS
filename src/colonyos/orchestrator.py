@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -9,6 +11,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
+from typing import Protocol
 
 import click
 from claude_agent_sdk import AgentDefinition
@@ -42,6 +45,7 @@ from colonyos.naming import (
 )
 from colonyos.github import check_open_pr
 from colonyos.memory import MemoryCategory, MemoryStore, load_memory_for_injection
+from colonyos.outcomes import OutcomeStore, format_outcome_summary
 from colonyos.recovery import (
     PreservationResult,
     checkout_branch,
@@ -53,7 +57,34 @@ from colonyos.recovery import (
 )
 from colonyos.sanitize import sanitize_untrusted_content
 from colonyos.slack import is_valid_git_ref
-from colonyos.ui import NullUI, ParallelProgressLine, PhaseUI, make_reviewer_prefix, print_reviewer_legend
+from colonyos.ui import (
+    NullUI,
+    ParallelProgressLine,
+    PhaseUI,
+    StreamBadge,
+    make_reviewer_badge,
+    make_task_prefix,
+    print_reviewer_legend,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class UIFactory(Protocol):
+    """Callable that produces phase-UI instances.
+
+    Extended factories accept ``prefix``, ``task_id``, and ``badge``
+    keyword arguments.  Legacy factories that only accept a positional
+    ``prefix`` string are handled via ``_invoke_ui_factory``.
+    """
+
+    def __call__(
+        self,
+        *,
+        prefix: str = "",
+        task_id: str | None = None,
+        badge: StreamBadge | None = None,
+    ) -> object: ...
 
 
 def _touch_heartbeat(repo_root: Path) -> None:
@@ -217,7 +248,7 @@ def _ensure_branch_exists(repo_root: Path, branch_name: str) -> None:
     _log(f"Created feature branch '{branch_name}' for parallel implement")
 
 
-_COLONYOS_OUTPUT_PREFIXES = (
+COLONYOS_OUTPUT_PREFIXES = (
     "cOS_prds/",
     "cOS_tasks/",
     "cOS_reviews/",
@@ -256,7 +287,7 @@ def _check_working_tree_clean(
         if ignore_colonyos_dirs:
             lines = [
                 ln for ln in lines
-                if not any(ln[3:].startswith(p) for p in _COLONYOS_OUTPUT_PREFIXES)
+                if not any(ln[3:].startswith(p) for p in COLONYOS_OUTPUT_PREFIXES)
             ]
         dirty_output = "\n".join(lines)
         return (not dirty_output, dirty_output)
@@ -336,11 +367,15 @@ def _preflight_check(
             raise PreflightError(
                 f"Branch '{branch_name}' already exists with open PR #{open_pr_number}: "
                 f"{open_pr_url}\n\n"
-                f"Use --resume to continue existing work, or --force to bypass this check."
+                f"Use --resume to continue existing work, or --force to bypass this check.",
+                code="branch_exists",
+                details={"branch_name": branch_name, "open_pr_number": open_pr_number, "open_pr_url": open_pr_url},
             )
         raise PreflightError(
             f"Branch '{branch_name}' already exists locally.\n\n"
-            "Use --resume to continue existing work, or --force to bypass this check."
+            "Use --resume to continue existing work, or --force to bypass this check.",
+            code="branch_exists",
+            details={"branch_name": branch_name},
         )
 
     # Check if main is behind origin/main
@@ -837,6 +872,7 @@ def _run_sequential_implement(
                 budget_usd=per_task_budget,
                 ui=ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
         except Exception as exc:
             _log(f"Task {task_id} raised exception: {exc}")
@@ -1027,7 +1063,7 @@ def _run_parallel_implement(
             )
 
             # Create a task-specific UI with prefix
-            task_ui = _make_ui(prefix=f"[{task_id}] ")
+            task_ui = _make_ui(task_id=task_id)
 
             # Run the agent
             result = run_phase_sync(
@@ -1039,6 +1075,7 @@ def _run_parallel_implement(
                 budget_usd=budget_usd,
                 ui=task_ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
 
             # Add task_id to artifacts for tracking (FR-10)
@@ -1054,8 +1091,8 @@ def _run_parallel_implement(
             conflict_files: list[str],
             task_id: str,
             working_dir: Path,
-            prd_path_arg: str,
-            task_file_path_arg: str,
+            prd_path: str,
+            task_file_path: str,
             budget_usd: float,
         ) -> PhaseResult:
             system, user = _build_conflict_resolve_prompt(
@@ -1066,7 +1103,9 @@ def _run_parallel_implement(
                 working_dir,
             )
 
-            conflict_ui = _make_ui(prefix=f"[CONFLICT {task_id}] ")
+            conflict_ui = _make_ui(
+                badge=StreamBadge(text=f"[CONFLICT {task_id}]", style="dim"),
+            )
 
             result = run_phase_sync(
                 Phase.CONFLICT_RESOLVE,
@@ -1077,6 +1116,7 @@ def _run_parallel_implement(
                 budget_usd=budget_usd,
                 ui=conflict_ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
 
             return result
@@ -1152,10 +1192,21 @@ def _run_parallel_implement(
             duration_ms=summary["wall_time_ms"],
             artifacts={
                 "parallel_tasks": str(summary["total_tasks"]),
+                "total_tasks": str(summary["total_tasks"]),
                 "completed": str(summary["completed"]),
                 "failed": str(summary["failed"]),
                 "blocked": str(summary["blocked"]),
                 "parallelism_ratio": f"{summary['parallelism_ratio']:.2f}x",
+                "task_results": {
+                    task_id: {
+                        "status": task.status.value.upper(),
+                        "description": task.description,
+                        "cost_usd": task.actual_cost_usd,
+                        "duration_ms": task.duration_ms,
+                        "error": task.error or "",
+                    }
+                    for task_id, task in state.tasks.items()
+                },
             },
             error=f"{len(state.failed)} task(s) failed" if any_failed else None,
         )
@@ -1219,6 +1270,203 @@ def _collect_review_findings(
         if verdict == "request-changes":
             findings.append((persona.role, text))
     return findings
+
+
+def _task_sort_key(task_id: str) -> tuple[int, ...]:
+    """Sort task IDs numerically where possible."""
+    parts: list[int] = []
+    for chunk in task_id.split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            return (10**9,)
+    return tuple(parts)
+
+
+def _load_task_outline(repo_root: Path, task_rel: str) -> list[tuple[str, str]]:
+    """Extract ordered task IDs and descriptions from a task markdown file."""
+    task_path = repo_root / task_rel
+    if not task_path.exists():
+        return []
+    outline: list[tuple[str, str]] = []
+    content = task_path.read_text(encoding="utf-8")
+    for line in content.splitlines():
+        match = re.match(r"^-\s*\[[x ]\]\s*(\d+\.\d+)\s+(.*)", line, re.IGNORECASE)
+        if match:
+            outline.append((match.group(1), match.group(2).strip()))
+    return outline
+
+
+def _format_task_outline_note(tasks: list[tuple[str, str]]) -> str:
+    """Summarize the planned task list for the implement phase."""
+    if not tasks:
+        return ""
+    rendered: list[str] = []
+    for task_id, description in tasks[:6]:
+        short = description if len(description) <= 72 else f"{description[:69]}..."
+        rendered.append(f"`{task_id}` {short}")
+    if len(tasks) > 6:
+        rendered.append(f"+{len(tasks) - 6} more")
+    return f"Implement tasks ({len(tasks)}): " + "; ".join(rendered)
+
+
+def _normalize_task_status(raw: object) -> str:
+    return str(raw or "").strip().upper().replace("_", "-")
+
+
+def _parse_task_results_artifact(raw: object) -> dict[str, dict[str, object]]:
+    """Decode the serialized task-results artifact when present."""
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        normalized: dict[str, dict[str, object]] = {}
+        for task_id, info in raw.items():
+            if isinstance(task_id, str) and isinstance(info, dict):
+                normalized[task_id] = dict(info)
+        return normalized
+    if not isinstance(raw, (str, bytes, bytearray)):
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    normalized = dict[str, dict[str, object]]()
+    for task_id, info in parsed.items():
+        if isinstance(task_id, str) and isinstance(info, dict):
+            normalized[task_id] = dict(info)
+    return normalized
+
+
+def _format_task_ids(task_ids: list[str]) -> str:
+    ordered = sorted(task_ids, key=_task_sort_key)
+    return ", ".join(f"`{task_id}`" for task_id in ordered)
+
+
+def _format_implement_result_note(result: PhaseResult) -> str:
+    """Summarize completed/failed/blocked task IDs for a finished implement phase."""
+    task_results = _parse_task_results_artifact(result.artifacts.get("task_results"))
+    if task_results:
+        completed = [
+            task_id for task_id, info in task_results.items()
+            if _normalize_task_status(info.get("status")) == "COMPLETED"
+        ]
+        failed = [
+            task_id for task_id, info in task_results.items()
+            if _normalize_task_status(info.get("status")) == "FAILED"
+        ]
+        blocked = [
+            task_id for task_id, info in task_results.items()
+            if _normalize_task_status(info.get("status")) == "BLOCKED"
+        ]
+    else:
+        completed_count = int(result.artifacts.get("completed", "0") or "0")
+        failed_count = int(result.artifacts.get("failed", "0") or "0")
+        blocked_count = int(result.artifacts.get("blocked", "0") or "0")
+        return (
+            f"Task results: {completed_count} completed, "
+            f"{failed_count} failed, {blocked_count} blocked."
+        )
+
+    parts: list[str] = [
+        f"Task results: {len(completed)} completed, {len(failed)} failed, {len(blocked)} blocked."
+    ]
+    if completed:
+        parts.append(f"Completed: {_format_task_ids(completed)}")
+    if failed:
+        parts.append(f"Failed: {_format_task_ids(failed)}")
+    if blocked:
+        parts.append(f"Blocked: {_format_task_ids(blocked)}")
+    return "\n".join(parts)
+
+
+def _invoke_ui_factory(
+    ui_factory: UIFactory | Callable[..., object],
+    *,
+    prefix: str = "",
+    task_id: str | None = None,
+    badge: StreamBadge | None = None,
+) -> object:
+    """Call UI factories while preserving legacy prefix-only compatibility."""
+    try:
+        signature = inspect.signature(ui_factory)
+    except (TypeError, ValueError):
+        signature = None
+
+    if signature is not None:
+        parameters = signature.parameters.values()
+        supports_extended_args = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters
+        ) or any(name in signature.parameters for name in ("task_id", "badge"))
+        if not supports_extended_args:
+            fallback_prefix = prefix
+            if badge is not None:
+                fallback_prefix = f"{badge.markup} "
+            elif task_id is not None:
+                fallback_prefix = make_task_prefix(task_id)
+            return ui_factory(fallback_prefix)  # type: ignore[operator]
+
+    return ui_factory(prefix=prefix, task_id=task_id, badge=badge)  # type: ignore[operator]
+
+
+def _reviewer_reference(index: int, role: str) -> str:
+    return f"R{index + 1} {role}"
+
+
+def _format_review_round_note(
+    results: list[PhaseResult],
+    reviewers: list[Persona],
+    round_num: int,
+    total_rounds: int,
+) -> str:
+    """Summarize one full review round for Slack and terminal milestone updates."""
+    approved: list[str] = []
+    requested_changes: list[str] = []
+    failed: list[str] = []
+
+    for index, (persona, result) in enumerate(zip(reviewers, results)):
+        reviewer_ref = _reviewer_reference(index, persona.role)
+        if not result.success:
+            failed.append(reviewer_ref)
+            continue
+        verdict = extract_review_verdict(result.artifacts.get("result", ""))
+        if verdict == "request-changes":
+            requested_changes.append(reviewer_ref)
+        else:
+            approved.append(reviewer_ref)
+
+    summary = (
+        f"Review round {round_num}/{total_rounds}: "
+        f"{len(approved)} approved, {len(requested_changes)} requested changes, "
+        f"{len(failed)} failed."
+    )
+    details: list[str] = [summary]
+    if requested_changes:
+        details.append("Requested changes: " + ", ".join(requested_changes))
+    if failed:
+        details.append("Failed reviewers: " + ", ".join(failed))
+    if not requested_changes and not failed:
+        details.append("All reviewers approved; moving to the decision gate.")
+    return "\n".join(details)
+
+
+def _format_fix_iteration_extra(
+    reviewers: list[Persona],
+    findings: list[tuple[str, str]],
+) -> str:
+    """Return a short fix-phase header summary for the reviewer findings."""
+    if not findings:
+        return ""
+    reviewer_indices = {persona.role: index for index, persona in enumerate(reviewers)}
+    refs: list[str] = []
+    for role, _ in findings:
+        idx = reviewer_indices.get(role)
+        refs.append(_reviewer_reference(idx, role) if idx is not None else role)
+    rendered = ", ".join(refs[:3])
+    if len(refs) > 3:
+        rendered += f", +{len(refs) - 3} more"
+    return f"Addressing feedback from {rendered}"
 
 
 def _build_decision_prompt(
@@ -1466,6 +1714,7 @@ def run_preflight_recovery(
         allowed_tools=["Read", "Glob", "Grep", "Bash", "Write", "Edit"],
         ui=ui,
         retry_config=config.retry,
+        timeout_seconds=config.budget.phase_timeout_seconds,
     )
 
     if not phase_result.success:
@@ -1585,6 +1834,7 @@ def run_auto_recovery(
         allowed_tools=["Read", "Glob", "Grep", "Bash", "Write", "Edit"],
         ui=ui,
         retry_config=config.retry,
+        timeout_seconds=config.budget.phase_timeout_seconds,
     )
 
 
@@ -1640,6 +1890,7 @@ def run_nuke_summary(
         allowed_tools=["Read", "Glob", "Grep"],
         ui=ui,
         retry_config=config.retry,
+        timeout_seconds=config.budget.phase_timeout_seconds,
     )
 
 
@@ -1915,6 +2166,20 @@ def _build_ceo_prompt(
             "Failed to fetch open PRs for CEO context, proceeding without."
         )
 
+    # Inject PR outcome history so the CEO can calibrate based on merge rate (non-blocking)
+    outcomes_section = ""
+    try:
+        outcome_summary = format_outcome_summary(repo_root)
+        if outcome_summary:
+            outcomes_section = (
+                "## PR Outcome History\n\n"
+                f"{outcome_summary}\n\n"
+            )
+    except Exception:
+        logger.warning(
+            "Failed to compute PR outcome summary for CEO context, proceeding without."
+        )
+
     user = (
         "## Development History\n\n"
         "Below is the complete changelog of features already built. "
@@ -1922,6 +2187,7 @@ def _build_ceo_prompt(
         "Your proposal MUST build upon or complement existing work.\n\n"
         f"{changelog}\n\n---\n\n"
         f"{prs_section}"
+        f"{outcomes_section}"
         f"{issues_section}"
         "Analyze this project and propose the single most impactful feature to build next. "
         "Output your proposal in the format described in the instructions."
@@ -1965,6 +2231,7 @@ def run_ceo(
         allowed_tools=["Read", "Glob", "Grep"],
         ui=ui,
         retry_config=config.retry,
+        timeout_seconds=config.budget.phase_timeout_seconds,
     )
 
     proposal_text = result.artifacts.get("result", "")
@@ -2021,6 +2288,7 @@ def update_directions_after_ceo(
             allowed_tools=[],
             ui=ui,
             retry_config=config.retry,
+            timeout_seconds=config.budget.phase_timeout_seconds,
         )
         cost = result.cost_usd or 0.0
         updated = result.artifacts.get("result", "")
@@ -2186,6 +2454,7 @@ def run_sweep(
         allowed_tools=["Read", "Glob", "Grep"],
         ui=ui,
         retry_config=config.retry,
+        timeout_seconds=config.budget.phase_timeout_seconds,
     )
 
     findings_text = result.artifacts.get("result", "")
@@ -2333,6 +2602,11 @@ def _save_run_log(repo_root: Path, log: RunLog, *, resumed: bool = False) -> Pat
                 "source_issue_url": log.source_issue_url,
                 "source_type": log.source_type,
                 "review_comment_id": log.review_comment_id,
+                "pr_url": log.pr_url,
+                "post_fix_head_sha": log.post_fix_head_sha,
+                "parallel_tasks": log.parallel_tasks,
+                "wall_time_ms": log.wall_time_ms,
+                "agent_time_ms": log.agent_time_ms,
                 "preflight": log.preflight.to_dict() if log.preflight else None,
                 "last_successful_phase": last_successful_phase,
                 "resume_events": resume_events,
@@ -2462,6 +2736,11 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
             preflight=PreflightResult.from_dict(data["preflight"]) if data.get("preflight") else None,
             source_type=data.get("source_type"),
             review_comment_id=data.get("review_comment_id"),
+            pr_url=data.get("pr_url"),
+            post_fix_head_sha=data.get("post_fix_head_sha"),
+            parallel_tasks=data.get("parallel_tasks"),
+            wall_time_ms=data.get("wall_time_ms"),
+            agent_time_ms=data.get("agent_time_ms"),
             recovery_events=list(data.get("recovery_events", [])),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -2526,6 +2805,9 @@ def _compute_next_phase(last_successful_phase: str | None) -> str | None:
 
     Returns the next phase name, or None if nothing to resume.
     """
+    if last_successful_phase is None:
+        return None
+
     mapping = {
         "plan": "implement",
         "implement": "review",
@@ -2758,10 +3040,15 @@ def run_standalone_review(
     The decision_verdict is None when ``--decide`` is not used.
     """
 
-    def _make_ui(prefix: str = "") -> PhaseUI | NullUI | None:
+    def _make_ui(
+        prefix: str = "",
+        *,
+        task_id: str | None = None,
+        badge: StreamBadge | None = None,
+    ) -> PhaseUI | NullUI | None:
         if quiet:
             return None
-        return PhaseUI(verbose=verbose, prefix=prefix)
+        return PhaseUI(verbose=verbose, prefix=prefix, task_id=task_id, badge=badge)
 
     reviewers = reviewer_personas(config)
     if not reviewers:
@@ -2797,7 +3084,7 @@ def run_standalone_review(
             sys_prompt, usr_prompt = _build_standalone_review_prompt(
                 persona, config, branch, base, diff_text,
             )
-            persona_ui = _make_ui(prefix=make_reviewer_prefix(i))
+            persona_ui = _make_ui(badge=make_reviewer_badge(i))
             review_calls.append(dict(
                 phase=Phase.REVIEW,
                 prompt=usr_prompt,
@@ -2890,6 +3177,7 @@ def run_standalone_review(
                 budget_usd=config.budget.per_phase,
                 ui=fix_ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
             phase_results.append(fix_result)
             total_cost += fix_result.cost_usd or 0
@@ -2927,6 +3215,7 @@ def run_standalone_review(
                 allowed_tools=["Read", "Glob", "Grep", "Bash"],
                 ui=decision_ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
             phase_results.append(decision_result)
             total_cost += decision_result.cost_usd or 0
@@ -3013,6 +3302,7 @@ def _run_learn_phase(
             allowed_tools=["Read", "Glob", "Grep"],
             ui=learn_ui,
             retry_config=config.retry,
+            timeout_seconds=config.budget.phase_timeout_seconds,
         )
         log.phases.append(learn_result)
         _save_run_log(repo_root, log)
@@ -3075,6 +3365,39 @@ def _extract_pr_number_from_log(log: RunLog) -> int | None:
                 if match:
                     return int(match.group(1))
     return None
+
+
+def _register_pr_outcome(
+    repo_root: Path,
+    run_id: str,
+    pr_url: str,
+    branch_name: str,
+) -> None:
+    """Register a newly created PR for outcome tracking.
+
+    Wraps :meth:`OutcomeStore.track_pr` in a try/except so tracking failures
+    never block the main pipeline.  Silently returns when *pr_url* is empty
+    or the PR number cannot be extracted from the URL.
+    """
+    if not pr_url:
+        return
+
+    match = re.search(r"/pull/(\d+)", pr_url)
+    if not match:
+        return
+
+    pr_number = int(match.group(1))
+
+    try:
+        with OutcomeStore(repo_root) as store:
+            store.track_pr(run_id, pr_number, pr_url, branch_name)
+        logger.info("Registered PR #%d for outcome tracking", pr_number)
+    except Exception:
+        logger.warning(
+            "Failed to register PR #%d for outcome tracking",
+            pr_number,
+            exc_info=True,
+        )
 
 
 def _run_ci_fix_loop(
@@ -3151,6 +3474,7 @@ def _run_ci_fix_loop(
             budget_usd=min(config.budget.per_phase, remaining),
             ui=None,
             retry_config=config.retry,
+            timeout_seconds=config.budget.phase_timeout_seconds,
         )
         log.phases.append(phase_result)
 
@@ -3270,7 +3594,7 @@ def run_thread_fix(
     config: ColonyConfig,
     verbose: bool = False,
     quiet: bool = False,
-    ui_factory: object | None = None,
+    ui_factory: UIFactory | Callable[..., object] | None = None,
     expected_head_sha: str | None = None,
     source_type: str | None = None,
     review_comment_id: str | None = None,
@@ -3299,12 +3623,22 @@ def run_thread_fix(
        corruption.
     """
 
-    def _make_ui(prefix: str = "") -> PhaseUI | NullUI | None:
+    def _make_ui(
+        prefix: str = "",
+        *,
+        task_id: str | None = None,
+        badge: StreamBadge | None = None,
+    ) -> PhaseUI | NullUI | None:
         if ui_factory is not None:
-            return ui_factory(prefix)  # type: ignore[operator]
+            return _invoke_ui_factory(
+                ui_factory,
+                prefix=prefix,
+                task_id=task_id,
+                badge=badge,
+            )  # type: ignore[return-value]
         if quiet:
             return None
-        return PhaseUI(verbose=verbose, prefix=prefix)
+        return PhaseUI(verbose=verbose, prefix=prefix, task_id=task_id, badge=badge)
 
     run_id = _build_run_id(f"fix-{fix_prompt}")
     log = RunLog(
@@ -3318,6 +3652,11 @@ def run_thread_fix(
         source_type=source_type,
         review_comment_id=review_comment_id,
     )
+
+    # FR-3.2: Register the PR for outcome tracking.  Uses INSERT OR IGNORE
+    # so duplicate registrations (e.g. from the main run() path) are safe.
+    if pr_url:
+        _register_pr_outcome(repo_root, run_id, pr_url, branch_name)
 
     # --- Defense-in-depth: validate branch name at point of use ---
     if not is_valid_git_ref(branch_name):
@@ -3422,6 +3761,7 @@ def run_thread_fix(
             budget_usd=config.budget.per_phase,
             ui=impl_ui,
             retry_config=config.retry,
+            timeout_seconds=config.budget.phase_timeout_seconds,
         )
         log.phases.append(impl_result)
 
@@ -3456,6 +3796,7 @@ def run_thread_fix(
             ui=verify_ui,
             allowed_tools=["Read", "Bash", "Glob", "Grep"],
             retry_config=config.retry,
+            timeout_seconds=config.budget.phase_timeout_seconds,
         )
         log.phases.append(verify_result)
 
@@ -3487,6 +3828,7 @@ def run_thread_fix(
                 budget_usd=config.budget.per_phase,
                 ui=deliver_ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
             log.phases.append(deliver_result)
 
@@ -3540,7 +3882,7 @@ def run(
     quiet: bool = False,
     source_issue: int | None = None,
     source_issue_url: str | None = None,
-    ui_factory: object | None = None,
+    ui_factory: UIFactory | Callable[..., object] | None = None,
     user_injection_provider: Callable[[], list[str]] | None = None,
     offline: bool = False,
     force: bool = False,
@@ -3551,18 +3893,28 @@ def run(
     """Execute the full orchestration loop: plan -> implement -> review -> deliver.
 
     Args:
-        ui_factory: Optional callable ``(prefix: str) -> UI | None`` that
+        ui_factory: Optional callable conforming to ``UIFactory`` protocol that
             overrides the default terminal UI.  Used by the Slack watcher to
             inject :class:`SlackUI` so phase progress appears as threaded
             replies.
     """
 
-    def _make_ui(prefix: str = "") -> PhaseUI | NullUI | None:
+    def _make_ui(
+        prefix: str = "",
+        *,
+        task_id: str | None = None,
+        badge: StreamBadge | None = None,
+    ) -> PhaseUI | NullUI | None:
         if ui_factory is not None:
-            return ui_factory(prefix)  # type: ignore[operator]
+            return _invoke_ui_factory(
+                ui_factory,
+                prefix=prefix,
+                task_id=task_id,
+                badge=badge,
+            )  # type: ignore[return-value]
         if quiet:
             return None
-        return PhaseUI(verbose=verbose, prefix=prefix)
+        return PhaseUI(verbose=verbose, prefix=prefix, task_id=task_id, badge=badge)
 
     is_resume = resume_from is not None
     # Track original branch for rollback if we checkout a base branch.
@@ -3974,6 +4326,7 @@ def _run_pipeline(
                 agents=persona_agents,
                 ui=plan_ui,
                 retry_config=config.retry,
+                timeout_seconds=config.budget.phase_timeout_seconds,
             )
             _append_phase(plan_result)
             _capture_phase_memory(memory_store, plan_result, log.run_id, config)
@@ -4000,6 +4353,10 @@ def _run_pipeline(
             impl_ui = _make_ui()
             if impl_ui is not None:
                 impl_ui.phase_header("Implement", config.budget.per_phase, config.get_model(Phase.IMPLEMENT), branch_name)
+                task_outline = _load_task_outline(repo_root, task_rel)
+                task_outline_note = _format_task_outline_note(task_outline)
+                if task_outline_note and impl_ui is not None:
+                    impl_ui.slack_note(task_outline_note)  # type: ignore[union-attr]
             else:
                 _log("=== Phase 2: Implement ===")
 
@@ -4024,6 +4381,7 @@ def _run_pipeline(
                             f"{attempt_result.artifacts.get('parallelism_ratio', '1.0x')}"
                         )
                         if impl_ui is not None:
+                            impl_ui.slack_note(_format_implement_result_note(attempt_result))  # type: ignore[union-attr]
                             if attempt_result.success:
                                 completed_tasks = int(attempt_result.artifacts.get("completed", "0"))
                                 impl_ui.phase_complete(
@@ -4056,6 +4414,7 @@ def _run_pipeline(
                             f"{attempt_result.artifacts.get('total_tasks', '?')} tasks"
                         )
                         if impl_ui is not None:
+                            impl_ui.slack_note(_format_implement_result_note(attempt_result))  # type: ignore[union-attr]
                             if attempt_result.success:
                                 completed_tasks = int(attempt_result.artifacts.get("completed", "0"))
                                 impl_ui.phase_complete(
@@ -4089,6 +4448,7 @@ def _run_pipeline(
                     budget_usd=config.budget.per_phase,
                     ui=impl_ui,
                     retry_config=config.retry,
+                    timeout_seconds=config.budget.phase_timeout_seconds,
                 )
                 return attempt_result
 
@@ -4158,7 +4518,7 @@ def _run_pipeline(
                         # FR-3: Inject memory context into review phase prompts
                         sys_prompt = _inject_memory_block(sys_prompt, memory_store, "review", usr_prompt, config)
                         usr_prompt += _drain_injected_context(user_injection_provider)
-                        persona_ui = _make_ui(prefix=make_reviewer_prefix(i))
+                        persona_ui = _make_ui(badge=make_reviewer_badge(i))
                         review_calls.append(dict(
                             phase=Phase.REVIEW,
                             prompt=usr_prompt,
@@ -4183,12 +4543,11 @@ def _run_pipeline(
                         on_complete=progress_tracker.on_reviewer_complete if progress_tracker else None,
                     )
 
-                    # Print summary after all reviewers complete
-                    if progress_tracker is not None:
-                        progress_tracker.print_summary(round_num=iteration + 1)
-
-                    # Save each persona's review artifact and capture memories
+                    # Persist review results before any post-review notifications so
+                    # resume metadata stays up to date even if a mirror UI blocks.
                     for persona, result in zip(reviewers, results):
+                        _append_phase(result)
+                        _capture_phase_memory(memory_store, result, log.run_id, config)
                         p_slug = _persona_slug(persona.role)
                         text = result.artifacts.get("result", "")
                         artifact = persona_review_artifact_path(
@@ -4201,8 +4560,19 @@ def _run_pipeline(
                             f"# Review by {persona.role} (Round {iteration + 1})\n\n{text}",
                             subdirectory=artifact.subdirectory,
                         )
-                        _append_phase(result)
-                        _capture_phase_memory(memory_store, result, log.run_id, config)
+
+                    # Print summary after all reviewers complete
+                    if progress_tracker is not None:
+                        progress_tracker.print_summary(round_num=iteration + 1)
+                    if review_header_ui is not None:
+                        review_header_ui.slack_note(  # type: ignore[union-attr]
+                            _format_review_round_note(
+                                results,
+                                reviewers,
+                                round_num=iteration + 1,
+                                total_rounds=config.max_fix_iterations + 1,
+                            )
+                        )
 
                     last_findings = _collect_review_findings(results, reviewers)
 
@@ -4236,6 +4606,7 @@ def _run_pipeline(
                                 f"Fix (iteration {iteration + 1})",
                                 config.budget.per_phase,
                                 config.get_model(Phase.FIX),
+                                _format_fix_iteration_extra(reviewers, last_findings),
                             )
                         else:
                             _log(f"  Running fix agent (iteration {iteration + 1})...")
@@ -4248,6 +4619,7 @@ def _run_pipeline(
                             budget_usd=config.budget.per_phase,
                             ui=fix_ui,
                             retry_config=config.retry,
+                            timeout_seconds=config.budget.phase_timeout_seconds,
                         )
                         _append_phase(fix_result)
                         _capture_phase_memory(memory_store, fix_result, log.run_id, config)
@@ -4274,6 +4646,7 @@ def _run_pipeline(
                     allowed_tools=["Read", "Glob", "Grep", "Bash"],
                     ui=decision_ui,
                     retry_config=config.retry,
+                    timeout_seconds=config.budget.phase_timeout_seconds,
                 )
                 _append_phase(decision_result)
 
@@ -4327,6 +4700,7 @@ def _run_pipeline(
                     budget_usd=config.budget.per_phase,
                     ui=deliver_ui,
                     retry_config=config.retry,
+                    timeout_seconds=config.budget.phase_timeout_seconds,
                 )
 
             deliver_result = _execute_deliver_phase()
@@ -4336,6 +4710,8 @@ def _run_pipeline(
             pr_url = deliver_result.artifacts.get("pr_url", "")
             if pr_url:
                 log.pr_url = pr_url
+                # Register the PR for outcome tracking (non-blocking)
+                _register_pr_outcome(repo_root, log.run_id, pr_url, branch_name)
 
             if not deliver_result.success:
                 recovered_result, recovery_log = _attempt_phase_recovery(
@@ -4354,6 +4730,8 @@ def _run_pipeline(
                 recovered_pr_url = recovered_result.artifacts.get("pr_url", "")
                 if recovered_pr_url:
                     log.pr_url = recovered_pr_url
+                    # Register the recovered PR for outcome tracking (non-blocking)
+                    _register_pr_outcome(repo_root, log.run_id, recovered_pr_url, branch_name)
 
         # --- CI Fix Phase (post-deliver) ---
         if config.ci_fix.enabled and config.phases.deliver:
@@ -4370,3 +4748,30 @@ def _run_pipeline(
     finally:
         if memory_store is not None:
             memory_store.close()
+
+        # Safety net: if the pipeline didn't complete cleanly, commit any
+        # dirty working-tree state so that subsequent runs aren't blocked
+        # by the preflight "dirty worktree" check.  On feature branches
+        # this preserves partial work; on main/master it stashes instead.
+        if log.status != RunStatus.COMPLETED:
+            try:
+                from colonyos.recovery import safety_commit_partial_work
+
+                ctx: list[str] = [f"Run: {log.run_id}"]
+                if log.prompt:
+                    ctx.append(f"Prompt: {log.prompt[:200]}")
+                if log.phases:
+                    last_phase = log.phases[-1]
+                    ctx.append(f"Last phase: {last_phase.phase.value}")
+                    if last_phase.error:
+                        ctx.append(f"Error: {last_phase.error[:300]}")
+                ctx.append(f"Cost so far: ${log.total_cost_usd:.2f}")
+                result = safety_commit_partial_work(
+                    repo_root, context_lines=ctx
+                )
+                if result:
+                    _log(f"Post-failure cleanup: {result}")
+            except Exception:
+                logger.warning(
+                    "Post-failure safety commit failed", exc_info=True
+                )

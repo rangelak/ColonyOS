@@ -13,18 +13,21 @@ and posts threaded progress updates back to Slack.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
 import re
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, runtime_checkable
 
-from colonyos.config import RouterConfig, SlackConfig, load_config, runs_dir_path
+from colonyos.config import LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS, RouterConfig, SlackConfig, load_config, runs_dir_path
+from colonyos.models import extract_result_text
 from colonyos.sanitize import sanitize_untrusted_content, strip_slack_links
 
 if TYPE_CHECKING:
@@ -40,7 +43,7 @@ class SlackClient(Protocol):
     """
 
     def chat_postMessage(
-        self, *, channel: str, thread_ts: str, text: str, **kwargs: Any
+        self, *, channel: str, text: str, thread_ts: str | None = None, **kwargs: Any
     ) -> dict[str, Any]: ...
 
     def reactions_add(
@@ -52,6 +55,8 @@ class SlackClient(Protocol):
     ) -> dict[str, Any]: ...
 
     def conversations_list(self, **kwargs: Any) -> dict[str, Any]: ...
+
+    def conversations_history(self, **kwargs: Any) -> dict[str, Any]: ...
 
 # Strict allowlist for git branch ref characters (matches git-check-ref-format rules).
 _VALID_GIT_REF_RE = re.compile(r"^[a-zA-Z0-9._/\-]+$")
@@ -283,17 +288,70 @@ def format_run_summary(
     total_cost: float,
     branch_name: str | None = None,
     pr_url: str | None = None,
+    summary: str | None = None,
+    phase_breakdown: list[str] | None = None,
+    demand_count: int = 1,
 ) -> str:
     """Format the final run summary for a Slack thread."""
     parts: list[str] = []
     icon = ":white_check_mark:" if status == "completed" else ":x:"
     parts.append(f"{icon} *Pipeline {status}*")
+    if summary:
+        parts.append(summary)
     parts.append(f"Total cost: ${total_cost:.4f}")
+    if demand_count > 1:
+        parts.append(f"Demand signals merged: {demand_count}")
     if branch_name:
         parts.append(f"Branch: `{branch_name}`")
     if pr_url:
         parts.append(f"PR: {pr_url}")
+    if phase_breakdown:
+        parts.append("*Phase breakdown*")
+        parts.extend(phase_breakdown)
     return "\n".join(parts)
+
+
+def _extract_phase_verdict(phase_name: str, artifacts: dict[str, Any]) -> str | None:
+    result_text = str(artifacts.get("result", "") or "")
+    if phase_name == "review":
+        match = re.search(r"VERDICT:\s*(approve|request-changes)", result_text, re.IGNORECASE)
+        if match:
+            return match.group(1).lower()
+    if phase_name == "decision":
+        match = re.search(r"VERDICT:\s*(GO|NO-GO)", result_text, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+    return None
+
+
+def format_phase_breakdown_line(phase: Any) -> str:
+    """Format a richer final-summary breakdown line for one PhaseResult-like object."""
+    phase_obj = getattr(phase, "phase", "")
+    phase_name = getattr(phase_obj, "value", str(phase_obj))
+    success = bool(getattr(phase, "success", False))
+    cost = float(getattr(phase, "cost_usd", 0.0) or 0.0)
+    artifacts = getattr(phase, "artifacts", {}) or {}
+    details: list[str] = []
+
+    if phase_name == "implement":
+        completed = artifacts.get("completed")
+        total = artifacts.get("total_tasks") or artifacts.get("parallel_tasks")
+        failed = artifacts.get("failed")
+        blocked = artifacts.get("blocked")
+        if total is not None and completed is not None:
+            details.append(f"tasks {completed}/{total}")
+        if str(failed or "0") != "0":
+            details.append(f"{failed} failed")
+        if str(blocked or "0") != "0":
+            details.append(f"{blocked} blocked")
+
+    verdict = _extract_phase_verdict(phase_name, artifacts)
+    if verdict:
+        details.append(verdict)
+
+    detail_suffix = f", {', '.join(details)}" if details else ""
+    status = "ok" if success else "failed"
+    return f"- {phase_name}: {status}, ${cost:.4f}{detail_suffix}"
 
 
 def format_fix_acknowledgment(branch_name: str) -> str:
@@ -314,6 +372,20 @@ def format_fix_error(error_type: str, detail: str) -> str:
     return f":x: *{error_type}*: {detail}"
 
 
+def post_message(
+    client: SlackClient,
+    channel: str,
+    text: str,
+    *,
+    thread_ts: str | None = None,
+) -> dict[str, Any]:
+    """Post a Slack message, optionally into an existing thread."""
+    kwargs: dict[str, Any] = {"channel": channel, "text": text}
+    if thread_ts:
+        kwargs["thread_ts"] = thread_ts
+    return client.chat_postMessage(**kwargs)
+
+
 def post_acknowledgment(
     client: SlackClient,
     channel: str,
@@ -321,11 +393,7 @@ def post_acknowledgment(
     prompt: str,
 ) -> None:
     """Post a threaded reply acknowledging pipeline start."""
-    client.chat_postMessage(
-        channel=channel,
-        thread_ts=thread_ts,
-        text=format_acknowledgment(prompt),
-    )
+    post_message(client, channel, format_acknowledgment(prompt), thread_ts=thread_ts)
 
 
 def post_phase_update(
@@ -337,10 +405,11 @@ def post_phase_update(
     cost: float,
 ) -> None:
     """Post a phase completion update as a threaded reply."""
-    client.chat_postMessage(
-        channel=channel,
+    post_message(
+        client,
+        channel,
+        format_phase_update(phase, success, cost),
         thread_ts=thread_ts,
-        text=format_phase_update(phase, success, cost),
     )
 
 
@@ -352,12 +421,24 @@ def post_run_summary(
     total_cost: float,
     branch_name: str | None = None,
     pr_url: str | None = None,
+    summary: str | None = None,
+    phase_breakdown: list[str] | None = None,
+    demand_count: int = 1,
 ) -> None:
     """Post the final run summary as a threaded reply."""
-    client.chat_postMessage(
-        channel=channel,
+    post_message(
+        client,
+        channel,
+        format_run_summary(
+            status,
+            total_cost,
+            branch_name,
+            pr_url,
+            summary,
+            phase_breakdown,
+            demand_count,
+        ),
         thread_ts=thread_ts,
-        text=format_run_summary(status, total_cost, branch_name, pr_url),
     )
 
 
@@ -452,6 +533,7 @@ class SlackUI:
         self._client = client
         self._channel = channel
         self._thread_ts = thread_ts
+        self._current_phase: str | None = None
 
     def phase_header(
         self,
@@ -460,6 +542,7 @@ class SlackUI:
         model: str,
         extra: str = "",
     ) -> None:
+        self._current_phase = phase_name
         msg = f":gear: Starting *{phase_name}* phase (${budget:.2f} budget, {model})"
         if extra:
             msg += f" — {extra}"
@@ -471,20 +554,35 @@ class SlackUI:
 
     def phase_complete(self, cost: float, turns: int, duration_ms: int) -> None:
         secs = duration_ms // 1000
+        phase_name = self._current_phase or "Phase"
         self._client.chat_postMessage(
             channel=self._channel,
             thread_ts=self._thread_ts,
-            text=f":white_check_mark: Phase completed — ${cost:.2f}, {turns} turns, {secs}s",
+            text=f":white_check_mark: *{phase_name}* completed — ${cost:.2f}, {turns} turns, {secs}s",
         )
 
     def phase_error(self, error: str) -> None:
         """Post a generic error message — internal details are logged, not posted."""
         logger.error("SlackUI phase error: %s", error)
+        phase_name = self._current_phase or "Phase"
         self._client.chat_postMessage(
             channel=self._channel,
             thread_ts=self._thread_ts,
-            text=":x: Phase failed. Check server logs for details.",
+            text=f":x: *{phase_name}* failed. Check server logs for details.",
         )
+
+    def phase_note(self, text: str) -> None:
+        note = text.strip()
+        if not note:
+            return
+        self._client.chat_postMessage(
+            channel=self._channel,
+            thread_ts=self._thread_ts,
+            text=note,
+        )
+
+    def slack_note(self, text: str) -> None:
+        self.phase_note(text)
 
     def on_tool_start(self, *a: object) -> None:
         pass
@@ -500,6 +598,59 @@ class SlackUI:
 
     def on_turn_complete(self) -> None:
         pass
+
+
+class FanoutSlackUI:
+    """Mirror Slack phase updates to multiple request threads."""
+
+    def __init__(self, *targets: SlackUI) -> None:
+        self._targets = list(targets)
+
+    def phase_header(
+        self,
+        phase_name: str,
+        budget: float,
+        model: str,
+        extra: str = "",
+    ) -> None:
+        for target in self._targets:
+            target.phase_header(phase_name, budget, model, extra)
+
+    def phase_complete(self, cost: float, turns: int, duration_ms: int) -> None:
+        for target in self._targets:
+            target.phase_complete(cost, turns, duration_ms)
+
+    def phase_error(self, error: str) -> None:
+        for target in self._targets:
+            target.phase_error(error)
+
+    def phase_note(self, text: str) -> None:
+        for target in self._targets:
+            target.phase_note(text)
+
+    def slack_note(self, text: str) -> None:
+        for target in self._targets:
+            target.slack_note(text)
+
+    def on_tool_start(self, *a: object) -> None:
+        for target in self._targets:
+            target.on_tool_start(*a)
+
+    def on_tool_input_delta(self, *a: object) -> None:
+        for target in self._targets:
+            target.on_tool_input_delta(*a)
+
+    def on_tool_done(self) -> None:
+        for target in self._targets:
+            target.on_tool_done()
+
+    def on_text_delta(self, *a: object) -> None:
+        for target in self._targets:
+            target.on_text_delta(*a)
+
+    def on_turn_complete(self) -> None:
+        for target in self._targets:
+            target.on_turn_complete()
 
 
 # ---------------------------------------------------------------------------
@@ -916,11 +1067,10 @@ def _triage_message_legacy(
         model=model,
         budget_usd=0.05,  # tiny budget for triage
         allowed_tools=[],  # no tool access
+        timeout_seconds=LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS,
     )
 
-    raw_text = ""
-    if result.artifacts:
-        raw_text = next(iter(result.artifacts.values()), "")
+    raw_text = extract_result_text(result.artifacts)
     if not raw_text and result.error:
         logger.warning("Triage LLM call failed: %s", result.error[:200])
         return TriageResult(
@@ -1103,6 +1253,53 @@ def resolve_channel_names(client: SlackClient, names: list[str]) -> list[Resolve
     return resolved
 
 
+def _slack_import_diagnostics() -> str:
+    details: list[str] = [f"python={sys.version_info.major}.{sys.version_info.minor}"]
+    for module_name in (
+        "slack_bolt",
+        "slack_sdk",
+        "slack_bolt.adapter.socket_mode",
+    ):
+        try:
+            spec = importlib.util.find_spec(module_name)
+        except Exception as exc:  # pragma: no cover - defensive only
+            details.append(f"{module_name}=error:{exc.__class__.__name__}")
+            continue
+        if spec is None:
+            details.append(f"{module_name}=missing")
+        else:
+            origin = spec.origin or "namespace"
+            details.append(f"{module_name}={origin}")
+    return ", ".join(details)
+
+
+def _raise_slack_dependency_error(exc: Exception, *, operation: str) -> NoReturn:
+    if isinstance(exc, ImportError):
+        logger.debug(
+            "Slack dependency import failed during %s (%s)",
+            operation,
+            _slack_import_diagnostics(),
+            exc_info=True,
+        )
+        raise ImportError(
+            "Slack dependencies are unavailable. Install or reinstall them with: "
+            "pip install 'colonyos[slack]'. Then run `colonyos doctor` to verify "
+            "your environment."
+        ) from exc
+
+    logger.debug(
+        "Slack dependency import crashed unexpectedly during %s (%s)",
+        operation,
+        _slack_import_diagnostics(),
+        exc_info=True,
+    )
+    raise RuntimeError(
+        "Slack dependencies failed to import cleanly. Reinstall them with: "
+        "pip install 'colonyos[slack]'. If this persists, run `colonyos doctor` "
+        "and prefer Python 3.11-3.13 for Slack-enabled deployments."
+    ) from exc
+
+
 def create_slack_app(config: SlackConfig) -> Any:
     """Create and configure a Slack Bolt app with Socket Mode.
 
@@ -1112,13 +1309,12 @@ def create_slack_app(config: SlackConfig) -> Any:
     The *config* parameter is stored on the app instance as ``_colonyos_config``
     so that event handlers can reference channel allowlists and trigger settings.
     """
+
     try:
+        import slack_sdk  # noqa: F401 — force full load before slack_bolt to avoid KeyError race in threads
         from slack_bolt import App
-    except ImportError:
-        raise ImportError(
-            "slack-bolt is not installed. "
-            "Install it with: pip install 'colonyos[slack]'"
-        )
+    except Exception as exc:
+        _raise_slack_dependency_error(exc, operation="app startup")
 
     bot_token = os.environ.get("COLONYOS_SLACK_BOT_TOKEN", "").strip()
     app_token = os.environ.get("COLONYOS_SLACK_APP_TOKEN", "").strip()
@@ -1149,7 +1345,11 @@ def start_socket_mode(app: Any) -> Any:
     caching it on the app instance (to avoid exposing it to agent
     introspection).
     """
-    from slack_bolt.adapter.socket_mode import SocketModeHandler
+    try:
+        import slack_sdk  # noqa: F401 — same thread-safety guard as create_slack_app
+        from slack_bolt.adapter.socket_mode import SocketModeHandler
+    except Exception as exc:
+        _raise_slack_dependency_error(exc, operation="socket mode startup")
 
     app_token = os.environ.get("COLONYOS_SLACK_APP_TOKEN", "").strip()
     handler = SocketModeHandler(app, app_token)
