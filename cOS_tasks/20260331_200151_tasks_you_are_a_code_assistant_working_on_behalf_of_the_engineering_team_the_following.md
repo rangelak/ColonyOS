@@ -29,8 +29,8 @@
   - [x] 3.1 Write tests verifying the fix completion path calls `remove_reaction("eyes")` before adding the result emoji, and adds `:tada:` on success only
   - [x] 3.2 In `src/colonyos/cli.py` (~line 4304-4310), add the same `:eyes:` removal and `:tada:` addition pattern as task 2.0
 
-- [ ] 4.0 Update existing tests and verify no regressions
+- [x] 4.0 Update existing tests and verify no regressions
   depends_on: [1.0, 2.0, 3.0]
-  - [ ] 4.1 Update `test_protocol_defines_required_methods` in `tests/test_slack.py` to assert `reactions_remove` is in the Protocol members and update the docstring ("4 Slack methods" → "5 Slack methods")
-  - [ ] 4.2 Run full test suite (`pytest tests/`) to verify zero regressions
-  - [ ] 4.3 Verify the import of `remove_reaction` is added to `src/colonyos/cli.py` alongside the existing `react_to_message` import
+  - [x] 4.1 Update `test_protocol_defines_required_methods` in `tests/test_slack.py` to assert `reactions_remove` is in the Protocol members and update the docstring ("4 Slack methods" → "5 Slack methods")
+  - [x] 4.2 Run full test suite (`pytest tests/`) to verify zero regressions
+  - [x] 4.3 Verify the import of `remove_reaction` is added to `src/colonyos/cli.py` alongside the existing `react_to_message` import
