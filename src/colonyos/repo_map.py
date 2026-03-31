@@ -11,6 +11,7 @@ import ast
 import logging
 import re
 import subprocess
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
@@ -446,8 +447,6 @@ def format_tree(files: list[FileSymbols]) -> str:
         return ""
 
     # Group files by their parent directory
-    from collections import OrderedDict
-
     dir_groups: OrderedDict[str, list[FileSymbols]] = OrderedDict()
     for fs in files:
         parts = fs.path.rsplit("/", 1)
@@ -583,8 +582,6 @@ def generate_overview(files: list[FileSymbols]) -> str:
     """
     if not files:
         return ""
-
-    from collections import Counter
 
     dir_counts: Counter[str] = Counter()
     root_count = 0

@@ -865,7 +865,8 @@ def _run_sequential_implement(
             repo_root=repo_root,
         )
 
-        # Inject semantic memory and external context (Slack/GitHub)
+        # Inject repo map, semantic memory, and external context (Slack/GitHub)
+        system = _inject_repo_map(system, repo_map_text)
         system = _inject_memory_block(system, memory_store, "implement", user, config)
         user += _drain_injected_context(user_injection_provider)
 
@@ -2232,6 +2233,16 @@ def run_ceo(
     proposal_filename = names.proposal_filename
 
     system, user = _build_ceo_prompt(config, proposal_filename, repo_root, persona=ceo_persona)
+
+    # Inject repo map into CEO phase (FR-15: all phases).
+    if config.repo_map.enabled:
+        try:
+            from colonyos.repo_map import generate_repo_map
+
+            ceo_repo_map_text = generate_repo_map(repo_root, config.repo_map)
+            system = _inject_repo_map(system, ceo_repo_map_text)
+        except Exception as exc:
+            _log(f"Warning: repo map generation failed for CEO phase: {exc}")
 
     if ui is not None:
         ui.phase_header("CEO", config.budget.per_phase, config.get_model(Phase.CEO))
@@ -4434,6 +4445,7 @@ def _run_pipeline(
                         _make_ui=_make_ui,
                         memory_store=memory_store,
                         user_injection_provider=user_injection_provider,
+                        repo_map_text=repo_map_text,
                     )
                     if attempt_result is not None:
                         _log(
@@ -4721,6 +4733,7 @@ def _run_pipeline(
                     source_issue=log.source_issue,
                     base_branch=base_branch,
                 )
+                system = _inject_repo_map(system, repo_map_text)
                 user += _drain_injected_context(user_injection_provider)
                 return run_phase_sync(
                     Phase.DELIVER,
