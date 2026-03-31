@@ -215,8 +215,6 @@ def _register_active_phase_controller(controller: _SyncRunController) -> None:
 def _unregister_active_phase_controller(controller: _SyncRunController) -> None:
     with _ACTIVE_PHASE_CONTROLLERS_LOCK:
         _ACTIVE_PHASE_CONTROLLERS.discard(controller)
-
-
 async def _run_phase_attempt(
     *,
     phase: Phase,

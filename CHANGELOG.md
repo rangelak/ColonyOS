@@ -136,7 +136,6 @@ Improves the autonomous daemon experience by cleaning up the TUI monitor, restor
 - `src/colonyos/tui/widgets/transcript.py` — Add dedicated daemon monitor banner and cleaner transcript spacing
 - `deploy/README.md` — Document daemon Slack allowlist behavior and open queue submission semantics
 - `tests/test_agent.py`, `tests/test_cli.py`, `tests/test_config.py`, `tests/test_daemon.py`, `tests/test_init.py`, `tests/tui/test_app.py` — Add regression coverage for cancellation, daemon monitor UX, config round-tripping, and init preservation
-
 ## 20260330_002500 — Handle 529 Overloaded Errors with Retry and Optional Model Fallback
 
 Adds a transport-level retry layer with exponential backoff and jitter inside `run_phase()` so that transient API 529/503 errors are handled transparently without triggering the orchestrator's heavyweight recovery. Includes optional model fallback (hard-blocked on safety-critical phases), full observability via `PhaseResult.retry_info`, and configurable `RetryConfig` in `config.yaml`.
