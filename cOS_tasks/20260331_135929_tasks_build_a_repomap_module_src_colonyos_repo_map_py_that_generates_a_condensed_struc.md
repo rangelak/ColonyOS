@@ -37,16 +37,16 @@
   - [x] 3.4 Implement `extract_other_file_info(file_path)` returning path and file size in bytes.
   - [x] 3.5 Implement `extract_file_symbols(file_path)` dispatcher that routes to `extract_python_symbols`, `extract_js_ts_symbols`, or `extract_other_file_info` based on file extension.
 
-- [ ] 4.0 Build tree formatting, relevance ranking, and token-budget truncation
+- [x] 4.0 Build tree formatting, relevance ranking, and token-budget truncation
   depends_on: [2.0, 3.0]
-  - [ ] 4.1 Write tests for tree formatting: directory grouping, indentation, class/function display, line counts. Verify output matches expected format from FR-5.
-  - [ ] 4.2 Write tests for relevance ranking: files matching prompt keywords rank higher, exact path matches always included, basename matches always included. Test with various prompt texts.
-  - [ ] 4.3 Write tests for truncation: output never exceeds `max_tokens` (using `chars/4` estimation), structure overview always included (~500 tokens), files are dropped in reverse relevance order, edge cases (budget too small for overview, empty repo)
-  - [ ] 4.4 Implement `format_tree(files: list[FileSymbols])` that produces the tree-formatted text output grouped by directory
-  - [ ] 4.5 Implement `rank_by_relevance(files, prompt_text)` that scores files by keyword overlap (words >= 3 chars from prompt vs. file path + symbol names), returns sorted list. Files with exact path or basename matches get maximum score.
-  - [ ] 4.6 Implement `generate_overview(files)` that produces a compact directory tree with file counts (~500 tokens)
-  - [ ] 4.7 Implement `truncate_to_budget(overview, ranked_files, max_tokens)` that greedily adds files until the `chars/4` budget is exhausted. Overview is always included first.
-  - [ ] 4.8 Implement top-level `generate_repo_map(repo_root, config, prompt_text="")` function that orchestrates: `get_tracked_files` → `extract_file_symbols` (for each) → `rank_by_relevance` → `truncate_to_budget` → return formatted string
+  - [x] 4.1 Write tests for tree formatting: directory grouping, indentation, class/function display, line counts. Verify output matches expected format from FR-5.
+  - [x] 4.2 Write tests for relevance ranking: files matching prompt keywords rank higher, exact path matches always included, basename matches always included. Test with various prompt texts.
+  - [x] 4.3 Write tests for truncation: output never exceeds `max_tokens` (using `chars/4` estimation), structure overview always included (~500 tokens), files are dropped in reverse relevance order, edge cases (budget too small for overview, empty repo)
+  - [x] 4.4 Implement `format_tree(files: list[FileSymbols])` that produces the tree-formatted text output grouped by directory
+  - [x] 4.5 Implement `rank_by_relevance(files, prompt_text)` that scores files by keyword overlap (words >= 3 chars from prompt vs. file path + symbol names), returns sorted list. Files with exact path or basename matches get maximum score.
+  - [x] 4.6 Implement `generate_overview(files)` that produces a compact directory tree with file counts (~500 tokens)
+  - [x] 4.7 Implement `truncate_to_budget(overview, ranked_files, max_tokens)` that greedily adds files until the `chars/4` budget is exhausted. Overview is always included first.
+  - [x] 4.8 Implement top-level `generate_repo_map(repo_root, config, prompt_text="")` function that orchestrates: `get_tracked_files` → `extract_file_symbols` (for each) → `rank_by_relevance` → `truncate_to_budget` → return formatted string
 
 - [ ] 5.0 Integrate repo map into the orchestrator pipeline
   depends_on: [1.0, 4.0]

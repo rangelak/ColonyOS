@@ -419,3 +419,298 @@ def extract_file_symbols(file_path: Path) -> FileSymbols:
         return extract_js_ts_symbols(file_path)
     else:
         return extract_other_file_info(file_path)
+
+
+# ---------------------------------------------------------------------------
+# Tree formatting (FR-5, Task 4.4)
+# ---------------------------------------------------------------------------
+
+
+def format_tree(files: list[FileSymbols]) -> str:
+    """Format file symbols as an indented directory tree.
+
+    Groups files by directory, shows line counts for code files and byte sizes
+    for other files. Symbols are indented under their parent file/class.
+
+    Parameters
+    ----------
+    files:
+        List of extracted file symbols, already in desired order.
+
+    Returns
+    -------
+    str
+        Tree-formatted text.
+    """
+    if not files:
+        return ""
+
+    # Group files by their parent directory
+    from collections import OrderedDict
+
+    dir_groups: OrderedDict[str, list[FileSymbols]] = OrderedDict()
+    for fs in files:
+        parts = fs.path.rsplit("/", 1)
+        directory = parts[0] + "/" if len(parts) > 1 else ""
+        dir_groups.setdefault(directory, []).append(fs)
+
+    lines: list[str] = []
+    for directory, dir_files in dir_groups.items():
+        if directory:
+            lines.append(directory)
+        for fs in dir_files:
+            basename = fs.path.rsplit("/", 1)[-1]
+            if fs.line_count > 0:
+                file_label = f"{basename} ({fs.line_count} lines)"
+            elif fs.size_bytes > 0:
+                file_label = f"{basename} ({fs.size_bytes} bytes)"
+            else:
+                file_label = basename
+            indent = "  " if directory else ""
+            lines.append(f"{indent}{file_label}")
+            _format_symbols(fs.symbols, indent + "  ", lines)
+
+    return "\n".join(lines) + "\n"
+
+
+def _format_symbols(symbols: list[Symbol], indent: str, lines: list[str]) -> None:
+    """Recursively format symbols with indentation."""
+    for sym in symbols:
+        if sym.kind == "class":
+            bases = f"({', '.join(sym.bases)})" if sym.bases else ""
+            lines.append(f"{indent}class {sym.name}{bases}")
+            _format_symbols(sym.children, indent + "  ", lines)
+        elif sym.kind == "function":
+            lines.append(f"{indent}{sym.name}{sym.params}")
+        elif sym.kind == "method":
+            lines.append(f"{indent}{sym.name}{sym.params}")
+        else:
+            # variable, export, interface, type
+            lines.append(f"{indent}{sym.kind} {sym.name}")
+
+
+# ---------------------------------------------------------------------------
+# Relevance ranking (FR-8, FR-9, Task 4.5)
+# ---------------------------------------------------------------------------
+
+
+def rank_by_relevance(
+    files: list[FileSymbols], prompt_text: str
+) -> list[FileSymbols]:
+    """Rank files by relevance to the given prompt text.
+
+    Scoring uses keyword overlap: words >= 3 chars extracted from the prompt
+    are matched against file paths and symbol names (case-insensitive).
+    Files with exact path or basename matches in the prompt get maximum score.
+
+    Parameters
+    ----------
+    files:
+        Files to rank.
+    prompt_text:
+        Current task/prompt text used for keyword extraction.
+
+    Returns
+    -------
+    list[FileSymbols]
+        Files sorted by relevance (highest first). Original list is not mutated.
+    """
+    if not files:
+        return []
+    if not prompt_text.strip():
+        return list(files)
+
+    prompt_lower = prompt_text.lower()
+    keywords = {w.lower() for w in prompt_text.split() if len(w) >= 3}
+
+    def _score(fs: FileSymbols) -> float:
+        score = 0.0
+        path_lower = fs.path.lower()
+        basename = fs.path.rsplit("/", 1)[-1].lower()
+
+        # Exact path match in prompt → maximum score (FR-9)
+        if path_lower in prompt_lower:
+            score += 1000.0
+        # Basename match in prompt (FR-9)
+        if basename in prompt_lower:
+            score += 500.0
+
+        # Keyword overlap with path components
+        path_parts = set(path_lower.replace("/", " ").replace(".", " ").replace("_", " ").split())
+        path_overlap = len(keywords & path_parts)
+        score += path_overlap * 10.0
+
+        # Keyword overlap with symbol names
+        symbol_words: set[str] = set()
+        for sym in fs.symbols:
+            for w in sym.name.lower().replace("_", " ").split():
+                if len(w) >= 3:
+                    symbol_words.add(w)
+            for child in sym.children:
+                for w in child.name.lower().replace("_", " ").split():
+                    if len(w) >= 3:
+                        symbol_words.add(w)
+        sym_overlap = len(keywords & symbol_words)
+        score += sym_overlap * 5.0
+
+        return score
+
+    scored = [(f, _score(f)) for f in files]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [f for f, _ in scored]
+
+
+# ---------------------------------------------------------------------------
+# Overview generation (FR-10, Task 4.6)
+# ---------------------------------------------------------------------------
+
+
+def generate_overview(files: list[FileSymbols]) -> str:
+    """Generate a compact directory tree with file counts.
+
+    Produces a lightweight overview (~500 tokens) showing the top-level
+    directory structure and how many files each contains.
+
+    Parameters
+    ----------
+    files:
+        All files in the repo map.
+
+    Returns
+    -------
+    str
+        Compact directory overview text.
+    """
+    if not files:
+        return ""
+
+    from collections import Counter
+
+    dir_counts: Counter[str] = Counter()
+    root_count = 0
+    for fs in files:
+        parts = fs.path.rsplit("/", 1)
+        if len(parts) > 1:
+            # Use the top-level directory
+            top_dir = fs.path.split("/")[0]
+            dir_counts[top_dir] += 1
+        else:
+            root_count += 1
+
+    lines = [f"{len(files)} files total"]
+    if root_count:
+        lines.append(f"  ./ ({root_count} files)")
+    for dirname, count in sorted(dir_counts.items()):
+        lines.append(f"  {dirname}/ ({count} files)")
+
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Token-budget truncation (FR-7, Task 4.7)
+# ---------------------------------------------------------------------------
+
+
+def truncate_to_budget(
+    overview: str,
+    ranked_files: list[FileSymbols],
+    max_tokens: int,
+) -> str:
+    """Assemble final map text within a token budget.
+
+    The overview is always included first (FR-10). Files are added greedily
+    in ranked order until the chars/4 token estimate would exceed *max_tokens*.
+
+    Parameters
+    ----------
+    overview:
+        Compact directory overview (always included).
+    ranked_files:
+        Files sorted by relevance (most relevant first).
+    max_tokens:
+        Maximum token budget (estimated as chars / 4).
+
+    Returns
+    -------
+    str
+        Final repo map text within budget.
+    """
+    if not overview and not ranked_files:
+        return ""
+
+    max_chars = max_tokens * 4
+
+    # Overview is always included (FR-10)
+    parts: list[str] = []
+    if overview:
+        parts.append(overview)
+
+    current_chars = sum(len(p) for p in parts)
+
+    # Greedily add files until budget exhausted
+    included_files: list[FileSymbols] = []
+    for fs in ranked_files:
+        file_block = format_tree([fs])
+        block_chars = len(file_block)
+        if current_chars + block_chars <= max_chars:
+            included_files.append(fs)
+            parts.append(file_block)
+            current_chars += block_chars
+        else:
+            # If this is the first file and we haven't added any, try to fit it
+            # to avoid returning only the overview
+            break
+
+    return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Top-level generator (Task 4.8)
+# ---------------------------------------------------------------------------
+
+
+def generate_repo_map(
+    repo_root: Path,
+    config: RepoMapConfig,
+    prompt_text: str = "",
+) -> str:
+    """Generate a complete repo map for the given repository.
+
+    Orchestrates the full pipeline: file walking → symbol extraction →
+    relevance ranking → truncation to budget.
+
+    Parameters
+    ----------
+    repo_root:
+        Root directory of the git repository.
+    config:
+        Repo map configuration.
+    prompt_text:
+        Optional prompt/task text for relevance-based ranking.
+
+    Returns
+    -------
+    str
+        Formatted repo map text within the configured token budget.
+    """
+    tracked = get_tracked_files(repo_root, config)
+    if not tracked:
+        return ""
+
+    # Extract symbols for each file
+    all_files: list[FileSymbols] = []
+    for rel_path in tracked:
+        abs_path = repo_root / rel_path
+        fs = extract_file_symbols(abs_path)
+        # Ensure path is stored as relative
+        fs.path = rel_path
+        all_files.append(fs)
+
+    # Generate overview
+    overview = generate_overview(all_files)
+
+    # Rank by relevance to prompt
+    ranked = rank_by_relevance(all_files, prompt_text)
+
+    # Truncate to budget
+    return truncate_to_budget(overview, ranked, config.max_tokens)

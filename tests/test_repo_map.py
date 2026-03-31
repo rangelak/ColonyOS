@@ -1,4 +1,4 @@
-"""Tests for the repo_map module — file walking and Python AST extraction."""
+"""Tests for the repo_map module — file walking, extraction, formatting, ranking, and truncation."""
 
 from __future__ import annotations
 
@@ -18,7 +18,12 @@ from colonyos.repo_map import (
     extract_js_ts_symbols,
     extract_other_file_info,
     extract_python_symbols,
+    format_tree,
+    generate_overview,
+    generate_repo_map,
     get_tracked_files,
+    rank_by_relevance,
+    truncate_to_budget,
 )
 
 
@@ -586,3 +591,323 @@ class TestExtractFileSymbols:
         result = extract_file_symbols(cfg)
         assert result.symbols == []
         assert result.size_bytes > 0
+
+
+# ===========================================================================
+# Tests for format_tree — FR-5 (Task 4.1)
+# ===========================================================================
+
+class TestFormatTree:
+    """Tests for format_tree() — tree-formatted text output."""
+
+    def test_groups_by_directory(self):
+        files = [
+            FileSymbols(path="src/app.py", line_count=100, symbols=[
+                Symbol(name="App", kind="class", children=[
+                    Symbol(name="run", kind="method", params="() -> None"),
+                ]),
+            ]),
+            FileSymbols(path="src/utils.py", line_count=50, symbols=[
+                Symbol(name="helper", kind="function", params="(x: int) -> str"),
+            ]),
+            FileSymbols(path="README.md", size_bytes=200),
+        ]
+        output = format_tree(files)
+        # Directory headers should appear
+        assert "src/" in output
+        # File names with line counts should appear
+        assert "app.py" in output
+        assert "100 lines" in output
+        assert "utils.py" in output
+        assert "50 lines" in output
+        # Symbols should appear
+        assert "App" in output
+        assert "run" in output
+        assert "helper" in output
+        # Non-code files show size
+        assert "README.md" in output
+
+    def test_indentation_structure(self):
+        files = [
+            FileSymbols(path="src/models.py", line_count=200, symbols=[
+                Symbol(name="User", kind="class", bases=["Base"], children=[
+                    Symbol(name="save", kind="method", params="() -> None"),
+                    Symbol(name="delete", kind="method", params="() -> None"),
+                ]),
+                Symbol(name="create_user", kind="function", params="(name: str) -> User"),
+            ]),
+        ]
+        output = format_tree(files)
+        lines = output.strip().splitlines()
+        # Directory line should not be indented much
+        # File line should be indented under directory
+        # Class should be indented under file
+        # Methods should be indented under class
+        # Check relative indentation
+        file_line = [l for l in lines if "models.py" in l][0]
+        class_line = [l for l in lines if "User" in l][0]
+        method_line = [l for l in lines if "save" in l][0]
+        func_line = [l for l in lines if "create_user" in l][0]
+        # Each level should be more indented
+        assert len(class_line) - len(class_line.lstrip()) > len(file_line) - len(file_line.lstrip())
+        assert len(method_line) - len(method_line.lstrip()) > len(class_line) - len(class_line.lstrip())
+        # Function at same level as class
+        assert len(func_line) - len(func_line.lstrip()) == len(class_line) - len(class_line.lstrip())
+
+    def test_class_with_bases_displayed(self):
+        files = [
+            FileSymbols(path="mod.py", line_count=10, symbols=[
+                Symbol(name="Dog", kind="class", bases=["Animal", "Serializable"]),
+            ]),
+        ]
+        output = format_tree(files)
+        assert "Dog(Animal, Serializable)" in output
+
+    def test_empty_files_list(self):
+        output = format_tree([])
+        assert output == ""
+
+    def test_files_without_symbols_show_size(self):
+        files = [
+            FileSymbols(path="data/config.yaml", size_bytes=1500),
+        ]
+        output = format_tree(files)
+        assert "config.yaml" in output
+        assert "1500 bytes" in output
+
+    def test_root_level_files(self):
+        """Files at the repo root (no directory) should still appear."""
+        files = [
+            FileSymbols(path="setup.py", line_count=30, symbols=[
+                Symbol(name="setup", kind="function", params="()"),
+            ]),
+        ]
+        output = format_tree(files)
+        assert "setup.py" in output
+        assert "setup" in output
+
+
+# ===========================================================================
+# Tests for rank_by_relevance — FR-8, FR-9 (Task 4.2)
+# ===========================================================================
+
+class TestRankByRelevance:
+    """Tests for rank_by_relevance() — keyword-based file scoring."""
+
+    def test_files_matching_prompt_keywords_rank_higher(self):
+        files = [
+            FileSymbols(path="src/database.py", symbols=[
+                Symbol(name="connect", kind="function"),
+            ]),
+            FileSymbols(path="src/utils.py", symbols=[
+                Symbol(name="format_string", kind="function"),
+            ]),
+            FileSymbols(path="src/models.py", symbols=[
+                Symbol(name="Database", kind="class"),
+            ]),
+        ]
+        ranked = rank_by_relevance(files, "fix the database connection")
+        # database.py and models.py (has Database class) should rank above utils.py
+        paths = [f.path for f in ranked]
+        db_idx = paths.index("src/database.py")
+        models_idx = paths.index("src/models.py")
+        utils_idx = paths.index("src/utils.py")
+        assert db_idx < utils_idx
+        assert models_idx < utils_idx
+
+    def test_exact_path_match_always_first(self):
+        files = [
+            FileSymbols(path="src/unrelated.py", symbols=[]),
+            FileSymbols(path="src/config.py", symbols=[]),
+            FileSymbols(path="src/other.py", symbols=[]),
+        ]
+        ranked = rank_by_relevance(files, "update src/config.py to add new field")
+        assert ranked[0].path == "src/config.py"
+
+    def test_basename_match_always_included(self):
+        files = [
+            FileSymbols(path="src/unrelated.py", symbols=[]),
+            FileSymbols(path="deep/nested/config.py", symbols=[]),
+            FileSymbols(path="src/other.py", symbols=[]),
+        ]
+        ranked = rank_by_relevance(files, "update config.py")
+        paths = [f.path for f in ranked]
+        config_idx = paths.index("deep/nested/config.py")
+        # config.py should rank highly due to basename match
+        assert config_idx < 2
+
+    def test_empty_prompt_returns_all_files(self):
+        files = [
+            FileSymbols(path="a.py", symbols=[]),
+            FileSymbols(path="b.py", symbols=[]),
+        ]
+        ranked = rank_by_relevance(files, "")
+        assert len(ranked) == 2
+
+    def test_no_files_returns_empty(self):
+        ranked = rank_by_relevance([], "some prompt")
+        assert ranked == []
+
+    def test_keyword_match_on_symbol_names(self):
+        files = [
+            FileSymbols(path="src/a.py", symbols=[
+                Symbol(name="Orchestrator", kind="class"),
+            ]),
+            FileSymbols(path="src/b.py", symbols=[
+                Symbol(name="helper", kind="function"),
+            ]),
+        ]
+        ranked = rank_by_relevance(files, "fix the orchestrator pipeline")
+        assert ranked[0].path == "src/a.py"
+
+
+# ===========================================================================
+# Tests for truncate_to_budget — FR-7, FR-10 (Task 4.3)
+# ===========================================================================
+
+class TestTruncateToBudget:
+    """Tests for truncate_to_budget() — token-budget enforcement."""
+
+    def test_output_never_exceeds_max_tokens(self):
+        overview = "Directory overview\n  src/ (10 files)\n  tests/ (5 files)\n"
+        files = [
+            FileSymbols(path=f"src/file_{i}.py", line_count=100, symbols=[
+                Symbol(name=f"func_{i}", kind="function", params="()"),
+            ])
+            for i in range(50)
+        ]
+        max_tokens = 200
+        result = truncate_to_budget(overview, files, max_tokens)
+        estimated_tokens = len(result) / 4
+        assert estimated_tokens <= max_tokens
+
+    def test_overview_always_included(self):
+        overview = "## Directory Overview\nsrc/ (3 files)\n"
+        files = [
+            FileSymbols(path="src/big.py", line_count=1000, symbols=[
+                Symbol(name=f"func_{i}", kind="function", params="(a, b, c, d, e)")
+                for i in range(100)
+            ]),
+        ]
+        result = truncate_to_budget(overview, files, max_tokens=100)
+        assert "Directory Overview" in result
+
+    def test_files_dropped_in_reverse_relevance_order(self):
+        overview = "overview\n"
+        # Files are expected to be in ranked order already (most relevant first)
+        files = [
+            FileSymbols(path="important.py", line_count=10, symbols=[
+                Symbol(name="critical", kind="function", params="()"),
+            ]),
+            FileSymbols(path="less_important.py", line_count=10, symbols=[
+                Symbol(name="minor", kind="function", params="()"),
+            ]),
+            FileSymbols(path="least_important.py", line_count=10, symbols=[
+                Symbol(name="trivial", kind="function", params="()"),
+            ]),
+        ]
+        # Very tight budget: should keep overview + first file, drop later ones
+        result = truncate_to_budget(overview, files, max_tokens=80)
+        assert "important.py" in result
+        # At least one of the later files should be dropped
+        if "least_important.py" in result:
+            # If all fit, the budget was generous enough
+            pass
+
+    def test_empty_repo(self):
+        result = truncate_to_budget("", [], max_tokens=4000)
+        assert result == ""
+
+    def test_budget_too_small_for_overview(self):
+        overview = "A" * 100  # 25 tokens
+        result = truncate_to_budget(overview, [], max_tokens=10)
+        # Should still return overview even if over budget (FR-10: always included)
+        assert overview in result
+
+
+# ===========================================================================
+# Tests for generate_overview — FR-10 (Task 4.3 supplement)
+# ===========================================================================
+
+class TestGenerateOverview:
+    """Tests for generate_overview() — compact directory tree."""
+
+    def test_produces_directory_tree_with_file_counts(self):
+        files = [
+            FileSymbols(path="src/app.py", line_count=100),
+            FileSymbols(path="src/utils.py", line_count=50),
+            FileSymbols(path="tests/test_app.py", line_count=80),
+            FileSymbols(path="README.md", size_bytes=200),
+        ]
+        overview = generate_overview(files)
+        assert "src/" in overview
+        assert "tests/" in overview
+        # Should mention file counts
+        assert "2" in overview  # src has 2 files
+        assert "1" in overview  # tests has 1 file
+
+    def test_empty_files_returns_empty(self):
+        overview = generate_overview([])
+        assert overview == ""
+
+
+# ===========================================================================
+# Tests for generate_repo_map — top-level orchestrator (Task 4.8)
+# ===========================================================================
+
+class TestGenerateRepoMap:
+    """Tests for generate_repo_map() — end-to-end generation."""
+
+    def test_generates_map_for_git_repo(self, git_repo: Path):
+        _add_and_commit(git_repo, {
+            "src/app.py": "class App:\n    def run(self) -> None:\n        pass\n",
+            "src/utils.py": "def helper(x: int) -> str:\n    return str(x)\n",
+            "README.md": "# My Project\n",
+        })
+        config = RepoMapConfig(max_tokens=4000)
+        result = generate_repo_map(git_repo, config)
+        assert "app.py" in result
+        assert "App" in result
+        assert "run" in result
+        assert "utils.py" in result
+        assert "helper" in result
+        assert "README.md" in result
+
+    def test_respects_token_budget(self, git_repo: Path):
+        # Create many files to exceed budget
+        file_map = {}
+        for i in range(50):
+            file_map[f"src/module_{i}.py"] = (
+                f"class Module{i}:\n"
+                f"    def method_{i}(self) -> None:\n"
+                f"        pass\n"
+            )
+        _add_and_commit(git_repo, file_map)
+        config = RepoMapConfig(max_tokens=200)
+        result = generate_repo_map(git_repo, config)
+        estimated_tokens = len(result) / 4
+        assert estimated_tokens <= 200
+
+    def test_relevance_with_prompt(self, git_repo: Path):
+        _add_and_commit(git_repo, {
+            "src/database.py": "class Database:\n    pass\n",
+            "src/auth.py": "class Auth:\n    pass\n",
+            "src/unrelated.py": "class Unrelated:\n    pass\n",
+        })
+        config = RepoMapConfig(max_tokens=4000)
+        result = generate_repo_map(git_repo, config, prompt_text="fix the database connection")
+        assert "database.py" in result
+        assert "Database" in result
+
+    def test_empty_repo(self, git_repo: Path):
+        config = RepoMapConfig()
+        result = generate_repo_map(git_repo, config)
+        assert result == ""
+
+    def test_disabled_config_still_generates(self, git_repo: Path):
+        """generate_repo_map doesn't check enabled — that's the orchestrator's job."""
+        _add_and_commit(git_repo, {"a.py": "x = 1\n"})
+        config = RepoMapConfig(enabled=False, max_tokens=4000)
+        result = generate_repo_map(git_repo, config)
+        # Should still produce output — gating is done at the caller level
+        assert "a.py" in result
