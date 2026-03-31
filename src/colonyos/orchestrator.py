@@ -4543,21 +4543,11 @@ def _run_pipeline(
                         on_complete=progress_tracker.on_reviewer_complete if progress_tracker else None,
                     )
 
-                    # Print summary after all reviewers complete
-                    if progress_tracker is not None:
-                        progress_tracker.print_summary(round_num=iteration + 1)
-                    if review_header_ui is not None:
-                        review_header_ui.slack_note(  # type: ignore[union-attr]
-                            _format_review_round_note(
-                                results,
-                                reviewers,
-                                round_num=iteration + 1,
-                                total_rounds=config.max_fix_iterations + 1,
-                            )
-                        )
-
-                    # Save each persona's review artifact and capture memories
+                    # Persist review results before any post-review notifications so
+                    # resume metadata stays up to date even if a mirror UI blocks.
                     for persona, result in zip(reviewers, results):
+                        _append_phase(result)
+                        _capture_phase_memory(memory_store, result, log.run_id, config)
                         p_slug = _persona_slug(persona.role)
                         text = result.artifacts.get("result", "")
                         artifact = persona_review_artifact_path(
@@ -4570,8 +4560,19 @@ def _run_pipeline(
                             f"# Review by {persona.role} (Round {iteration + 1})\n\n{text}",
                             subdirectory=artifact.subdirectory,
                         )
-                        _append_phase(result)
-                        _capture_phase_memory(memory_store, result, log.run_id, config)
+
+                    # Print summary after all reviewers complete
+                    if progress_tracker is not None:
+                        progress_tracker.print_summary(round_num=iteration + 1)
+                    if review_header_ui is not None:
+                        review_header_ui.slack_note(  # type: ignore[union-attr]
+                            _format_review_round_note(
+                                results,
+                                reviewers,
+                                round_num=iteration + 1,
+                                total_rounds=config.max_fix_iterations + 1,
+                            )
+                        )
 
                     last_findings = _collect_review_findings(results, reviewers)
 

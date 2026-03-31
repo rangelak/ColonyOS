@@ -178,16 +178,22 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 def load_daemon_state(repo_root: Path) -> DaemonState:
     """Load daemon state from ``.colonyos/daemon_state.json``.
 
-    Returns a fresh ``DaemonState`` if the file does not exist or is
-    corrupt.
+    Returns a fresh ``DaemonState`` if the file does not exist, is not a
+    JSON object (e.g. an array), or is otherwise unusable.
     """
     state_path = repo_root / ".colonyos" / "daemon_state.json"
     if not state_path.exists():
         return DaemonState()
     try:
         data = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            logger.warning(
+                "Daemon state file is not a JSON object, starting fresh (got %s)",
+                type(data).__name__,
+            )
+            return DaemonState()
         return DaemonState.from_dict(data)
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         logger.warning("Corrupt daemon state file, starting fresh: %s", exc)
         return DaemonState()
 

@@ -200,3 +200,24 @@ class TestLoadSaveDaemonState:
         state_path.write_text("not json{{{", encoding="utf-8")
         state = load_daemon_state(tmp_repo)
         assert state.daily_spend_usd == 0.0
+
+    def test_load_returns_fresh_on_valid_json_non_object(self, tmp_repo: Path):
+        state_path = tmp_repo / ".colonyos" / "daemon_state.json"
+        state_path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+        state = load_daemon_state(tmp_repo)
+        assert state.daily_spend_usd == 0.0
+
+    def test_load_returns_fresh_on_valid_json_wrong_numeric_types(self, tmp_repo: Path):
+        state_path = tmp_repo / ".colonyos" / "daemon_state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "daily_spend_usd": "not-a-number",
+                    "consecutive_failures": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        state = load_daemon_state(tmp_repo)
+        assert state.daily_spend_usd == 0.0
+        assert state.consecutive_failures == 0

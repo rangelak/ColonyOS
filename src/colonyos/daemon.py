@@ -20,7 +20,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from colonyos.cancellation import cancellation_scope, request_cancel
 from colonyos.config import ColonyConfig, load_config
@@ -71,15 +71,35 @@ class DaemonError(RuntimeError):
 class _CombinedUI:
     """Forward phase UI events to a terminal UI and a secondary mirror UI."""
 
+    _SECONDARY_CALL_TIMEOUT_SECONDS = 3.0
+
     def __init__(self, primary: Any, secondary: Any) -> None:
         self._primary = primary
         self._secondary = secondary
 
     def _secondary_call(self, method: str, *args: object, **kwargs: object) -> None:
-        try:
-            getattr(self._secondary, method)(*args, **kwargs)
-        except Exception:
-            logger.debug("Secondary UI call %s failed", method, exc_info=True)
+        done = threading.Event()
+
+        def _invoke() -> None:
+            try:
+                getattr(self._secondary, method)(*args, **kwargs)
+            except Exception:
+                logger.debug("Secondary UI call %s failed", method, exc_info=True)
+            finally:
+                done.set()
+
+        thread = threading.Thread(
+            target=_invoke,
+            name=f"secondary-ui-{method}",
+            daemon=True,
+        )
+        thread.start()
+        if not done.wait(self._SECONDARY_CALL_TIMEOUT_SECONDS):
+            logger.warning(
+                "Secondary UI call %s timed out after %.1fs; continuing without waiting",
+                method,
+                self._SECONDARY_CALL_TIMEOUT_SECONDS,
+            )
 
     def phase_header(self, *args: object, **kwargs: object) -> None:
         self._primary.phase_header(*args, **kwargs)
@@ -314,6 +334,8 @@ class Daemon:
 
         # Shared mutable state — protected by _lock
         self._lock = threading.Lock()
+        self._notification_thread_locks: dict[str, threading.Lock] = {}
+        self._notification_thread_locks_guard = threading.Lock()
         self._state = load_daemon_state(repo_root)
         self._queue_state = self._load_or_create_queue()
         self._pipeline_running = False
@@ -374,6 +396,9 @@ class Daemon:
                     self.dry_run,
                 )
 
+                # Start embedded dashboard server
+                self._start_dashboard_server()
+
                 # Start background threads
                 threads = self._start_threads()
 
@@ -396,6 +421,72 @@ class Daemon:
         """Request graceful shutdown."""
         logger.info("Daemon shutdown requested")
         self._stop_event.set()
+
+    def pause(self) -> None:
+        """Pause the daemon — stop picking up new queue items."""
+        with self._lock:
+            self._state.paused = True
+            self._persist_state()
+        logger.info("Daemon paused via API")
+
+    def resume(self) -> None:
+        """Resume the daemon — start picking up queue items again."""
+        with self._lock:
+            self._state.paused = False
+            self._persist_state()
+        logger.info("Daemon resumed via API")
+
+    def _start_dashboard_server(self) -> None:
+        """Start the embedded web dashboard on a daemon thread.
+
+        Uses uvicorn to serve the FastAPI app. The dashboard provides
+        live daemon health via ``app.state.daemon_instance``. Errors
+        during server startup or runtime are logged but never crash
+        the daemon.
+        """
+        if not self.daemon_config.dashboard_enabled:
+            logger.info("Dashboard disabled in config, skipping")
+            return
+
+        try:
+            import uvicorn
+            from colonyos.server import create_app
+        except ImportError:
+            logger.info(
+                "Dashboard dependencies not installed (pip install colonyos[ui]), skipping"
+            )
+            return
+
+        port = self.daemon_config.dashboard_port
+
+        write_enabled = self.daemon_config.dashboard_write_enabled
+
+        def _serve() -> None:
+            try:
+                app, auth_token = create_app(
+                    self.repo_root, write_enabled=write_enabled
+                )
+                app.state.daemon_instance = self
+                masked = auth_token[-4:] if len(auth_token) >= 4 else "****"
+                logger.info(
+                    "Dashboard started on http://127.0.0.1:%d (write=%s, token: ...%s)",
+                    port,
+                    write_enabled,
+                    masked,
+                )
+                config = uvicorn.Config(
+                    app,
+                    host="127.0.0.1",
+                    port=port,
+                    log_level="warning",
+                )
+                server = uvicorn.Server(config)
+                server.run()
+            except Exception:
+                logger.warning("Dashboard server failed", exc_info=True)
+
+        thread = threading.Thread(target=_serve, daemon=True, name="dashboard-server")
+        thread.start()
 
     def _check_time_exceeded(self) -> bool:
         if not self.max_hours:
@@ -560,15 +651,40 @@ class Daemon:
         # Only inspect or recover git state when there is actual runnable work.
         # This avoids mutating the repo while the daemon is paused, cooling down,
         # or simply idle with an empty queue.
-        if self._is_worktree_dirty():
+        worktree_state, worktree_detail = self._preexec_worktree_state()
+        if worktree_state == "indeterminate":
+            logger.error(
+                "Pre-execution worktree check failed (fail-closed); blocking execution: %s",
+                worktree_detail,
+            )
+            self._pause_for_pre_execution_blocker(
+                item,
+                "Could not run `git status` to verify the worktree (fail-closed). "
+                f"{worktree_detail} "
+                "Fix git access from the daemon's repo root (permissions, install, or hung/broken repo), "
+                "confirm `git status --porcelain` succeeds, then resume.",
+            )
+            return False
+        if worktree_state == "dirty":
             if self.daemon_config.auto_recover_dirty_worktree:
                 logger.warning("Dirty worktree detected pre-execution, auto-recovering")
                 if not self._recover_dirty_worktree_preemptive():
+                    self._pause_for_pre_execution_blocker(
+                        item,
+                        "Dirty worktree before execution: auto-recovery failed. "
+                        "Execution is blocked until the worktree is fixed; then resume the daemon.",
+                    )
                     return False
             else:
                 logger.error(
                     "Dirty worktree detected, skipping execution. "
                     "Enable auto_recover_dirty_worktree or clean manually."
+                )
+                self._pause_for_pre_execution_blocker(
+                    item,
+                    "Dirty worktree before execution while `daemon.auto_recover_dirty_worktree` "
+                    "is disabled. Execution is blocked until the worktree is clean or auto "
+                    "recovery is enabled; then resume the daemon.",
                 )
                 return False
 
@@ -619,6 +735,7 @@ class Daemon:
                         if queued_item.status == QueueItemStatus.PENDING
                     ),
                 )
+            self._cleanup_notification_lock(item.id)
         except KeyboardInterrupt:
             logger.warning("Run interrupted while executing item %s", item.id)
             with self._lock:
@@ -627,6 +744,7 @@ class Daemon:
                 self._pipeline_running = False
                 self._persist_state()
                 self._persist_queue()
+            self._cleanup_notification_lock(item.id)
             raise
         except Exception as exc:
             logger.exception("Pipeline failed for item %s", item.id)
@@ -651,6 +769,9 @@ class Daemon:
             )
             operator_hint = self._failure_guidance(exc)
             error_code = getattr(exc, "code", None) or type(exc).__name__
+            systemic_slack: tuple[str, int] | None = None
+            escalation_slack: tuple[int, int] | None = None
+            cb_cooldown_slack: tuple[int, int, str] | None = None
             with self._lock:
                 item.status = QueueItemStatus.FAILED
                 item.error = self._format_item_error(
@@ -668,33 +789,43 @@ class Daemon:
                         self._state.paused = True
                         logger.error(
                             "Auto-paused: %d consecutive failures with same error (%s). "
-                            "Use 'colonyos daemon resume' or Slack /resume to unpause.",
+                            "Send 'resume' in the configured Slack channel to unpause.",
                             failures,
                             error_code,
                         )
-                        self._post_systemic_failure_alert(error_code, failures)
+                        self._state.circuit_breaker_until = None
+                        systemic_slack = (error_code, failures)
                     else:
                         cb_expiry = self._state.activate_circuit_breaker(
                             self.daemon_config.circuit_breaker_cooldown_minutes
                         )
+                        activation_n = self._state.circuit_breaker_activations
                         if cb_expiry is None:
                             self._state.paused = True
                             logger.error(
                                 "Auto-paused: circuit breaker escalated after %d activations",
-                                self._state.circuit_breaker_activations,
+                                activation_n,
                             )
-                            self._post_systemic_failure_alert(error_code, failures)
+                            self._state.circuit_breaker_until = None
+                            escalation_slack = (activation_n, failures)
                         else:
                             logger.warning(
                                 "Circuit breaker activated after %d consecutive failures "
                                 "(activation #%d, cooldown until %s)",
                                 failures,
-                                self._state.circuit_breaker_activations,
+                                activation_n,
                                 cb_expiry,
                             )
+                            cb_cooldown_slack = (failures, activation_n, cb_expiry)
                 self._pipeline_running = False
                 self._persist_state()
                 self._persist_queue()
+            if systemic_slack is not None:
+                self._post_systemic_failure_alert(*systemic_slack)
+            if escalation_slack is not None:
+                self._post_circuit_breaker_escalation_pause_alert(*escalation_slack)
+            if cb_cooldown_slack is not None:
+                self._post_circuit_breaker_cooldown_notice(*cb_cooldown_slack)
             logger.error(
                 "Daemon item %s failed: %s. %s",
                 item.id,
@@ -706,6 +837,7 @@ class Daemon:
                 failure_message=failure_message,
                 incident_path=str(incident_path) if incident_path is not None else None,
             )
+            self._cleanup_notification_lock(item.id)
         return True
 
     def _make_monitor_ui(
@@ -1236,28 +1368,22 @@ class Daemon:
         except Exception:
             logger.exception("Error during git state recovery")
 
-    def _is_worktree_dirty(self) -> bool:
-        """Fast check for uncommitted changes before picking a queue item."""
-        try:
-            result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                cwd=self.repo_root,
-            )
-            if result.returncode != 0:
-                return False
-            from colonyos.orchestrator import COLONYOS_OUTPUT_PREFIXES
+    def _preexec_worktree_state(
+        self,
+    ) -> tuple[Literal["clean", "dirty", "indeterminate"], str]:
+        """Classify worktree before execution: clean, dirty, or indeterminate (fail-closed).
 
-            for line in result.stdout.strip().splitlines():
-                path = line[3:].strip().strip('"')
-                if not any(path.startswith(p) for p in COLONYOS_OUTPUT_PREFIXES):
-                    return True
-            return False
-        except Exception:
-            logger.debug("Pre-execution worktree check failed", exc_info=True)
-            return False
+        Uses the same rules as pipeline preflight (including ignoring ColonyOS output dirs).
+        If ``git status`` errors or times out, returns ``indeterminate`` with a short detail
+        string instead of assuming clean.
+        """
+        from colonyos.orchestrator import _check_working_tree_clean
+
+        try:
+            is_clean, _dirty_out = _check_working_tree_clean(self.repo_root)
+            return ("clean" if is_clean else "dirty", "")
+        except PreflightError as exc:
+            return ("indeterminate", str(exc).strip() or exc.__class__.__name__)
 
     def _recover_dirty_worktree_preemptive(self) -> bool:
         """Preserve and reset a dirty worktree before any item is picked.
@@ -1645,6 +1771,19 @@ class Daemon:
             logger.debug("Failed to create Slack WebClient", exc_info=True)
             return None
 
+    def _notification_thread_lock_for(self, item_id: str) -> threading.Lock:
+        with self._notification_thread_locks_guard:
+            lock = self._notification_thread_locks.get(item_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._notification_thread_locks[item_id] = lock
+            return lock
+
+    def _cleanup_notification_lock(self, item_id: str) -> None:
+        """Remove the notification thread lock for a terminal item to prevent unbounded growth."""
+        with self._notification_thread_locks_guard:
+            self._notification_thread_locks.pop(item_id, None)
+
     def _ensure_notification_thread(self, item: QueueItem, intro_text: str) -> tuple[Any, str, str] | None:
         client = self._get_notification_client()
         channel = item.notification_channel or self._default_notification_channel()
@@ -1652,20 +1791,28 @@ class Daemon:
             return None
         if item.notification_thread_ts:
             return client, channel, item.notification_thread_ts
-        try:
-            from colonyos.slack import post_message
+        item_lock = self._notification_thread_lock_for(item.id)
+        with item_lock:
+            with self._lock:
+                if item.notification_thread_ts:
+                    return client, channel, item.notification_thread_ts
+            try:
+                from colonyos.slack import post_message
 
-            response = post_message(client, channel, intro_text)
+                response = post_message(client, channel, intro_text)
+            except Exception:
+                logger.debug("Failed to create notification thread", exc_info=True)
+                return None
             thread_ts = response.get("ts")
             if not thread_ts:
                 return None
-            item.notification_channel = channel
-            item.notification_thread_ts = thread_ts
-            self._persist_queue()
+            with self._lock:
+                if item.notification_thread_ts:
+                    return client, channel, item.notification_thread_ts
+                item.notification_channel = channel
+                item.notification_thread_ts = thread_ts
+                self._persist_queue()
             return client, channel, thread_ts
-        except Exception:
-            logger.debug("Failed to create notification thread", exc_info=True)
-            return None
 
     def _format_phase_breakdown(self, log: Any) -> list[str]:
         from colonyos.slack import format_phase_breakdown_line
@@ -1684,6 +1831,12 @@ class Daemon:
             f":gear: *Starting {item.source_type} work*\n{item.summary or item.source_value[:160]}",
         )
         if notification is None:
+            details = failure_message[:500]
+            if incident_path:
+                details = f"{details}\nIncident: `{incident_path}`"
+            self._post_slack_message(
+                f":x: *{item.source_type} failed* (`{item.id}`)\n{details}"
+            )
             return
         client, channel, thread_ts = notification
         details = failure_message[:500]
@@ -1740,6 +1893,10 @@ class Daemon:
         if cmd in ("resume", "start"):
             with self._lock:
                 self._state.paused = False
+                self._state.consecutive_failures = 0
+                self._state.circuit_breaker_until = None
+                self._state.circuit_breaker_activations = 0
+                self._recent_failure_codes.clear()
                 self._persist_state()
             logger.info("Daemon resumed via Slack by user %s", user_id)
             return f"Daemon resumed by <@{user_id}>."
@@ -1982,10 +2139,71 @@ class Daemon:
     def _post_systemic_failure_alert(self, error_code: str, failures: int) -> None:
         """Post a Slack alert when the daemon auto-pauses due to systemic failures."""
         self._post_slack_message(
-            f":rotating_light: *Daemon auto-paused*\n"
+            f":rotating_light: *Daemon auto-paused (same error)*\n"
             f"{failures} consecutive failures with the same error: `{error_code}`\n"
             f"The daemon will not process any more items until manually resumed.\n"
-            f"Use `colonyos daemon resume` or send `resume` in this channel to unpause."
+            "Send `resume` in this channel to unpause."
+        )
+
+    def _post_circuit_breaker_cooldown_notice(
+        self,
+        consecutive_failures: int,
+        activation_count: int,
+        cooldown_until_iso: str,
+    ) -> None:
+        """Slack when the breaker trips into cooldown (not auto-pause)."""
+        self._post_slack_message(
+            f":electric_plug: *Circuit breaker cooldown*\n"
+            f"After {consecutive_failures} consecutive failures, activation "
+            f"#{activation_count}. Cooldown until `{cooldown_until_iso}` (ISO UTC). "
+            f"Execution resumes automatically after that unless the daemon is paused."
+        )
+
+    def _post_circuit_breaker_escalation_pause_alert(
+        self,
+        activation_count: int,
+        consecutive_failures: int,
+    ) -> None:
+        """Auto-pause after repeated breaker activations without a success (mixed errors)."""
+        self._post_slack_message(
+            f":rotating_light: *Daemon auto-paused (circuit breaker escalation)*\n"
+            f"Breaker activation #{activation_count} without an intervening success "
+            f"(last trip after {consecutive_failures} consecutive failures). "
+            f"This is not the same-error systemic case.\n"
+            "Send `resume` in this channel to unpause."
+        )
+
+    def _pause_for_pre_execution_blocker(self, item: QueueItem, reason: str) -> None:
+        """Pause the daemon when pre-execution repo health blocks forward progress."""
+        with self._lock:
+            if self._state.paused or self._state.is_circuit_breaker_active():
+                return
+            self._state.paused = True
+            self._state.circuit_breaker_until = None
+            self._persist_state()
+
+        incident_path = self._record_runtime_incident(
+            label_prefix="daemon-preexec-blocked",
+            summary=(
+                f"{reason}\n\n"
+                f"Pending item: {item.id}\n"
+                f"Source type: {item.source_type}\n"
+                f"Source value: {item.source_value[:500]}\n"
+                "The daemon paused itself to avoid retrying the same blocked state indefinitely."
+            ),
+            metadata={
+                "item_id": item.id,
+                "source_type": item.source_type,
+                "source_value": item.source_value[:500],
+                "reason": reason,
+            },
+        )
+        self._post_slack_message(
+            ":rotating_light: *Daemon auto-paused before execution*\n"
+            f"{reason}\n"
+            f"Pending item: `{item.id}`\n"
+            f"Incident summary: `{incident_path}`\n"
+            "Fix the repo state, then send `resume` in Slack."
         )
 
     def _failure_summary(self, exc: Exception) -> str:

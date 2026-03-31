@@ -19,3 +19,4 @@ web/node_modules/
 src/colonyos/web_dist/
 generated/
 .DS_Store
+node_modules/

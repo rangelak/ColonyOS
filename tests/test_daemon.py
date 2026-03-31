@@ -8,13 +8,14 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from colonyos.cleanup import ComplexityCategory, FileComplexity
 from colonyos.config import ColonyConfig, DaemonConfig
-from colonyos.daemon import Daemon, DaemonError
+from colonyos.daemon import Daemon, DaemonError, _CombinedUI
 from colonyos.daemon_state import DaemonState, save_daemon_state
 from colonyos.models import (
     Phase,
@@ -263,7 +264,8 @@ class TestDirtyWorktreeRecovery:
             total_cost_usd=0.1,
         )
 
-        with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=[dirty_error, fake_log]) as mock_run, \
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=[dirty_error, fake_log]) as mock_run, \
              patch("colonyos.recovery.preserve_and_reset_worktree", return_value=preserve_result) as mock_preserve:
             assert daemon_instance._try_execute_next() is True
 
@@ -295,7 +297,8 @@ class TestDirtyWorktreeRecovery:
             stash_message="stash-msg",
         )
 
-        with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=[dirty_error, dirty_error]) as mock_run, \
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=[dirty_error, dirty_error]) as mock_run, \
              patch("colonyos.recovery.preserve_and_reset_worktree", return_value=preserve_result) as mock_preserve, \
              patch.object(daemon_instance, "_post_execution_failure"):
             assert daemon_instance._try_execute_next() is True
@@ -324,7 +327,8 @@ class TestDirtyWorktreeRecovery:
             details={"dirty_output": " M src/dirty.py"},
         )
 
-        with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=dirty_error), \
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=dirty_error), \
              patch("colonyos.recovery.preserve_and_reset_worktree") as mock_preserve, \
              patch.object(daemon_instance, "_post_execution_failure"):
             assert daemon_instance._try_execute_next() is True
@@ -494,9 +498,17 @@ class TestSlackKillSwitch:
         )
         d = Daemon(tmp_repo, config, dry_run=True)
         d._state.paused = True
+        d._state.consecutive_failures = 3
+        d._state.circuit_breaker_until = datetime.now(timezone.utc).isoformat()
+        d._state.circuit_breaker_activations = 2
+        d._recent_failure_codes = ["dirty_worktree", "dirty_worktree", "dirty_worktree"]
         result = d._handle_control_command("U12345", "resume")
         assert result is not None
         assert d._state.paused is False
+        assert d._state.consecutive_failures == 0
+        assert d._state.circuit_breaker_until is None
+        assert d._state.circuit_breaker_activations == 0
+        assert d._recent_failure_codes == []
 
     def test_status_returns_health(self, tmp_repo: Path):
         config = ColonyConfig(
@@ -577,21 +589,22 @@ class TestBudgetAlerts:
                 priority=1,
             ),
         ]
+        def _is_budget_80_warning(call: Any) -> bool:
+            if not call[0]:
+                return False
+            text = call[0][0]
+            return "Budget warning" in text and "Approaching daily limit" in text
+
         with patch.object(daemon_instance, "_post_slack_message") as mock_slack:
             daemon_instance._try_execute_next()
-            # Should have posted 80% warning
             assert mock_slack.called
-            args = mock_slack.call_args_list[0][0][0]
-            assert "80%" in args or "warning" in args.lower()
+            assert sum(1 for c in mock_slack.call_args_list if _is_budget_80_warning(c)) == 1
 
         assert daemon_instance._budget_80_alerted is True
 
-        # Second call should NOT fire again
         with patch.object(daemon_instance, "_post_slack_message") as mock_slack2:
             daemon_instance._try_execute_next()
-            # Should not fire the 80% alert again (already alerted)
-            for call in mock_slack2.call_args_list:
-                assert "80%" not in call[0][0] or "warning" not in call[0][0].lower()
+            assert sum(1 for c in mock_slack2.call_args_list if _is_budget_80_warning(c)) == 0
 
     def test_100_percent_alert_fires(self, daemon_instance: Daemon):
         daemon_instance._state.daily_spend_usd = 50.0  # 100% of $50
@@ -879,7 +892,8 @@ class TestSlackNotifications:
                 priority=1,
             )
         ]
-        with patch.object(daemon_instance, "_execute_item", side_effect=RuntimeError("boom")), \
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch.object(daemon_instance, "_execute_item", side_effect=RuntimeError("boom")), \
              patch("colonyos.slack.post_message", return_value={"ts": "1234.5"}) as mock_post:
             daemon_instance._try_execute_next()
 
@@ -890,6 +904,39 @@ class TestSlackNotifications:
             "execution failed" in str(call)
             for call in mock_post.call_args_list
         )
+
+    def test_ensure_notification_thread_single_intro_under_concurrency(self, daemon_instance: Daemon):
+        """Concurrent callers for the same item must not each post an intro message."""
+        daemon_instance._slack_client = MagicMock()
+        item = QueueItem(
+            id="concurrent-intro-1",
+            source_type="prompt",
+            source_value="x",
+            notification_channel="C1",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        post_calls = {"n": 0}
+        guard = threading.Lock()
+
+        def counted_post(*args: Any, **kwargs: Any) -> dict[str, str]:
+            with guard:
+                post_calls["n"] += 1
+            return {"ts": "99.0"}
+
+        def worker() -> None:
+            daemon_instance._ensure_notification_thread(item, "intro")
+
+        with patch("colonyos.slack.post_message", side_effect=counted_post):
+            threads = [threading.Thread(target=worker) for _ in range(16)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30.0)
+                assert not t.is_alive()
+
+        assert post_calls["n"] == 1
+        assert item.notification_thread_ts == "99.0"
 
 
 class TestMonitorUi:
@@ -911,6 +958,40 @@ class TestMonitorUi:
 
         assert isinstance(message, ToolLineMsg)
         assert message.badge_text == "[2.0]"
+
+
+class TestCombinedUi:
+    def test_secondary_call_timeout_does_not_block(self, monkeypatch: pytest.MonkeyPatch):
+        class Primary:
+            def __init__(self) -> None:
+                self.called = False
+
+            def phase_note(self, text: str) -> None:
+                self.called = True
+
+        class Secondary:
+            def __init__(self) -> None:
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def phase_note(self, text: str) -> None:
+                self.started.set()
+                self.release.wait(timeout=1.0)
+
+        primary = Primary()
+        secondary = Secondary()
+        ui = _CombinedUI(primary, secondary)
+        monkeypatch.setattr(ui, "_SECONDARY_CALL_TIMEOUT_SECONDS", 0.01)
+
+        started_at = time.monotonic()
+        ui.phase_note("review summary")
+        elapsed = time.monotonic() - started_at
+
+        assert primary.called is True
+        assert secondary.started.wait(timeout=0.2)
+        assert elapsed < 0.2
+
+        secondary.release.set()
 
     def test_daily_digest_posts_top_three(self, daemon_instance: Daemon):
         daemon_instance.daemon_config = DaemonConfig(digest_hour_utc=0)
@@ -1168,13 +1249,16 @@ class TestSystemicFailureDetection:
             details={"dirty_output": " M src/dirty.py"},
         )
 
-        with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=dirty_error), \
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=dirty_error), \
              patch.object(daemon_instance, "_post_execution_failure"), \
-             patch.object(daemon_instance, "_post_systemic_failure_alert") as mock_alert:
+             patch.object(daemon_instance, "_post_systemic_failure_alert") as mock_sys, \
+             patch.object(daemon_instance, "_post_circuit_breaker_escalation_pause_alert") as mock_esc:
             daemon_instance._try_execute_next()
 
         assert daemon_instance._state.paused is True
-        mock_alert.assert_called_once_with("dirty_worktree", 3)
+        mock_sys.assert_called_once_with("dirty_worktree", 3)
+        mock_esc.assert_not_called()
 
     def test_circuit_breaker_on_non_systemic_failure(self, daemon_instance: Daemon):
         daemon_instance.dry_run = False
@@ -1193,13 +1277,16 @@ class TestSystemicFailureDetection:
 
         error = RuntimeError("connection_reset")
 
-        with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=error), \
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=error), \
              patch.object(daemon_instance, "_post_execution_failure"), \
-             patch.object(daemon_instance, "_post_systemic_failure_alert"):
+             patch.object(daemon_instance, "_post_systemic_failure_alert"), \
+             patch.object(daemon_instance, "_post_circuit_breaker_cooldown_notice") as mock_cooldown:
             daemon_instance._try_execute_next()
 
         assert daemon_instance._state.paused is False
         assert daemon_instance._state.is_circuit_breaker_active() is True
+        mock_cooldown.assert_called_once()
 
     def test_escalating_cb_auto_pauses_after_three_activations(self, daemon_instance: Daemon):
         """After 3 CB activations without a success, the daemon should auto-pause."""
@@ -1220,10 +1307,23 @@ class TestSystemicFailureDetection:
             )
             daemon_instance._queue_state.items = [item]
 
-            with patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=RuntimeError("fail")), \
+            with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+                 patch("colonyos.cli.run_pipeline_for_queue_item", side_effect=RuntimeError("fail")), \
                  patch.object(daemon_instance, "_post_execution_failure"), \
-                 patch.object(daemon_instance, "_post_systemic_failure_alert"):
+                 patch.object(daemon_instance, "_post_systemic_failure_alert") as mock_sys, \
+                 patch.object(daemon_instance, "_post_circuit_breaker_cooldown_notice") as mock_cool, \
+                 patch.object(
+                     daemon_instance, "_post_circuit_breaker_escalation_pause_alert"
+                 ) as mock_esc:
                 daemon_instance._try_execute_next()
+                if cycle < 2:
+                    mock_sys.assert_not_called()
+                    mock_esc.assert_not_called()
+                    mock_cool.assert_called_once()
+                else:
+                    mock_sys.assert_not_called()
+                    mock_esc.assert_called_once_with(3, 3)
+                    mock_cool.assert_not_called()
 
         assert daemon_instance._state.circuit_breaker_activations == 3
         assert daemon_instance._state.paused is True
@@ -1247,24 +1347,79 @@ class TestSystemicFailureDetection:
             total_cost_usd=0.1,
         )
 
-        with patch("colonyos.cli.run_pipeline_for_queue_item", return_value=fake_log):
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch("colonyos.cli.run_pipeline_for_queue_item", return_value=fake_log):
             daemon_instance._try_execute_next()
 
         assert daemon_instance._recent_failure_codes == []
 
 
+class TestPostExecutionFailureSlack:
+    def test_falls_back_when_notification_thread_unavailable(self, daemon_instance: Daemon):
+        item = QueueItem(
+            id="item-fail",
+            source_type="prompt",
+            source_value="do thing",
+            status=QueueItemStatus.FAILED,
+            priority=1,
+        )
+        with patch.object(daemon_instance, "_ensure_notification_thread", return_value=None), \
+             patch.object(daemon_instance, "_post_slack_message") as mock_slack:
+            daemon_instance._post_execution_failure(
+                item,
+                failure_message="something broke",
+                incident_path=".colonyos/incidents/x.md",
+            )
+        mock_slack.assert_called_once()
+        body = mock_slack.call_args.args[0]
+        assert "item-fail" in body
+        assert "something broke" in body
+        assert "x.md" in body
+
+
 class TestPreExecWorktreeCheck:
     """Pre-execution dirty worktree check should prevent item-level failures."""
 
+    def test_preexec_worktree_state_indeterminate_on_preflight_error(self, daemon_instance: Daemon):
+        with patch(
+            "colonyos.orchestrator._check_working_tree_clean",
+            side_effect=PreflightError("git status timed out after 30s."),
+        ):
+            state, detail = daemon_instance._preexec_worktree_state()
+        assert state == "indeterminate"
+        assert "timed out" in detail
+
+    def test_systemic_failure_alert_uses_slack_resume_guidance(
+        self, daemon_instance: Daemon
+    ):
+        with patch.object(daemon_instance, "_post_slack_message") as mock_slack:
+            daemon_instance._post_systemic_failure_alert("dirty_worktree", 3)
+
+        text = mock_slack.call_args.args[0]
+        assert "colonyos daemon resume" not in text
+        assert "Send `resume` in this channel to unpause." in text
+
     def test_skips_execution_when_dirty_and_no_auto_recover(self, daemon_instance: Daemon):
         daemon_instance.daemon_config.auto_recover_dirty_worktree = False
-        daemon_instance._queue_state.items = [
-            QueueItem(id="item", source_type="prompt", source_value="x", status=QueueItemStatus.PENDING, priority=1),
-        ]
-        with patch.object(daemon_instance, "_is_worktree_dirty", return_value=True):
+        item = QueueItem(
+            id="item",
+            source_type="prompt",
+            source_value="x",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("dirty", "")), \
+             patch.object(daemon_instance, "_post_slack_message") as mock_slack:
             result = daemon_instance._try_execute_next()
         assert result is False
-        assert daemon_instance._queue_state.items[0].status == QueueItemStatus.PENDING
+        assert item.status == QueueItemStatus.PENDING
+        assert daemon_instance._state.paused is True
+        posted = "\n".join(str(c.args[0]) for c in mock_slack.call_args_list if c.args)
+        assert "auto-paused before execution" in posted
+        assert "daemon.auto_recover_dirty_worktree" in posted
+        assert "clean" in posted.lower()
+        assert "colonyos daemon resume" not in posted
 
     def test_recovers_and_proceeds_when_dirty_and_auto_recover(self, daemon_instance: Daemon):
         daemon_instance.daemon_config.auto_recover_dirty_worktree = True
@@ -1284,7 +1439,7 @@ class TestPreExecWorktreeCheck:
             total_cost_usd=0.0,
         )
 
-        with patch.object(daemon_instance, "_is_worktree_dirty", return_value=True), \
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("dirty", "")), \
              patch.object(daemon_instance, "_recover_dirty_worktree_preemptive") as mock_recover, \
              patch("colonyos.cli.run_pipeline_for_queue_item", return_value=fake_log):
             result = daemon_instance._try_execute_next()
@@ -1295,14 +1450,45 @@ class TestPreExecWorktreeCheck:
 
     def test_skips_execution_when_recovery_fails(self, daemon_instance: Daemon):
         daemon_instance.daemon_config.auto_recover_dirty_worktree = True
-        daemon_instance._queue_state.items = [
-            QueueItem(id="item", source_type="prompt", source_value="x", status=QueueItemStatus.PENDING, priority=1),
-        ]
-        with patch.object(daemon_instance, "_is_worktree_dirty", return_value=True), \
-             patch.object(daemon_instance, "_recover_dirty_worktree_preemptive", return_value=False):
+        item = QueueItem(
+            id="item",
+            source_type="prompt",
+            source_value="x",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("dirty", "")), \
+             patch.object(daemon_instance, "_recover_dirty_worktree_preemptive", return_value=False), \
+             patch.object(daemon_instance, "_post_slack_message") as mock_slack:
             result = daemon_instance._try_execute_next()
         assert result is False
-        assert daemon_instance._queue_state.items[0].status == QueueItemStatus.PENDING
+        assert item.status == QueueItemStatus.PENDING
+        assert daemon_instance._state.paused is True
+        posted = "\n".join(str(c.args[0]) for c in mock_slack.call_args_list if c.args)
+        assert "auto-paused before execution" in posted
+        assert "auto-recovery failed" in posted
+        assert "colonyos daemon resume" not in posted
+
+    def test_preexec_blocker_noops_when_already_paused(self, daemon_instance: Daemon):
+        daemon_instance._state.paused = True
+        item = QueueItem(
+            id="item",
+            source_type="prompt",
+            source_value="x",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+
+        with patch.object(daemon_instance, "_record_runtime_incident") as mock_incident, \
+             patch.object(daemon_instance, "_post_slack_message") as mock_slack:
+            daemon_instance._pause_for_pre_execution_blocker(
+                item,
+                "Dirty worktree detected before execution.",
+            )
+
+        mock_incident.assert_not_called()
+        mock_slack.assert_not_called()
 
     def test_proceeds_when_worktree_clean(self, daemon_instance: Daemon):
         item = QueueItem(
@@ -1321,12 +1507,39 @@ class TestPreExecWorktreeCheck:
             total_cost_usd=0.0,
         )
 
-        with patch.object(daemon_instance, "_is_worktree_dirty", return_value=False), \
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
              patch("colonyos.cli.run_pipeline_for_queue_item", return_value=fake_log):
             result = daemon_instance._try_execute_next()
 
         assert result is True
         assert item.status == QueueItemStatus.COMPLETED
+
+    def test_blocks_when_worktree_state_indeterminate(self, daemon_instance: Daemon):
+        """Fail-closed: unknown git status blocks execution and posts remediation to Slack."""
+        item = QueueItem(
+            id="item",
+            source_type="prompt",
+            source_value="x",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+        detail = "git status exited with code 128: fatal: not a git repository"
+        with patch.object(
+            daemon_instance,
+            "_preexec_worktree_state",
+            return_value=("indeterminate", detail),
+        ), patch.object(daemon_instance, "_post_slack_message") as mock_slack:
+            result = daemon_instance._try_execute_next()
+        assert result is False
+        assert item.status == QueueItemStatus.PENDING
+        assert daemon_instance._state.paused is True
+        posted = "\n".join(str(c.args[0]) for c in mock_slack.call_args_list if c.args)
+        assert "auto-paused before execution" in posted
+        assert "git status" in posted.lower()
+        assert "fail-closed" in posted.lower()
+        assert detail in posted
+        assert "git status --porcelain" in posted
 
     def test_skips_worktree_check_while_paused(self, daemon_instance: Daemon):
         daemon_instance._state.paused = True
@@ -1334,15 +1547,52 @@ class TestPreExecWorktreeCheck:
             QueueItem(id="item", source_type="prompt", source_value="x", status=QueueItemStatus.PENDING, priority=1),
         ]
 
-        with patch.object(daemon_instance, "_is_worktree_dirty") as mock_dirty:
+        with patch.object(daemon_instance, "_preexec_worktree_state") as mock_state:
             result = daemon_instance._try_execute_next()
 
         assert result is False
-        mock_dirty.assert_not_called()
+        mock_state.assert_not_called()
 
     def test_skips_worktree_check_when_queue_is_empty(self, daemon_instance: Daemon):
-        with patch.object(daemon_instance, "_is_worktree_dirty") as mock_dirty:
+        with patch.object(daemon_instance, "_preexec_worktree_state") as mock_state:
             result = daemon_instance._try_execute_next()
 
         assert result is False
-        mock_dirty.assert_not_called()
+        mock_state.assert_not_called()
+
+
+class TestNotificationLockCleanup:
+    """Tests for _notification_thread_locks cleanup to prevent unbounded growth."""
+
+    def test_lock_created_on_first_access(self, daemon_instance: Daemon):
+        lock = daemon_instance._notification_thread_lock_for("item-1")
+        assert isinstance(lock, type(threading.Lock()))
+        assert "item-1" in daemon_instance._notification_thread_locks
+
+    def test_same_lock_returned_for_same_item(self, daemon_instance: Daemon):
+        lock1 = daemon_instance._notification_thread_lock_for("item-1")
+        lock2 = daemon_instance._notification_thread_lock_for("item-1")
+        assert lock1 is lock2
+
+    def test_cleanup_removes_lock(self, daemon_instance: Daemon):
+        daemon_instance._notification_thread_lock_for("item-1")
+        assert "item-1" in daemon_instance._notification_thread_locks
+
+        daemon_instance._cleanup_notification_lock("item-1")
+        assert "item-1" not in daemon_instance._notification_thread_locks
+
+    def test_cleanup_is_idempotent(self, daemon_instance: Daemon):
+        daemon_instance._notification_thread_lock_for("item-1")
+        daemon_instance._cleanup_notification_lock("item-1")
+        # Second cleanup should not raise
+        daemon_instance._cleanup_notification_lock("item-1")
+        assert "item-1" not in daemon_instance._notification_thread_locks
+
+    def test_cleanup_does_not_affect_other_locks(self, daemon_instance: Daemon):
+        daemon_instance._notification_thread_lock_for("item-1")
+        daemon_instance._notification_thread_lock_for("item-2")
+        assert len(daemon_instance._notification_thread_locks) == 2
+
+        daemon_instance._cleanup_notification_lock("item-1")
+        assert "item-1" not in daemon_instance._notification_thread_locks
+        assert "item-2" in daemon_instance._notification_thread_locks

@@ -29,6 +29,8 @@ function makeRun(overrides: Partial<RunLog> = {}): RunLog {
     task_rel: null,
     source_issue: null,
     source_issue_url: null,
+    source_type: "prompt",
+    pr_url: null,
     ...overrides,
   };
 }
@@ -79,5 +81,54 @@ describe("RunList", () => {
     );
     expect(screen.getByText("First")).toBeInTheDocument();
     expect(screen.getByText("Second")).toBeInTheDocument();
+  });
+
+  it("renders source type badge", () => {
+    render(
+      <MemoryRouter>
+        <RunList runs={[makeRun({ source_type: "issue" })]} />
+      </MemoryRouter>
+    );
+    expect(screen.getByText("Issue")).toBeInTheDocument();
+  });
+
+  it("renders source type badge for prompt type", () => {
+    render(
+      <MemoryRouter>
+        <RunList runs={[makeRun({ source_type: "prompt" })]} />
+      </MemoryRouter>
+    );
+    // Badge + column header "Prompt" text - just verify at least one badge exists
+    const badges = screen.getAllByText("Prompt");
+    expect(badges.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("renders PR link when pr_url is present", () => {
+    render(
+      <MemoryRouter>
+        <RunList runs={[makeRun({ pr_url: "https://github.com/org/repo/pull/42" })]} />
+      </MemoryRouter>
+    );
+    const link = screen.getByText("PR ↗");
+    expect(link).toBeInTheDocument();
+    expect(link.closest("a")).toHaveAttribute("href", "https://github.com/org/repo/pull/42");
+  });
+
+  it("renders dash when pr_url is null", () => {
+    render(
+      <MemoryRouter>
+        <RunList runs={[makeRun({ pr_url: null })]} />
+      </MemoryRouter>
+    );
+    expect(screen.getByText("—")).toBeInTheDocument();
+  });
+
+  it("handles null source_type gracefully", () => {
+    render(
+      <MemoryRouter>
+        <RunList runs={[makeRun({ source_type: null })]} />
+      </MemoryRouter>
+    );
+    expect(screen.getByText("Unknown")).toBeInTheDocument();
   });
 });

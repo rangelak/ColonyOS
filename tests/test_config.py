@@ -1551,3 +1551,28 @@ class TestPipelineTimeoutConfig:
         save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.daemon.pipeline_timeout_seconds == 3600
+
+
+class TestDashboardWriteEnabledConfig:
+    """Tests for daemon.dashboard_write_enabled config field."""
+
+    def test_default_is_false(self) -> None:
+        assert DaemonConfig().dashboard_write_enabled is False
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"dashboard_write_enabled": True}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.dashboard_write_enabled is True
+
+    def test_roundtrip(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            daemon=DaemonConfig(dashboard_write_enabled=True),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.dashboard_write_enabled is True
