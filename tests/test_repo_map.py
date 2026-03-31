@@ -82,6 +82,15 @@ class TestGetTrackedFiles:
         files = get_tracked_files(git_repo, config)
         assert sorted(files) == ["README.md", "src/app.py", "src/utils.py"]
 
+    def test_ignores_leaked_git_env_vars(
+        self, git_repo: Path, config: RepoMapConfig, monkeypatch: pytest.MonkeyPatch
+    ):
+        _add_and_commit(git_repo, {"src/app.py": "pass"})
+        monkeypatch.setenv("GIT_DIR", "/definitely/not/the/repo/.git")
+        monkeypatch.setenv("GIT_WORK_TREE", "/definitely/not/the/repo")
+        files = get_tracked_files(git_repo, config)
+        assert files == ["src/app.py"]
+
     def test_filters_sensitive_env_files(self, git_repo: Path, config: RepoMapConfig):
         _add_and_commit(git_repo, {
             "app.py": "pass",

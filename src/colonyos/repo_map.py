@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import re
 import subprocess
 from collections import Counter, OrderedDict
@@ -76,6 +77,11 @@ def _matches_any(filename: str, patterns: tuple[str, ...] | list[str]) -> bool:
     return False
 
 
+def _git_clean_env() -> dict[str, str]:
+    """Return a git subprocess environment with repo-shaping vars removed."""
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+
 def get_tracked_files(repo_root: Path, config: RepoMapConfig) -> list[str]:
     """Return a list of tracked files from ``git ls-files``.
 
@@ -96,10 +102,10 @@ def get_tracked_files(repo_root: Path, config: RepoMapConfig) -> list[str]:
     """
     try:
         result = subprocess.run(
-            ["git", "ls-files"],
+            ["git", "-C", str(repo_root), "ls-files"],
             capture_output=True,
             text=True,
-            cwd=repo_root,
+            env=_git_clean_env(),
             timeout=30,
         )
     except subprocess.TimeoutExpired:
