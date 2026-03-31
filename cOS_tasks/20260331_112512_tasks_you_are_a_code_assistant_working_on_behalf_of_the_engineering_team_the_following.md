@@ -45,12 +45,12 @@
   - [x] 2.3 Integrate `DaemonHealthBanner` into `web/src/components/Layout.tsx` sidebar header (below the ColonyOS title)
   - [x] 2.4 Add pause/resume button to the health banner (gated by write_enabled, with confirmation dialog)
 
-- [ ] 3.0 Queue page and component
+- [x] 3.0 Queue page and component
   depends_on: [1.0]
-  - [ ] 3.1 Write Vitest tests for `QueueTable` component (renders items, filters by status, shows empty state)
-  - [ ] 3.2 Create `web/src/components/QueueTable.tsx` — table of queue items with status badge, source type pill, truncated source value, priority, demand count, cost, duration, PR link, error tooltip
-  - [ ] 3.3 Create `web/src/pages/Queue.tsx` — page with status filter tabs (All/Pending/Running/Completed/Failed), polls `/api/queue` at 5s, shows aggregate cost
-  - [ ] 3.4 Add `/queue` route to `web/src/App.tsx` and "Queue" nav item to `web/src/components/Layout.tsx`
+  - [x] 3.1 Write Vitest tests for `QueueTable` component (renders items, filters by status, shows empty state)
+  - [x] 3.2 Create `web/src/components/QueueTable.tsx` — table of queue items with status badge, source type pill, truncated source value, priority, demand count, cost, duration, PR link, error tooltip
+  - [x] 3.3 Create `web/src/pages/Queue.tsx` — page with status filter tabs (All/Pending/Running/Completed/Failed), polls `/api/queue` at 5s, shows aggregate cost
+  - [x] 3.4 Add `/queue` route to `web/src/App.tsx` and "Queue" nav item to `web/src/components/Layout.tsx`
 
 - [ ] 4.0 Analytics page with charts
   depends_on: [1.0]
