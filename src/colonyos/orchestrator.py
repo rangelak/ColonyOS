@@ -1424,7 +1424,12 @@ def _format_task_list_with_descriptions(
 
 
 def _format_implement_result_note(result: PhaseResult) -> str:
-    """Summarize completed/failed/blocked task IDs for a finished implement phase."""
+    """Summarize completed/failed/blocked tasks for a finished implement phase.
+
+    When structured ``task_results`` are available, renders a categorized bullet
+    list with descriptions and optional cost/duration per task.  Falls back to
+    plain counts when the artifact is missing or unparseable.
+    """
     task_results = _parse_task_results_artifact(result.artifacts.get("task_results"))
     if task_results:
         completed = [
@@ -1574,7 +1579,13 @@ def _format_review_round_note(
     round_num: int,
     total_rounds: int,
 ) -> str:
-    """Summarize one full review round for Slack and terminal milestone updates."""
+    """Summarize one full review round for Slack and terminal milestone updates.
+
+    Groups reviewers into approved / requested-changes / failed categories
+    with emoji markers for visual hierarchy.  For reviewers who requested
+    changes, includes condensed finding summaries extracted from the review
+    result text via :func:`_extract_review_findings_summary`.
+    """
     approved: list[str] = []
     requested_changes: list[tuple[str, str]] = []  # (reviewer_ref, result_text)
     failed: list[str] = []

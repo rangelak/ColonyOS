@@ -44,9 +44,9 @@
   - [x] 5.3 Apply `sanitize_for_slack()` (for user-derived descriptions) and `sanitize_untrusted_content()` (for LLM text) to all untrusted content before including in formatted messages. Ensure they're called in `_format_task_outline_note()`, `_format_implement_result_note()`, `_format_review_round_note()`, and the phase_header call at line 875.
   - [x] 5.4 Apply `_truncate_slack_message()` at the call sites where `impl_ui.slack_note()` and `review_header_ui.slack_note()` are invoked (lines 4396, 4421, 4455, 4608).
 
-- [ ] 6.0 Integration verification and full test run
+- [x] 6.0 Integration verification and full test run
   depends_on: [1.0, 2.0, 3.0, 4.0, 5.0]
-  - [ ] 6.1 Run the full test suite (`pytest tests/`) and verify all 336+ tests pass with zero regressions.
-  - [ ] 6.2 Verify the new tests from task 1.0 all pass against the implementations from tasks 2.0-5.0.
-  - [ ] 6.3 Manually verify sample output of each formatting function looks correct in both terminal and Slack mrkdwn contexts (add a debug script or print statements if needed, then remove).
-  - [ ] 6.4 Update any docstrings on modified functions to reflect the new output format.
+  - [x] 6.1 Run the full test suite (`pytest tests/`) and verify all 336+ tests pass with zero regressions.
+  - [x] 6.2 Verify the new tests from task 1.0 all pass against the implementations from tasks 2.0-5.0.
+  - [x] 6.3 Manually verify sample output of each formatting function looks correct in both terminal and Slack mrkdwn contexts (add a debug script or print statements if needed, then remove).
+  - [x] 6.4 Update any docstrings on modified functions to reflect the new output format.
