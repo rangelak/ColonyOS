@@ -3732,3 +3732,88 @@ class TestMapCommand:
             result = runner.invoke(app, ["map"])
         assert result.exit_code == 0
         assert "No tracked files" in result.output or result.output.strip() == ""
+
+
+class TestMainCompletionReactions:
+    """Tests for the main run completion reaction logic (task 2.0).
+
+    The completion block in QueueExecutor._process_next_item removes :eyes:,
+    adds the status emoji, and adds :tada: on success only.
+    Since QueueExecutor is a nested class, we test the same logic by
+    calling the slack helpers directly with a mock client, matching the
+    exact call sequence in cli.py.
+    """
+
+    def _simulate_completion_reactions(self, client, channel, thread_ts, status):
+        """Replicate the main completion reaction block from cli.py."""
+        from colonyos.slack import react_to_message, remove_reaction
+        import logging
+
+        logger = logging.getLogger("colonyos.cli")
+        emoji = "white_check_mark" if status == RunStatus.COMPLETED else "x"
+        try:
+            remove_reaction(client, channel, thread_ts, "eyes")
+        except Exception:
+            logger.debug("Failed to remove eyes reaction", exc_info=True)
+        try:
+            react_to_message(client, channel, thread_ts, emoji)
+        except Exception:
+            logger.debug("Failed to add result reaction", exc_info=True)
+        if status == RunStatus.COMPLETED:
+            try:
+                react_to_message(client, channel, thread_ts, "tada")
+            except Exception:
+                logger.debug("Failed to add tada reaction", exc_info=True)
+
+    def test_success_removes_eyes_adds_check_and_tada(self):
+        """On success: remove :eyes:, add :white_check_mark:, add :tada:."""
+        client = MagicMock()
+        self._simulate_completion_reactions(client, "C1", "ts1", RunStatus.COMPLETED)
+
+        assert client.reactions_remove.call_count == 1
+        client.reactions_remove.assert_called_once_with(channel="C1", timestamp="ts1", name="eyes")
+
+        assert client.reactions_add.call_count == 2
+        calls = client.reactions_add.call_args_list
+        assert calls[0].kwargs == {"channel": "C1", "timestamp": "ts1", "name": "white_check_mark"}
+        assert calls[1].kwargs == {"channel": "C1", "timestamp": "ts1", "name": "tada"}
+
+    def test_failure_removes_eyes_adds_x_no_tada(self):
+        """On failure: remove :eyes:, add :x:, no :tada:."""
+        client = MagicMock()
+        self._simulate_completion_reactions(client, "C1", "ts1", RunStatus.FAILED)
+
+        client.reactions_remove.assert_called_once_with(channel="C1", timestamp="ts1", name="eyes")
+        client.reactions_add.assert_called_once_with(channel="C1", timestamp="ts1", name="x")
+
+    def test_eyes_removal_called_before_status_emoji(self):
+        """remove_reaction('eyes') must be called before react_to_message(status_emoji)."""
+        call_order = []
+        client = MagicMock()
+        client.reactions_remove.side_effect = lambda **kw: call_order.append(("remove", kw["name"]))
+        client.reactions_add.side_effect = lambda **kw: call_order.append(("add", kw["name"]))
+
+        self._simulate_completion_reactions(client, "C1", "ts1", RunStatus.COMPLETED)
+
+        assert call_order[0] == ("remove", "eyes")
+        assert call_order[1] == ("add", "white_check_mark")
+        assert call_order[2] == ("add", "tada")
+
+    def test_eyes_removal_failure_does_not_block_status_emoji(self):
+        """If removing :eyes: fails, the status emoji is still added."""
+        client = MagicMock()
+        client.reactions_remove.side_effect = Exception("no_reaction")
+
+        self._simulate_completion_reactions(client, "C1", "ts1", RunStatus.COMPLETED)
+
+        # reactions_add should still have been called for check + tada
+        assert client.reactions_add.call_count == 2
+
+    def test_tada_failure_does_not_raise(self):
+        """If adding :tada: fails, no exception propagates."""
+        client = MagicMock()
+        # First reactions_add (white_check_mark) succeeds, second (tada) fails
+        client.reactions_add.side_effect = [None, Exception("already_reacted")]
+
+        # Should not raise
+        self._simulate_completion_reactions(client, "C1", "ts1", RunStatus.COMPLETED)

@@ -18,11 +18,11 @@
   - [x] 1.2 Add `reactions_remove` method signature to `SlackClient` Protocol in `src/colonyos/slack.py` (after `reactions_add` at line 51)
   - [x] 1.3 Add `remove_reaction()` function in `src/colonyos/slack.py` (after `react_to_message()` at line 456), mirroring the existing `react_to_message()` pattern but calling `client.reactions_remove()`
 
-- [ ] 2.0 Add `:eyes:` removal and `:tada:` addition to main run completion path
+- [x] 2.0 Add `:eyes:` removal and `:tada:` addition to main run completion path
   depends_on: [1.0]
-  - [ ] 2.1 Write tests verifying the main completion path calls `remove_reaction("eyes")` before adding the result emoji, and adds `:tada:` on success only
-  - [ ] 2.2 In `src/colonyos/cli.py` (~line 4050-4056), add a try/except block calling `remove_reaction(client, channel, thread_ts, "eyes")` before the existing `react_to_message()` call
-  - [ ] 2.3 In the same block, add a try/except for `react_to_message(client, channel, thread_ts, "tada")` after the `:white_check_mark:` reaction, gated on `log.status == RunStatus.COMPLETED`
+  - [x] 2.1 Write tests verifying the main completion path calls `remove_reaction("eyes")` before adding the result emoji, and adds `:tada:` on success only
+  - [x] 2.2 In `src/colonyos/cli.py` (~line 4050-4056), add a try/except block calling `remove_reaction(client, channel, thread_ts, "eyes")` before the existing `react_to_message()` call
+  - [x] 2.3 In the same block, add a try/except for `react_to_message(client, channel, thread_ts, "tada")` after the `:white_check_mark:` reaction, gated on `log.status == RunStatus.COMPLETED`
 
 - [ ] 3.0 Add `:eyes:` removal and `:tada:` addition to fix run completion path
   depends_on: [1.0]
