@@ -122,3 +122,12 @@ _Date: 2026-03-30 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[code-quality]** Optional config fields compared with arithmetic operators without None guards raise TypeError at runtime.
 - **[architecture]** Superseded dataclasses kept alongside replacements accumulate dead abstractions; remove the old type promptly.
 - **[testing]** Auth validation catching network errors as "success" silently accepts any token when the server is unreachable.
+
+## Run: run-20260331_131622-df4825679a
+_Date: 2026-03-31 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
+
+- **[security]** Format-string interpolation of untrusted LLM output (`str.format()`) causes KeyError crashes and config value leakage.
+- **[code-quality]** Budget guard arithmetic must account for full fix-cycle cost (fix + review + decision), not just a single phase.
+- **[security]** Fix-loop re-invocations of review agents must carry the same `allowed_tools` restrictions as the initial review call.
+- **[code-quality]** Falsy-zero bugs (`max_budget or default`) silently discard explicit zero values; use `is None` checks for optional numerics.
+- **[architecture]** Extract repeated fix-loop and cost-computation logic into dedicated helpers; inline duplication causes silent divergence.

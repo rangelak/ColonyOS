@@ -652,3 +652,139 @@ class TestMemoryCapture:
         outcomes = store.get_outcomes()
         pr43 = [o for o in outcomes if o["pr_number"] == 43][0]
         assert pr43["status"] == "merged"
+
+
+# ---------------------------------------------------------------------------
+# 2.1 Sync tracking columns tests
+# ---------------------------------------------------------------------------
+
+
+class TestSyncColumns:
+    """Tests for last_sync_at / sync_failures columns and related methods."""
+
+    def test_new_columns_exist_after_init(self, store: OutcomeStore):
+        """pr_outcomes table has last_sync_at and sync_failures columns."""
+        cur = store._conn.cursor()
+        cur.execute("PRAGMA table_info(pr_outcomes)")
+        columns = {row[1] for row in cur.fetchall()}
+        assert "last_sync_at" in columns
+        assert "sync_failures" in columns
+
+    def test_sync_failures_defaults_to_zero(self, store: OutcomeStore):
+        """New PR records have sync_failures = 0."""
+        store.track_pr("run-1", 42, "url1", "colonyos/feat-x")
+        outcomes = store.get_outcomes()
+        assert outcomes[0]["sync_failures"] == 0
+
+    def test_last_sync_at_defaults_to_none(self, store: OutcomeStore):
+        """New PR records have last_sync_at = None."""
+        store.track_pr("run-1", 42, "url1", "colonyos/feat-x")
+        outcomes = store.get_outcomes()
+        assert outcomes[0]["last_sync_at"] is None
+
+    def test_update_sync_status_sets_fields(self, store: OutcomeStore):
+        """update_sync_status correctly sets last_sync_at and sync_failures."""
+        store.track_pr("run-1", 42, "url1", "colonyos/feat-x")
+        now = datetime.now(timezone.utc).isoformat()
+        store.update_sync_status(pr_number=42, last_sync_at=now, sync_failures=0)
+
+        outcomes = store.get_outcomes()
+        assert outcomes[0]["last_sync_at"] == now
+        assert outcomes[0]["sync_failures"] == 0
+
+    def test_update_sync_status_increments_failures(self, store: OutcomeStore):
+        """update_sync_status can increment sync_failures."""
+        store.track_pr("run-1", 42, "url1", "colonyos/feat-x")
+        now = datetime.now(timezone.utc).isoformat()
+        store.update_sync_status(pr_number=42, last_sync_at=now, sync_failures=1)
+
+        outcomes = store.get_outcomes()
+        assert outcomes[0]["sync_failures"] == 1
+
+        # Increment again
+        store.update_sync_status(pr_number=42, last_sync_at=now, sync_failures=2)
+        outcomes = store.get_outcomes()
+        assert outcomes[0]["sync_failures"] == 2
+
+    def test_get_sync_candidates_returns_open_prs_under_max(self, store: OutcomeStore):
+        """get_sync_candidates returns only open PRs with sync_failures < max."""
+        store.track_pr("run-1", 42, "url1", "colonyos/feat-x")
+        store.track_pr("run-2", 43, "url2", "colonyos/feat-y")
+        store.track_pr("run-3", 44, "url3", "colonyos/feat-z")
+
+        # PR 43 has too many failures
+        store.update_sync_status(pr_number=43, last_sync_at="2025-01-01T00:00:00Z", sync_failures=3)
+        # PR 44 is merged (not open)
+        store.update_outcome(pr_number=44, status="merged")
+
+        candidates = store.get_sync_candidates(max_failures=3)
+        pr_numbers = [c["pr_number"] for c in candidates]
+        assert 42 in pr_numbers
+        assert 43 not in pr_numbers  # too many failures
+        assert 44 not in pr_numbers  # not open
+
+    def test_get_sync_candidates_ordered_by_last_sync_at_nulls_first(self, store: OutcomeStore):
+        """get_sync_candidates orders by last_sync_at ASC, NULLs first."""
+        store.track_pr("run-1", 42, "url1", "colonyos/feat-x")
+        store.track_pr("run-2", 43, "url2", "colonyos/feat-y")
+        store.track_pr("run-3", 44, "url3", "colonyos/feat-z")
+
+        # PR 43 was synced recently, PR 44 was synced earlier, PR 42 never synced
+        store.update_sync_status(pr_number=43, last_sync_at="2025-01-15T12:00:00Z", sync_failures=0)
+        store.update_sync_status(pr_number=44, last_sync_at="2025-01-15T10:00:00Z", sync_failures=0)
+
+        candidates = store.get_sync_candidates(max_failures=3)
+        pr_numbers = [c["pr_number"] for c in candidates]
+        # 42 (NULL) first, then 44 (earlier), then 43 (later)
+        assert pr_numbers == [42, 44, 43]
+
+    def test_schema_migration_existing_db(self, tmp_repo: Path):
+        """ALTER TABLE migration handles existing databases gracefully."""
+        # Create a store with the old schema (no sync columns)
+        s1 = OutcomeStore(tmp_repo)
+        s1.track_pr("run-1", 42, "url1", "colonyos/feat-x")
+        s1.close()
+
+        # Re-open — migration should add columns without error
+        s2 = OutcomeStore(tmp_repo)
+        outcomes = s2.get_outcomes()
+        assert outcomes[0]["sync_failures"] == 0
+        assert outcomes[0]["last_sync_at"] is None
+        s2.close()
+
+    def test_get_sync_candidates_empty_when_no_open_prs(self, store: OutcomeStore):
+        """get_sync_candidates returns empty list when no open PRs exist."""
+        store.track_pr("run-1", 42, "url1", "colonyos/feat-x")
+        store.update_outcome(pr_number=42, status="merged")
+        assert store.get_sync_candidates(max_failures=3) == []
+
+
+class TestMergeStateStatusField:
+    """Tests for mergeStateStatus in _call_gh_pr_view."""
+
+    def test_merge_state_status_in_json_fields(self):
+        """_call_gh_pr_view requests mergeStateStatus in --json fields."""
+        with patch("colonyos.outcomes.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                stdout=json.dumps({
+                    "state": "OPEN",
+                    "mergedAt": None,
+                    "closedAt": None,
+                    "reviews": [],
+                    "comments": [],
+                    "statusCheckRollup": [],
+                    "labels": [],
+                    "mergeStateStatus": "BEHIND",
+                }),
+                returncode=0,
+            )
+            from colonyos.outcomes import _call_gh_pr_view
+            result = _call_gh_pr_view(42, Path("/tmp/repo"))
+
+            # Verify the --json arg includes mergeStateStatus
+            call_args = mock_run.call_args[0][0]
+            json_fields_arg = call_args[call_args.index("--json") + 1]
+            assert "mergeStateStatus" in json_fields_arg
+
+            # Verify the returned dict includes mergeStateStatus
+            assert result["mergeStateStatus"] == "BEHIND"

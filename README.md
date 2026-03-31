@@ -464,6 +464,40 @@ pr_review:
   circuit_breaker_cooldown_minutes: 15
 ```
 
+### PR Sync
+
+Keeps open `colonyos/` PRs up-to-date with `main` by automatically merging
+the latest `main` into stale branches. The daemon detects PRs that are behind
+`main` (via `mergeStateStatus` from the GitHub API) and performs the merge in
+an isolated ephemeral worktree — the main working tree is never touched.
+
+**How to enable:**
+
+1. Set `COLONYOS_WRITE_ENABLED=1` (or `dashboard_write_enabled: true` in config) — PR sync pushes to remote branches, so write access is required.
+2. Enable PR sync in your config:
+
+```yaml
+pr_sync:
+  enabled: true                # default: false (opt-in)
+  interval_minutes: 60         # how often to check for stale PRs
+  max_sync_failures: 3         # per-PR retry cap before giving up
+```
+
+**Behavior:**
+
+- Runs as concern #7 in the daemon tick loop on its own timer (separate from outcome polling).
+- Processes at most 1 PR per tick, consistent with the daemon's sequential model.
+- Only syncs branches matching the configured `branch_prefix` (default: `colonyos/`).
+- Skips PRs whose branch has a RUNNING queue item to avoid conflicts with active pipelines.
+- Uses `git merge origin/main --no-edit` (never rebase or force-push) to preserve review state.
+
+**On merge conflicts:**
+
+- The merge is aborted cleanly (`git merge --abort`) and the branch is left untouched.
+- A Slack notification is sent with the list of conflicting files.
+- A PR comment is posted detailing the conflict.
+- The `sync_failures` counter is incremented. After `max_sync_failures` consecutive failures, the PR is skipped until manually resolved.
+
 ### Retry on transient API errors
 
 ```yaml
