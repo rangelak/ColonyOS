@@ -89,12 +89,26 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
     # Semaphore for rate limiting: max 1 concurrent run
     active_run_semaphore = threading.Semaphore(1)
 
-    # CORS for local dev only (Vite dev server on a different port)
+    # Build CORS origins list from env vars
+    cors_origins: list[str] = []
+
+    # Dev origins (Vite dev server on a different port)
     if os.environ.get("COLONYOS_DEV"):
+        cors_origins.extend(["http://localhost:5173", "http://127.0.0.1:5173"])
+
+    # Configurable extra origins for subdomain deployment
+    allowed_origins_env = os.environ.get("COLONYOS_ALLOWED_ORIGINS", "").strip()
+    if allowed_origins_env:
+        for origin in allowed_origins_env.split(","):
+            origin = origin.strip()
+            if origin and origin not in cors_origins:
+                cors_origins.append(origin)
+
+    if cors_origins:
         allowed_methods = ["GET", "PUT", "POST"] if write_enabled else ["GET"]
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+            allow_origins=cors_origins,
             allow_methods=allowed_methods,
             allow_headers=["Content-Type", "Accept", "Authorization"],
         )
@@ -371,6 +385,45 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
         """Verify a bearer token is valid. Returns 401 if invalid."""
         _require_write_auth(request)
         return {"status": "ok"}
+
+    @app.post("/api/daemon/pause")
+    async def daemon_pause(request: Request) -> JSONResponse:
+        """Pause the daemon — stop picking up new work (FR-8)."""
+        _require_write_auth(request)
+
+        daemon = app.state.daemon_instance
+        if daemon is not None:
+            daemon.pause()
+            body = daemon.get_health()
+        else:
+            # Standalone server: toggle on disk
+            from colonyos.daemon_state import load_daemon_state, save_daemon_state
+
+            state = load_daemon_state(repo_root)
+            state.paused = True
+            save_daemon_state(repo_root, state)
+            body = {"paused": True}
+
+        return JSONResponse(content=body)
+
+    @app.post("/api/daemon/resume")
+    async def daemon_resume(request: Request) -> JSONResponse:
+        """Resume the daemon — start picking up work again (FR-8)."""
+        _require_write_auth(request)
+
+        daemon = app.state.daemon_instance
+        if daemon is not None:
+            daemon.resume()
+            body = daemon.get_health()
+        else:
+            from colonyos.daemon_state import load_daemon_state, save_daemon_state
+
+            state = load_daemon_state(repo_root)
+            state.paused = False
+            save_daemon_state(repo_root, state)
+            body = {"paused": False}
+
+        return JSONResponse(content=body)
 
     @app.post("/api/runs")
     async def launch_run(request: Request) -> dict[str, Any]:

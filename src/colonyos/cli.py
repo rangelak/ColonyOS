@@ -5544,10 +5544,11 @@ def sweep(path: str | None, execute: bool, plan_only: bool, max_tasks: int | Non
 
 
 @app.command()
+@click.option("--host", default="127.0.0.1", type=str, help="Host to bind to (default: 127.0.0.1)")
 @click.option("--port", default=7400, type=int, help="Port to serve on (default: 7400)")
 @click.option("--no-open", is_flag=True, help="Don't auto-open browser")
 @click.option("--write", is_flag=True, help="Enable write endpoints (config editing, run launching)")
-def ui(port: int, no_open: bool, write: bool) -> None:
+def ui(host: str, port: int, no_open: bool, write: bool) -> None:
     """Launch the local web dashboard (requires colonyos[ui])."""
     if write:
         os.environ["COLONYOS_WRITE_ENABLED"] = "1"
@@ -5570,18 +5571,18 @@ def ui(port: int, no_open: bool, write: bool) -> None:
     repo_root = _find_repo_root()
     fast_app, auth_token = create_app(repo_root)
 
-    url = f"http://127.0.0.1:{port}"
+    url = f"http://{host}:{port}"
     click.echo(f"[colonyos] Starting dashboard at {url}")
     if os.environ.get("COLONYOS_WRITE_ENABLED"):
         click.echo(f"[colonyos] Write mode ENABLED — auth token: {auth_token}")
 
-    if not no_open:
+    if not no_open and host in ("127.0.0.1", "localhost"):
         import webbrowser
 
         webbrowser.open(url)
 
     try:
-        uvicorn.run(fast_app, host="127.0.0.1", port=port, log_level="warning")
+        uvicorn.run(fast_app, host=host, port=port, log_level="warning")
     except KeyboardInterrupt:
         click.echo("\n[colonyos] Dashboard stopped.")
 

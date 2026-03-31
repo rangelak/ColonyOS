@@ -458,6 +458,222 @@ class TestErrorMessageSafety:
         assert "/" not in detail or "Run" in detail  # only the generic message
 
 
+class TestDaemonPauseResume:
+    """Tests for POST /api/daemon/pause and POST /api/daemon/resume endpoints."""
+
+    def test_pause_requires_write_enabled(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.delenv("COLONYOS_WRITE_ENABLED", raising=False)
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, _ = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.post("/api/daemon/pause")
+        assert resp.status_code == 403
+
+    def test_resume_requires_write_enabled(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.delenv("COLONYOS_WRITE_ENABLED", raising=False)
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, _ = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.post("/api/daemon/resume")
+        assert resp.status_code == 403
+
+    def test_pause_requires_valid_token(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.setenv("COLONYOS_WRITE_ENABLED", "1")
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, _ = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.post(
+            "/api/daemon/pause",
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+        assert resp.status_code == 401
+
+    def test_pause_toggles_state_disk_fallback(self, tmp_repo: Path, monkeypatch):
+        """When no live daemon, pause/resume should toggle state on disk."""
+        monkeypatch.setenv("COLONYOS_WRITE_ENABLED", "1")
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, auth_token = create_app(tmp_repo)
+        client = TestClient(app)
+
+        # Pause
+        resp = client.post(
+            "/api/daemon/pause",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["paused"] is True
+
+        # Verify healthz also reflects paused state
+        resp = client.get("/healthz")
+        health = resp.json()
+        assert health["paused"] is True
+
+    def test_resume_toggles_state_disk_fallback(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.setenv("COLONYOS_WRITE_ENABLED", "1")
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, auth_token = create_app(tmp_repo)
+        client = TestClient(app)
+
+        # Pause first
+        client.post(
+            "/api/daemon/pause",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+
+        # Then resume
+        resp = client.post(
+            "/api/daemon/resume",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["paused"] is False
+
+    def test_pause_with_live_daemon(self, tmp_repo: Path, monkeypatch):
+        """When a live daemon instance is attached, pause should toggle it."""
+        monkeypatch.setenv("COLONYOS_WRITE_ENABLED", "1")
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, auth_token = create_app(tmp_repo)
+
+        # Simulate a live daemon instance
+        mock_daemon = MagicMock()
+        mock_daemon.pause.return_value = None
+        mock_daemon.get_health.return_value = {
+            "status": "degraded",
+            "heartbeat_age_seconds": 1.0,
+            "queue_depth": 0,
+            "daily_spend_usd": 0.0,
+            "daily_budget_remaining_usd": 500.0,
+            "circuit_breaker_active": False,
+            "paused": True,
+            "pipeline_running": False,
+            "total_items_today": 0,
+            "consecutive_failures": 0,
+        }
+        app.state.daemon_instance = mock_daemon
+
+        client = TestClient(app)
+        resp = client.post(
+            "/api/daemon/pause",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["paused"] is True
+        mock_daemon.pause.assert_called_once()
+
+    def test_resume_with_live_daemon(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.setenv("COLONYOS_WRITE_ENABLED", "1")
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, auth_token = create_app(tmp_repo)
+
+        mock_daemon = MagicMock()
+        mock_daemon.resume.return_value = None
+        mock_daemon.get_health.return_value = {
+            "status": "healthy",
+            "heartbeat_age_seconds": 1.0,
+            "queue_depth": 0,
+            "daily_spend_usd": 0.0,
+            "daily_budget_remaining_usd": 500.0,
+            "circuit_breaker_active": False,
+            "paused": False,
+            "pipeline_running": False,
+            "total_items_today": 0,
+            "consecutive_failures": 0,
+        }
+        app.state.daemon_instance = mock_daemon
+
+        client = TestClient(app)
+        resp = client.post(
+            "/api/daemon/resume",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["paused"] is False
+        mock_daemon.resume.assert_called_once()
+
+
+class TestConfigurableCORS:
+    """Tests for COLONYOS_ALLOWED_ORIGINS configurable CORS."""
+
+    def test_custom_origins_applied(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.setenv("COLONYOS_ALLOWED_ORIGINS", "https://colonyos.myapp.com,https://ops.example.com")
+        monkeypatch.delenv("COLONYOS_DEV", raising=False)
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, _ = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get(
+            "/api/health",
+            headers={"Origin": "https://colonyos.myapp.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.headers.get("access-control-allow-origin") == "https://colonyos.myapp.com"
+
+    def test_custom_origins_rejects_unknown(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.setenv("COLONYOS_ALLOWED_ORIGINS", "https://colonyos.myapp.com")
+        monkeypatch.delenv("COLONYOS_DEV", raising=False)
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, _ = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get(
+            "/api/health",
+            headers={"Origin": "https://evil.com"},
+        )
+        assert resp.status_code == 200
+        assert "access-control-allow-origin" not in resp.headers
+
+    def test_no_origins_env_no_cors(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.delenv("COLONYOS_ALLOWED_ORIGINS", raising=False)
+        monkeypatch.delenv("COLONYOS_DEV", raising=False)
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, _ = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get(
+            "/api/health",
+            headers={"Origin": "http://localhost:5173"},
+        )
+        assert resp.status_code == 200
+        assert "access-control-allow-origin" not in resp.headers
+
+    def test_dev_and_custom_origins_combined(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.setenv("COLONYOS_DEV", "1")
+        monkeypatch.setenv("COLONYOS_ALLOWED_ORIGINS", "https://colonyos.myapp.com")
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, _ = create_app(tmp_repo)
+        client = TestClient(app)
+        # Dev origin should still work
+        resp = client.get(
+            "/api/health",
+            headers={"Origin": "http://localhost:5173"},
+        )
+        assert resp.status_code == 200
+        assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
 class TestSPAPathTraversal:
     """Verify SPA catch-all route blocks path traversal."""
 

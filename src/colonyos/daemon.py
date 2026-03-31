@@ -376,6 +376,9 @@ class Daemon:
                     self.dry_run,
                 )
 
+                # Start embedded dashboard server
+                self._start_dashboard_server()
+
                 # Start background threads
                 threads = self._start_threads()
 
@@ -398,6 +401,67 @@ class Daemon:
         """Request graceful shutdown."""
         logger.info("Daemon shutdown requested")
         self._stop_event.set()
+
+    def pause(self) -> None:
+        """Pause the daemon — stop picking up new queue items."""
+        with self._lock:
+            self._state.paused = True
+            self._persist_state()
+        logger.info("Daemon paused via API")
+
+    def resume(self) -> None:
+        """Resume the daemon — start picking up queue items again."""
+        with self._lock:
+            self._state.paused = False
+            self._persist_state()
+        logger.info("Daemon resumed via API")
+
+    def _start_dashboard_server(self) -> None:
+        """Start the embedded web dashboard on a daemon thread.
+
+        Uses uvicorn to serve the FastAPI app. The dashboard provides
+        live daemon health via ``app.state.daemon_instance``. Errors
+        during server startup or runtime are logged but never crash
+        the daemon.
+        """
+        if not self.daemon_config.dashboard_enabled:
+            logger.info("Dashboard disabled in config, skipping")
+            return
+
+        try:
+            import uvicorn
+            from colonyos.server import create_app
+        except ImportError:
+            logger.info(
+                "Dashboard dependencies not installed (pip install colonyos[ui]), skipping"
+            )
+            return
+
+        port = self.daemon_config.dashboard_port
+
+        def _serve() -> None:
+            try:
+                os.environ.setdefault("COLONYOS_WRITE_ENABLED", "1")
+                app, auth_token = create_app(self.repo_root)
+                app.state.daemon_instance = self
+                logger.info(
+                    "Dashboard started on http://127.0.0.1:%d (token: %s)",
+                    port,
+                    auth_token,
+                )
+                config = uvicorn.Config(
+                    app,
+                    host="127.0.0.1",
+                    port=port,
+                    log_level="warning",
+                )
+                server = uvicorn.Server(config)
+                server.run()
+            except Exception:
+                logger.warning("Dashboard server failed", exc_info=True)
+
+        thread = threading.Thread(target=_serve, daemon=True, name="dashboard-server")
+        thread.start()
 
     def _check_time_exceeded(self) -> bool:
         if not self.max_hours:

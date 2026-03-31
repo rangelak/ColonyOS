@@ -272,6 +272,8 @@ class DaemonConfig:
     allow_all_control_users: bool = False
     auto_recover_dirty_worktree: bool = True
     pipeline_timeout_seconds: int = 7200
+    dashboard_enabled: bool = True
+    dashboard_port: int = 8741
 
 
 @dataclass
@@ -800,6 +802,8 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
             raw.get("auto_recover_dirty_worktree", d["auto_recover_dirty_worktree"])
         ),
         pipeline_timeout_seconds=pipeline_timeout,
+        dashboard_enabled=bool(raw.get("dashboard_enabled", True)),
+        dashboard_port=int(raw.get("dashboard_port", 8741)),
     )
 
 
