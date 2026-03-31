@@ -52,13 +52,13 @@
   - [x] 3.3 Create `web/src/pages/Queue.tsx` — page with status filter tabs (All/Pending/Running/Completed/Failed), polls `/api/queue` at 5s, shows aggregate cost
   - [x] 3.4 Add `/queue` route to `web/src/App.tsx` and "Queue" nav item to `web/src/components/Layout.tsx`
 
-- [ ] 4.0 Analytics page with charts
+- [x] 4.0 Analytics page with charts
   depends_on: [1.0]
-  - [ ] 4.1 Write Vitest tests for chart components (render with sample data, handle empty data)
-  - [ ] 4.2 Create `web/src/components/CostChart.tsx` — Recharts `AreaChart` showing cost trend from `recent_trend` data
-  - [ ] 4.3 Create `web/src/components/PhaseBreakdownChart.tsx` — Recharts `BarChart` for phase cost breakdown and failure hotspots
-  - [ ] 4.4 Create `web/src/pages/Analytics.tsx` — page assembling charts: cost trend, phase cost breakdown, failure hotspots, model usage breakdown, duration stats, review loop summary
-  - [ ] 4.5 Add `/analytics` route to `web/src/App.tsx` and "Analytics" nav item to `Layout.tsx`
+  - [x] 4.1 Write Vitest tests for chart components (render with sample data, handle empty data)
+  - [x] 4.2 Create `web/src/components/CostChart.tsx` — Recharts `AreaChart` showing cost trend from `recent_trend` data
+  - [x] 4.3 Create `web/src/components/PhaseBreakdownChart.tsx` — Recharts `BarChart` for phase cost breakdown and failure hotspots
+  - [x] 4.4 Create `web/src/pages/Analytics.tsx` — page assembling charts: cost trend, phase cost breakdown, failure hotspots, model usage breakdown, duration stats, review loop summary
+  - [x] 4.5 Add `/analytics` route to `web/src/App.tsx` and "Analytics" nav item to `Layout.tsx`
 
 - [ ] 5.0 Enhanced Dashboard and improved existing components
   depends_on: [2.0, 3.0]

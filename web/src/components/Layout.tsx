@@ -5,6 +5,7 @@ import DaemonHealthBanner from "./DaemonHealthBanner";
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard" },
   { to: "/queue", label: "Queue" },
+  { to: "/analytics", label: "Analytics" },
   { to: "/config", label: "Config" },
   { to: "/proposals", label: "Proposals" },
   { to: "/reviews", label: "Reviews" },

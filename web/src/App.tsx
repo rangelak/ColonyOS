@@ -7,6 +7,7 @@ import Config from "./pages/Config";
 import Queue from "./pages/Queue";
 import Proposals from "./pages/Proposals";
 import Reviews from "./pages/Reviews";
+import Analytics from "./pages/Analytics";
 
 export default function App() {
   return (
@@ -16,6 +17,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/queue" element={<Queue />} />
+          <Route path="/analytics" element={<Analytics />} />
           <Route path="/runs/:id" element={<RunDetail />} />
           <Route path="/config" element={<Config />} />
           <Route path="/proposals" element={<Proposals />} />
