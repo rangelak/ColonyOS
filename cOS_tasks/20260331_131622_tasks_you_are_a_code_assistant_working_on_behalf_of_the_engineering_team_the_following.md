@@ -26,13 +26,13 @@
   - [x] 1.5 Add `_parse_pr_sync_config()` function following the pattern of `_parse_ci_fix_config()`: extract values, validate types and ranges, return `PRSyncConfig`
   - [x] 1.6 Wire `_parse_pr_sync_config()` into `_parse_daemon_config()` and add serialization in `save_config()`
 
-- [ ] 2.0 Schema: Extend OutcomeStore with sync tracking columns
+- [x] 2.0 Schema: Extend OutcomeStore with sync tracking columns
   depends_on: []
-  - [ ] 2.1 Write tests in `tests/test_outcomes.py`: add `TestSyncColumns` class testing that new columns exist after init, that `update_sync_status()` correctly sets `last_sync_at`/`sync_failures`, that `get_sync_candidates()` returns only open PRs with `sync_failures < max`, and that the schema migration handles existing databases gracefully
-  - [ ] 2.2 Add `last_sync_at TEXT` and `sync_failures INTEGER DEFAULT 0` columns to the `pr_outcomes` CREATE TABLE in `OutcomeStore._init_db()`. Add an ALTER TABLE migration path for existing databases (try ALTER, catch if column exists)
-  - [ ] 2.3 Add `update_sync_status(pr_number, last_sync_at, sync_failures)` method to `OutcomeStore`
-  - [ ] 2.4 Add `get_sync_candidates(max_failures)` method that returns open PRs where `sync_failures < max_failures`, ordered by `last_sync_at ASC NULLS FIRST` (oldest-synced first)
-  - [ ] 2.5 Add `mergeStateStatus` to the `--json` field list in `_call_gh_pr_view()` and surface it in the returned dict
+  - [x] 2.1 Write tests in `tests/test_outcomes.py`: add `TestSyncColumns` class testing that new columns exist after init, that `update_sync_status()` correctly sets `last_sync_at`/`sync_failures`, that `get_sync_candidates()` returns only open PRs with `sync_failures < max`, and that the schema migration handles existing databases gracefully
+  - [x] 2.2 Add `last_sync_at TEXT` and `sync_failures INTEGER DEFAULT 0` columns to the `pr_outcomes` CREATE TABLE in `OutcomeStore._init_db()`. Add an ALTER TABLE migration path for existing databases (try ALTER, catch if column exists)
+  - [x] 2.3 Add `update_sync_status(pr_number, last_sync_at, sync_failures)` method to `OutcomeStore`
+  - [x] 2.4 Add `get_sync_candidates(max_failures)` method that returns open PRs where `sync_failures < max_failures`, ordered by `last_sync_at ASC NULLS FIRST` (oldest-synced first)
+  - [x] 2.5 Add `mergeStateStatus` to the `--json` field list in `_call_gh_pr_view()` and surface it in the returned dict
 
 - [ ] 3.0 GitHub helper: Add PR comment posting function
   depends_on: []

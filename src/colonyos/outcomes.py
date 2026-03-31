@@ -84,9 +84,26 @@ class OutcomeStore:
                 ci_passed INTEGER,
                 labels TEXT DEFAULT '',
                 close_context TEXT DEFAULT '',
-                last_polled_at TEXT
+                last_polled_at TEXT,
+                last_sync_at TEXT,
+                sync_failures INTEGER DEFAULT 0
             )
         """)
+        self._conn.commit()
+        # Migration: add sync columns to existing databases that lack them.
+        self._migrate_sync_columns()
+
+    def _migrate_sync_columns(self) -> None:
+        """Add last_sync_at and sync_failures columns if missing (idempotent)."""
+        cur = self._conn.cursor()
+        cur.execute("PRAGMA table_info(pr_outcomes)")
+        existing = {row[1] for row in cur.fetchall()}
+        if "last_sync_at" not in existing:
+            cur.execute("ALTER TABLE pr_outcomes ADD COLUMN last_sync_at TEXT")
+        if "sync_failures" not in existing:
+            cur.execute(
+                "ALTER TABLE pr_outcomes ADD COLUMN sync_failures INTEGER DEFAULT 0"
+            )
         self._conn.commit()
 
     def close(self) -> None:
@@ -178,6 +195,47 @@ class OutcomeStore:
         )
         self._conn.commit()
 
+    def update_sync_status(
+        self,
+        pr_number: int,
+        last_sync_at: str,
+        sync_failures: int,
+    ) -> None:
+        """Update sync tracking fields for a PR.
+
+        Parameters
+        ----------
+        pr_number:
+            The PR to update.
+        last_sync_at:
+            ISO-8601 timestamp of the sync attempt.
+        sync_failures:
+            Cumulative count of consecutive sync failures.
+        """
+        self._conn.execute(
+            "UPDATE pr_outcomes SET last_sync_at = ?, sync_failures = ? WHERE pr_number = ?",
+            (last_sync_at, sync_failures, pr_number),
+        )
+        self._conn.commit()
+
+    def get_sync_candidates(self, max_failures: int) -> list[sqlite3.Row]:
+        """Return open PRs eligible for sync, ordered oldest-synced first.
+
+        Only returns PRs with ``sync_failures < max_failures`` and
+        ``status = 'open'``.  NULLs in ``last_sync_at`` sort first
+        (never-synced PRs get priority).
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM pr_outcomes
+            WHERE status = 'open' AND sync_failures < ?
+            ORDER BY last_sync_at IS NOT NULL, last_sync_at ASC
+            """,
+            (max_failures,),
+        )
+        return cur.fetchall()
+
 
 # ---------------------------------------------------------------------------
 # GitHub interaction
@@ -195,7 +253,7 @@ def _call_gh_pr_view(pr_number: int, repo_root: Path) -> dict[str, Any]:
     result = subprocess.run(
         [
             "gh", "pr", "view", str(pr_number),
-            "--json", "state,mergedAt,closedAt,reviews,comments,statusCheckRollup,labels",
+            "--json", "state,mergedAt,closedAt,reviews,comments,statusCheckRollup,labels,mergeStateStatus",
         ],
         capture_output=True,
         text=True,
