@@ -15,7 +15,7 @@ import pytest
 
 from colonyos.cleanup import ComplexityCategory, FileComplexity
 from colonyos.config import ColonyConfig, DaemonConfig
-from colonyos.daemon import Daemon, DaemonError
+from colonyos.daemon import Daemon, DaemonError, _CombinedUI
 from colonyos.daemon_state import DaemonState, save_daemon_state
 from colonyos.models import (
     Phase,
@@ -959,6 +959,40 @@ class TestMonitorUi:
         assert isinstance(message, ToolLineMsg)
         assert message.badge_text == "[2.0]"
 
+
+class TestCombinedUi:
+    def test_secondary_call_timeout_does_not_block(self, monkeypatch: pytest.MonkeyPatch):
+        class Primary:
+            def __init__(self) -> None:
+                self.called = False
+
+            def phase_note(self, text: str) -> None:
+                self.called = True
+
+        class Secondary:
+            def __init__(self) -> None:
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def phase_note(self, text: str) -> None:
+                self.started.set()
+                self.release.wait(timeout=1.0)
+
+        primary = Primary()
+        secondary = Secondary()
+        ui = _CombinedUI(primary, secondary)
+        monkeypatch.setattr(ui, "_SECONDARY_CALL_TIMEOUT_SECONDS", 0.01)
+
+        started_at = time.monotonic()
+        ui.phase_note("review summary")
+        elapsed = time.monotonic() - started_at
+
+        assert primary.called is True
+        assert secondary.started.wait(timeout=0.2)
+        assert elapsed < 0.2
+
+        secondary.release.set()
+
     def test_daily_digest_posts_top_three(self, daemon_instance: Daemon):
         daemon_instance.daemon_config = DaemonConfig(digest_hour_utc=0)
         daemon_instance._queue_state.items = [
@@ -1532,7 +1566,7 @@ class TestNotificationLockCleanup:
 
     def test_lock_created_on_first_access(self, daemon_instance: Daemon):
         lock = daemon_instance._notification_thread_lock_for("item-1")
-        assert isinstance(lock, threading.Lock)
+        assert isinstance(lock, type(threading.Lock()))
         assert "item-1" in daemon_instance._notification_thread_locks
 
     def test_same_lock_returned_for_same_item(self, daemon_instance: Daemon):

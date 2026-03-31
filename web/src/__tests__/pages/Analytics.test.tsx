@@ -127,7 +127,6 @@ describe("Analytics page", () => {
   it("renders chart error boundary when a chart throws", async () => {
     // Mock CostChart to throw during render
     const CostChartMock = await import("../../components/CostChart");
-    const original = CostChartMock.default;
     // Replace with a component that throws
     vi.spyOn(CostChartMock, "default").mockImplementation(() => {
       throw new Error("Chart render boom");

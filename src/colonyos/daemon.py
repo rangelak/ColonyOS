@@ -71,15 +71,35 @@ class DaemonError(RuntimeError):
 class _CombinedUI:
     """Forward phase UI events to a terminal UI and a secondary mirror UI."""
 
+    _SECONDARY_CALL_TIMEOUT_SECONDS = 3.0
+
     def __init__(self, primary: Any, secondary: Any) -> None:
         self._primary = primary
         self._secondary = secondary
 
     def _secondary_call(self, method: str, *args: object, **kwargs: object) -> None:
-        try:
-            getattr(self._secondary, method)(*args, **kwargs)
-        except Exception:
-            logger.debug("Secondary UI call %s failed", method, exc_info=True)
+        done = threading.Event()
+
+        def _invoke() -> None:
+            try:
+                getattr(self._secondary, method)(*args, **kwargs)
+            except Exception:
+                logger.debug("Secondary UI call %s failed", method, exc_info=True)
+            finally:
+                done.set()
+
+        thread = threading.Thread(
+            target=_invoke,
+            name=f"secondary-ui-{method}",
+            daemon=True,
+        )
+        thread.start()
+        if not done.wait(self._SECONDARY_CALL_TIMEOUT_SECONDS):
+            logger.warning(
+                "Secondary UI call %s timed out after %.1fs; continuing without waiting",
+                method,
+                self._SECONDARY_CALL_TIMEOUT_SECONDS,
+            )
 
     def phase_header(self, *args: object, **kwargs: object) -> None:
         self._primary.phase_header(*args, **kwargs)
