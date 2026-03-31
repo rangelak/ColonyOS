@@ -4315,9 +4315,18 @@ def _watch_slack_impl(
                 emoji = "white_check_mark" if log.status == RunStatus.COMPLETED else "x"
                 for channel, thread_ts in slack_targets:
                     try:
+                        remove_reaction(client, channel, thread_ts, "eyes")  # type: ignore[arg-type]
+                    except Exception:
+                        logger.debug("Failed to remove eyes reaction", exc_info=True)
+                    try:
                         react_to_message(client, channel, thread_ts, emoji)  # type: ignore[arg-type]
                     except Exception:
                         logger.debug("Failed to add fix result reaction", exc_info=True)
+                    if log.status == RunStatus.COMPLETED:
+                        try:
+                            react_to_message(client, channel, thread_ts, "tada")  # type: ignore[arg-type]
+                        except Exception:
+                            logger.debug("Failed to add tada reaction", exc_info=True)
 
                 self._post_run_summary_to_targets(
                     client,  # type: ignore[arg-type]

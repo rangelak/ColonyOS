@@ -24,10 +24,10 @@
   - [x] 2.2 In `src/colonyos/cli.py` (~line 4050-4056), add a try/except block calling `remove_reaction(client, channel, thread_ts, "eyes")` before the existing `react_to_message()` call
   - [x] 2.3 In the same block, add a try/except for `react_to_message(client, channel, thread_ts, "tada")` after the `:white_check_mark:` reaction, gated on `log.status == RunStatus.COMPLETED`
 
-- [ ] 3.0 Add `:eyes:` removal and `:tada:` addition to fix run completion path
+- [x] 3.0 Add `:eyes:` removal and `:tada:` addition to fix run completion path
   depends_on: [1.0]
-  - [ ] 3.1 Write tests verifying the fix completion path calls `remove_reaction("eyes")` before adding the result emoji, and adds `:tada:` on success only
-  - [ ] 3.2 In `src/colonyos/cli.py` (~line 4304-4310), add the same `:eyes:` removal and `:tada:` addition pattern as task 2.0
+  - [x] 3.1 Write tests verifying the fix completion path calls `remove_reaction("eyes")` before adding the result emoji, and adds `:tada:` on success only
+  - [x] 3.2 In `src/colonyos/cli.py` (~line 4304-4310), add the same `:eyes:` removal and `:tada:` addition pattern as task 2.0
 
 - [ ] 4.0 Update existing tests and verify no regressions
   depends_on: [1.0, 2.0, 3.0]
