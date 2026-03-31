@@ -73,15 +73,15 @@
   - [x] 6.2 Rewrite `web/src/components/PhaseTimeline.tsx` — vertical connector line between phases, proportional duration bars (width relative to longest phase), Lucide icons (CheckCircle/XCircle/SkipForward) replacing unicode, expandable error details on click
   - [x] 6.3 Add visual grouping for review/fix loop iterations (indent or group repeated REVIEW+FIX phases with a loop indicator)
 
-- [ ] 7.0 Backend: Daemon-embedded server and pause/resume endpoints
+- [x] 7.0 Backend: Daemon-embedded server and pause/resume endpoints
   depends_on: []
-  - [ ] 7.1 Write pytest tests for new `/api/daemon/pause` and `/api/daemon/resume` endpoints (auth required, toggles paused state, returns updated health)
-  - [ ] 7.2 Write pytest tests for configurable CORS (respects `COLONYOS_ALLOWED_ORIGINS` env var)
-  - [ ] 7.3 Add `POST /api/daemon/pause` and `POST /api/daemon/resume` endpoints to `src/colonyos/server.py` — require write auth, toggle `DaemonState.paused`, save state, return updated health response
-  - [ ] 7.4 Add configurable CORS support in `server.py` — read `COLONYOS_ALLOWED_ORIGINS` env var (comma-separated), add to CORS middleware allow_origins
-  - [ ] 7.5 Add `--host` flag to the `colonyos serve` / `colonyos ui` CLI command (default `127.0.0.1`)
-  - [ ] 7.6 Embed uvicorn server in `src/colonyos/daemon.py` — start on a daemon thread during `Daemon.start()`, set `app.state.daemon_instance = self`, add `dashboard_port` config option under `daemon` section
-  - [ ] 7.7 Update `src/colonyos/config.py` — add `dashboard_port: int = 8741` and `dashboard_enabled: bool = True` to `DaemonConfig`
+  - [x] 7.1 Write pytest tests for new `/api/daemon/pause` and `/api/daemon/resume` endpoints (auth required, toggles paused state, returns updated health)
+  - [x] 7.2 Write pytest tests for configurable CORS (respects `COLONYOS_ALLOWED_ORIGINS` env var)
+  - [x] 7.3 Add `POST /api/daemon/pause` and `POST /api/daemon/resume` endpoints to `src/colonyos/server.py` — require write auth, toggle `DaemonState.paused`, save state, return updated health response
+  - [x] 7.4 Add configurable CORS support in `server.py` — read `COLONYOS_ALLOWED_ORIGINS` env var (comma-separated), add to CORS middleware allow_origins
+  - [x] 7.5 Add `--host` flag to the `colonyos serve` / `colonyos ui` CLI command (default `127.0.0.1`)
+  - [x] 7.6 Embed uvicorn server in `src/colonyos/daemon.py` — start on a daemon thread during `Daemon.start()`, set `app.state.daemon_instance = self`, add `dashboard_port` config option under `daemon` section
+  - [x] 7.7 Update `src/colonyos/config.py` — add `dashboard_port: int = 8741` and `dashboard_enabled: bool = True` to `DaemonConfig`
 
 - [ ] 8.0 Deployment docs and build integration
   depends_on: [7.0]
