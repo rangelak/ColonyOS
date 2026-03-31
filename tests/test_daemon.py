@@ -905,6 +905,39 @@ class TestSlackNotifications:
             for call in mock_post.call_args_list
         )
 
+    def test_ensure_notification_thread_single_intro_under_concurrency(self, daemon_instance: Daemon):
+        """Concurrent callers for the same item must not each post an intro message."""
+        daemon_instance._slack_client = MagicMock()
+        item = QueueItem(
+            id="concurrent-intro-1",
+            source_type="prompt",
+            source_value="x",
+            notification_channel="C1",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        post_calls = {"n": 0}
+        guard = threading.Lock()
+
+        def counted_post(*args: Any, **kwargs: Any) -> dict[str, str]:
+            with guard:
+                post_calls["n"] += 1
+            return {"ts": "99.0"}
+
+        def worker() -> None:
+            daemon_instance._ensure_notification_thread(item, "intro")
+
+        with patch("colonyos.slack.post_message", side_effect=counted_post):
+            threads = [threading.Thread(target=worker) for _ in range(16)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30.0)
+                assert not t.is_alive()
+
+        assert post_calls["n"] == 1
+        assert item.notification_thread_ts == "99.0"
+
 
 class TestMonitorUi:
     def test_make_monitor_ui_uses_task_badge_for_parallel_tasks(
