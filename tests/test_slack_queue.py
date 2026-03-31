@@ -278,3 +278,139 @@ def test_ensure_triage_worker_restarts_if_previous_thread_died(tmp_path: Path) -
     )
     replacement_worker.start.assert_called_once()
     assert engine._triage_worker is replacement_worker
+
+
+# ---------------------------------------------------------------------------
+# Task 2.0: Bounded retry for transient triage failures
+# ---------------------------------------------------------------------------
+
+
+def test_triage_retries_on_transient_failure_then_succeeds(tmp_path: Path) -> None:
+    """A transient TimeoutError on the first attempt should be retried and succeed."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    call_count = 0
+
+    def _triage_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise TimeoutError("LLM call timed out")
+        return TriageResult(
+            actionable=True,
+            confidence=0.9,
+            summary="Add brew install support",
+            base_branch=None,
+            reasoning="clear feature request",
+        )
+
+    with patch("colonyos.slack_queue.triage_message", side_effect=_triage_side_effect), \
+         patch("colonyos.slack_queue.time.sleep") as mock_sleep:
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="10.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    assert call_count == 2
+    mock_sleep.assert_called_once_with(3)
+    assert len(queue_state.items) == 1
+    assert watch_state.is_processed("C1", "10.0")
+
+
+def test_triage_retry_checks_shutdown_event(tmp_path: Path) -> None:
+    """If shutdown_event is set between attempts, retry should not happen."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    call_count = 0
+
+    def _triage_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        # Set shutdown after first failure
+        engine.shutdown_event.set()
+        raise TimeoutError("LLM call timed out")
+
+    with patch("colonyos.slack_queue.triage_message", side_effect=_triage_side_effect), \
+         patch("colonyos.slack_queue.time.sleep") as mock_sleep:
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="11.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    # Should only be called once — no retry because shutdown_event was set
+    assert call_count == 1
+    mock_sleep.assert_not_called()
+    assert len(queue_state.items) == 0
+
+
+def test_triage_posts_warning_after_max_retries(tmp_path: Path) -> None:
+    """After max retries exhausted, the existing error handler posts a warning."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    with patch(
+        "colonyos.slack_queue.triage_message",
+        side_effect=ConnectionError("connection refused"),
+    ), patch("colonyos.slack_queue.time.sleep"), \
+         patch("colonyos.slack_queue.post_message") as mock_post:
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="12.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    # post_message should have been called with the warning
+    mock_post.assert_called_once_with(
+        client,
+        "C1",
+        ":warning: Triage failed. Check server logs for details.",
+        thread_ts="12.0",
+    )
+    assert len(queue_state.items) == 0
+
+
+def test_triage_non_transient_error_skips_retry(tmp_path: Path) -> None:
+    """Non-transient errors (e.g., ValueError) should fail immediately without retry."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    call_count = 0
+
+    def _triage_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise ValueError("invalid input")
+
+    with patch("colonyos.slack_queue.triage_message", side_effect=_triage_side_effect), \
+         patch("colonyos.slack_queue.time.sleep") as mock_sleep, \
+         patch("colonyos.slack_queue.post_message"):
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="13.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    # Should only be called once — no retry for ValueError
+    assert call_count == 1
+    mock_sleep.assert_not_called()
+    assert len(queue_state.items) == 0

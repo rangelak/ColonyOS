@@ -18,11 +18,11 @@
   - [x] 1.2 In `slack_queue.py:257`, remove the `with self.agent_lock or nullcontext():` wrapper around the `triage_message()` call. The `triage_message()` call and its surrounding try/except should execute at the same indentation level as the rest of `_triage_and_enqueue()`, without any lock acquisition.
   - [x] 1.3 Verify existing tests pass — specifically all `test_slack_queue.py` tests and any tests that mock or reference `agent_lock`.
 
-- [ ] 2.0 Add bounded retry for transient triage failures
+- [x] 2.0 Add bounded retry for transient triage failures
   depends_on: [1.0]
-  - [ ] 2.1 Write tests: (a) Test that a transient failure (simulated timeout/API error) on first attempt succeeds on retry. (b) Test that retry checks `shutdown_event` between attempts. (c) Test that after max retries, the existing error handler runs (warning posted to Slack). (d) Test that non-transient errors (e.g., ValueError) skip retry and fail immediately.
-  - [ ] 2.2 In `_triage_and_enqueue()`, wrap the `triage_message()` call in a retry loop: max 1 retry, 3-second backoff between attempts, with `shutdown_event.is_set()` check before retry. Only retry on `Exception` subclasses that indicate transient failure (timeout, connection error, HTTP 429/5xx). Let other exceptions propagate to the existing error handler.
-  - [ ] 2.3 Import `time` module if not already imported for the `time.sleep(3)` backoff.
+  - [x] 2.1 Write tests: (a) Test that a transient failure (simulated timeout/API error) on first attempt succeeds on retry. (b) Test that retry checks `shutdown_event` between attempts. (c) Test that after max retries, the existing error handler runs (warning posted to Slack). (d) Test that non-transient errors (e.g., ValueError) skip retry and fail immediately.
+  - [x] 2.2 In `_triage_and_enqueue()`, wrap the `triage_message()` call in a retry loop: max 1 retry, 3-second backoff between attempts, with `shutdown_event.is_set()` check before retry. Only retry on `Exception` subclasses that indicate transient failure (timeout, connection error, HTTP 429/5xx). Let other exceptions propagate to the existing error handler.
+  - [x] 2.3 Import `time` module if not already imported for the `time.sleep(3)` backoff.
 
 - [ ] 3.0 Mark failed triages as processed in watch_state (prevent redelivery loops)
   depends_on: [1.0]
