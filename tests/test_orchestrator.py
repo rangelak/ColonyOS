@@ -36,6 +36,7 @@ from colonyos.orchestrator import (
     _build_thread_fix_prompt,
     _build_ceo_prompt,
     _build_run_id,
+    _inject_repo_map,
     _invoke_ui_factory,
     _load_run_log,
     _parse_learn_output,
@@ -338,6 +339,65 @@ class TestParseParentTasks:
 
     def test_empty_content(self):
         assert _parse_parent_tasks("") == []
+
+
+class TestInjectRepoMap:
+    """Tests for _inject_repo_map() — Task 5.1."""
+
+    def test_injects_when_repo_map_non_empty(self):
+        """Repo map block is appended with the ## Repository Structure header."""
+        system = "Base system prompt."
+        repo_map = "src/\n  config.py (100 lines)\n"
+        result = _inject_repo_map(system, repo_map)
+        assert "## Repository Structure" in result
+        assert "config.py (100 lines)" in result
+        # Original prompt is preserved
+        assert result.startswith("Base system prompt.")
+
+    def test_no_injection_when_empty(self):
+        """Empty repo map string produces no change to the system prompt."""
+        system = "Base system prompt."
+        result = _inject_repo_map(system, "")
+        assert result == system
+
+    def test_no_injection_when_whitespace_only(self):
+        """Whitespace-only repo map string produces no change."""
+        system = "Base system prompt."
+        result = _inject_repo_map(system, "   \n  ")
+        assert result == system
+
+    def test_repo_map_appears_after_base(self):
+        """Repo map block is appended after the base system prompt content."""
+        system = "## User Directions\n\nBe concise."
+        repo_map = "src/\n  main.py (50 lines)\n"
+        result = _inject_repo_map(system, repo_map)
+        # Header should come after user directions
+        idx_directions = result.index("User Directions")
+        idx_repo_map = result.index("Repository Structure")
+        assert idx_repo_map > idx_directions
+
+    def test_repo_map_integrated_in_plan_prompt(self):
+        """Repo map is injected into a plan prompt when enabled."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="T", description="t", stack="Python"),
+            personas=[REVIEWER_PERSONA],
+            model="test-model",
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+        )
+        system, _user = _build_plan_prompt("test", config, "prd.md", "tasks.md")
+        # Inject repo map manually (as _run_pipeline would)
+        repo_map = "src/\n  foo.py (10 lines)\n"
+        result = _inject_repo_map(system, repo_map)
+        assert "## Repository Structure" in result
+        assert "foo.py (10 lines)" in result
+
+    def test_repo_map_not_injected_when_disabled(self):
+        """When config.repo_map.enabled is False, no repo map should be generated."""
+        # This tests the pattern: callers check config.repo_map.enabled
+        # before calling generate_repo_map, passing "" when disabled
+        system = "Base prompt."
+        result = _inject_repo_map(system, "")
+        assert "Repository Structure" not in result
 
 
 class TestPersonaSlug:
