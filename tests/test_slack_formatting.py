@@ -24,6 +24,7 @@ from colonyos.orchestrator import (
     _format_fix_iteration_extra,
     _format_task_ids,
     _format_task_list_with_descriptions,
+    _truncate_slack_message,
 )
 
 try:
@@ -485,3 +486,103 @@ class TestMessageSizeCap:
         note = _format_review_round_note(results, reviewers, round_num=1, total_rounds=3)
         # Should produce output without error
         assert len(note) > 0
+
+
+# ===================================================================
+# 5.2  _truncate_slack_message
+# ===================================================================
+
+
+class TestTruncateSlackMessage:
+    """Tests for _truncate_slack_message() helper."""
+
+    def test_short_message_unchanged(self):
+        msg = "Hello world"
+        assert _truncate_slack_message(msg) == msg
+
+    def test_exactly_at_limit_unchanged(self):
+        msg = "x" * 3000
+        assert _truncate_slack_message(msg) == msg
+
+    def test_over_limit_truncated(self):
+        msg = "line1\nline2\n" + "x" * 3000
+        result = _truncate_slack_message(msg)
+        assert len(result) <= 3000
+        assert result.endswith("_(truncated)_")
+
+    def test_truncates_at_newline_boundary(self):
+        # Create a message with known newline positions
+        lines = [f"line {i}: " + "a" * 50 for i in range(100)]
+        msg = "\n".join(lines)
+        result = _truncate_slack_message(msg, max_chars=500)
+        assert len(result) <= 500
+        assert result.endswith("_(truncated)_")
+        # Should end at a newline boundary (not mid-line)
+        body = result.rsplit("\n_(truncated)_", 1)[0]
+        assert body == body  # no partial lines
+
+    def test_custom_max_chars(self):
+        msg = "short\n" + "x" * 200
+        result = _truncate_slack_message(msg, max_chars=100)
+        assert len(result) <= 100
+        assert "_(truncated)_" in result
+
+    def test_empty_string(self):
+        assert _truncate_slack_message("") == ""
+
+    def test_no_newlines_hard_cut(self):
+        msg = "x" * 4000
+        result = _truncate_slack_message(msg, max_chars=100)
+        assert len(result) <= 100
+        assert result.endswith("_(truncated)_")
+
+
+# ===================================================================
+# 5.3  Sanitization integration — verify untrusted content is escaped
+# ===================================================================
+
+
+class TestSanitizationIntegration:
+    """Verify that formatting functions sanitize untrusted content."""
+
+    def test_task_outline_escapes_mrkdwn(self):
+        """Task descriptions with Slack mrkdwn metacharacters are escaped."""
+        tasks = [("1.0", "*bold* @here injection")]
+        result = _format_task_outline_note(tasks)
+        assert "@here" not in result
+        assert "\\*bold\\*" in result
+
+    def test_task_outline_strips_xml_tags(self):
+        tasks = [("1.0", "<system>evil</system> task")]
+        result = _format_task_outline_note(tasks)
+        assert "<system>" not in result
+        assert "evil" in result
+
+    def test_implement_result_escapes_descriptions(self):
+        task_results = {
+            "1.0": {
+                "status": "COMPLETED",
+                "description": "*bold* @channel alert",
+                "cost_usd": 0.50,
+                "duration_ms": 5000,
+            }
+        }
+        result = _format_implement_result_note(
+            _make_phase_result(artifacts={"task_results": json.dumps(task_results)})
+        )
+        assert "@channel" not in result
+        assert "\\*bold\\*" in result
+
+    def test_review_findings_sanitized(self):
+        """Review findings with mrkdwn injection are sanitized."""
+        text = (
+            "VERDICT: request-changes\n"
+            "FINDINGS:\n"
+            "- [src/api.py]: *critical* @here vulnerability\n"
+        )
+        reviewers = [Persona(role="Security Engineer", expertise="sec", perspective="sec")]
+        results = [_make_review_result(result_text=text)]
+        note = _format_review_round_note(results, reviewers, round_num=1, total_rounds=3)
+        assert "@here" not in note
+        # The mrkdwn chars in findings content should be escaped
+        assert "\\*critical\\*" in note

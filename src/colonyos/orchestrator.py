@@ -56,7 +56,7 @@ from colonyos.recovery import (
     recovery_dir_path,
     write_incident_summary,
 )
-from colonyos.sanitize import sanitize_untrusted_content
+from colonyos.sanitize import sanitize_for_slack, sanitize_untrusted_content
 from colonyos.slack import is_valid_git_ref
 from colonyos.ui import (
     NullUI,
@@ -872,9 +872,10 @@ def _run_sequential_implement(
 
         ui = _make_ui()
         if ui is not None:
-            short_desc = sanitize_untrusted_content(task_desc)[:60]
-            if len(task_desc) > 60:
-                short_desc = short_desc[:57] + "..."
+            safe_desc = sanitize_for_slack(sanitize_untrusted_content(task_desc))
+            short_desc = safe_desc[:60]
+            if len(safe_desc) > 60:
+                short_desc = safe_desc[:57] + "..."
             ui.phase_header(
                 f"Implement [{task_id}] {short_desc}",
                 per_task_budget,
@@ -1317,6 +1318,24 @@ def _load_task_outline(repo_root: Path, task_rel: str) -> list[tuple[str, str]]:
     return outline
 
 
+def _truncate_slack_message(text: str, max_chars: int = 3000) -> str:
+    """Truncate a Slack message to *max_chars* at a newline boundary.
+
+    If *text* exceeds *max_chars*, it is cut at the last newline before the
+    limit and a ``_(truncated)_`` indicator is appended.  This keeps messages
+    well under Slack's 40,000-char limit while remaining scannable.
+    """
+    if len(text) <= max_chars:
+        return text
+    # Find last newline before the limit (leave room for the indicator)
+    indicator = "\n_(truncated)_"
+    cut = text.rfind("\n", 0, max_chars - len(indicator))
+    if cut <= 0:
+        # No newline found — hard cut
+        cut = max_chars - len(indicator)
+    return text[:cut] + indicator
+
+
 def _format_task_outline_note(tasks: list[tuple[str, str]]) -> str:
     """Summarize the planned task list for the implement phase.
 
@@ -1327,7 +1346,8 @@ def _format_task_outline_note(tasks: list[tuple[str, str]]) -> str:
         return ""
     lines: list[str] = [f"*Implement tasks ({len(tasks)}):*"]
     for task_id, description in tasks[:6]:
-        short = description if len(description) <= 72 else f"{description[:69]}..."
+        safe_desc = sanitize_for_slack(sanitize_untrusted_content(description))
+        short = safe_desc if len(safe_desc) <= 72 else f"{safe_desc[:69]}..."
         lines.append(f"\u2022 `{task_id}` {short}")
     if len(tasks) > 6:
         lines.append(f"+{len(tasks) - 6} more")
@@ -1384,7 +1404,7 @@ def _format_task_list_with_descriptions(
     for task_id in ordered[:max_shown]:
         info = task_results.get(task_id, {})
         desc = str(info.get("description", ""))
-        desc = sanitize_untrusted_content(desc)
+        desc = sanitize_for_slack(sanitize_untrusted_content(desc))
         if len(desc) > 72:
             desc = desc[:69] + "..."
         suffix = ""
@@ -1512,6 +1532,7 @@ def _extract_review_findings_summary(
     if findings_lines:
         truncated = []
         for f in findings_lines[:max_findings]:
+            f = sanitize_for_slack(sanitize_untrusted_content(f))
             if len(f) > max_chars:
                 truncated.append(f[: max_chars - 3] + "...")
             else:
@@ -1530,6 +1551,7 @@ def _extract_review_findings_summary(
             sentence = stripped.split(". ")[0]
             if not sentence.endswith("."):
                 sentence += "."
+            sentence = sanitize_for_slack(sanitize_untrusted_content(sentence))
             if len(sentence) > max_chars:
                 sentence = sentence[: max_chars - 3] + "..."
             return [sentence]
@@ -1538,6 +1560,7 @@ def _extract_review_findings_summary(
     for line in lines:
         stripped = line.strip()
         if stripped and not stripped.upper().startswith("VERDICT:"):
+            stripped = sanitize_for_slack(sanitize_untrusted_content(stripped))
             if len(stripped) > max_chars:
                 stripped = stripped[: max_chars - 3] + "..."
             return [stripped]
@@ -4524,7 +4547,7 @@ def _run_pipeline(
                 task_outline = _load_task_outline(repo_root, task_rel)
                 task_outline_note = _format_task_outline_note(task_outline)
                 if task_outline_note and impl_ui is not None:
-                    impl_ui.slack_note(task_outline_note)  # type: ignore[union-attr]
+                    impl_ui.slack_note(_truncate_slack_message(task_outline_note))  # type: ignore[union-attr]
             else:
                 _log("=== Phase 2: Implement ===")
 
@@ -4549,7 +4572,7 @@ def _run_pipeline(
                             f"{attempt_result.artifacts.get('parallelism_ratio', '1.0x')}"
                         )
                         if impl_ui is not None:
-                            impl_ui.slack_note(_format_implement_result_note(attempt_result))  # type: ignore[union-attr]
+                            impl_ui.slack_note(_truncate_slack_message(_format_implement_result_note(attempt_result)))  # type: ignore[union-attr]
                             if attempt_result.success:
                                 completed_tasks = int(attempt_result.artifacts.get("completed", "0"))
                                 impl_ui.phase_complete(
@@ -4583,7 +4606,7 @@ def _run_pipeline(
                             f"{attempt_result.artifacts.get('total_tasks', '?')} tasks"
                         )
                         if impl_ui is not None:
-                            impl_ui.slack_note(_format_implement_result_note(attempt_result))  # type: ignore[union-attr]
+                            impl_ui.slack_note(_truncate_slack_message(_format_implement_result_note(attempt_result)))  # type: ignore[union-attr]
                             if attempt_result.success:
                                 completed_tasks = int(attempt_result.artifacts.get("completed", "0"))
                                 impl_ui.phase_complete(
@@ -4737,11 +4760,13 @@ def _run_pipeline(
                         progress_tracker.print_summary(round_num=iteration + 1)
                     if review_header_ui is not None:
                         review_header_ui.slack_note(  # type: ignore[union-attr]
-                            _format_review_round_note(
-                                results,
-                                reviewers,
-                                round_num=iteration + 1,
-                                total_rounds=config.max_fix_iterations + 1,
+                            _truncate_slack_message(
+                                _format_review_round_note(
+                                    results,
+                                    reviewers,
+                                    round_num=iteration + 1,
+                                    total_rounds=config.max_fix_iterations + 1,
+                                )
                             )
                         )
 

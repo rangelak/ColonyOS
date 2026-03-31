@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest.mock
 
-from colonyos.sanitize import XML_TAG_RE, sanitize_ci_logs, sanitize_untrusted_content, strip_slack_links
+from colonyos.sanitize import XML_TAG_RE, sanitize_ci_logs, sanitize_for_slack, sanitize_untrusted_content, strip_slack_links
 
 
 class TestSanitizeUntrustedContent:
@@ -174,6 +174,95 @@ class TestStripSlackLinks:
             call_args = mock_debug.call_args
             assert "evil.com" in str(call_args)
             assert "click here" in str(call_args)
+
+
+class TestSanitizeForSlack:
+    """Tests for sanitize_for_slack() — Slack mrkdwn injection prevention."""
+
+    def test_escapes_bold_asterisks(self) -> None:
+        assert sanitize_for_slack("*bold*") == "\\*bold\\*"
+
+    def test_escapes_italic_underscores(self) -> None:
+        assert sanitize_for_slack("_italic_") == "\\_italic\\_"
+
+    def test_escapes_strikethrough_tildes(self) -> None:
+        assert sanitize_for_slack("~strike~") == "\\~strike\\~"
+
+    def test_escapes_inline_code_backticks(self) -> None:
+        assert sanitize_for_slack("`code`") == "\\`code\\`"
+
+    def test_neutralizes_at_here(self) -> None:
+        result = sanitize_for_slack("Hey @here check this")
+        assert "@here" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_at_channel(self) -> None:
+        result = sanitize_for_slack("Alert @channel!")
+        assert "@channel" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_at_everyone(self) -> None:
+        result = sanitize_for_slack("Hello @everyone")
+        assert "@everyone" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_slack_special_mention_here(self) -> None:
+        result = sanitize_for_slack("<!here> alert")
+        assert "<!here>" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_slack_special_mention_channel(self) -> None:
+        result = sanitize_for_slack("<!channel|channel> notice")
+        assert "<!channel" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_slack_special_mention_everyone(self) -> None:
+        result = sanitize_for_slack("<!everyone> wake up")
+        assert "<!everyone>" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_link_injection(self) -> None:
+        result = sanitize_for_slack("<https://evil.com|Click here for free money>")
+        assert "<https://evil.com|" not in result
+        assert "evil.com" in result
+        assert "Click here" in result
+
+    def test_neutralizes_bare_link(self) -> None:
+        result = sanitize_for_slack("<https://example.com>")
+        assert "<https://example.com>" not in result
+        assert "https://example.com" in result
+
+    def test_neutralizes_blockquote(self) -> None:
+        result = sanitize_for_slack("> quoted text")
+        assert result.startswith("\u200b")  # zero-width space prefix
+
+    def test_neutralizes_blockquote_multiline(self) -> None:
+        result = sanitize_for_slack("line 1\n> quoted\nline 3")
+        lines = result.split("\n")
+        assert lines[0] == "line 1"
+        assert lines[1].startswith("\u200b")
+        assert lines[2] == "line 3"
+
+    def test_preserves_plain_text(self) -> None:
+        assert sanitize_for_slack("Hello world 123") == "Hello world 123"
+
+    def test_empty_string(self) -> None:
+        assert sanitize_for_slack("") == ""
+
+    def test_combined_injection_attempt(self) -> None:
+        """A malicious task description combining multiple injection vectors."""
+        malicious = "*URGENT* @here — visit <https://evil.com|our portal> for `secrets`"
+        result = sanitize_for_slack(malicious)
+        assert "@here" not in result
+        assert "<https://evil.com|" not in result
+        # Asterisks and backticks should be escaped
+        assert "\\*URGENT\\*" in result
+        assert "\\`secrets\\`" in result
+
+    def test_case_insensitive_mentions(self) -> None:
+        result = sanitize_for_slack("@HERE and @Channel")
+        assert "@HERE" not in result
+        assert "@Channel" not in result
 
 
 class TestXmlTagRegex:

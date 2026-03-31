@@ -37,12 +37,12 @@
   - [x] 4.2 Modify `_format_review_round_note()` (line 1434) to include finding summaries for reviewers who requested changes. For each reviewer in `requested_changes`, call `_extract_review_findings_summary()` on their result text and append findings as sub-bullets. Add approved reviewer list with `:white_check_mark:` prefix and changes list with `:warning:` prefix for visual hierarchy.
   - [x] 4.3 Ensure the function signature change is backward-compatible: add `results` data to the existing parameters (results are already passed, just not used for finding extraction — the full text is in `result.artifacts["result"]`).
 
-- [ ] 5.0 Add message size safety and sanitization (FR-5)
+- [x] 5.0 Add message size safety and sanitization (FR-5)
   depends_on: [2.0, 3.0, 4.0]
-  - [ ] 5.1 Add a new `sanitize_for_slack(text: str) -> str` function in `src/colonyos/sanitize.py` that escapes Slack mrkdwn metacharacters (`*`, `_`, `~`, `` ` ``, `>` at line start) in untrusted content, and neutralizes mention injection (`@here`, `@channel`, `<!channel>`, `<!everyone>`) and link markup (`<url|text>` patterns). Add corresponding tests in `tests/test_sanitize.py`.
-  - [ ] 5.2 Add a helper `_truncate_slack_message(text: str, max_chars: int = 3000) -> str` in `orchestrator.py` that truncates messages at the nearest newline boundary before `max_chars` and appends `\n_(truncated)_` if truncated.
-  - [ ] 5.3 Apply `sanitize_for_slack()` (for user-derived descriptions) and `sanitize_untrusted_content()` (for LLM text) to all untrusted content before including in formatted messages. Ensure they're called in `_format_task_outline_note()`, `_format_implement_result_note()`, `_format_review_round_note()`, and the phase_header call at line 875.
-  - [ ] 5.4 Apply `_truncate_slack_message()` at the call sites where `impl_ui.slack_note()` and `review_header_ui.slack_note()` are invoked (lines 4396, 4421, 4455, 4608).
+  - [x] 5.1 Add a new `sanitize_for_slack(text: str) -> str` function in `src/colonyos/sanitize.py` that escapes Slack mrkdwn metacharacters (`*`, `_`, `~`, `` ` ``, `>` at line start) in untrusted content, and neutralizes mention injection (`@here`, `@channel`, `<!channel>`, `<!everyone>`) and link markup (`<url|text>` patterns). Add corresponding tests in `tests/test_sanitize.py`.
+  - [x] 5.2 Add a helper `_truncate_slack_message(text: str, max_chars: int = 3000) -> str` in `orchestrator.py` that truncates messages at the nearest newline boundary before `max_chars` and appends `\n_(truncated)_` if truncated.
+  - [x] 5.3 Apply `sanitize_for_slack()` (for user-derived descriptions) and `sanitize_untrusted_content()` (for LLM text) to all untrusted content before including in formatted messages. Ensure they're called in `_format_task_outline_note()`, `_format_implement_result_note()`, `_format_review_round_note()`, and the phase_header call at line 875.
+  - [x] 5.4 Apply `_truncate_slack_message()` at the call sites where `impl_ui.slack_note()` and `review_header_ui.slack_note()` are invoked (lines 4396, 4421, 4455, 4608).
 
 - [ ] 6.0 Integration verification and full test run
   depends_on: [1.0, 2.0, 3.0, 4.0, 5.0]
