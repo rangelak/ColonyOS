@@ -65,6 +65,10 @@ class SlackQueueEngine:
     is_budget_exceeded: Callable[[], bool]
     is_daily_budget_exceeded: Callable[[], bool]
     dry_run: bool = False
+    # NOTE: agent_lock is accepted but intentionally NOT acquired during triage.
+    # Triage (the LLM classification call) is stateless and runs lock-free so that
+    # Slack intake is never blocked by pipeline execution.  Queue mutations are
+    # guarded by state_lock.  agent_lock is retained for potential future use only.
     agent_lock: threading.Lock | None = None
     triage_queue_maxsize: int = 64
     _triage_queue: queue_module.Queue[dict[str, Any]] = field(init=False, repr=False)

@@ -35,9 +35,9 @@
   - [x] 4.2 In `_handle_event()`, after `_reserve_pending_message()` and inside the `state_lock` block, add `increment_hourly_count(self.watch_state)`. Remove the `increment_hourly_count(self.watch_state)` call from `_triage_and_enqueue()` (currently at line 355 inside the `state_lock` block).
   - [x] 4.3 Verify that `check_rate_limit()` (called at line 186 of `_handle_event`) reads the same `watch_state` field that `increment_hourly_count` writes, ensuring the eager increment is visible to subsequent rate-limit checks.
 
-- [ ] 5.0 Integration verification and cleanup
+- [x] 5.0 Integration verification and cleanup
   depends_on: [1.0, 2.0, 3.0, 4.0]
-  - [ ] 5.1 Write integration test: simulate a full flow where `agent_lock` is held (pipeline running), a Slack event arrives, and verify: (a) `:eyes:` reaction fires immediately, (b) triage completes without blocking on `agent_lock`, (c) queue item is created with correct position, (d) acknowledgment is posted to Slack.
-  - [ ] 5.2 Run the full test suite (`pytest tests/`) and confirm zero regressions.
-  - [ ] 5.3 Review `daemon.py` line 1689 where `agent_lock` is passed to `SlackQueueEngine` — add a code comment explaining that the lock is no longer used for triage serialization (kept for potential future use). Alternatively, stop passing it if no other code in `SlackQueueEngine` uses it.
-  - [ ] 5.4 Update any docstrings in `SlackQueueEngine` or `_triage_and_enqueue` that reference `agent_lock` serialization behavior.
+  - [x] 5.1 Write integration test: simulate a full flow where `agent_lock` is held (pipeline running), a Slack event arrives, and verify: (a) `:eyes:` reaction fires immediately, (b) triage completes without blocking on `agent_lock`, (c) queue item is created with correct position, (d) acknowledgment is posted to Slack.
+  - [x] 5.2 Run the full test suite (`pytest tests/`) and confirm zero regressions.
+  - [x] 5.3 Review `daemon.py` line 1689 where `agent_lock` is passed to `SlackQueueEngine` — add a code comment explaining that the lock is no longer used for triage serialization (kept for potential future use). Alternatively, stop passing it if no other code in `SlackQueueEngine` uses it.
+  - [x] 5.4 Update any docstrings in `SlackQueueEngine` or `_triage_and_enqueue` that reference `agent_lock` serialization behavior.

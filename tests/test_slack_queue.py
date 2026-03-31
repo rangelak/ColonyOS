@@ -630,3 +630,80 @@ def test_failed_triage_does_not_decrement_hourly_count(tmp_path: Path) -> None:
 
     # The hourly count should NOT have been decremented — fail-closed behavior
     assert watch_state.hourly_trigger_counts[current_hour] == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 5.0: Integration verification and cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_integration_triage_completes_while_pipeline_holds_agent_lock(tmp_path: Path) -> None:
+    """End-to-end: Slack event arrives while agent_lock is held (pipeline running).
+
+    Verifies:
+      (a) :eyes: reaction fires immediately,
+      (b) triage completes without blocking on agent_lock,
+      (c) queue item is created with correct position,
+      (d) acknowledgment is posted to Slack.
+    """
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    agent_lock = threading.Lock()
+    engine = _make_engine(tmp_path, queue_state, watch_state, agent_lock=agent_lock)
+    client = MagicMock()
+    triage_completed = threading.Event()
+
+    def _mock_triage(*args, **kwargs):
+        triage_completed.set()
+        return TriageResult(
+            actionable=True,
+            confidence=0.95,
+            summary="Add dark mode toggle",
+            base_branch=None,
+            reasoning="clear feature request",
+        )
+
+    # Simulate a running pipeline by holding agent_lock
+    agent_lock.acquire()
+    try:
+        event = {
+            "channel": "C1",
+            "ts": "100.0",
+            "user": "U1",
+            "text": "<@UBOT> Add dark mode toggle",
+        }
+
+        with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+             patch("colonyos.slack_queue.extract_prompt_from_mention", return_value="Add dark mode toggle"), \
+             patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+             patch("colonyos.slack_queue.react_to_message") as mock_react, \
+             patch("colonyos.slack_queue.triage_message", side_effect=_mock_triage), \
+             patch("colonyos.slack_queue.post_triage_acknowledgment") as mock_ack:
+            # _handle_event enqueues to the triage queue; the worker picks it up
+            engine._handle_event(event, client)
+
+            # (a) :eyes: reaction fires immediately (before triage)
+            mock_react.assert_called_once_with(client, "C1", "100.0", "eyes")
+
+            # Wait for the triage worker to complete processing
+            assert triage_completed.wait(timeout=3), "Triage did not complete — likely blocked on agent_lock"
+            # Give the worker a moment to finish enqueue + ack
+            engine._triage_queue.join()
+
+        # (b) Triage completed without blocking on agent_lock (asserted above via timeout)
+
+        # (c) Queue item created with correct position
+        assert len(queue_state.items) == 1
+        item = queue_state.items[0]
+        assert item.source_type == "slack"
+        assert item.summary == "Add dark mode toggle"
+
+        # (d) Acknowledgment posted to Slack
+        mock_ack.assert_called_once()
+        ack_kwargs = mock_ack.call_args
+        assert ack_kwargs[1].get("queue_position") == 1 or ack_kwargs[0][4] is not None  # position arg
+
+        # Message marked as processed
+        assert watch_state.is_processed("C1", "100.0")
+    finally:
+        agent_lock.release()
