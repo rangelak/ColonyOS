@@ -21,6 +21,12 @@ from colonyos.config import RepoMapConfig
 logger = logging.getLogger(__name__)
 
 # Hardcoded sensitive file patterns that are always excluded (FR-6).
+# Maximum file size (in bytes) to read for symbol extraction.  Files larger
+# than this threshold are recorded with size metadata only — no AST/regex
+# parsing — to avoid OOM on generated or vendored megafiles.
+_MAX_PARSE_SIZE: int = 1_000_000  # 1 MB
+
+# Hardcoded sensitive file patterns that are always excluded (FR-6).
 SENSITIVE_PATTERNS: tuple[str, ...] = (
     ".env",
     ".env.*",
@@ -154,6 +160,16 @@ def extract_python_symbols(file_path: Path) -> FileSymbols:
         Extracted symbols for the file.
     """
     result = FileSymbols(path=str(file_path))
+
+    # Guard against pathologically large files (e.g., generated code).
+    try:
+        file_size = file_path.stat().st_size
+    except OSError:
+        file_size = 0
+    if file_size > _MAX_PARSE_SIZE:
+        logger.info("Skipping parse of %s (%d bytes > %d limit)", file_path, file_size, _MAX_PARSE_SIZE)
+        result.size_bytes = file_size
+        return result
 
     try:
         source = file_path.read_text(encoding="utf-8")
@@ -325,6 +341,16 @@ def extract_js_ts_symbols(file_path: Path) -> FileSymbols:
         Extracted symbols for the file.
     """
     result = FileSymbols(path=str(file_path))
+
+    # Guard against pathologically large files (e.g., vendored bundles).
+    try:
+        file_size = file_path.stat().st_size
+    except OSError:
+        file_size = 0
+    if file_size > _MAX_PARSE_SIZE:
+        logger.info("Skipping parse of %s (%d bytes > %d limit)", file_path, file_size, _MAX_PARSE_SIZE)
+        result.size_bytes = file_size
+        return result
 
     try:
         source = file_path.read_text(encoding="utf-8")

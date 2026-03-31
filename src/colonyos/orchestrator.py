@@ -2237,8 +2237,6 @@ def run_ceo(
     # Inject repo map into CEO phase (FR-15: all phases).
     if config.repo_map.enabled:
         try:
-            from colonyos.repo_map import generate_repo_map
-
             ceo_repo_map_text = generate_repo_map(repo_root, config.repo_map)
             system = _inject_repo_map(system, ceo_repo_map_text)
         except Exception as exc:
@@ -4678,6 +4676,7 @@ def _run_pipeline(
                 else:
                     _log("=== Decision Gate ===")
                 system, user = _build_decision_prompt(config, prd_rel, branch_name)
+                system = _inject_repo_map(system, repo_map_text)
                 user += _drain_injected_context(user_injection_provider)
                 decision_result = run_phase_sync(
                     Phase.DECISION,

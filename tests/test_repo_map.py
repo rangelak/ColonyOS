@@ -14,6 +14,7 @@ from colonyos.repo_map import (
     FileSymbols,
     Symbol,
     SENSITIVE_PATTERNS,
+    _MAX_PARSE_SIZE,
     extract_file_symbols,
     extract_js_ts_symbols,
     extract_other_file_info,
@@ -302,6 +303,29 @@ class TestExtractPythonSymbols:
             result = extract_python_symbols(py)
         assert result.symbols == []
 
+    def test_skips_oversized_file(self, tmp_path: Path, caplog):
+        """Files larger than _MAX_PARSE_SIZE are returned with size metadata only."""
+        py = tmp_path / "huge.py"
+        # Write a file just over the limit
+        py.write_bytes(b"x" * (_MAX_PARSE_SIZE + 1))
+        with caplog.at_level(logging.INFO):
+            result = extract_python_symbols(py)
+        assert result.symbols == []
+        assert result.size_bytes == _MAX_PARSE_SIZE + 1
+        assert result.line_count == 0  # No content was parsed
+        assert "Skipping parse" in caplog.text
+
+    def test_parses_file_at_size_limit(self, tmp_path: Path):
+        """A file exactly at _MAX_PARSE_SIZE should still be parsed normally."""
+        py = tmp_path / "borderline.py"
+        # Create valid Python content right at the limit
+        content = "x = 1\n"
+        padding = "# " + "a" * (_MAX_PARSE_SIZE - len(content) - 3) + "\n"
+        py.write_text(padding + content)
+        result = extract_python_symbols(py)
+        # It should have been parsed (not skipped)
+        assert result.line_count > 0
+
     def test_varargs_and_kwargs(self, tmp_path: Path):
         py = tmp_path / "varargs.py"
         py.write_text(
@@ -476,6 +500,17 @@ class TestExtractJsTsSymbols:
             result = extract_js_ts_symbols(js)
         assert result.symbols == []
         assert "Could not read" in caplog.text
+
+    def test_skips_oversized_file(self, tmp_path: Path, caplog):
+        """JS/TS files larger than _MAX_PARSE_SIZE are returned with size metadata only."""
+        js = tmp_path / "huge.js"
+        js.write_bytes(b"x" * (_MAX_PARSE_SIZE + 1))
+        with caplog.at_level(logging.INFO):
+            result = extract_js_ts_symbols(js)
+        assert result.symbols == []
+        assert result.size_bytes == _MAX_PARSE_SIZE + 1
+        assert result.line_count == 0
+        assert "Skipping parse" in caplog.text
 
     def test_handles_encoding_error(self, tmp_path: Path, caplog):
         js = tmp_path / "binary.js"

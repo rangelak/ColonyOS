@@ -35,6 +35,7 @@ from colonyos.orchestrator import (
     _build_deliver_prompt,
     _build_thread_fix_prompt,
     _build_ceo_prompt,
+    _build_decision_prompt,
     _build_run_id,
     _inject_repo_map,
     _invoke_ui_factory,
@@ -457,6 +458,37 @@ class TestInjectRepoMapCEOPhase:
             budget=BudgetConfig(per_phase=1.0, per_run=10.0),
         )
         system, _user = _build_ceo_prompt(config, "proposal.md", Path("/tmp/test-repo"))
+        result = _inject_repo_map(system, "")
+        assert result == system
+        assert "Repository Structure" not in result
+
+
+class TestInjectRepoMapDecisionGate:
+    """Tests for repo map injection into Decision Gate phase — FR-15."""
+
+    def test_repo_map_injected_into_decision_prompt(self):
+        """Repo map should be injectable into a decision gate prompt."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="T", description="t", stack="Python"),
+            personas=[REVIEWER_PERSONA],
+            model="test-model",
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+        )
+        system, _user = _build_decision_prompt(config, "prd.md", "test-branch")
+        repo_map = "src/\n  decision.py (40 lines)\n"
+        result = _inject_repo_map(system, repo_map)
+        assert "## Repository Structure" in result
+        assert "decision.py (40 lines)" in result
+
+    def test_decision_prompt_unchanged_when_repo_map_empty(self):
+        """Decision gate prompt is unchanged when repo map is empty."""
+        config = ColonyConfig(
+            project=ProjectInfo(name="T", description="t", stack="Python"),
+            personas=[REVIEWER_PERSONA],
+            model="test-model",
+            budget=BudgetConfig(per_phase=1.0, per_run=10.0),
+        )
+        system, _user = _build_decision_prompt(config, "prd.md", "test-branch")
         result = _inject_repo_map(system, "")
         assert result == system
         assert "Repository Structure" not in result
