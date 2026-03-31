@@ -58,8 +58,8 @@ export default function CostChart({ data }: CostChartProps) {
               color: "#f3f4f6",
               fontSize: 12,
             }}
-            formatter={(value: number) => [`$${value.toFixed(4)}`, "Cost"]}
-            labelFormatter={(label: string) => `Run: ${label}`}
+            formatter={(value: unknown) => [`$${Number(value).toFixed(4)}`, "Cost"]}
+            labelFormatter={(label: unknown) => `Run: ${label}`}
           />
           <Area
             type="monotone"

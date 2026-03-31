@@ -45,9 +45,10 @@ export function PhaseCostChart({ data }: PhaseCostChartProps) {
               color: "#f3f4f6",
               fontSize: 12,
             }}
-            formatter={(value: number, name: string) => {
-              if (name === "avg_cost") return [`$${value.toFixed(4)}`, "Avg Cost"];
-              return [`$${value.toFixed(4)}`, "Total Cost"];
+            formatter={(value: unknown, name: unknown) => {
+              const v = Number(value);
+              if (name === "avg_cost") return [`$${v.toFixed(4)}`, "Avg Cost"];
+              return [`$${v.toFixed(4)}`, "Total Cost"];
             }}
           />
           <Bar dataKey="total_cost" fill="#34d399" radius={[4, 4, 0, 0]} name="total_cost" />
@@ -99,9 +100,10 @@ export function FailureHotspotsChart({ data }: FailureHotspotsChartProps) {
               color: "#f3f4f6",
               fontSize: 12,
             }}
-            formatter={(value: number, name: string) => {
-              if (name === "failure_pct") return [`${value.toFixed(1)}%`, "Failure Rate"];
-              return [value, name === "failures" ? "Failures" : "Executions"];
+            formatter={(value: unknown, name: unknown) => {
+              const v = Number(value);
+              if (name === "failure_pct") return [`${v.toFixed(1)}%`, "Failure Rate"];
+              return [v, name === "failures" ? "Failures" : "Executions"];
             }}
           />
           <Bar dataKey="failure_pct" fill="#f87171" radius={[4, 4, 0, 0]} name="failure_pct" />

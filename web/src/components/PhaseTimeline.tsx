@@ -65,11 +65,13 @@ function groupEntries(entries: PhaseTimelineEntry[]): TimelineItem[] {
   });
 
   // Flush remaining loop group
-  if (currentLoop) {
-    if (currentLoop.entries.length >= 2) {
-      items.push(currentLoop);
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- TS narrows incorrectly after forEach
+  const remaining = currentLoop as LoopGroup | null;
+  if (remaining) {
+    if (remaining.entries.length >= 2) {
+      items.push(remaining);
     } else {
-      for (const e of currentLoop.entries) {
+      for (const e of remaining.entries) {
         items.push({ kind: "single", entry: e.entry, originalIndex: e.originalIndex });
       }
     }
