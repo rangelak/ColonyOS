@@ -15,6 +15,7 @@ from colonyos.config import (
     PhasesConfig,
     PRSyncConfig,
     RecoveryConfig,
+    RepoMapConfig,
     RetryConfig,
     RouterConfig,
     SlackConfig,
@@ -1577,6 +1578,108 @@ class TestDashboardWriteEnabledConfig:
         save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.daemon.dashboard_write_enabled is True
+
+
+class TestRepoMapConfig:
+    """Tests for repo_map configuration section."""
+
+    def test_default_values(self) -> None:
+        cfg = RepoMapConfig()
+        assert cfg.enabled is True
+        assert cfg.max_tokens == 4000
+        assert cfg.max_files == 2000
+        assert cfg.include_patterns == []
+        assert cfg.exclude_patterns == []
+
+    def test_defaults_when_no_config(self, tmp_repo: Path) -> None:
+        config = load_config(tmp_repo)
+        assert config.repo_map.enabled is True
+        assert config.repo_map.max_tokens == 4000
+        assert config.repo_map.max_files == 2000
+        assert config.repo_map.include_patterns == []
+        assert config.repo_map.exclude_patterns == []
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "repo_map": {
+                    "enabled": False,
+                    "max_tokens": 8000,
+                    "max_files": 500,
+                    "include_patterns": ["src/**/*.py"],
+                    "exclude_patterns": ["tests/**"],
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.repo_map.enabled is False
+        assert config.repo_map.max_tokens == 8000
+        assert config.repo_map.max_files == 500
+        assert config.repo_map.include_patterns == ["src/**/*.py"]
+        assert config.repo_map.exclude_patterns == ["tests/**"]
+
+    def test_partial_yaml_uses_defaults(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"repo_map": {"max_tokens": 6000}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.repo_map.enabled is True
+        assert config.repo_map.max_tokens == 6000
+        assert config.repo_map.max_files == 2000
+        assert config.repo_map.include_patterns == []
+
+    def test_validation_max_tokens_positive(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"repo_map": {"max_tokens": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="max_tokens must be positive"):
+            load_config(tmp_repo)
+
+    def test_validation_max_files_positive(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"repo_map": {"max_files": -1}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="max_files must be positive"):
+            load_config(tmp_repo)
+
+    def test_roundtrip(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            repo_map=RepoMapConfig(
+                enabled=False,
+                max_tokens=8000,
+                max_files=500,
+                include_patterns=["src/**/*.py"],
+                exclude_patterns=["tests/**"],
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.repo_map.enabled is False
+        assert loaded.repo_map.max_tokens == 8000
+        assert loaded.repo_map.max_files == 500
+        assert loaded.repo_map.include_patterns == ["src/**/*.py"]
+        assert loaded.repo_map.exclude_patterns == ["tests/**"]
+
+    def test_save_omits_when_defaults(self, tmp_repo: Path) -> None:
+        """save_config should not serialize repo_map when all values are defaults."""
+        original = ColonyConfig()
+        save_config(tmp_repo, original)
+        raw = yaml.safe_load(
+            (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert "repo_map" not in raw
 
 
 class TestPRSyncConfig:

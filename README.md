@@ -308,6 +308,9 @@ flowchart TD
 | `colonyos show RUN_ID` | Detailed single-run inspection |
 | `colonyos show RUN_ID --json` | Machine-readable JSON output |
 | `colonyos show RUN_ID --phase NAME` | Inspect a specific phase within a run |
+| `colonyos map` | Print a structural summary (repo map) of the codebase |
+| `colonyos map --max-tokens N` | Limit repo map output to N tokens |
+| `colonyos map --prompt "text"` | Rank files by relevance to the given prompt |
 
 ### Codebase maintenance
 

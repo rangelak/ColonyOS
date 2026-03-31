@@ -1724,6 +1724,9 @@ class Daemon:
                 is_budget_exceeded=self._check_budget_exceeded,
                 is_daily_budget_exceeded=self._check_daily_budget_exceeded,
                 dry_run=self.dry_run,
+                # agent_lock is passed for potential future use (e.g., multi-worker
+                # triage serialization) but is NOT acquired during triage — triage
+                # runs lock-free so Slack intake is never blocked by pipeline execution.
                 agent_lock=self._agent_lock,
             )
             logger.info("Slack listener thread started")
