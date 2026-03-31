@@ -872,8 +872,11 @@ def _run_sequential_implement(
 
         ui = _make_ui()
         if ui is not None:
+            short_desc = sanitize_untrusted_content(task_desc)[:60]
+            if len(task_desc) > 60:
+                short_desc = short_desc[:57] + "..."
             ui.phase_header(
-                f"Implement [{task_id}]",
+                f"Implement [{task_id}] {short_desc}",
                 per_task_budget,
                 config.get_model(Phase.IMPLEMENT),
                 branch_name,
@@ -1365,6 +1368,41 @@ def _format_task_ids(task_ids: list[str]) -> str:
     return ", ".join(f"`{task_id}`" for task_id in ordered)
 
 
+def _format_task_list_with_descriptions(
+    task_ids: list[str],
+    task_results: dict[str, dict[str, object]],
+    *,
+    max_shown: int = 6,
+) -> str:
+    """Format task IDs with descriptions as bullet points.
+
+    Each line is ``• `{id}` {description}`` with optional cost/duration suffix.
+    Shows up to *max_shown* tasks with ``+N more`` overflow.
+    """
+    ordered = sorted(task_ids, key=_task_sort_key)
+    lines: list[str] = []
+    for task_id in ordered[:max_shown]:
+        info = task_results.get(task_id, {})
+        desc = str(info.get("description", ""))
+        desc = sanitize_untrusted_content(desc)
+        if len(desc) > 72:
+            desc = desc[:69] + "..."
+        suffix = ""
+        cost = info.get("cost_usd")
+        dur = info.get("duration_ms")
+        if cost is not None and dur is not None:
+            try:
+                secs = int(dur) // 1000
+                suffix = f" — ${float(cost):.2f}, {secs}s"
+            except (ValueError, TypeError):
+                pass
+        line = f"• `{task_id}` {desc}{suffix}" if desc else f"• `{task_id}`{suffix}"
+        lines.append(line)
+    if len(ordered) > max_shown:
+        lines.append(f"+{len(ordered) - max_shown} more")
+    return "\n".join(lines)
+
+
 def _format_implement_result_note(result: PhaseResult) -> str:
     """Summarize completed/failed/blocked task IDs for a finished implement phase."""
     task_results = _parse_task_results_artifact(result.artifacts.get("task_results"))
@@ -1391,14 +1429,17 @@ def _format_implement_result_note(result: PhaseResult) -> str:
         )
 
     parts: list[str] = [
-        f"Task results: {len(completed)} completed, {len(failed)} failed, {len(blocked)} blocked."
+        f"*Task results:* {len(completed)} completed, {len(failed)} failed, {len(blocked)} blocked."
     ]
     if completed:
-        parts.append(f"Completed: {_format_task_ids(completed)}")
+        parts.append(":white_check_mark: *Completed:*")
+        parts.append(_format_task_list_with_descriptions(completed, task_results))
     if failed:
-        parts.append(f"Failed: {_format_task_ids(failed)}")
+        parts.append(":x: *Failed:*")
+        parts.append(_format_task_list_with_descriptions(failed, task_results))
     if blocked:
-        parts.append(f"Blocked: {_format_task_ids(blocked)}")
+        parts.append(":no_entry_sign: *Blocked:*")
+        parts.append(_format_task_list_with_descriptions(blocked, task_results))
     return "\n".join(parts)
 
 

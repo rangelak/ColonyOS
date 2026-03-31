@@ -23,6 +23,7 @@ from colonyos.orchestrator import (
     _format_review_round_note,
     _format_fix_iteration_extra,
     _format_task_ids,
+    _format_task_list_with_descriptions,
 )
 
 try:
@@ -167,7 +168,6 @@ class TestFormatImplementResultNote:
         assert "1 failed" in result
         assert "0 blocked" in result
 
-    @pytest.mark.xfail(reason="Descriptions not yet included in output (task 3.0)", strict=True)
     def test_descriptions_appear_in_output(self):
         """Task descriptions from task_results should appear in the output."""
         task_results = {
@@ -180,7 +180,6 @@ class TestFormatImplementResultNote:
         assert "Frontend dependencies" in result
         assert "Daemon health banner" in result
 
-    @pytest.mark.xfail(reason="Cost/duration not yet included in output (task 3.0)", strict=True)
     def test_cost_and_duration_shown(self):
         """Cost and duration data should appear in output when available."""
         task_results = {
@@ -197,7 +196,6 @@ class TestFormatImplementResultNote:
         assert "$0.58" in result
         assert "142s" in result
 
-    @pytest.mark.xfail(reason="Bullet formatting not yet implemented (task 3.0)", strict=True)
     def test_uses_bullet_format(self):
         """Output should use bullet-point format for task listing."""
         task_results = {
@@ -208,6 +206,87 @@ class TestFormatImplementResultNote:
             _make_phase_result(artifacts={"task_results": json.dumps(task_results)})
         )
         assert "\u2022" in result  # bullet character
+
+    def test_overflow_with_more_than_six_tasks(self):
+        """Only first 6 tasks shown per category, +N more for the rest."""
+        task_results = {
+            f"{i}.0": {"status": "COMPLETED", "description": f"Task {i}"}
+            for i in range(1, 10)
+        }
+        result = _format_implement_result_note(
+            _make_phase_result(artifacts={"task_results": json.dumps(task_results)})
+        )
+        assert "+3 more" in result
+        # First 6 should be present
+        for i in range(1, 7):
+            assert f"`{i}.0`" in result
+        # 7-9 should NOT be shown individually
+        assert "`7.0`" not in result
+
+    def test_description_truncation_at_72_chars(self):
+        """Descriptions longer than 72 chars should be truncated."""
+        task_results = {
+            "1.0": {"status": "COMPLETED", "description": "A" * 100},
+        }
+        result = _format_implement_result_note(
+            _make_phase_result(artifacts={"task_results": json.dumps(task_results)})
+        )
+        assert "A" * 100 not in result
+        assert "..." in result
+
+
+# ===================================================================
+# 3.3  _format_task_list_with_descriptions helper
+# ===================================================================
+
+
+class TestFormatTaskListWithDescriptions:
+    """Tests for the _format_task_list_with_descriptions() helper."""
+
+    def test_basic_output(self):
+        task_results = {
+            "1.0": {"status": "COMPLETED", "description": "Setup frontend", "cost_usd": 0.58, "duration_ms": 142000},
+        }
+        result = _format_task_list_with_descriptions(["1.0"], task_results)
+        assert "`1.0`" in result
+        assert "Setup frontend" in result
+        assert "$0.58" in result
+        assert "142s" in result
+
+    def test_no_cost_duration(self):
+        task_results = {
+            "1.0": {"status": "COMPLETED", "description": "Setup frontend"},
+        }
+        result = _format_task_list_with_descriptions(["1.0"], task_results)
+        assert "`1.0`" in result
+        assert "Setup frontend" in result
+        assert "$" not in result
+
+    def test_empty_list(self):
+        result = _format_task_list_with_descriptions([], {})
+        assert result == ""
+
+    def test_overflow(self):
+        task_results = {
+            f"{i}.0": {"status": "COMPLETED", "description": f"Task {i}"}
+            for i in range(1, 10)
+        }
+        result = _format_task_list_with_descriptions(
+            [f"{i}.0" for i in range(1, 10)], task_results, max_shown=6
+        )
+        assert "+3 more" in result
+
+    def test_sorted_order(self):
+        task_results = {
+            "3.0": {"description": "Third"},
+            "1.0": {"description": "First"},
+            "2.0": {"description": "Second"},
+        }
+        result = _format_task_list_with_descriptions(["3.0", "1.0", "2.0"], task_results)
+        lines = result.strip().split("\n")
+        assert "`1.0`" in lines[0]
+        assert "`2.0`" in lines[1]
+        assert "`3.0`" in lines[2]
 
 
 # ===================================================================

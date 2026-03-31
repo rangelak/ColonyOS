@@ -25,11 +25,11 @@
   - [x] 2.1 Modify `_format_task_outline_note()` in `orchestrator.py` (line 1317) to output newline-separated bullet points with `•` prefix instead of `"; ".join()`. Add bold header `*Implement tasks (N):*` on its own line. Keep 72-char truncation and `+N more` overflow.
   - [x] 2.2 Run existing tests to verify no regressions.
 
-- [ ] 3.0 Include task descriptions in completion and result messages (FR-1, FR-3)
+- [x] 3.0 Include task descriptions in completion and result messages (FR-1, FR-3)
   depends_on: []
-  - [ ] 3.1 Modify the `phase_header` call at orchestrator.py line 875 to include the truncated task description: `f"Implement [{task_id}] {short_desc}"` where `short_desc` is the description truncated to 60 chars. Apply `sanitize_untrusted_content()` to the description.
-  - [ ] 3.2 Modify `_format_implement_result_note()` (line 1364) to include task descriptions from `task_results` artifacts. For each completed/failed/blocked task, show `• \`{task_id}\` {description}` with optional `— ${cost:.2f}, {secs}s` suffix for tasks that have cost/duration. Use `•` bullets and newlines. Cap at 6 tasks per category with `+N more`.
-  - [ ] 3.3 Modify `_format_task_ids()` (line 1359) or create a new `_format_task_ids_with_descriptions()` helper that accepts a `task_results` dict and renders task IDs with descriptions.
+  - [x] 3.1 Modify the `phase_header` call at orchestrator.py line 875 to include the truncated task description: `f"Implement [{task_id}] {short_desc}"` where `short_desc` is the description truncated to 60 chars. Apply `sanitize_untrusted_content()` to the description.
+  - [x] 3.2 Modify `_format_implement_result_note()` (line 1364) to include task descriptions from `task_results` artifacts. For each completed/failed/blocked task, show `• \`{task_id}\` {description}` with optional `— ${cost:.2f}, {secs}s` suffix for tasks that have cost/duration. Use `•` bullets and newlines. Cap at 6 tasks per category with `+N more`.
+  - [x] 3.3 Modify `_format_task_ids()` (line 1359) or create a new `_format_task_ids_with_descriptions()` helper that accepts a `task_results` dict and renders task IDs with descriptions.
 
 - [ ] 4.0 Add review finding summaries to review round messages (FR-4)
   depends_on: []
