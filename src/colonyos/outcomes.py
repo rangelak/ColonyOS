@@ -94,7 +94,7 @@ class OutcomeStore:
         self._migrate_sync_columns()
 
     def _migrate_sync_columns(self) -> None:
-        """Add last_sync_at and sync_failures columns if missing (idempotent)."""
+        """Add sync-related columns if missing (idempotent)."""
         cur = self._conn.cursor()
         cur.execute("PRAGMA table_info(pr_outcomes)")
         existing = {row[1] for row in cur.fetchall()}
@@ -103,6 +103,10 @@ class OutcomeStore:
         if "sync_failures" not in existing:
             cur.execute(
                 "ALTER TABLE pr_outcomes ADD COLUMN sync_failures INTEGER DEFAULT 0"
+            )
+        if "merge_state_status" not in existing:
+            cur.execute(
+                "ALTER TABLE pr_outcomes ADD COLUMN merge_state_status TEXT"
             )
         self._conn.commit()
 
@@ -159,6 +163,7 @@ class OutcomeStore:
         ci_passed: Optional[bool] = None,
         labels: Optional[str] = None,
         close_context: Optional[str] = None,
+        merge_state_status: Optional[str] = None,
     ) -> None:
         """Update an existing outcome record.
 
@@ -187,6 +192,9 @@ class OutcomeStore:
         if close_context is not None:
             sets.append("close_context = ?")
             params.append(close_context)
+        if merge_state_status is not None:
+            sets.append("merge_state_status = ?")
+            params.append(merge_state_status)
 
         params.append(pr_number)
         self._conn.execute(
@@ -235,6 +243,33 @@ class OutcomeStore:
             (max_failures,),
         )
         return cur.fetchall()
+
+    def get_sync_failures(self, pr_number: int) -> int:
+        """Return the current ``sync_failures`` count for a single PR.
+
+        Returns ``0`` if the PR is not tracked or the column is NULL.
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT sync_failures FROM pr_outcomes WHERE pr_number = ?",
+            (pr_number,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return 0
+        return row["sync_failures"] or 0
+
+    def get_merge_state_status(self, pr_number: int) -> str | None:
+        """Return the cached ``merge_state_status`` for a PR, or None."""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT merge_state_status FROM pr_outcomes WHERE pr_number = ?",
+            (pr_number,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return row["merge_state_status"]
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +387,8 @@ def poll_outcomes(repo_root: Path) -> None:
 
             state = data.get("state", "OPEN").upper()
 
+            merge_state = data.get("mergeStateStatus")
+
             if state == "MERGED":
                 review_count = len(data.get("reviews") or []) + len(data.get("comments") or [])
                 store.update_outcome(
@@ -361,6 +398,7 @@ def poll_outcomes(repo_root: Path) -> None:
                     review_comment_count=review_count,
                     ci_passed=_extract_ci_passed(data),
                     labels=_extract_labels(data),
+                    merge_state_status=merge_state,
                 )
             elif state == "CLOSED":
                 review_count = len(data.get("reviews") or []) + len(data.get("comments") or [])
@@ -373,6 +411,7 @@ def poll_outcomes(repo_root: Path) -> None:
                     ci_passed=_extract_ci_passed(data),
                     labels=_extract_labels(data),
                     close_context=close_context,
+                    merge_state_status=merge_state,
                 )
                 # Capture reviewer feedback as a FAILURE memory entry so the
                 # pipeline can learn from rejected PRs.  Only stored when there
@@ -397,13 +436,14 @@ def poll_outcomes(repo_root: Path) -> None:
                             exc_info=True,
                         )
             else:
-                # Still open — just update last_polled_at
+                # Still open — update last_polled_at and merge state
                 store.update_outcome(
                     pr_number=pr_number,
                     status="open",
                     review_comment_count=len(data.get("reviews") or []) + len(data.get("comments") or []),
                     ci_passed=_extract_ci_passed(data),
                     labels=_extract_labels(data),
+                    merge_state_status=merge_state,
                 )
     finally:
         store.close()

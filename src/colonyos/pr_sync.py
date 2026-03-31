@@ -11,7 +11,6 @@ safe to call repeatedly — each invocation processes at most 1 PR.
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 from datetime import datetime, timezone
@@ -21,11 +20,15 @@ from typing import Any, Callable, Sequence
 from colonyos.config import ColonyConfig
 from colonyos.github import post_pr_comment
 from colonyos.outcomes import OutcomeStore
+from colonyos.worktree import WorktreeManager
 
 logger = logging.getLogger(__name__)
 
 # mergeStateStatus values that indicate the branch needs syncing.
 _STALE_STATES = {"BEHIND", "DIRTY"}
+
+# Timeout (seconds) for the git merge subprocess.
+_MERGE_TIMEOUT_SECONDS = 120
 
 
 def sync_stale_prs(
@@ -74,92 +77,68 @@ def sync_stale_prs(
             if branch:
                 running_branches.add(branch)
 
-    # Get sync candidates from OutcomeStore
+    # Single OutcomeStore connection for the entire operation
     store = OutcomeStore(repo_root)
     try:
         candidates = store.get_sync_candidates(pr_sync_cfg.max_sync_failures)
+        branch_prefix = config.branch_prefix
+
+        for candidate in candidates:
+            branch_name = candidate["branch_name"]
+            pr_number = candidate["pr_number"]
+
+            # Filter: only colonyos/ branches
+            if not branch_name.startswith(branch_prefix):
+                logger.debug(
+                    "Skipping PR #%d — branch %s does not match prefix %s",
+                    pr_number, branch_name, branch_prefix,
+                )
+                continue
+
+            # Filter: skip branches with running queue items
+            if branch_name in running_branches:
+                logger.debug(
+                    "Skipping PR #%d — branch %s has a RUNNING queue item",
+                    pr_number, branch_name,
+                )
+                continue
+
+            # Read cached merge state from OutcomeStore (populated by outcome polling)
+            merge_state = store.get_merge_state_status(pr_number)
+            if merge_state is None:
+                # No cached data yet — skip until next outcome poll populates it
+                logger.debug(
+                    "Skipping PR #%d — no cached mergeStateStatus yet",
+                    pr_number,
+                )
+                continue
+
+            if merge_state not in _STALE_STATES:
+                logger.debug(
+                    "Skipping PR #%d — mergeStateStatus=%s (not stale)",
+                    pr_number, merge_state,
+                )
+                continue
+
+            # Found a candidate — sync it and return (1 per invocation)
+            logger.info(
+                "Syncing PR #%d (branch=%s, mergeStateStatus=%s)",
+                pr_number, branch_name, merge_state,
+            )
+            success = _sync_single_pr(
+                repo_root=repo_root,
+                pr_number=pr_number,
+                branch_name=branch_name,
+                max_sync_failures=pr_sync_cfg.max_sync_failures,
+                post_slack_fn=post_slack_fn,
+                store=store,
+            )
+            return success
+
+        # No candidate found
+        return None
     finally:
         store.close()
-
-    branch_prefix = config.branch_prefix
-
-    for candidate in candidates:
-        branch_name = candidate["branch_name"]
-        pr_number = candidate["pr_number"]
-
-        # Filter: only colonyos/ branches
-        if not branch_name.startswith(branch_prefix):
-            logger.debug(
-                "Skipping PR #%d — branch %s does not match prefix %s",
-                pr_number, branch_name, branch_prefix,
-            )
-            continue
-
-        # Filter: skip branches with running queue items
-        if branch_name in running_branches:
-            logger.debug(
-                "Skipping PR #%d — branch %s has a RUNNING queue item",
-                pr_number, branch_name,
-            )
-            continue
-
-        # Check merge state via GitHub API
-        merge_state = _check_merge_state(repo_root, pr_number)
-        if merge_state not in _STALE_STATES:
-            logger.debug(
-                "Skipping PR #%d — mergeStateStatus=%s (not stale)",
-                pr_number, merge_state,
-            )
-            continue
-
-        # Found a candidate — sync it and return (1 per invocation)
-        logger.info(
-            "Syncing PR #%d (branch=%s, mergeStateStatus=%s)",
-            pr_number, branch_name, merge_state,
-        )
-        success = _sync_single_pr(
-            repo_root=repo_root,
-            pr_number=pr_number,
-            branch_name=branch_name,
-            post_slack_fn=post_slack_fn,
-        )
-        return success
-
-    # No candidate found
-    return None
-
-
-def _check_merge_state(repo_root: Path, pr_number: int) -> str:
-    """Query GitHub for the PR's ``mergeStateStatus``.
-
-    Returns the status string (e.g. ``"BEHIND"``, ``"CLEAN"``) or
-    ``"UNKNOWN"`` on any error.
-    """
-    try:
-        result = subprocess.run(
-            [
-                "gh", "pr", "view", str(pr_number),
-                "--json", "mergeStateStatus",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            cwd=str(repo_root),
-        )
-        if result.returncode != 0:
-            logger.warning(
-                "gh pr view failed for PR #%d: %s",
-                pr_number, result.stderr.strip(),
-            )
-            return "UNKNOWN"
-        data = json.loads(result.stdout)
-        return data.get("mergeStateStatus", "UNKNOWN")
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
-        logger.warning("Failed to check merge state for PR #%d: %s", pr_number, exc)
-        return "UNKNOWN"
-    except FileNotFoundError:
-        logger.warning("gh CLI not found — cannot check merge state")
-        return "UNKNOWN"
 
 
 def _sync_single_pr(
@@ -167,21 +146,20 @@ def _sync_single_pr(
     repo_root: Path,
     pr_number: int,
     branch_name: str,
+    max_sync_failures: int,
     post_slack_fn: Callable[[str], None],
+    store: OutcomeStore,
 ) -> bool:
     """Merge ``origin/main`` into a single PR branch.
 
-    Performs the merge in an ephemeral worktree to avoid corrupting the
-    main working tree.
+    Performs the merge in an ephemeral worktree (via :class:`WorktreeManager`)
+    to avoid corrupting the main working tree.
 
     Returns ``True`` on success, ``False`` on conflict or error.
     """
     now_iso = datetime.now(timezone.utc).isoformat()
-    store = OutcomeStore(repo_root)
-
-    # Sanitise branch name for use as a worktree task-id
     task_id = f"pr-sync-{pr_number}"
-    worktree_path = repo_root / ".colonyos" / "worktrees" / f"task-{task_id}"
+    wt_manager = WorktreeManager(repo_root)
 
     try:
         # 1. Fetch latest main and the PR branch
@@ -191,22 +169,19 @@ def _sync_single_pr(
         # 2. Get pre-sync HEAD
         pre_sha = _get_rev(repo_root, f"origin/{branch_name}")
 
-        # 3. Create ephemeral worktree on the PR branch
-        _run_git(
-            repo_root,
-            ["git", "worktree", "add", str(worktree_path), f"origin/{branch_name}", "--detach"],
-            "create worktree",
-        )
+        # 3. Create ephemeral worktree via WorktreeManager
+        worktree_path = wt_manager.create_detached_worktree(task_id, f"origin/{branch_name}")
 
         # 4. Check out the branch in the worktree (so push updates the ref)
         _run_git(worktree_path, ["git", "checkout", branch_name], "checkout branch in worktree")
 
-        # 5. Attempt merge
+        # 5. Attempt merge (with timeout to prevent hanging)
         merge_result = subprocess.run(
             ["git", "merge", "origin/main", "--no-edit"],
             cwd=str(worktree_path),
             capture_output=True,
             text=True,
+            timeout=_MERGE_TIMEOUT_SECONDS,
         )
 
         if merge_result.returncode != 0:
@@ -214,8 +189,8 @@ def _sync_single_pr(
             conflict_files = _get_conflict_files(worktree_path)
             _run_git(worktree_path, ["git", "merge", "--abort"], "merge --abort")
 
-            # Update failure tracking
-            current_failures = _get_current_failures(store, pr_number)
+            # Update failure tracking (direct query, no full-table scan)
+            current_failures = store.get_sync_failures(pr_number)
             new_failures = current_failures + 1
             store.update_sync_status(pr_number, now_iso, new_failures)
 
@@ -243,6 +218,29 @@ def _sync_single_pr(
             )
             post_pr_comment(repo_root, pr_number, comment_body)
 
+            # FR-10: Escalation notification when max failures reached
+            if new_failures >= max_sync_failures:
+                escalation_msg = (
+                    f":rotating_light: PR #{pr_number} (`{branch_name}`) has reached "
+                    f"the maximum sync failure limit ({max_sync_failures}). "
+                    f"No further automatic sync attempts will be made. "
+                    f"Manual intervention is required to resolve merge conflicts."
+                )
+                try:
+                    post_slack_fn(escalation_msg)
+                except Exception:
+                    logger.warning(
+                        "Failed to post escalation notification for PR #%d",
+                        pr_number, exc_info=True,
+                    )
+                escalation_comment = (
+                    f"## :rotating_light: ColonyOS Sync Escalation\n\n"
+                    f"This PR has failed to sync with `main` **{max_sync_failures} times**. "
+                    f"Automatic sync attempts have been **suspended**.\n\n"
+                    f"Please resolve the merge conflicts manually."
+                )
+                post_pr_comment(repo_root, pr_number, escalation_comment)
+
             logger.warning(
                 "PR #%d sync failed — merge conflict (files: %s, failure #%d)",
                 pr_number, conflict_list, new_failures,
@@ -269,25 +267,18 @@ def _sync_single_pr(
 
         # Best-effort failure tracking
         try:
-            current_failures = _get_current_failures(store, pr_number)
+            current_failures = store.get_sync_failures(pr_number)
             store.update_sync_status(pr_number, now_iso, current_failures + 1)
         except Exception:
             logger.debug("Could not update sync failure count for PR #%d", pr_number)
 
         return False
     finally:
-        # Always tear down the worktree
+        # Always tear down the worktree via WorktreeManager
         try:
-            subprocess.run(
-                ["git", "worktree", "remove", str(worktree_path), "--force"],
-                cwd=str(repo_root),
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            wt_manager.cleanup_worktree(task_id)
         except Exception:
             logger.debug("Worktree cleanup failed for task %s", task_id)
-        store.close()
 
 
 # ---------------------------------------------------------------------------
@@ -327,15 +318,3 @@ def _get_conflict_files(worktree_path: Path) -> list[str]:
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip().splitlines()
     return []
-
-
-def _get_current_failures(store: OutcomeStore, pr_number: int) -> int:
-    """Read current sync_failures count for a PR."""
-    try:
-        rows = store.get_sync_candidates(999999)
-        for row in rows:
-            if row["pr_number"] == pr_number:
-                return row["sync_failures"]
-    except Exception:
-        pass
-    return 0

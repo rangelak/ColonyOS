@@ -594,8 +594,8 @@ class Daemon:
             and not self._pipeline_running
             and now - self._last_pr_sync_time >= pr_sync_cfg.interval_minutes * 60
         ):
-            self._sync_stale_prs()
-            self._last_pr_sync_time = now
+            if self._sync_stale_prs():
+                self._last_pr_sync_time = now
 
     # ------------------------------------------------------------------
     # Queue execution
@@ -1084,12 +1084,15 @@ class Daemon:
         except Exception:
             logger.warning("Error polling PR outcomes", exc_info=True)
 
-    def _sync_stale_prs(self) -> None:
+    def _sync_stale_prs(self) -> bool:
         """Sync a stale ColonyOS PR with main (concern #7).
 
         Wraps :func:`~colonyos.pr_sync.sync_stale_prs` in try/except so
         a failure never crashes the daemon.  Follows the same pattern as
         :meth:`_poll_pr_outcomes`.
+
+        Returns ``True`` if the call completed without exception (regardless
+        of whether a sync was performed), ``False`` on exception.
         """
         try:
             from colonyos.pr_sync import sync_stale_prs
@@ -1102,8 +1105,10 @@ class Daemon:
                 write_enabled=self.daemon_config.dashboard_write_enabled,
             )
             logger.debug("PR sync check completed")
+            return True
         except Exception:
             logger.warning("Error during PR sync", exc_info=True)
+            return False
 
     # ------------------------------------------------------------------
     # CEO Idle-Fill (FR-4)
