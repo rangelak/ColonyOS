@@ -112,6 +112,11 @@ DEFAULTS = {
         "dashboard_enabled": True,
         "dashboard_port": 8741,
         "dashboard_write_enabled": False,
+        "pr_sync": {
+            "enabled": False,
+            "interval_minutes": 60,
+            "max_sync_failures": 3,
+        },
     },
 }
 
@@ -257,6 +262,15 @@ class SlackConfig:
 
 
 @dataclass
+class PRSyncConfig:
+    """Configuration for automatic PR sync with main."""
+
+    enabled: bool = False
+    interval_minutes: int = 60
+    max_sync_failures: int = 3
+
+
+@dataclass
 class DaemonConfig:
     """Configuration for daemon mode (FR-12)."""
 
@@ -278,6 +292,7 @@ class DaemonConfig:
     dashboard_enabled: bool = True
     dashboard_port: int = 8741
     dashboard_write_enabled: bool = False
+    pr_sync: PRSyncConfig = field(default_factory=PRSyncConfig)
 
 
 @dataclass
@@ -713,6 +728,28 @@ def _parse_recovery_config(raw: dict) -> RecoveryConfig:
     )
 
 
+def _parse_pr_sync_config(raw: dict) -> PRSyncConfig:
+    """Parse the ``pr_sync`` section from the daemon config."""
+    if not raw:
+        return PRSyncConfig()
+    d = DEFAULTS["daemon"]["pr_sync"]
+    interval_minutes = int(raw.get("interval_minutes", d["interval_minutes"]))
+    if interval_minutes < 1:
+        raise ValueError(
+            f"pr_sync.interval_minutes must be >= 1, got {interval_minutes}"
+        )
+    max_sync_failures = int(raw.get("max_sync_failures", d["max_sync_failures"]))
+    if max_sync_failures < 1:
+        raise ValueError(
+            f"pr_sync.max_sync_failures must be >= 1, got {max_sync_failures}"
+        )
+    return PRSyncConfig(
+        enabled=bool(raw.get("enabled", d["enabled"])),
+        interval_minutes=interval_minutes,
+        max_sync_failures=max_sync_failures,
+    )
+
+
 def _parse_daemon_config(raw: dict) -> DaemonConfig:
     """Parse the ``daemon`` section from config.yaml."""
     if not raw:
@@ -809,6 +846,7 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
         dashboard_enabled=bool(raw.get("dashboard_enabled", True)),
         dashboard_port=int(raw.get("dashboard_port", 8741)),
         dashboard_write_enabled=bool(raw.get("dashboard_write_enabled", False)),
+        pr_sync=_parse_pr_sync_config(raw.get("pr_sync", {})),
     )
 
 
@@ -1172,8 +1210,11 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         or config.daemon.dashboard_enabled != daemon_defaults.get("dashboard_enabled", True)
         or config.daemon.dashboard_port != daemon_defaults.get("dashboard_port", 8741)
         or config.daemon.dashboard_write_enabled != daemon_defaults.get("dashboard_write_enabled", False)
+        or config.daemon.pr_sync.enabled != daemon_defaults["pr_sync"]["enabled"]
+        or config.daemon.pr_sync.interval_minutes != daemon_defaults["pr_sync"]["interval_minutes"]
+        or config.daemon.pr_sync.max_sync_failures != daemon_defaults["pr_sync"]["max_sync_failures"]
     ):
-        data["daemon"] = {
+        daemon_data: dict[str, Any] = {
             "daily_budget_usd": config.daemon.daily_budget_usd,
             "github_poll_interval_seconds": config.daemon.github_poll_interval_seconds,
             "ceo_cooldown_minutes": config.daemon.ceo_cooldown_minutes,
@@ -1192,7 +1233,13 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "dashboard_enabled": config.daemon.dashboard_enabled,
             "dashboard_port": config.daemon.dashboard_port,
             "dashboard_write_enabled": config.daemon.dashboard_write_enabled,
+            "pr_sync": {
+                "enabled": config.daemon.pr_sync.enabled,
+                "interval_minutes": config.daemon.pr_sync.interval_minutes,
+                "max_sync_failures": config.daemon.pr_sync.max_sync_failures,
+            },
         }
+        data["daemon"] = daemon_data
 
     if not config.directions_auto_update:
         data["directions_auto_update"] = False

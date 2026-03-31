@@ -12,6 +12,28 @@ Decouples Slack message triage from the pipeline execution lock so that incoming
 **PRD:** `cOS_prds/20260331_150608_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
 **Tasks:** `cOS_tasks/20260331_150608_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
 
+## 20260331_140000 — Daemon PR Sync: Keep ColonyOS PRs Up-to-Date with Main
+
+Adds a new daemon concern that automatically detects open ColonyOS-authored PRs that have fallen behind `main`, merges the latest `main` into those branches via isolated worktrees, and pushes the result — keeping PRs perpetually merge-ready. Conflict failures are reported via Slack and PR comments with automatic retry capping.
+
+**Created:**
+- `src/colonyos/pr_sync.py` — Core sync logic: detection, worktree-based merge, failure tracking, and notifications
+- `src/colonyos/worktree.py` — Ephemeral worktree manager for isolated git operations
+- `tests/test_pr_sync.py` — Comprehensive unit/integration tests for PR sync
+- `tests/test_config.py` — Config tests for new `pr_sync` section
+- `tests/test_github.py` — Tests for `post_pr_comment()` helper
+- `tests/test_outcomes.py` — Tests for new sync tracking columns
+
+**Modified:**
+- `src/colonyos/config.py` — Added `PRSyncConfig` with `enabled`, `interval_minutes`, `max_sync_failures`
+- `src/colonyos/daemon.py` — Wired PR sync into daemon tick loop as concern #7
+- `src/colonyos/github.py` — Added `post_pr_comment()` helper
+- `src/colonyos/outcomes.py` — Added `last_sync_at`, `sync_failures`, `mergeStateStatus` columns
+- `README.md` — Documentation for PR sync feature
+
+**PRD:** `cOS_prds/20260331_131622_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260331_131622_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260330_193500 — Homebrew Global Installation & VM-Ready Deployment
 
 Adds a working Homebrew distribution channel (`brew install rangelak/colonyos/colonyos`) and a single-command VM provisioning script for Ubuntu 22.04+. The release workflow now auto-updates the tap formula on every tagged release, and `colonyos doctor` detects the install method to show correct upgrade instructions.
