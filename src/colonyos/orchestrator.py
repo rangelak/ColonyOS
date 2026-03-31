@@ -1318,7 +1318,21 @@ def _load_task_outline(repo_root: Path, task_rel: str) -> list[tuple[str, str]]:
     return outline
 
 
-def _truncate_slack_message(text: str, max_chars: int = 3000) -> str:
+# ---------------------------------------------------------------------------
+# Slack formatting constants
+# ---------------------------------------------------------------------------
+# Maximum character length for Slack thread notes.  Keeps messages well under
+# Slack's 40,000-char limit while remaining scannable.
+_SLACK_MAX_CHARS = 3000
+# Maximum visible tasks / task descriptions shown before ``+N more`` overflow.
+_SLACK_MAX_SHOWN_TASKS = 6
+# Maximum length for a single task description line (truncated with ``...``).
+_SLACK_TASK_DESC_MAX = 72
+# Maximum length for a single review finding summary line.
+_SLACK_FINDING_MAX = 80
+
+
+def _truncate_slack_message(text: str, max_chars: int = _SLACK_MAX_CHARS) -> str:
     """Truncate a Slack message to *max_chars* at a newline boundary.
 
     If *text* exceeds *max_chars*, it is cut at the last newline before the
@@ -1345,12 +1359,12 @@ def _format_task_outline_note(tasks: list[tuple[str, str]]) -> str:
     if not tasks:
         return ""
     lines: list[str] = [f"*Implement tasks ({len(tasks)}):*"]
-    for task_id, description in tasks[:6]:
+    for task_id, description in tasks[:_SLACK_MAX_SHOWN_TASKS]:
         safe_desc = sanitize_for_slack(sanitize_untrusted_content(description))
-        short = safe_desc if len(safe_desc) <= 72 else f"{safe_desc[:69]}..."
+        short = safe_desc if len(safe_desc) <= _SLACK_TASK_DESC_MAX else f"{safe_desc[:_SLACK_TASK_DESC_MAX - 3]}..."
         lines.append(f"\u2022 `{task_id}` {short}")
-    if len(tasks) > 6:
-        lines.append(f"+{len(tasks) - 6} more")
+    if len(tasks) > _SLACK_MAX_SHOWN_TASKS:
+        lines.append(f"+{len(tasks) - _SLACK_MAX_SHOWN_TASKS} more")
     return _truncate_slack_message("\n".join(lines))
 
 
@@ -1392,7 +1406,7 @@ def _format_task_list_with_descriptions(
     task_ids: list[str],
     task_results: dict[str, dict[str, object]],
     *,
-    max_shown: int = 6,
+    max_shown: int = _SLACK_MAX_SHOWN_TASKS,
 ) -> str:
     """Format task IDs with descriptions as bullet points.
 
@@ -1405,8 +1419,8 @@ def _format_task_list_with_descriptions(
         info = task_results.get(task_id, {})
         desc = str(info.get("description", ""))
         desc = sanitize_for_slack(sanitize_untrusted_content(desc))
-        if len(desc) > 72:
-            desc = desc[:69] + "..."
+        if len(desc) > _SLACK_TASK_DESC_MAX:
+            desc = desc[:_SLACK_TASK_DESC_MAX - 3] + "..."
         suffix = ""
         cost = info.get("cost_usd")
         dur = info.get("duration_ms")
@@ -1504,7 +1518,7 @@ def _reviewer_reference(index: int, role: str) -> str:
 def _extract_review_findings_summary(
     text: str,
     max_findings: int = 2,
-    max_chars: int = 80,
+    max_chars: int = _SLACK_FINDING_MAX,
 ) -> list[str]:
     """Extract a condensed list of findings from review result text.
 
@@ -4561,7 +4575,7 @@ def _run_pipeline(
                 task_outline = _load_task_outline(repo_root, task_rel)
                 task_outline_note = _format_task_outline_note(task_outline)
                 if task_outline_note and impl_ui is not None:
-                    impl_ui.slack_note(_truncate_slack_message(task_outline_note))  # type: ignore[union-attr]
+                    impl_ui.slack_note(task_outline_note)  # type: ignore[union-attr]
             else:
                 _log("=== Phase 2: Implement ===")
 
@@ -4586,7 +4600,7 @@ def _run_pipeline(
                             f"{attempt_result.artifacts.get('parallelism_ratio', '1.0x')}"
                         )
                         if impl_ui is not None:
-                            impl_ui.slack_note(_truncate_slack_message(_format_implement_result_note(attempt_result)))  # type: ignore[union-attr]
+                            impl_ui.slack_note(_format_implement_result_note(attempt_result))  # type: ignore[union-attr]
                             if attempt_result.success:
                                 completed_tasks = int(attempt_result.artifacts.get("completed", "0"))
                                 impl_ui.phase_complete(
@@ -4620,7 +4634,7 @@ def _run_pipeline(
                             f"{attempt_result.artifacts.get('total_tasks', '?')} tasks"
                         )
                         if impl_ui is not None:
-                            impl_ui.slack_note(_truncate_slack_message(_format_implement_result_note(attempt_result)))  # type: ignore[union-attr]
+                            impl_ui.slack_note(_format_implement_result_note(attempt_result))  # type: ignore[union-attr]
                             if attempt_result.success:
                                 completed_tasks = int(attempt_result.artifacts.get("completed", "0"))
                                 impl_ui.phase_complete(
@@ -4774,13 +4788,11 @@ def _run_pipeline(
                         progress_tracker.print_summary(round_num=iteration + 1)
                     if review_header_ui is not None:
                         review_header_ui.slack_note(  # type: ignore[union-attr]
-                            _truncate_slack_message(
-                                _format_review_round_note(
-                                    results,
-                                    reviewers,
-                                    round_num=iteration + 1,
-                                    total_rounds=config.max_fix_iterations + 1,
-                                )
+                            _format_review_round_note(
+                                results,
+                                reviewers,
+                                round_num=iteration + 1,
+                                total_rounds=config.max_fix_iterations + 1,
                             )
                         )
 

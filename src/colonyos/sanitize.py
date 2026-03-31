@@ -94,7 +94,7 @@ _SLACK_LINK_INJECTION_RE = re.compile(r"<([a-zA-Z][a-zA-Z0-9+.-]*://[^|>]+|mailt
 def sanitize_for_slack(text: str) -> str:
     """Escape Slack mrkdwn metacharacters and neutralize injection in untrusted content.
 
-    Applies three sanitization passes:
+    Applies four sanitization passes:
     1. Neutralize Slack link markup (``<url|text>`` → ``url - text``)
     2. Escape mrkdwn formatting characters (``*``, ``_``, ``~``, `` ` ``)
     3. Neutralize mention injection (``@here``, ``@channel``, ``<!everyone>``, etc.)

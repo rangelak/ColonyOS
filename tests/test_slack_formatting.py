@@ -25,6 +25,10 @@ from colonyos.orchestrator import (
     _format_task_ids,
     _format_task_list_with_descriptions,
     _truncate_slack_message,
+    _SLACK_MAX_CHARS,
+    _SLACK_MAX_SHOWN_TASKS,
+    _SLACK_TASK_DESC_MAX,
+    _SLACK_FINDING_MAX,
 )
 
 try:
@@ -600,3 +604,41 @@ class TestSanitizationIntegration:
         assert "@here" not in note
         # The mrkdwn chars in findings content should be escaped
         assert "\\*critical\\*" in note
+
+
+class TestSlackFormattingConstants:
+    """Verify named constants have sensible values and are used by formatters."""
+
+    def test_constants_are_positive_integers(self):
+        assert isinstance(_SLACK_MAX_CHARS, int) and _SLACK_MAX_CHARS > 0
+        assert isinstance(_SLACK_MAX_SHOWN_TASKS, int) and _SLACK_MAX_SHOWN_TASKS > 0
+        assert isinstance(_SLACK_TASK_DESC_MAX, int) and _SLACK_TASK_DESC_MAX > 0
+        assert isinstance(_SLACK_FINDING_MAX, int) and _SLACK_FINDING_MAX > 0
+
+    def test_truncate_uses_max_chars_constant(self):
+        """_truncate_slack_message default aligns with _SLACK_MAX_CHARS."""
+        long_text = "\n".join([f"line {i}" for i in range(_SLACK_MAX_CHARS)])
+        result = _truncate_slack_message(long_text)
+        assert len(result) <= _SLACK_MAX_CHARS
+
+    def test_task_outline_respects_max_shown_tasks(self):
+        """Only _SLACK_MAX_SHOWN_TASKS tasks appear before overflow line."""
+        n = _SLACK_MAX_SHOWN_TASKS + 5
+        tasks = [(f"{i}.0", f"Task {i}") for i in range(1, n + 1)]
+        result = _format_task_outline_note(tasks)
+        # Count bullet lines
+        bullet_lines = [l for l in result.splitlines() if l.startswith("\u2022")]
+        assert len(bullet_lines) == _SLACK_MAX_SHOWN_TASKS
+        assert f"+{n - _SLACK_MAX_SHOWN_TASKS} more" in result
+
+    def test_task_desc_truncation_at_constant(self):
+        """Descriptions longer than _SLACK_TASK_DESC_MAX are truncated."""
+        long_desc = "a" * (_SLACK_TASK_DESC_MAX + 20)
+        tasks = [("1.0", long_desc)]
+        result = _format_task_outline_note(tasks)
+        # The bullet line should contain the truncated desc ending with ...
+        bullet = [l for l in result.splitlines() if l.startswith("\u2022")][0]
+        # Extract description portion after task ID
+        desc_part = bullet.split("` ", 1)[1]
+        assert desc_part.endswith("...")
+        assert len(desc_part) <= _SLACK_TASK_DESC_MAX
