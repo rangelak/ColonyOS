@@ -196,6 +196,7 @@ class SlackQueueEngine:
                     logger.debug("Failed to post rate-limit message", exc_info=True)
                 return
             self._reserve_pending_message(channel, ts)
+            increment_hourly_count(self.watch_state)
 
         if self.dry_run:
             with self.state_lock:
@@ -384,7 +385,6 @@ class SlackQueueEngine:
                 ts,
                 (merged_item.id if merged_item else queue_item.id),  # type: ignore[union-attr]
             )
-            increment_hourly_count(self.watch_state)
             self.watch_state.runs_triggered += 1
             self.persist_queue()
             self.persist_watch_state()

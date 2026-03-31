@@ -498,3 +498,135 @@ def test_triage_error_message_rejected_by_handle_event(tmp_path: Path) -> None:
     # The message should NOT have been enqueued
     assert engine._triage_queue.qsize() == 0
     mock_ensure.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Task 4.0: Move increment_hourly_count to reservation time (close TOCTOU gap)
+# ---------------------------------------------------------------------------
+
+
+def test_increment_hourly_count_called_during_handle_event(tmp_path: Path) -> None:
+    """increment_hourly_count fires at reservation time (_handle_event), not during triage."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+    event = {
+        "channel": "C1",
+        "ts": "30.0",
+        "user": "U1",
+        "text": "<@UBOT> Add brew installation support",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.extract_prompt_from_mention", return_value="Add brew installation support"), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch("colonyos.slack_queue.increment_hourly_count") as mock_increment, \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message"):
+        engine._handle_event(event, client)
+
+    # increment_hourly_count should be called once during _handle_event
+    mock_increment.assert_called_once_with(watch_state)
+
+
+def test_increment_hourly_count_not_called_during_triage(tmp_path: Path) -> None:
+    """increment_hourly_count must NOT be called during _triage_and_enqueue."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    with patch(
+        "colonyos.slack_queue.triage_message",
+        return_value=TriageResult(
+            actionable=True,
+            confidence=0.95,
+            summary="Add brew install support",
+            base_branch=None,
+            reasoning="clear feature request",
+        ),
+    ), patch("colonyos.slack_queue.increment_hourly_count") as mock_increment:
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="31.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    # increment_hourly_count should NOT be called by _triage_and_enqueue
+    mock_increment.assert_not_called()
+
+
+def test_eager_increment_makes_rate_limit_reject_burst(tmp_path: Path) -> None:
+    """When hourly count is incremented eagerly, subsequent messages hit the rate limit."""
+    from colonyos.config import SlackConfig as SC
+
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    config = ColonyConfig(slack=SlackConfig(enabled=True, channels=["C1"], auto_approve=True, max_runs_per_hour=1))
+    engine = SlackQueueEngine(
+        repo_root=tmp_path,
+        config=config,
+        queue_state=queue_state,
+        watch_state=watch_state,
+        state_lock=threading.Lock(),
+        shutdown_event=threading.Event(),
+        bot_user_id="UBOT",
+        slack_client_ready=threading.Event(),
+        publish_client=lambda client: None,
+        persist_queue=lambda: None,
+        persist_watch_state=lambda: None,
+        is_time_exceeded=lambda: False,
+        is_budget_exceeded=lambda: False,
+        is_daily_budget_exceeded=lambda: False,
+    )
+    client = MagicMock()
+
+    event1 = {"channel": "C1", "ts": "40.0", "user": "U1", "text": "<@UBOT> first request"}
+    event2 = {"channel": "C1", "ts": "41.0", "user": "U2", "text": "<@UBOT> second request"}
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.extract_prompt_from_mention", side_effect=lambda t, _: t.replace("<@UBOT> ", "")), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message"), \
+         patch("colonyos.slack_queue.post_message") as mock_post:
+        # First message: accepted, count goes to 1
+        engine._handle_event(event1, client)
+        # Second message: should be rate-limited since max_runs_per_hour=1
+        engine._handle_event(event2, client)
+
+    # Only the first message should be in the triage queue
+    assert engine._triage_queue.qsize() == 1
+    # Second message should have triggered a rate-limit warning
+    mock_post.assert_called_once()
+    args = mock_post.call_args
+    assert "Rate limit" in args[0][2]
+
+
+def test_failed_triage_does_not_decrement_hourly_count(tmp_path: Path) -> None:
+    """A message that fails triage should NOT decrement the hourly count (fail-closed)."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    # Simulate the eager increment that _handle_event would have done
+    current_hour = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+    watch_state.hourly_trigger_counts[current_hour] = 1
+
+    with patch(
+        "colonyos.slack_queue.triage_message",
+        side_effect=ValueError("bad input"),
+    ), patch("colonyos.slack_queue.post_message"):
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="50.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    # The hourly count should NOT have been decremented — fail-closed behavior
+    assert watch_state.hourly_trigger_counts[current_hour] == 1

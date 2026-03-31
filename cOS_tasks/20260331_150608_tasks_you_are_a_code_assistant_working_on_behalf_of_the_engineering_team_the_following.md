@@ -29,11 +29,11 @@
   - [x] 3.1 Write tests: (a) Test that when triage fails (after retries), `watch_state.mark_processed(channel, ts, "triage-error")` is called. (b) Test that a message previously marked `"triage-error"` is rejected by `_handle_event()` via the existing `is_processed` check.
   - [x] 3.2 In `_triage_and_enqueue()`, in the `except Exception` block (after the retry logic from task 2.0), add `with self.state_lock: self.watch_state.mark_processed(channel, ts, "triage-error"); self.persist_watch_state()` before the `return` statement. This ensures Slack redeliveries of the same message are rejected.
 
-- [ ] 4.0 Move `increment_hourly_count` to message reservation time (close TOCTOU gap)
+- [x] 4.0 Move `increment_hourly_count` to message reservation time (close TOCTOU gap)
   depends_on: [1.0]
-  - [ ] 4.1 Write tests: (a) Test that `increment_hourly_count` is called during `_handle_event()` (at reservation time) rather than during `_triage_and_enqueue()`. (b) Test that `check_rate_limit` correctly rejects messages when hourly count is incremented eagerly. (c) Test that a message that fails triage does NOT decrement the hourly count (fail-closed behavior).
-  - [ ] 4.2 In `_handle_event()`, after `_reserve_pending_message()` and inside the `state_lock` block, add `increment_hourly_count(self.watch_state)`. Remove the `increment_hourly_count(self.watch_state)` call from `_triage_and_enqueue()` (currently at line 355 inside the `state_lock` block).
-  - [ ] 4.3 Verify that `check_rate_limit()` (called at line 186 of `_handle_event`) reads the same `watch_state` field that `increment_hourly_count` writes, ensuring the eager increment is visible to subsequent rate-limit checks.
+  - [x] 4.1 Write tests: (a) Test that `increment_hourly_count` is called during `_handle_event()` (at reservation time) rather than during `_triage_and_enqueue()`. (b) Test that `check_rate_limit` correctly rejects messages when hourly count is incremented eagerly. (c) Test that a message that fails triage does NOT decrement the hourly count (fail-closed behavior).
+  - [x] 4.2 In `_handle_event()`, after `_reserve_pending_message()` and inside the `state_lock` block, add `increment_hourly_count(self.watch_state)`. Remove the `increment_hourly_count(self.watch_state)` call from `_triage_and_enqueue()` (currently at line 355 inside the `state_lock` block).
+  - [x] 4.3 Verify that `check_rate_limit()` (called at line 186 of `_handle_event`) reads the same `watch_state` field that `increment_hourly_count` writes, ensuring the eager increment is visible to subsequent rate-limit checks.
 
 - [ ] 5.0 Integration verification and cleanup
   depends_on: [1.0, 2.0, 3.0, 4.0]
