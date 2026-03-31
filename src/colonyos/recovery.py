@@ -27,13 +27,19 @@ def incident_slug(prefix: str) -> str:
     return f"{timestamp}_{cleaned[:40]}"
 
 
-def _git(repo_root: Path, *args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
+_DEFAULT_GIT_TIMEOUT = 30
+
+
+def _git(
+    repo_root: Path, *args: str, check: bool = False, timeout: int | None = _DEFAULT_GIT_TIMEOUT,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
         cwd=repo_root,
         capture_output=True,
         text=True,
         check=check,
+        timeout=timeout,
     )
 
 
@@ -173,3 +179,161 @@ def create_branch(repo_root: Path, branch_name: str) -> None:
     result = _git(repo_root, "checkout", "-b", branch_name)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"git checkout -b {branch_name} failed")
+
+
+_PROTECTED_BRANCHES = frozenset({"main", "master"})
+
+_LOGGER = __import__("logging").getLogger(__name__)
+
+_SAFETY_STASH_PREFIXES = ("colonyos-safety", "colonyos-branch-restore")
+_MAX_SAFETY_STASHES = 5
+
+
+def _prune_old_safety_stashes(repo_root: Path) -> None:
+    """Drop old ColonyOS safety stashes beyond ``_MAX_SAFETY_STASHES``.
+
+    Stash indices are 0-based with 0 being the newest.  We keep the
+    ``_MAX_SAFETY_STASHES`` most recent safety stashes and drop the rest,
+    iterating from highest index to lowest so that drops don't shift the
+    indices of entries we still need to process.
+
+    Best-effort: failures are silently ignored.
+    """
+    try:
+        result = _git(repo_root, "stash", "list")
+        if result.returncode != 0 or not result.stdout.strip():
+            return
+
+        safety_indices: list[int] = []
+        for line in result.stdout.strip().splitlines():
+            if any(prefix in line for prefix in _SAFETY_STASH_PREFIXES):
+                try:
+                    idx = int(line.split("@{", 1)[1].split("}", 1)[0])
+                    safety_indices.append(idx)
+                except (IndexError, ValueError):
+                    continue
+
+        if len(safety_indices) <= _MAX_SAFETY_STASHES:
+            return
+
+        safety_indices.sort()
+        to_drop = safety_indices[_MAX_SAFETY_STASHES:]
+        for idx in sorted(to_drop, reverse=True):
+            _git(repo_root, "stash", "drop", f"stash@{{{idx}}}")
+        _LOGGER.debug(
+            "Pruned %d old safety stash(es)", len(to_drop),
+        )
+    except Exception:
+        pass
+
+
+def safety_commit_partial_work(
+    repo_root: Path,
+    *,
+    context_lines: list[str] | None = None,
+) -> str | None:
+    """Commit or stash dirty working-tree state after a failed pipeline run.
+
+    On feature branches the changes are committed (preserving partial work
+    on the branch for later inspection or ``--resume``).  On protected
+    branches (main/master) the changes are stashed instead.
+
+    Uses ``--no-verify`` and a generous timeout to avoid the exact failure
+    mode that caused the original issue (pre-commit hooks timing out).
+
+    Returns a short description of what was done, or ``None`` if the tree
+    was already clean.  Never raises — all errors are logged and swallowed
+    so this cannot mask the original pipeline failure.
+    """
+    try:
+        status = _git(repo_root, "status", "--porcelain")
+        dirty = status.stdout.strip()
+        if not dirty:
+            return None
+
+        branch_result = _git(repo_root, "rev-parse", "--abbrev-ref", "HEAD")
+        current_branch = branch_result.stdout.strip() or "UNKNOWN"
+
+        # Detached HEAD or protected branches: stash instead of committing.
+        # On detached HEAD, a commit would be unreachable (effectively lost).
+        should_stash = (
+            current_branch in _PROTECTED_BRANCHES
+            or current_branch in ("HEAD", "UNKNOWN")
+        )
+
+        if should_stash:
+            stash_msg = f"colonyos-safety-stash-{current_branch}"
+            _git(repo_root, "stash", "push", "--include-untracked", "-m", stash_msg, timeout=60)
+            desc = f"Stashed dirty state on {current_branch} ({stash_msg})"
+            _LOGGER.info(desc)
+            return desc
+
+        lines = ["WIP: preserving partial work after pipeline failure", ""]
+        if context_lines:
+            lines.extend(context_lines)
+            lines.append("")
+        lines.append("Automatic safety commit by ColonyOS.")
+        lines.append("Preserves partial work and keeps the tree clean")
+        lines.append("for subsequent pipeline runs.")
+        msg = "\n".join(lines)
+
+        _git(repo_root, "add", "-A", timeout=60)
+        commit = _git(repo_root, "commit", "--no-verify", "-m", msg, timeout=120)
+
+        if commit.returncode == 0:
+            desc = f"Safety-committed partial work on {current_branch}"
+            _LOGGER.info(desc)
+            return desc
+
+        # Commit failed (e.g. empty after add, or hook error despite
+        # --no-verify).  Reset the index to undo the add, then stash.
+        _git(repo_root, "reset", "HEAD", timeout=30)
+        stash_msg = f"colonyos-safety-{current_branch}"
+        _git(repo_root, "stash", "push", "--include-untracked", "-m", stash_msg, timeout=60)
+        desc = f"Commit failed, stashed on {current_branch} ({stash_msg})"
+        _LOGGER.warning(desc)
+        return desc
+    except Exception:
+        _LOGGER.warning("safety_commit_partial_work failed", exc_info=True)
+        return None
+    finally:
+        _prune_old_safety_stashes(repo_root)
+
+
+def restore_to_branch(repo_root: Path, target_branch: str) -> str | None:
+    """Ensure the repo is on *target_branch*, cleaning up if necessary.
+
+    Intended for daemon use: after a pipeline run (success or failure) the
+    daemon should be back on the default branch ready for the next item.
+
+    Returns a description of what was done, or ``None`` if already there.
+    Never raises.
+    """
+    try:
+        branch_result = _git(repo_root, "rev-parse", "--abbrev-ref", "HEAD")
+        current = branch_result.stdout.strip()
+        if current == target_branch:
+            return None
+
+        status = _git(repo_root, "status", "--porcelain")
+        if status.stdout.strip():
+            safe_label = current if current not in ("HEAD", "") else "detached"
+            stash_msg = f"colonyos-branch-restore-{safe_label}"
+            _git(repo_root, "stash", "push", "--include-untracked", "-m", stash_msg, timeout=60)
+            _LOGGER.info("Stashed leftover dirty state before restoring to %s", target_branch)
+
+        checkout = _git(repo_root, "checkout", target_branch)
+        if checkout.returncode != 0:
+            _LOGGER.warning(
+                "Failed to checkout %s: %s", target_branch, checkout.stderr.strip()
+            )
+            return None
+
+        desc = f"Restored to {target_branch} (was on {current})"
+        _LOGGER.info(desc)
+        return desc
+    except Exception:
+        _LOGGER.warning("restore_to_branch failed", exc_info=True)
+        return None
+    finally:
+        _prune_old_safety_stashes(repo_root)
