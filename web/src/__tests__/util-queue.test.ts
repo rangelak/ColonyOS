@@ -1,11 +1,68 @@
 import { describe, it, expect } from "vitest";
 import {
+  capitalize,
   queueStatusColor,
   queueStatusBg,
   queueStatusIcon,
   healthStatusColor,
   healthStatusDot,
+  sourceTypeBg,
+  sourceTypeLabel,
 } from "../util";
+
+describe("capitalize", () => {
+  it("capitalizes a lowercase string", () => {
+    expect(capitalize("healthy")).toBe("Healthy");
+  });
+
+  it("returns already-capitalized string unchanged", () => {
+    expect(capitalize("Running")).toBe("Running");
+  });
+
+  it("handles empty string", () => {
+    expect(capitalize("")).toBe("");
+  });
+
+  it("handles single character", () => {
+    expect(capitalize("a")).toBe("A");
+  });
+});
+
+describe("sourceTypeBg", () => {
+  it("returns blue for issue", () => {
+    expect(sourceTypeBg("issue")).toContain("blue");
+  });
+
+  it("returns purple for slack", () => {
+    expect(sourceTypeBg("slack")).toContain("purple");
+  });
+
+  it("returns default gray for null", () => {
+    expect(sourceTypeBg(null)).toContain("gray");
+  });
+
+  it("returns default gray for unknown type", () => {
+    expect(sourceTypeBg("unknown")).toContain("gray");
+  });
+});
+
+describe("sourceTypeLabel", () => {
+  it("returns Issue for issue", () => {
+    expect(sourceTypeLabel("issue")).toBe("Issue");
+  });
+
+  it("returns Slack Fix for slack_fix", () => {
+    expect(sourceTypeLabel("slack_fix")).toBe("Slack Fix");
+  });
+
+  it("returns raw value for unknown type", () => {
+    expect(sourceTypeLabel("custom")).toBe("custom");
+  });
+
+  it("returns Unknown for null", () => {
+    expect(sourceTypeLabel(null)).toBe("Unknown");
+  });
+});
 
 describe("queueStatusColor", () => {
   it("returns yellow for pending", () => {

@@ -5,13 +5,9 @@ import type { RunLog, StatsResult, DaemonHealth, QueueState } from "../types";
 import StatsPanel from "../components/StatsPanel";
 import RunList from "../components/RunList";
 import RunLauncher from "../components/RunLauncher";
-import { healthStatusDot } from "../util";
+import { capitalize, healthStatusDot } from "../util";
 
 const POLL_INTERVAL_MS = 5000;
-
-function capitalize(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
 
 function HealthSummaryCard({ health }: { health: DaemonHealth }) {
   const totalBudget = health.daily_spend_usd + health.daily_budget_remaining_usd;

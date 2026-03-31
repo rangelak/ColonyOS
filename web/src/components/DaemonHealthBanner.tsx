@@ -1,13 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { fetchDaemonHealth, fetchHealth, pauseDaemon, resumeDaemon } from "../api";
-import { healthStatusDot } from "../util";
+import { capitalize, healthStatusDot } from "../util";
 import type { DaemonHealth } from "../types";
 
 const POLL_INTERVAL_MS = 5000;
-
-function capitalize(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
 
 export default function DaemonHealthBanner() {
   const [health, setHealth] = useState<DaemonHealth | null>(null);

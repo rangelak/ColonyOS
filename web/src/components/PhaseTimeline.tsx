@@ -212,23 +212,33 @@ export default function PhaseTimeline({
     });
   };
 
+  // Pre-compute visible index for each item to avoid mutable counters during render
+  const { totalVisible, visibleIndexMap } = useMemo(() => {
+    const indexMap = new Map<string, number>();
+    let idx = 0;
+    for (let groupIdx = 0; groupIdx < groupedItems.length; groupIdx++) {
+      const item = groupedItems[groupIdx];
+      if (item.kind === "single") {
+        indexMap.set(`single-${item.originalIndex}`, idx++);
+      } else {
+        for (let loopIdx = 0; loopIdx < item.entries.length; loopIdx++) {
+          indexMap.set(`loop-${groupIdx}-${loopIdx}`, idx++);
+        }
+      }
+    }
+    return { totalVisible: idx, visibleIndexMap: indexMap };
+  }, [groupedItems]);
+
   if (entries.length === 0) {
     return <p className="text-gray-500 text-sm">No phases recorded.</p>;
   }
-
-  // Count total visible items for connector logic
-  let visibleIndex = 0;
-  const totalVisible = groupedItems.reduce(
-    (acc, item) => acc + (item.kind === "loop" ? item.entries.length : 1),
-    0,
-  );
 
   return (
     <div className="space-y-0">
       {groupedItems.map((item, groupIdx) => {
         if (item.kind === "single") {
-          const isLast = visibleIndex === totalVisible - 1;
-          const row = (
+          const vi = visibleIndexMap.get(`single-${item.originalIndex}`) ?? 0;
+          return (
             <PhaseRow
               key={`single-${item.originalIndex}`}
               entry={item.entry}
@@ -236,16 +246,14 @@ export default function PhaseTimeline({
               maxDuration={maxDuration}
               expandedErrors={expandedErrors}
               toggleError={toggleError}
-              isLast={isLast}
+              isLast={vi === totalVisible - 1}
               showConnector={true}
             />
           );
-          visibleIndex++;
-          return row;
         }
 
         // Loop group
-        const loopNode = (
+        return (
           <div
             key={`loop-${groupIdx}`}
             data-testid="loop-group"
@@ -257,9 +265,9 @@ export default function PhaseTimeline({
               <span>Review/Fix Loop ({Math.ceil(item.entries.length / 2)} iteration{Math.ceil(item.entries.length / 2) !== 1 ? "s" : ""})</span>
             </div>
             {item.entries.map(({ entry, originalIndex }, loopIdx) => {
+              const vi = visibleIndexMap.get(`loop-${groupIdx}-${loopIdx}`) ?? 0;
               const isLastInLoop = loopIdx === item.entries.length - 1;
-              const isLastOverall = visibleIndex === totalVisible - 1;
-              const row = (
+              return (
                 <PhaseRow
                   key={`loop-entry-${originalIndex}`}
                   entry={entry}
@@ -267,16 +275,13 @@ export default function PhaseTimeline({
                   maxDuration={maxDuration}
                   expandedErrors={expandedErrors}
                   toggleError={toggleError}
-                  isLast={isLastOverall}
+                  isLast={vi === totalVisible - 1}
                   showConnector={!isLastInLoop}
                 />
               );
-              visibleIndex++;
-              return row;
             })}
           </div>
         );
-        return loopNode;
       })}
     </div>
   );

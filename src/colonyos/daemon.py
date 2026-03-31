@@ -715,6 +715,7 @@ class Daemon:
                         if queued_item.status == QueueItemStatus.PENDING
                     ),
                 )
+            self._cleanup_notification_lock(item.id)
         except KeyboardInterrupt:
             logger.warning("Run interrupted while executing item %s", item.id)
             with self._lock:
@@ -723,6 +724,7 @@ class Daemon:
                 self._pipeline_running = False
                 self._persist_state()
                 self._persist_queue()
+            self._cleanup_notification_lock(item.id)
             raise
         except Exception as exc:
             logger.exception("Pipeline failed for item %s", item.id)
@@ -815,6 +817,7 @@ class Daemon:
                 failure_message=failure_message,
                 incident_path=str(incident_path) if incident_path is not None else None,
             )
+            self._cleanup_notification_lock(item.id)
         return True
 
     def _make_monitor_ui(
@@ -1755,6 +1758,11 @@ class Daemon:
                 lock = threading.Lock()
                 self._notification_thread_locks[item_id] = lock
             return lock
+
+    def _cleanup_notification_lock(self, item_id: str) -> None:
+        """Remove the notification thread lock for a terminal item to prevent unbounded growth."""
+        with self._notification_thread_locks_guard:
+            self._notification_thread_locks.pop(item_id, None)
 
     def _ensure_notification_thread(self, item: QueueItem, intro_text: str) -> tuple[Any, str, str] | None:
         client = self._get_notification_client()

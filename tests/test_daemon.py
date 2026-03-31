@@ -1525,3 +1525,40 @@ class TestPreExecWorktreeCheck:
 
         assert result is False
         mock_state.assert_not_called()
+
+
+class TestNotificationLockCleanup:
+    """Tests for _notification_thread_locks cleanup to prevent unbounded growth."""
+
+    def test_lock_created_on_first_access(self, daemon_instance: Daemon):
+        lock = daemon_instance._notification_thread_lock_for("item-1")
+        assert isinstance(lock, threading.Lock)
+        assert "item-1" in daemon_instance._notification_thread_locks
+
+    def test_same_lock_returned_for_same_item(self, daemon_instance: Daemon):
+        lock1 = daemon_instance._notification_thread_lock_for("item-1")
+        lock2 = daemon_instance._notification_thread_lock_for("item-1")
+        assert lock1 is lock2
+
+    def test_cleanup_removes_lock(self, daemon_instance: Daemon):
+        daemon_instance._notification_thread_lock_for("item-1")
+        assert "item-1" in daemon_instance._notification_thread_locks
+
+        daemon_instance._cleanup_notification_lock("item-1")
+        assert "item-1" not in daemon_instance._notification_thread_locks
+
+    def test_cleanup_is_idempotent(self, daemon_instance: Daemon):
+        daemon_instance._notification_thread_lock_for("item-1")
+        daemon_instance._cleanup_notification_lock("item-1")
+        # Second cleanup should not raise
+        daemon_instance._cleanup_notification_lock("item-1")
+        assert "item-1" not in daemon_instance._notification_thread_locks
+
+    def test_cleanup_does_not_affect_other_locks(self, daemon_instance: Daemon):
+        daemon_instance._notification_thread_lock_for("item-1")
+        daemon_instance._notification_thread_lock_for("item-2")
+        assert len(daemon_instance._notification_thread_locks) == 2
+
+        daemon_instance._cleanup_notification_lock("item-1")
+        assert "item-1" not in daemon_instance._notification_thread_locks
+        assert "item-2" in daemon_instance._notification_thread_locks
