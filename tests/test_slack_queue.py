@@ -110,17 +110,16 @@ def test_triage_merges_similar_request_into_existing_item(tmp_path: Path) -> Non
     assert client.chat_postMessage.called
 
 
-def test_triage_waits_for_agent_lock_before_calling_agent(tmp_path: Path) -> None:
+def test_triage_completes_while_agent_lock_is_held(tmp_path: Path) -> None:
+    """Triage must NOT acquire agent_lock — it should complete even when the lock is held."""
     queue_state = QueueState(queue_id="q")
     watch_state = SlackWatchState(watch_id="w")
     agent_lock = threading.Lock()
     engine = _make_engine(tmp_path, queue_state, watch_state, agent_lock=agent_lock)
     client = MagicMock()
-    started = threading.Event()
     finished = threading.Event()
 
     def _triage(*args, **kwargs):
-        started.set()
         finished.set()
         return TriageResult(
             actionable=True,
@@ -130,25 +129,57 @@ def test_triage_waits_for_agent_lock_before_calling_agent(tmp_path: Path) -> Non
             reasoning="clear feature request",
         )
 
+    # Hold the agent_lock (simulating a running pipeline)
     agent_lock.acquire()
-    worker = threading.Thread(
-        target=engine._triage_and_enqueue,
-        kwargs={
-            "client": client,
-            "channel": "C1",
-            "ts": "3.0",
-            "user": "U1",
-            "prompt_text": "Add brew installation support",
-        },
-    )
-    with patch("colonyos.slack_queue.triage_message", side_effect=_triage):
-        worker.start()
-        assert not started.wait(timeout=0.1)
+    try:
+        worker = threading.Thread(
+            target=engine._triage_and_enqueue,
+            kwargs={
+                "client": client,
+                "channel": "C1",
+                "ts": "3.0",
+                "user": "U1",
+                "prompt_text": "Add brew installation support",
+            },
+        )
+        with patch("colonyos.slack_queue.triage_message", side_effect=_triage):
+            worker.start()
+            # Triage should complete within 1s even though agent_lock is held
+            assert finished.wait(timeout=1), "Triage blocked on agent_lock"
+            worker.join(timeout=2)
+    finally:
         agent_lock.release()
-        worker.join(timeout=1)
 
-    assert finished.is_set()
     assert len(queue_state.items) == 1
+
+
+def test_triage_completes_when_agent_lock_is_none(tmp_path: Path) -> None:
+    """Triage must work when agent_lock is None (the default)."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state, agent_lock=None)
+    client = MagicMock()
+
+    with patch(
+        "colonyos.slack_queue.triage_message",
+        return_value=TriageResult(
+            actionable=True,
+            confidence=0.95,
+            summary="Add brew install support",
+            base_branch=None,
+            reasoning="clear feature request",
+        ),
+    ):
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="4.0",
+            user="U1",
+            prompt_text="Add brew installation support",
+        )
+
+    assert len(queue_state.items) == 1
+    assert watch_state.is_processed("C1", "4.0")
 
 
 def test_generate_id_is_unique_with_same_timestamp() -> None:
@@ -247,3 +278,432 @@ def test_ensure_triage_worker_restarts_if_previous_thread_died(tmp_path: Path) -
     )
     replacement_worker.start.assert_called_once()
     assert engine._triage_worker is replacement_worker
+
+
+# ---------------------------------------------------------------------------
+# Task 2.0: Bounded retry for transient triage failures
+# ---------------------------------------------------------------------------
+
+
+def test_triage_retries_on_transient_failure_then_succeeds(tmp_path: Path) -> None:
+    """A transient TimeoutError on the first attempt should be retried and succeed."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    call_count = 0
+
+    def _triage_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise TimeoutError("LLM call timed out")
+        return TriageResult(
+            actionable=True,
+            confidence=0.9,
+            summary="Add brew install support",
+            base_branch=None,
+            reasoning="clear feature request",
+        )
+
+    with patch("colonyos.slack_queue.triage_message", side_effect=_triage_side_effect), \
+         patch("colonyos.slack_queue.time.sleep") as mock_sleep:
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="10.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    assert call_count == 2
+    mock_sleep.assert_called_once_with(3)
+    assert len(queue_state.items) == 1
+    assert watch_state.is_processed("C1", "10.0")
+
+
+def test_triage_retry_checks_shutdown_event(tmp_path: Path) -> None:
+    """If shutdown_event is set between attempts, retry should not happen."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    call_count = 0
+
+    def _triage_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        # Set shutdown after first failure
+        engine.shutdown_event.set()
+        raise TimeoutError("LLM call timed out")
+
+    with patch("colonyos.slack_queue.triage_message", side_effect=_triage_side_effect), \
+         patch("colonyos.slack_queue.time.sleep") as mock_sleep:
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="11.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    # Should only be called once — no retry because shutdown_event was set
+    assert call_count == 1
+    mock_sleep.assert_not_called()
+    assert len(queue_state.items) == 0
+
+
+def test_triage_posts_warning_after_max_retries(tmp_path: Path) -> None:
+    """After max retries exhausted, the existing error handler posts a warning."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    with patch(
+        "colonyos.slack_queue.triage_message",
+        side_effect=ConnectionError("connection refused"),
+    ), patch("colonyos.slack_queue.time.sleep"), \
+         patch("colonyos.slack_queue.post_message") as mock_post:
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="12.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    # post_message should have been called with the warning
+    mock_post.assert_called_once_with(
+        client,
+        "C1",
+        ":warning: Triage failed. Check server logs for details.",
+        thread_ts="12.0",
+    )
+    assert len(queue_state.items) == 0
+
+
+def test_triage_non_transient_error_skips_retry(tmp_path: Path) -> None:
+    """Non-transient errors (e.g., ValueError) should fail immediately without retry."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    call_count = 0
+
+    def _triage_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise ValueError("invalid input")
+
+    with patch("colonyos.slack_queue.triage_message", side_effect=_triage_side_effect), \
+         patch("colonyos.slack_queue.time.sleep") as mock_sleep, \
+         patch("colonyos.slack_queue.post_message"):
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="13.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    # Should only be called once — no retry for ValueError
+    assert call_count == 1
+    mock_sleep.assert_not_called()
+    assert len(queue_state.items) == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 3.0: Mark failed triages as processed (prevent redelivery loops)
+# ---------------------------------------------------------------------------
+
+
+def test_failed_triage_marks_processed_as_triage_error_transient(tmp_path: Path) -> None:
+    """When triage fails after retries (transient error), the message is marked 'triage-error'."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    with patch(
+        "colonyos.slack_queue.triage_message",
+        side_effect=ConnectionError("connection refused"),
+    ), patch("colonyos.slack_queue.time.sleep"), \
+         patch("colonyos.slack_queue.post_message"):
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="20.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    assert watch_state.is_processed("C1", "20.0")
+    # Verify the status stored is "triage-error"
+    key = watch_state.message_key("C1", "20.0")
+    assert watch_state.processed_messages[key] == "triage-error"
+
+
+def test_failed_triage_marks_processed_as_triage_error_non_transient(tmp_path: Path) -> None:
+    """When triage fails with a non-transient error, the message is marked 'triage-error'."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    with patch(
+        "colonyos.slack_queue.triage_message",
+        side_effect=ValueError("bad input"),
+    ), patch("colonyos.slack_queue.post_message"):
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="21.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    assert watch_state.is_processed("C1", "21.0")
+    key = watch_state.message_key("C1", "21.0")
+    assert watch_state.processed_messages[key] == "triage-error"
+
+
+def test_triage_error_message_rejected_by_handle_event(tmp_path: Path) -> None:
+    """A message previously marked 'triage-error' is rejected by _handle_event via is_processed."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    # Pre-mark the message as triage-error
+    watch_state.mark_processed("C1", "22.0", "triage-error")
+
+    event = {
+        "channel": "C1",
+        "ts": "22.0",
+        "user": "U1",
+        "text": "<@UBOT> Add brew installation support",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.extract_prompt_from_mention", return_value="Add brew installation support"), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch.object(engine, "_ensure_triage_worker") as mock_ensure, \
+         patch("colonyos.slack_queue.react_to_message"):
+        engine._handle_event(event, client)
+
+    # The message should NOT have been enqueued
+    assert engine._triage_queue.qsize() == 0
+    mock_ensure.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Task 4.0: Move increment_hourly_count to reservation time (close TOCTOU gap)
+# ---------------------------------------------------------------------------
+
+
+def test_increment_hourly_count_called_during_handle_event(tmp_path: Path) -> None:
+    """increment_hourly_count fires at reservation time (_handle_event), not during triage."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+    event = {
+        "channel": "C1",
+        "ts": "30.0",
+        "user": "U1",
+        "text": "<@UBOT> Add brew installation support",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.extract_prompt_from_mention", return_value="Add brew installation support"), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch("colonyos.slack_queue.increment_hourly_count") as mock_increment, \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message"):
+        engine._handle_event(event, client)
+
+    # increment_hourly_count should be called once during _handle_event
+    mock_increment.assert_called_once_with(watch_state)
+
+
+def test_increment_hourly_count_not_called_during_triage(tmp_path: Path) -> None:
+    """increment_hourly_count must NOT be called during _triage_and_enqueue."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    with patch(
+        "colonyos.slack_queue.triage_message",
+        return_value=TriageResult(
+            actionable=True,
+            confidence=0.95,
+            summary="Add brew install support",
+            base_branch=None,
+            reasoning="clear feature request",
+        ),
+    ), patch("colonyos.slack_queue.increment_hourly_count") as mock_increment:
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="31.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    # increment_hourly_count should NOT be called by _triage_and_enqueue
+    mock_increment.assert_not_called()
+
+
+def test_eager_increment_makes_rate_limit_reject_burst(tmp_path: Path) -> None:
+    """When hourly count is incremented eagerly, subsequent messages hit the rate limit."""
+    from colonyos.config import SlackConfig as SC
+
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    config = ColonyConfig(slack=SlackConfig(enabled=True, channels=["C1"], auto_approve=True, max_runs_per_hour=1))
+    engine = SlackQueueEngine(
+        repo_root=tmp_path,
+        config=config,
+        queue_state=queue_state,
+        watch_state=watch_state,
+        state_lock=threading.Lock(),
+        shutdown_event=threading.Event(),
+        bot_user_id="UBOT",
+        slack_client_ready=threading.Event(),
+        publish_client=lambda client: None,
+        persist_queue=lambda: None,
+        persist_watch_state=lambda: None,
+        is_time_exceeded=lambda: False,
+        is_budget_exceeded=lambda: False,
+        is_daily_budget_exceeded=lambda: False,
+    )
+    client = MagicMock()
+
+    event1 = {"channel": "C1", "ts": "40.0", "user": "U1", "text": "<@UBOT> first request"}
+    event2 = {"channel": "C1", "ts": "41.0", "user": "U2", "text": "<@UBOT> second request"}
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.extract_prompt_from_mention", side_effect=lambda t, _: t.replace("<@UBOT> ", "")), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message"), \
+         patch("colonyos.slack_queue.post_message") as mock_post:
+        # First message: accepted, count goes to 1
+        engine._handle_event(event1, client)
+        # Second message: should be rate-limited since max_runs_per_hour=1
+        engine._handle_event(event2, client)
+
+    # Only the first message should be in the triage queue
+    assert engine._triage_queue.qsize() == 1
+    # Second message should have triggered a rate-limit warning
+    mock_post.assert_called_once()
+    args = mock_post.call_args
+    assert "Rate limit" in args[0][2]
+
+
+def test_failed_triage_does_not_decrement_hourly_count(tmp_path: Path) -> None:
+    """A message that fails triage should NOT decrement the hourly count (fail-closed)."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+
+    # Simulate the eager increment that _handle_event would have done
+    current_hour = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+    watch_state.hourly_trigger_counts[current_hour] = 1
+
+    with patch(
+        "colonyos.slack_queue.triage_message",
+        side_effect=ValueError("bad input"),
+    ), patch("colonyos.slack_queue.post_message"):
+        engine._triage_and_enqueue(
+            client=client,
+            channel="C1",
+            ts="50.0",
+            user="U1",
+            prompt_text="Add brew install support",
+        )
+
+    # The hourly count should NOT have been decremented — fail-closed behavior
+    assert watch_state.hourly_trigger_counts[current_hour] == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 5.0: Integration verification and cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_integration_triage_completes_while_pipeline_holds_agent_lock(tmp_path: Path) -> None:
+    """End-to-end: Slack event arrives while agent_lock is held (pipeline running).
+
+    Verifies:
+      (a) :eyes: reaction fires immediately,
+      (b) triage completes without blocking on agent_lock,
+      (c) queue item is created with correct position,
+      (d) acknowledgment is posted to Slack.
+    """
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    agent_lock = threading.Lock()
+    engine = _make_engine(tmp_path, queue_state, watch_state, agent_lock=agent_lock)
+    client = MagicMock()
+    triage_completed = threading.Event()
+
+    def _mock_triage(*args, **kwargs):
+        triage_completed.set()
+        return TriageResult(
+            actionable=True,
+            confidence=0.95,
+            summary="Add dark mode toggle",
+            base_branch=None,
+            reasoning="clear feature request",
+        )
+
+    # Simulate a running pipeline by holding agent_lock
+    agent_lock.acquire()
+    try:
+        event = {
+            "channel": "C1",
+            "ts": "100.0",
+            "user": "U1",
+            "text": "<@UBOT> Add dark mode toggle",
+        }
+
+        with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+             patch("colonyos.slack_queue.extract_prompt_from_mention", return_value="Add dark mode toggle"), \
+             patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+             patch("colonyos.slack_queue.react_to_message") as mock_react, \
+             patch("colonyos.slack_queue.triage_message", side_effect=_mock_triage), \
+             patch("colonyos.slack_queue.post_triage_acknowledgment") as mock_ack:
+            # _handle_event enqueues to the triage queue; the worker picks it up
+            engine._handle_event(event, client)
+
+            # (a) :eyes: reaction fires immediately (before triage)
+            mock_react.assert_called_once_with(client, "C1", "100.0", "eyes")
+
+            # Wait for the triage worker to complete processing
+            assert triage_completed.wait(timeout=3), "Triage did not complete — likely blocked on agent_lock"
+            # Give the worker a moment to finish enqueue + ack
+            engine._triage_queue.join()
+
+        # (b) Triage completed without blocking on agent_lock (asserted above via timeout)
+
+        # (c) Queue item created with correct position
+        assert len(queue_state.items) == 1
+        item = queue_state.items[0]
+        assert item.source_type == "slack"
+        assert item.summary == "Add dark mode toggle"
+
+        # (d) Acknowledgment posted to Slack
+        mock_ack.assert_called_once()
+        ack_kwargs = mock_ack.call_args
+        assert ack_kwargs[1].get("queue_position") == 1 or ack_kwargs[0][4] is not None  # position arg
+
+        # Message marked as processed
+        assert watch_state.is_processed("C1", "100.0")
+    finally:
+        agent_lock.release()

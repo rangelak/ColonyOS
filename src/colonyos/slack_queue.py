@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 import queue as queue_module
 import threading
+import time
 import uuid
-from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +65,10 @@ class SlackQueueEngine:
     is_budget_exceeded: Callable[[], bool]
     is_daily_budget_exceeded: Callable[[], bool]
     dry_run: bool = False
+    # NOTE: agent_lock is accepted but intentionally NOT acquired during triage.
+    # Triage (the LLM classification call) is stateless and runs lock-free so that
+    # Slack intake is never blocked by pipeline execution.  Queue mutations are
+    # guarded by state_lock.  agent_lock is retained for potential future use only.
     agent_lock: threading.Lock | None = None
     triage_queue_maxsize: int = 64
     _triage_queue: queue_module.Queue[dict[str, Any]] = field(init=False, repr=False)
@@ -196,6 +200,7 @@ class SlackQueueEngine:
                     logger.debug("Failed to post rate-limit message", exc_info=True)
                 return
             self._reserve_pending_message(channel, ts)
+            increment_hourly_count(self.watch_state)
 
         if self.dry_run:
             with self.state_lock:
@@ -253,25 +258,57 @@ class SlackQueueEngine:
         if self.config.slack.triage_scope:
             triage_kwargs["triage_scope"] = self.config.slack.triage_scope
 
-        try:
-            with self.agent_lock or nullcontext():
+        max_attempts = 2  # 1 initial + 1 retry
+        triage_result = None
+        for attempt in range(max_attempts):
+            try:
                 triage_result = triage_message(
                     prompt_text,
                     repo_root=self.repo_root,
                     **triage_kwargs,
                 )
-        except Exception:
-            logger.exception("Triage failed for message %s:%s", channel, ts)
-            try:
-                post_message(
-                    client,
-                    channel,
-                    ":warning: Triage failed. Check server logs for details.",
-                    thread_ts=ts,
-                )
+                break
+            except (TimeoutError, ConnectionError, OSError) as exc:
+                if attempt < max_attempts - 1 and not self.shutdown_event.is_set():
+                    logger.warning(
+                        "Transient triage failure (attempt %d/%d) for %s:%s: %s",
+                        attempt + 1,
+                        max_attempts,
+                        channel,
+                        ts,
+                        exc,
+                    )
+                    time.sleep(3)
+                    continue
+                logger.exception("Triage failed after %d attempts for %s:%s", max_attempts, channel, ts)
+                try:
+                    post_message(
+                        client,
+                        channel,
+                        ":warning: Triage failed. Check server logs for details.",
+                        thread_ts=ts,
+                    )
+                except Exception:
+                    logger.debug("Failed to post triage failure message", exc_info=True)
+                with self.state_lock:
+                    self.watch_state.mark_processed(channel, ts, "triage-error")
+                    self.persist_watch_state()
+                return
             except Exception:
-                logger.debug("Failed to post triage failure message", exc_info=True)
-            return
+                logger.exception("Triage failed for message %s:%s", channel, ts)
+                try:
+                    post_message(
+                        client,
+                        channel,
+                        ":warning: Triage failed. Check server logs for details.",
+                        thread_ts=ts,
+                    )
+                except Exception:
+                    logger.debug("Failed to post triage failure message", exc_info=True)
+                with self.state_lock:
+                    self.watch_state.mark_processed(channel, ts, "triage-error")
+                    self.persist_watch_state()
+                return
 
         if self.shutdown_event.is_set():
             logger.info(
@@ -352,7 +389,6 @@ class SlackQueueEngine:
                 ts,
                 (merged_item.id if merged_item else queue_item.id),  # type: ignore[union-attr]
             )
-            increment_hourly_count(self.watch_state)
             self.watch_state.runs_triggered += 1
             self.persist_queue()
             self.persist_watch_state()
