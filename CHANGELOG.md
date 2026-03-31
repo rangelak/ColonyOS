@@ -1,5 +1,18 @@
 # Changelog
 
+## 20260331_220500 — Replace :eyes: Emoji with Completion Emoji on Pipeline Finish
+
+Adds clean emoji state transitions to Slack messages: when a ColonyOS pipeline completes, the `:eyes:` (in-progress) reaction is removed before adding the terminal status emoji (`:white_check_mark:` / `:x:`), plus `:tada:` on success. This eliminates ambiguous dual-emoji states so each message shows exactly one reaction reflecting its current state.
+
+**Modified:**
+- `src/colonyos/slack.py` — Added `reactions_remove` to `SlackClient` Protocol and `remove_reaction()` helper function
+- `src/colonyos/cli.py` — Added `:eyes:` removal and `:tada:` reaction to both main and fix run completion paths
+- `tests/test_slack.py` — Tests for `remove_reaction()` helper
+- `tests/test_cli.py` — Tests for emoji state transitions on both completion paths
+
+**PRD:** `cOS_prds/20260331_200151_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260331_200151_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260331_160000 — RepoMap Module for Agent Structural Context
 
 Adds a `RepoMap` module (`src/colonyos/repo_map.py`) that generates a condensed structural summary of the repository — file paths, class names, function signatures — and injects it into every pipeline phase prompt. This eliminates agent cold-start overhead by giving each phase a "table of contents" of the codebase from the first token. Includes a `colonyos map` CLI command for debugging visibility.
