@@ -564,11 +564,22 @@ class Daemon:
             if self.daemon_config.auto_recover_dirty_worktree:
                 logger.warning("Dirty worktree detected pre-execution, auto-recovering")
                 if not self._recover_dirty_worktree_preemptive():
+                    self._pause_for_pre_execution_blocker(
+                        item,
+                        "Dirty worktree before execution: auto-recovery failed. "
+                        "Execution is blocked until the worktree is fixed; then resume the daemon.",
+                    )
                     return False
             else:
                 logger.error(
                     "Dirty worktree detected, skipping execution. "
                     "Enable auto_recover_dirty_worktree or clean manually."
+                )
+                self._pause_for_pre_execution_blocker(
+                    item,
+                    "Dirty worktree before execution while `daemon.auto_recover_dirty_worktree` "
+                    "is disabled. Execution is blocked until the worktree is clean or auto "
+                    "recovery is enabled; then resume the daemon.",
                 )
                 return False
 
@@ -651,6 +662,9 @@ class Daemon:
             )
             operator_hint = self._failure_guidance(exc)
             error_code = getattr(exc, "code", None) or type(exc).__name__
+            systemic_slack: tuple[str, int] | None = None
+            escalation_slack: tuple[int, int] | None = None
+            cb_cooldown_slack: tuple[int, int, str] | None = None
             with self._lock:
                 item.status = QueueItemStatus.FAILED
                 item.error = self._format_item_error(
@@ -672,29 +686,39 @@ class Daemon:
                             failures,
                             error_code,
                         )
-                        self._post_systemic_failure_alert(error_code, failures)
+                        self._state.circuit_breaker_until = None
+                        systemic_slack = (error_code, failures)
                     else:
                         cb_expiry = self._state.activate_circuit_breaker(
                             self.daemon_config.circuit_breaker_cooldown_minutes
                         )
+                        activation_n = self._state.circuit_breaker_activations
                         if cb_expiry is None:
                             self._state.paused = True
                             logger.error(
                                 "Auto-paused: circuit breaker escalated after %d activations",
-                                self._state.circuit_breaker_activations,
+                                activation_n,
                             )
-                            self._post_systemic_failure_alert(error_code, failures)
+                            self._state.circuit_breaker_until = None
+                            escalation_slack = (activation_n, failures)
                         else:
                             logger.warning(
                                 "Circuit breaker activated after %d consecutive failures "
                                 "(activation #%d, cooldown until %s)",
                                 failures,
-                                self._state.circuit_breaker_activations,
+                                activation_n,
                                 cb_expiry,
                             )
+                            cb_cooldown_slack = (failures, activation_n, cb_expiry)
                 self._pipeline_running = False
                 self._persist_state()
                 self._persist_queue()
+            if systemic_slack is not None:
+                self._post_systemic_failure_alert(*systemic_slack)
+            if escalation_slack is not None:
+                self._post_circuit_breaker_escalation_pause_alert(*escalation_slack)
+            if cb_cooldown_slack is not None:
+                self._post_circuit_breaker_cooldown_notice(*cb_cooldown_slack)
             logger.error(
                 "Daemon item %s failed: %s. %s",
                 item.id,
@@ -1684,6 +1708,12 @@ class Daemon:
             f":gear: *Starting {item.source_type} work*\n{item.summary or item.source_value[:160]}",
         )
         if notification is None:
+            details = failure_message[:500]
+            if incident_path:
+                details = f"{details}\nIncident: `{incident_path}`"
+            self._post_slack_message(
+                f":x: *{item.source_type} failed* (`{item.id}`)\n{details}"
+            )
             return
         client, channel, thread_ts = notification
         details = failure_message[:500]
@@ -1740,6 +1770,10 @@ class Daemon:
         if cmd in ("resume", "start"):
             with self._lock:
                 self._state.paused = False
+                self._state.consecutive_failures = 0
+                self._state.circuit_breaker_until = None
+                self._state.circuit_breaker_activations = 0
+                self._recent_failure_codes.clear()
                 self._persist_state()
             logger.info("Daemon resumed via Slack by user %s", user_id)
             return f"Daemon resumed by <@{user_id}>."
@@ -1982,10 +2016,68 @@ class Daemon:
     def _post_systemic_failure_alert(self, error_code: str, failures: int) -> None:
         """Post a Slack alert when the daemon auto-pauses due to systemic failures."""
         self._post_slack_message(
-            f":rotating_light: *Daemon auto-paused*\n"
+            f":rotating_light: *Daemon auto-paused (same error)*\n"
             f"{failures} consecutive failures with the same error: `{error_code}`\n"
             f"The daemon will not process any more items until manually resumed.\n"
             f"Use `colonyos daemon resume` or send `resume` in this channel to unpause."
+        )
+
+    def _post_circuit_breaker_cooldown_notice(
+        self,
+        consecutive_failures: int,
+        activation_count: int,
+        cooldown_until_iso: str,
+    ) -> None:
+        """Slack when the breaker trips into cooldown (not auto-pause)."""
+        self._post_slack_message(
+            f":electric_plug: *Circuit breaker cooldown*\n"
+            f"After {consecutive_failures} consecutive failures, activation "
+            f"#{activation_count}. Cooldown until `{cooldown_until_iso}` (ISO UTC). "
+            f"Execution resumes automatically after that unless the daemon is paused."
+        )
+
+    def _post_circuit_breaker_escalation_pause_alert(
+        self,
+        activation_count: int,
+        consecutive_failures: int,
+    ) -> None:
+        """Auto-pause after repeated breaker activations without a success (mixed errors)."""
+        self._post_slack_message(
+            f":rotating_light: *Daemon auto-paused (circuit breaker escalation)*\n"
+            f"Breaker activation #{activation_count} without an intervening success "
+            f"(last trip after {consecutive_failures} consecutive failures). "
+            f"This is not the same-error systemic case.\n"
+            f"Use `colonyos daemon resume` or send `resume` in this channel to unpause."
+        )
+
+    def _pause_for_pre_execution_blocker(self, item: QueueItem, reason: str) -> None:
+        """Pause the daemon when pre-execution repo health blocks forward progress."""
+        incident_path = self._record_runtime_incident(
+            label_prefix="daemon-preexec-blocked",
+            summary=(
+                f"{reason}\n\n"
+                f"Pending item: {item.id}\n"
+                f"Source type: {item.source_type}\n"
+                f"Source value: {item.source_value[:500]}\n"
+                "The daemon paused itself to avoid retrying the same blocked state indefinitely."
+            ),
+            metadata={
+                "item_id": item.id,
+                "source_type": item.source_type,
+                "source_value": item.source_value[:500],
+                "reason": reason,
+            },
+        )
+        with self._lock:
+            self._state.paused = True
+            self._state.circuit_breaker_until = None
+            self._persist_state()
+        self._post_slack_message(
+            ":rotating_light: *Daemon auto-paused before execution*\n"
+            f"{reason}\n"
+            f"Pending item: `{item.id}`\n"
+            f"Incident summary: `{incident_path}`\n"
+            "Fix the repo state, then use `colonyos daemon resume` or send `resume` in Slack."
         )
 
     def _failure_summary(self, exc: Exception) -> str:

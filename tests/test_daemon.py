@@ -494,9 +494,17 @@ class TestSlackKillSwitch:
         )
         d = Daemon(tmp_repo, config, dry_run=True)
         d._state.paused = True
+        d._state.consecutive_failures = 3
+        d._state.circuit_breaker_until = datetime.now(timezone.utc).isoformat()
+        d._state.circuit_breaker_activations = 2
+        d._recent_failure_codes = ["dirty_worktree", "dirty_worktree", "dirty_worktree"]
         result = d._handle_control_command("U12345", "resume")
         assert result is not None
         assert d._state.paused is False
+        assert d._state.consecutive_failures == 0
+        assert d._state.circuit_breaker_until is None
+        assert d._state.circuit_breaker_activations == 0
+        assert d._recent_failure_codes == []
 
     def test_status_returns_health(self, tmp_repo: Path):
         config = ColonyConfig(
@@ -1258,13 +1266,21 @@ class TestPreExecWorktreeCheck:
 
     def test_skips_execution_when_dirty_and_no_auto_recover(self, daemon_instance: Daemon):
         daemon_instance.daemon_config.auto_recover_dirty_worktree = False
-        daemon_instance._queue_state.items = [
-            QueueItem(id="item", source_type="prompt", source_value="x", status=QueueItemStatus.PENDING, priority=1),
-        ]
-        with patch.object(daemon_instance, "_is_worktree_dirty", return_value=True):
+        item = QueueItem(
+            id="item",
+            source_type="prompt",
+            source_value="x",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+        with patch.object(daemon_instance, "_is_worktree_dirty", return_value=True), \
+             patch.object(daemon_instance, "_post_slack_message") as mock_slack:
             result = daemon_instance._try_execute_next()
         assert result is False
-        assert daemon_instance._queue_state.items[0].status == QueueItemStatus.PENDING
+        assert item.status == QueueItemStatus.PENDING
+        assert daemon_instance._state.paused is True
+        assert "auto-paused before execution" in mock_slack.call_args.args[0]
 
     def test_recovers_and_proceeds_when_dirty_and_auto_recover(self, daemon_instance: Daemon):
         daemon_instance.daemon_config.auto_recover_dirty_worktree = True
@@ -1295,14 +1311,22 @@ class TestPreExecWorktreeCheck:
 
     def test_skips_execution_when_recovery_fails(self, daemon_instance: Daemon):
         daemon_instance.daemon_config.auto_recover_dirty_worktree = True
-        daemon_instance._queue_state.items = [
-            QueueItem(id="item", source_type="prompt", source_value="x", status=QueueItemStatus.PENDING, priority=1),
-        ]
+        item = QueueItem(
+            id="item",
+            source_type="prompt",
+            source_value="x",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
         with patch.object(daemon_instance, "_is_worktree_dirty", return_value=True), \
-             patch.object(daemon_instance, "_recover_dirty_worktree_preemptive", return_value=False):
+             patch.object(daemon_instance, "_recover_dirty_worktree_preemptive", return_value=False), \
+             patch.object(daemon_instance, "_post_slack_message") as mock_slack:
             result = daemon_instance._try_execute_next()
         assert result is False
-        assert daemon_instance._queue_state.items[0].status == QueueItemStatus.PENDING
+        assert item.status == QueueItemStatus.PENDING
+        assert daemon_instance._state.paused is True
+        assert "auto-paused before execution" in mock_slack.call_args.args[0]
 
     def test_proceeds_when_worktree_clean(self, daemon_instance: Daemon):
         item = QueueItem(
