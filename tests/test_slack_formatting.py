@@ -458,6 +458,43 @@ class TestExtractReviewFindingsSummary:
         findings = _extract_review_findings_summary(text, max_findings=3)
         assert len(findings) == 3
 
+    def test_blank_lines_stop_after_max_findings(self):
+        """Blank lines past max_findings cap should stop collection, not over-collect."""
+        text = (
+            "FINDINGS:\n"
+            "- [a.py]: Issue 1\n"
+            "- [b.py]: Issue 2\n"
+            "\n"
+            "\n"
+            "Some unrelated text that looks like a finding section.\n"
+            "- [c.py]: Should not appear\n"
+        )
+        findings = _extract_review_findings_summary(text, max_findings=2)
+        assert len(findings) == 2
+        assert "Issue 1" in findings[0]
+        assert "Issue 2" in findings[1]
+
+
+class TestTaskListDebugLogging:
+    """Verify that malformed cost/duration logs a debug message."""
+
+    def test_malformed_cost_logs_debug(self, caplog):
+        """ValueError on cost/duration should log at DEBUG level."""
+        import logging
+
+        task_results = {
+            "1.0": {
+                "description": "Task one",
+                "status": "COMPLETED",
+                "cost_usd": "not-a-number",
+                "duration_ms": "also-bad",
+            }
+        }
+        with caplog.at_level(logging.DEBUG, logger="colonyos.orchestrator"):
+            result = _format_task_list_with_descriptions(["1.0"], task_results)
+        assert "1.0" in result
+        assert "Skipping malformed cost/duration" in caplog.text
+
 
 # ===================================================================
 # 1.5  Message size cap (3,000 chars)

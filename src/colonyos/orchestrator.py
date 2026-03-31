@@ -1429,7 +1429,7 @@ def _format_task_list_with_descriptions(
                 secs = int(dur) // 1000
                 suffix = f" — ${float(cost):.2f}, {secs}s"
             except (ValueError, TypeError):
-                pass
+                logger.debug("Skipping malformed cost/duration for task %s: cost=%r, dur=%r", task_id, cost, dur)
         line = f"• `{task_id}` {desc}{suffix}" if desc else f"• `{task_id}`{suffix}"
         lines.append(line)
     if len(ordered) > max_shown:
@@ -1545,11 +1545,12 @@ def _extract_review_findings_summary(
         if in_findings:
             if stripped.startswith("- "):
                 findings_lines.append(stripped[2:].strip())
-            elif not stripped:
-                # Blank line between findings — continue collecting
+            elif not stripped and len(findings_lines) < max_findings:
+                # Tolerate a single blank line between findings, but only
+                # while we haven't yet collected enough.
                 continue
-            elif not stripped.startswith("-"):
-                # Hit a non-finding line (e.g. SYNTHESIS:) — stop collecting
+            else:
+                # Hit a non-finding line or blank after enough findings — stop
                 break
     if findings_lines:
         truncated = []
