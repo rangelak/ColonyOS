@@ -64,14 +64,6 @@ function okResponse(data: unknown) {
   });
 }
 
-function errorResponse(status: number, message: string) {
-  return Promise.resolve({
-    ok: false,
-    status,
-    json: () => Promise.resolve({ detail: message }),
-  });
-}
-
 describe("Analytics", () => {
   it("shows loading state initially", () => {
     mockFetch.mockReturnValue(new Promise(() => {})); // never resolves

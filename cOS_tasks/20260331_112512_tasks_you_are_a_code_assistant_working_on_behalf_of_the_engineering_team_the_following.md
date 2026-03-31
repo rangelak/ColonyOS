@@ -83,8 +83,8 @@
   - [x] 7.6 Embed uvicorn server in `src/colonyos/daemon.py` — start on a daemon thread during `Daemon.start()`, set `app.state.daemon_instance = self`, add `dashboard_port` config option under `daemon` section
   - [x] 7.7 Update `src/colonyos/config.py` — add `dashboard_port: int = 8741` and `dashboard_enabled: bool = True` to `DaemonConfig`
 
-- [ ] 8.0 Deployment docs and build integration
+- [x] 8.0 Deployment docs and build integration
   depends_on: [7.0]
-  - [ ] 8.1 Update `deploy/README.md` with reverse proxy examples (Caddy 2-liner, nginx server block) for subdomain deployment
-  - [ ] 8.2 Build the frontend (`cd web && npm run build`) and copy output to `src/colonyos/web_dist/`
-  - [ ] 8.3 Smoke test: run `colonyos daemon` and verify the dashboard is accessible, health banner shows live data, queue page populates, analytics charts render
+  - [x] 8.1 Update `deploy/README.md` with reverse proxy examples (Caddy 2-liner, nginx server block) for subdomain deployment
+  - [x] 8.2 Build the frontend (`cd web && npm run build`) and copy output to `src/colonyos/web_dist/`
+  - [x] 8.3 Smoke test: run `colonyos daemon` and verify the dashboard is accessible, health banner shows live data, queue page populates, analytics charts render

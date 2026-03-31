@@ -112,10 +112,78 @@ If you prefer manual control, follow these steps:
    sudo journalctl -u colonyos -f
    ```
 
+## Web Dashboard
+
+The ColonyOS daemon automatically starts a web dashboard on port `8741`
+(configurable via `daemon.dashboard_port` in `.colonyos/config.yaml`).
+
+By default, the dashboard binds to `127.0.0.1` (localhost only). To expose it
+externally, use a reverse proxy. **Do not bind to `0.0.0.0` in production —
+always terminate TLS at the reverse proxy.**
+
+### Reverse Proxy Setup
+
+#### Caddy (recommended — automatic HTTPS)
+
+```
+colonyos.myapp.com {
+    reverse_proxy localhost:8741
+}
+```
+
+That's it — Caddy handles TLS certificates automatically via Let's Encrypt.
+
+#### nginx
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name colonyos.myapp.com;
+
+    ssl_certificate     /etc/letsencrypt/live/colonyos.myapp.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/colonyos.myapp.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8741;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+#### CORS Configuration
+
+When serving the dashboard from a subdomain, set the allowed origins so the
+browser can reach the API:
+
+```bash
+# In /opt/colonyos/env
+COLONYOS_ALLOWED_ORIGINS=https://colonyos.myapp.com
+```
+
+Multiple origins can be comma-separated:
+
+```bash
+COLONYOS_ALLOWED_ORIGINS=https://colonyos.myapp.com,http://localhost:5173
+```
+
+### Dashboard Configuration
+
+In `.colonyos/config.yaml`:
+
+```yaml
+daemon:
+  dashboard_enabled: true   # set to false to disable the web dashboard
+  dashboard_port: 8741      # port the dashboard listens on
+```
+
 ## Monitoring
 
 - **Logs**: `journalctl -u colonyos --since "1 hour ago"`
 - **Health**: `curl http://localhost:8741/healthz`
+- **Dashboard**: Open `http://localhost:8741` in a browser (or your subdomain)
 - **Slack**: The daemon posts heartbeat messages every 4 hours
 - **Daily digest**: Summary posted at the configured UTC hour
 
