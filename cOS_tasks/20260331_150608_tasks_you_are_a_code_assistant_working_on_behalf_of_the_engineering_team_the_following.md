@@ -24,10 +24,10 @@
   - [x] 2.2 In `_triage_and_enqueue()`, wrap the `triage_message()` call in a retry loop: max 1 retry, 3-second backoff between attempts, with `shutdown_event.is_set()` check before retry. Only retry on `Exception` subclasses that indicate transient failure (timeout, connection error, HTTP 429/5xx). Let other exceptions propagate to the existing error handler.
   - [x] 2.3 Import `time` module if not already imported for the `time.sleep(3)` backoff.
 
-- [ ] 3.0 Mark failed triages as processed in watch_state (prevent redelivery loops)
+- [x] 3.0 Mark failed triages as processed in watch_state (prevent redelivery loops)
   depends_on: [1.0]
-  - [ ] 3.1 Write tests: (a) Test that when triage fails (after retries), `watch_state.mark_processed(channel, ts, "triage-error")` is called. (b) Test that a message previously marked `"triage-error"` is rejected by `_handle_event()` via the existing `is_processed` check.
-  - [ ] 3.2 In `_triage_and_enqueue()`, in the `except Exception` block (after the retry logic from task 2.0), add `with self.state_lock: self.watch_state.mark_processed(channel, ts, "triage-error"); self.persist_watch_state()` before the `return` statement. This ensures Slack redeliveries of the same message are rejected.
+  - [x] 3.1 Write tests: (a) Test that when triage fails (after retries), `watch_state.mark_processed(channel, ts, "triage-error")` is called. (b) Test that a message previously marked `"triage-error"` is rejected by `_handle_event()` via the existing `is_processed` check.
+  - [x] 3.2 In `_triage_and_enqueue()`, in the `except Exception` block (after the retry logic from task 2.0), add `with self.state_lock: self.watch_state.mark_processed(channel, ts, "triage-error"); self.persist_watch_state()` before the `return` statement. This ensures Slack redeliveries of the same message are rejected.
 
 - [ ] 4.0 Move `increment_hourly_count` to message reservation time (close TOCTOU gap)
   depends_on: [1.0]

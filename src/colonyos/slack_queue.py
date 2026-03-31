@@ -285,6 +285,9 @@ class SlackQueueEngine:
                     )
                 except Exception:
                     logger.debug("Failed to post triage failure message", exc_info=True)
+                with self.state_lock:
+                    self.watch_state.mark_processed(channel, ts, "triage-error")
+                    self.persist_watch_state()
                 return
             except Exception:
                 logger.exception("Triage failed for message %s:%s", channel, ts)
@@ -297,6 +300,9 @@ class SlackQueueEngine:
                     )
                 except Exception:
                     logger.debug("Failed to post triage failure message", exc_info=True)
+                with self.state_lock:
+                    self.watch_state.mark_processed(channel, ts, "triage-error")
+                    self.persist_watch_state()
                 return
 
         if self.shutdown_event.is_set():
