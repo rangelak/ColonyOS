@@ -93,6 +93,13 @@ DEFAULTS = {
         "max_nuke_attempts": 1,
         "incident_char_cap": 4000,
     },
+    "repo_map": {
+        "enabled": True,
+        "max_tokens": 4000,
+        "max_files": 2000,
+        "include_patterns": [],
+        "exclude_patterns": [],
+    },
     "daemon": {
         "daily_budget_usd": 500.0,
         "github_poll_interval_seconds": 120,
@@ -202,6 +209,17 @@ class RouterConfig:
 
 
 @dataclass
+class RepoMapConfig:
+    """Configuration for the repository map injected into agent prompts."""
+
+    enabled: bool = True
+    max_tokens: int = 4000
+    max_files: int = 2000
+    include_patterns: list[str] = field(default_factory=list)
+    exclude_patterns: list[str] = field(default_factory=list)
+
+
+@dataclass
 class MemoryConfig:
     """Configuration for the persistent memory system."""
 
@@ -307,6 +325,7 @@ class ColonyConfig:
     parallel_implement: ParallelImplementConfig = field(default_factory=ParallelImplementConfig)
     router: RouterConfig = field(default_factory=RouterConfig)
     sweep: SweepConfig = field(default_factory=SweepConfig)
+    repo_map: RepoMapConfig = field(default_factory=RepoMapConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
@@ -611,6 +630,29 @@ def _parse_router_config(raw: dict) -> RouterConfig:
         confidence_threshold=confidence_threshold,
         small_fix_threshold=small_fix_threshold,
         qa_budget=qa_budget,
+    )
+
+
+def _parse_repo_map_config(raw: dict) -> RepoMapConfig:
+    """Parse the ``repo_map`` section from config.yaml."""
+    if not raw:
+        return RepoMapConfig()
+    defaults = DEFAULTS["repo_map"]
+    enabled = bool(raw.get("enabled", defaults["enabled"]))
+    max_tokens = int(raw.get("max_tokens", defaults["max_tokens"]))
+    if max_tokens < 1:
+        raise ValueError(f"repo_map.max_tokens must be positive, got {max_tokens}")
+    max_files = int(raw.get("max_files", defaults["max_files"]))
+    if max_files < 1:
+        raise ValueError(f"repo_map.max_files must be positive, got {max_files}")
+    include_patterns = list(raw.get("include_patterns", defaults["include_patterns"]))
+    exclude_patterns = list(raw.get("exclude_patterns", defaults["exclude_patterns"]))
+    return RepoMapConfig(
+        enabled=enabled,
+        max_tokens=max_tokens,
+        max_files=max_files,
+        include_patterns=include_patterns,
+        exclude_patterns=exclude_patterns,
     )
 
 
@@ -929,6 +971,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         parallel_implement=_parse_parallel_implement_config(raw.get("parallel_implement", {})),
         router=_parse_router_config(raw.get("router", {})),
         sweep=_parse_sweep_config(raw.get("sweep", {})),
+        repo_map=_parse_repo_map_config(raw.get("repo_map", {})),
         memory=_parse_memory_config(raw.get("memory", {})),
         retry=_parse_retry_config(raw.get("retry", {})),
         recovery=_parse_recovery_config(raw.get("recovery", {})),
@@ -1119,6 +1162,23 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "max_tasks": config.sweep.max_tasks,
             "max_files_per_task": config.sweep.max_files_per_task,
             "default_categories": list(config.sweep.default_categories),
+        }
+
+    # Only serialize repo_map if values differ from defaults
+    repo_map_defaults = DEFAULTS["repo_map"]
+    if (
+        config.repo_map.enabled != repo_map_defaults["enabled"]
+        or config.repo_map.max_tokens != repo_map_defaults["max_tokens"]
+        or config.repo_map.max_files != repo_map_defaults["max_files"]
+        or config.repo_map.include_patterns != repo_map_defaults["include_patterns"]
+        or config.repo_map.exclude_patterns != repo_map_defaults["exclude_patterns"]
+    ):
+        data["repo_map"] = {
+            "enabled": config.repo_map.enabled,
+            "max_tokens": config.repo_map.max_tokens,
+            "max_files": config.repo_map.max_files,
+            "include_patterns": list(config.repo_map.include_patterns),
+            "exclude_patterns": list(config.repo_map.exclude_patterns),
         }
 
     # Only serialize memory if values differ from defaults
