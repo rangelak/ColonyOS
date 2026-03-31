@@ -10,6 +10,7 @@ import type {
   ArtifactResult,
   ProposalEntry,
   ReviewEntry,
+  DaemonHealth,
 } from "./types";
 
 const BASE = "/api";
@@ -113,4 +114,22 @@ export function fetchProposals(): Promise<ProposalEntry[]> {
 
 export function fetchReviews(): Promise<ReviewEntry[]> {
   return fetchJSON<ReviewEntry[]>("/reviews");
+}
+
+// Daemon health and control endpoints
+
+export async function fetchDaemonHealth(): Promise<DaemonHealth> {
+  const resp = await fetch("/healthz");
+  if (!resp.ok && resp.status !== 503) {
+    throw new Error(`API error ${resp.status}: ${resp.statusText}`);
+  }
+  return resp.json() as Promise<DaemonHealth>;
+}
+
+export function pauseDaemon(): Promise<DaemonHealth> {
+  return writeJSON<DaemonHealth>("POST", "/daemon/pause", {});
+}
+
+export function resumeDaemon(): Promise<DaemonHealth> {
+  return writeJSON<DaemonHealth>("POST", "/daemon/resume", {});
 }
