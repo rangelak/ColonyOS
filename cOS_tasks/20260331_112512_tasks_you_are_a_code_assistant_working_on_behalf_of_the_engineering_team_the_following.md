@@ -38,12 +38,12 @@
   - [x] 1.5 Add queue status color/icon utilities to `web/src/util.ts` (pending=yellow, running=blue, completed=green, failed=red)
   - [x] 1.6 Write Vitest tests for new API functions and utility helpers
 
-- [ ] 2.0 Daemon health banner component (visible on every page)
+- [x] 2.0 Daemon health banner component (visible on every page)
   depends_on: [1.0]
-  - [ ] 2.1 Write Vitest tests for `DaemonHealthBanner` component (renders healthy/degraded/stopped states, shows budget, shows circuit breaker warning)
-  - [ ] 2.2 Create `web/src/components/DaemonHealthBanner.tsx` — compact health indicator that polls `/healthz` every 5s, shows status badge (green/yellow/red dot), daily spend vs budget bar, circuit breaker + paused warnings
-  - [ ] 2.3 Integrate `DaemonHealthBanner` into `web/src/components/Layout.tsx` sidebar header (below the ColonyOS title)
-  - [ ] 2.4 Add pause/resume button to the health banner (gated by write_enabled, with confirmation dialog)
+  - [x] 2.1 Write Vitest tests for `DaemonHealthBanner` component (renders healthy/degraded/stopped states, shows budget, shows circuit breaker warning)
+  - [x] 2.2 Create `web/src/components/DaemonHealthBanner.tsx` — compact health indicator that polls `/healthz` every 5s, shows status badge (green/yellow/red dot), daily spend vs budget bar, circuit breaker + paused warnings
+  - [x] 2.3 Integrate `DaemonHealthBanner` into `web/src/components/Layout.tsx` sidebar header (below the ColonyOS title)
+  - [x] 2.4 Add pause/resume button to the health banner (gated by write_enabled, with confirmation dialog)
 
 - [ ] 3.0 Queue page and component
   depends_on: [1.0]

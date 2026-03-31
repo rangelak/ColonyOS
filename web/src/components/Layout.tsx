@@ -1,5 +1,6 @@
 import { NavLink } from "react-router-dom";
 import type { ReactNode } from "react";
+import DaemonHealthBanner from "./DaemonHealthBanner";
 
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard" },
@@ -18,6 +19,9 @@ export default function Layout({ children }: { children: ReactNode }) {
             ColonyOS
           </h1>
           <p className="text-xs text-gray-500 mt-0.5">Dashboard</p>
+        </div>
+        <div className="p-3 pb-0">
+          <DaemonHealthBanner />
         </div>
         <nav className="flex-1 p-3 space-y-1">
           {NAV_ITEMS.map(({ to, label }) => (
