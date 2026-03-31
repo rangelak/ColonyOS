@@ -79,7 +79,16 @@ def _matches_any(filename: str, patterns: tuple[str, ...] | list[str]) -> bool:
 
 def _git_clean_env() -> dict[str, str]:
     """Return a git subprocess environment with repo-shaping vars removed."""
-    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    blocked = {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_COMMON_DIR",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+    }
+    return {key: value for key, value in os.environ.items() if key not in blocked}
 
 
 def get_tracked_files(repo_root: Path, config: RepoMapConfig) -> list[str]:

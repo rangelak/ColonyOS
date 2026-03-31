@@ -15,6 +15,7 @@ from colonyos.repo_map import (
     Symbol,
     SENSITIVE_PATTERNS,
     _MAX_PARSE_SIZE,
+    _git_clean_env,
     extract_file_symbols,
     extract_js_ts_symbols,
     extract_other_file_info,
@@ -90,6 +91,17 @@ class TestGetTrackedFiles:
         monkeypatch.setenv("GIT_WORK_TREE", "/definitely/not/the/repo")
         files = get_tracked_files(git_repo, config)
         assert files == ["src/app.py"]
+
+    def test_keeps_non_repo_shaping_git_env_vars(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "/github/workspace")
+        monkeypatch.setenv("GIT_DIR", "/bad/.git")
+        env = _git_clean_env()
+        assert env["GIT_CONFIG_COUNT"] == "1"
+        assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
+        assert env["GIT_CONFIG_VALUE_0"] == "/github/workspace"
+        assert "GIT_DIR" not in env
 
     def test_filters_sensitive_env_files(self, git_repo: Path, config: RepoMapConfig):
         _add_and_commit(git_repo, {
