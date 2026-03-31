@@ -4745,3 +4745,30 @@ def _run_pipeline(
     finally:
         if memory_store is not None:
             memory_store.close()
+
+        # Safety net: if the pipeline didn't complete cleanly, commit any
+        # dirty working-tree state so that subsequent runs aren't blocked
+        # by the preflight "dirty worktree" check.  On feature branches
+        # this preserves partial work; on main/master it stashes instead.
+        if log.status != RunStatus.COMPLETED:
+            try:
+                from colonyos.recovery import safety_commit_partial_work
+
+                ctx: list[str] = [f"Run: {log.run_id}"]
+                if log.prompt:
+                    ctx.append(f"Prompt: {log.prompt[:200]}")
+                if log.phases:
+                    last_phase = log.phases[-1]
+                    ctx.append(f"Last phase: {last_phase.phase.value}")
+                    if last_phase.error:
+                        ctx.append(f"Error: {last_phase.error[:300]}")
+                ctx.append(f"Cost so far: ${log.total_cost_usd:.2f}")
+                result = safety_commit_partial_work(
+                    repo_root, context_lines=ctx
+                )
+                if result:
+                    _log(f"Post-failure cleanup: {result}")
+            except Exception:
+                logger.warning(
+                    "Post-failure safety commit failed", exc_info=True
+                )

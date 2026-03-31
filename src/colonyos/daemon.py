@@ -1297,6 +1297,22 @@ class Daemon:
                     f"Pipeline exceeded {timeout}s wall-clock timeout"
                 )
 
+        # Capture the current branch so we can restore after the pipeline
+        # finishes (success or failure).  This prevents a failed pipeline
+        # from leaving the daemon stranded on a feature branch.
+        branch_before: str | None = None
+        try:
+            br = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, cwd=self.repo_root, timeout=10,
+            )
+            name = br.stdout.strip() if br.returncode == 0 else ""
+            # "HEAD" means detached -- not a real branch we can restore to.
+            if name and name != "HEAD":
+                branch_before = name
+        except Exception:
+            logger.debug("Could not determine current branch before pipeline run")
+
         attempted_dirty_worktree_recovery = False
         attempted_branch_exists_recovery = False
         watchdog = threading.Timer(timeout, _timeout_watchdog)
@@ -1344,6 +1360,23 @@ class Daemon:
                     raise
         finally:
             watchdog.cancel()
+            # Restore the branch the daemon was on before the pipeline run.
+            # The orchestrator's safety commit (in _run_pipeline finally)
+            # should have already committed any dirty state, but
+            # restore_to_branch handles leftover dirt as a fallback.
+            if branch_before:
+                try:
+                    from colonyos.recovery import restore_to_branch
+
+                    restored = restore_to_branch(self.repo_root, branch_before)
+                    if restored:
+                        logger.info("Post-pipeline: %s", restored)
+                except Exception:
+                    logger.warning(
+                        "Failed to restore to %s after pipeline run",
+                        branch_before,
+                        exc_info=True,
+                    )
 
     # ------------------------------------------------------------------
     # Background threads

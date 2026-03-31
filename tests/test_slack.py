@@ -149,7 +149,7 @@ class TestCreateSlackApp:
         original_import = __import__
 
         def fake_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
-            if name == "slack_bolt":
+            if name in ("slack_bolt", "slack_sdk"):
                 raise KeyError("slack_sdk")
             return original_import(name, globals, locals, fromlist, level)
 
@@ -166,7 +166,7 @@ class TestCreateSlackApp:
         original_import = __import__
 
         def fake_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
-            if name == "slack_bolt.adapter.socket_mode":
+            if name in ("slack_bolt.adapter.socket_mode", "slack_sdk"):
                 raise KeyError("slack_sdk")
             return original_import(name, globals, locals, fromlist, level)
 
