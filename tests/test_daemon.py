@@ -179,7 +179,8 @@ class TestPriorityQueue:
              patch.object(daemon_instance, "_reprioritize_queue") as mock_reprioritize, \
              patch.object(daemon_instance, "_post_heartbeat") as mock_heartbeat, \
              patch.object(daemon_instance, "_poll_pr_outcomes") as mock_outcomes, \
-             patch.object(daemon_instance, "_post_daily_digest_if_due") as mock_digest:
+             patch.object(daemon_instance, "_post_daily_digest_if_due") as mock_digest, \
+             patch.object(daemon_instance, "_sync_stale_prs") as mock_sync:
             daemon_instance._tick()
 
         mock_execute.assert_called_once()
@@ -190,6 +191,8 @@ class TestPriorityQueue:
         mock_heartbeat.assert_called_once()
         mock_outcomes.assert_called_once()
         mock_digest.assert_called_once()
+        # PR sync is disabled by default, so not called
+        mock_sync.assert_not_called()
 
 
 class TestBudgetEnforcement:
@@ -1596,3 +1599,107 @@ class TestNotificationLockCleanup:
         daemon_instance._cleanup_notification_lock("item-1")
         assert "item-1" not in daemon_instance._notification_thread_locks
         assert "item-2" in daemon_instance._notification_thread_locks
+
+
+class TestPRSync:
+    """Tests for PR sync daemon integration (concern #7)."""
+
+    def test_sync_called_on_interval(self, daemon_instance: Daemon):
+        """sync_stale_prs is called when the pr_sync interval elapses."""
+        daemon_instance.config.daemon.pr_sync.enabled = True
+        daemon_instance.config.daemon.pr_sync.interval_minutes = 1
+        daemon_instance._last_pr_sync_time = 0.0  # force elapsed
+
+        with patch.object(daemon_instance, "_try_execute_next", return_value=False), \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_schedule_ceo"), \
+             patch.object(daemon_instance, "_schedule_cleanup"), \
+             patch.object(daemon_instance, "_reprioritize_queue"), \
+             patch.object(daemon_instance, "_post_heartbeat"), \
+             patch.object(daemon_instance, "_poll_pr_outcomes"), \
+             patch.object(daemon_instance, "_post_daily_digest_if_due"), \
+             patch.object(daemon_instance, "_sync_stale_prs") as mock_sync:
+            daemon_instance._tick()
+
+        mock_sync.assert_called_once()
+
+    def test_sync_not_called_when_disabled(self, daemon_instance: Daemon):
+        """sync is not called when pr_sync.enabled is False."""
+        daemon_instance.config.daemon.pr_sync.enabled = False
+        daemon_instance._last_pr_sync_time = 0.0
+
+        with patch.object(daemon_instance, "_try_execute_next", return_value=False), \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_schedule_ceo"), \
+             patch.object(daemon_instance, "_schedule_cleanup"), \
+             patch.object(daemon_instance, "_reprioritize_queue"), \
+             patch.object(daemon_instance, "_post_heartbeat"), \
+             patch.object(daemon_instance, "_poll_pr_outcomes"), \
+             patch.object(daemon_instance, "_post_daily_digest_if_due"), \
+             patch.object(daemon_instance, "_sync_stale_prs") as mock_sync:
+            daemon_instance._tick()
+
+        mock_sync.assert_not_called()
+
+    def test_sync_not_called_when_paused(self, daemon_instance: Daemon):
+        """sync is skipped when daemon is paused."""
+        daemon_instance.config.daemon.pr_sync.enabled = True
+        daemon_instance.config.daemon.pr_sync.interval_minutes = 1
+        daemon_instance._last_pr_sync_time = 0.0
+        daemon_instance._state.paused = True
+
+        with patch.object(daemon_instance, "_try_execute_next", return_value=False), \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_schedule_ceo"), \
+             patch.object(daemon_instance, "_schedule_cleanup"), \
+             patch.object(daemon_instance, "_reprioritize_queue"), \
+             patch.object(daemon_instance, "_post_heartbeat"), \
+             patch.object(daemon_instance, "_poll_pr_outcomes"), \
+             patch.object(daemon_instance, "_post_daily_digest_if_due"), \
+             patch.object(daemon_instance, "_sync_stale_prs") as mock_sync:
+            daemon_instance._tick()
+
+        mock_sync.assert_not_called()
+
+    def test_sync_not_called_during_pipeline(self, daemon_instance: Daemon):
+        """sync is skipped when _pipeline_running is True."""
+        daemon_instance.config.daemon.pr_sync.enabled = True
+        daemon_instance.config.daemon.pr_sync.interval_minutes = 1
+        daemon_instance._last_pr_sync_time = 0.0
+        daemon_instance._pipeline_running = True
+
+        with patch.object(daemon_instance, "_try_execute_next", return_value=False), \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_schedule_ceo"), \
+             patch.object(daemon_instance, "_schedule_cleanup"), \
+             patch.object(daemon_instance, "_reprioritize_queue"), \
+             patch.object(daemon_instance, "_post_heartbeat"), \
+             patch.object(daemon_instance, "_poll_pr_outcomes"), \
+             patch.object(daemon_instance, "_post_daily_digest_if_due"), \
+             patch.object(daemon_instance, "_sync_stale_prs") as mock_sync:
+            daemon_instance._tick()
+
+        mock_sync.assert_not_called()
+
+    def test_sync_exception_caught(self, daemon_instance: Daemon):
+        """Exceptions in _sync_stale_prs do not crash the daemon."""
+        daemon_instance.config.daemon.pr_sync.enabled = True
+        daemon_instance.config.daemon.pr_sync.interval_minutes = 1
+        daemon_instance._last_pr_sync_time = 0.0
+
+        with patch("colonyos.pr_sync.sync_stale_prs", side_effect=RuntimeError("boom")), \
+             patch.object(daemon_instance, "_post_slack_message"):
+            # Should not raise
+            daemon_instance._sync_stale_prs()
+
+    def test_sync_passes_write_enabled(self, daemon_instance: Daemon):
+        """_sync_stale_prs passes the dashboard_write_enabled config value."""
+        daemon_instance.config.daemon.pr_sync.enabled = True
+        daemon_instance.config.daemon.dashboard_write_enabled = True
+
+        with patch("colonyos.pr_sync.sync_stale_prs") as mock_sync:
+            daemon_instance._sync_stale_prs()
+
+        mock_sync.assert_called_once()
+        call_kwargs = mock_sync.call_args[1]
+        assert call_kwargs["write_enabled"] is True
