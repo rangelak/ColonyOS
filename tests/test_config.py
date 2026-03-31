@@ -845,7 +845,7 @@ class TestSlackConfigTriageFields:
 class TestDaemonConfigBudgetAndControl:
     def test_default_daily_budget_is_500(self) -> None:
         assert DEFAULTS["daemon"]["daily_budget_usd"] == 500.0
-        assert DEFAULTS["daemon"]["auto_recover_dirty_worktree"] is False
+        assert DEFAULTS["daemon"]["auto_recover_dirty_worktree"] is True
 
     def test_parses_unlimited_daemon_budget(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"

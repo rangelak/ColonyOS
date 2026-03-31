@@ -33,6 +33,7 @@ class DaemonState:
     )
     consecutive_failures: int = 0
     circuit_breaker_until: str | None = None
+    circuit_breaker_activations: int = 0
     total_items_today: int = 0
     daemon_started_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
@@ -46,6 +47,7 @@ class DaemonState:
             "daily_reset_date": self.daily_reset_date,
             "consecutive_failures": self.consecutive_failures,
             "circuit_breaker_until": self.circuit_breaker_until,
+            "circuit_breaker_activations": self.circuit_breaker_activations,
             "total_items_today": self.total_items_today,
             "daemon_started_at": self.daemon_started_at,
             "last_heartbeat": self.last_heartbeat,
@@ -62,6 +64,7 @@ class DaemonState:
             ),
             consecutive_failures=int(data.get("consecutive_failures", 0)),
             circuit_breaker_until=data.get("circuit_breaker_until"),
+            circuit_breaker_activations=int(data.get("circuit_breaker_activations", 0)),
             total_items_today=int(data.get("total_items_today", 0)),
             daemon_started_at=data.get(
                 "daemon_started_at",
@@ -95,15 +98,26 @@ class DaemonState:
         return self.consecutive_failures
 
     def record_success(self) -> None:
-        """Reset consecutive failure counter on success."""
+        """Reset consecutive failure counter and circuit breaker on success."""
         self.consecutive_failures = 0
         self.circuit_breaker_until = None
+        self.circuit_breaker_activations = 0
 
-    def activate_circuit_breaker(self, cooldown_minutes: int) -> str:
-        """Set circuit breaker expiry. Returns the expiry ISO timestamp."""
+    def activate_circuit_breaker(self, cooldown_minutes: int) -> str | None:
+        """Set circuit breaker expiry with escalating cooldowns.
+
+        Returns the expiry ISO timestamp on success, or ``None`` if the
+        circuit breaker has been activated too many times without a
+        success (indicating a structural problem that requires a pause).
+        """
         from datetime import timedelta
 
-        expiry = datetime.now(timezone.utc) + timedelta(minutes=cooldown_minutes)
+        self.circuit_breaker_activations += 1
+        if self.circuit_breaker_activations >= 3:
+            return None
+        multiplier = 2 ** (self.circuit_breaker_activations - 1)
+        cooldown = cooldown_minutes * multiplier
+        expiry = datetime.now(timezone.utc) + timedelta(minutes=cooldown)
         self.circuit_breaker_until = expiry.isoformat()
         return self.circuit_breaker_until
 

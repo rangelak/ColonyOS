@@ -345,6 +345,9 @@ class Daemon:
         self._slack_client: Any | None = None
         self._slack_client_ready = threading.Event()
 
+        # Systemic failure tracking — recent error codes for pattern detection
+        self._recent_failure_codes: list[str] = []
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -450,21 +453,26 @@ class Daemon:
             self._poll_github_issues()
             self._last_github_poll_time = now
 
-        # 3. CEO idle-fill (only when queue is empty and no pipeline running)
+        # 3. CEO idle-fill (only when healthy, queue is empty, and no pipeline running)
         ceo_cooldown = self.daemon_config.ceo_cooldown_minutes * 60
         if (
             not executed_item
-            and
-            not self._pipeline_running
+            and not self._pipeline_running
+            and not self._state.is_circuit_breaker_active()
+            and not self._state.paused
             and self._pending_count() == 0
             and now - self._last_ceo_time >= ceo_cooldown
         ):
             self._schedule_ceo()
             self._last_ceo_time = now
 
-        # 4. Cleanup scheduling
+        # 4. Cleanup scheduling (skip when degraded)
         cleanup_interval = self.daemon_config.cleanup_interval_hours * 3600
-        if now - self._last_cleanup_time >= cleanup_interval:
+        if (
+            not self._state.is_circuit_breaker_active()
+            and not self._state.paused
+            and now - self._last_cleanup_time >= cleanup_interval
+        ):
             self._schedule_cleanup()
             self._last_cleanup_time = now
 
@@ -549,6 +557,26 @@ class Daemon:
             if item is None:
                 return False
 
+        # Only inspect or recover git state when there is actual runnable work.
+        # This avoids mutating the repo while the daemon is paused, cooling down,
+        # or simply idle with an empty queue.
+        if self._is_worktree_dirty():
+            if self.daemon_config.auto_recover_dirty_worktree:
+                logger.warning("Dirty worktree detected pre-execution, auto-recovering")
+                if not self._recover_dirty_worktree_preemptive():
+                    return False
+            else:
+                logger.error(
+                    "Dirty worktree detected, skipping execution. "
+                    "Enable auto_recover_dirty_worktree or clean manually."
+                )
+                return False
+
+        with self._lock:
+            if self._state.paused or self._state.is_circuit_breaker_active():
+                return False
+            if item.status != QueueItemStatus.PENDING:
+                return False
             item.status = QueueItemStatus.RUNNING
             self._pipeline_running = True
             self._persist_queue()
@@ -567,6 +595,7 @@ class Daemon:
                 if log.status == RunStatus.COMPLETED:
                     item.status = QueueItemStatus.COMPLETED
                     self._state.record_success()
+                    self._recent_failure_codes.clear()
                 else:
                     item.status = QueueItemStatus.FAILED
                     item.error = (
@@ -621,21 +650,48 @@ class Daemon:
                 },
             )
             operator_hint = self._failure_guidance(exc)
+            error_code = getattr(exc, "code", None) or type(exc).__name__
             with self._lock:
                 item.status = QueueItemStatus.FAILED
                 item.error = self._format_item_error(
                     failure_message,
                     incident_path=incident_path,
                 )
+                self._recent_failure_codes.append(error_code)
+                max_tracked = self.daemon_config.max_consecutive_failures
+                if len(self._recent_failure_codes) > max_tracked:
+                    self._recent_failure_codes = self._recent_failure_codes[-max_tracked:]
+
                 failures = self._state.record_failure()
-                if failures >= self.daemon_config.max_consecutive_failures:
-                    self._state.activate_circuit_breaker(
-                        self.daemon_config.circuit_breaker_cooldown_minutes
-                    )
-                    logger.warning(
-                        "Circuit breaker activated after %d consecutive failures",
-                        failures,
-                    )
+                if failures >= max_tracked:
+                    if self._is_systemic_failure():
+                        self._state.paused = True
+                        logger.error(
+                            "Auto-paused: %d consecutive failures with same error (%s). "
+                            "Use 'colonyos daemon resume' or Slack /resume to unpause.",
+                            failures,
+                            error_code,
+                        )
+                        self._post_systemic_failure_alert(error_code, failures)
+                    else:
+                        cb_expiry = self._state.activate_circuit_breaker(
+                            self.daemon_config.circuit_breaker_cooldown_minutes
+                        )
+                        if cb_expiry is None:
+                            self._state.paused = True
+                            logger.error(
+                                "Auto-paused: circuit breaker escalated after %d activations",
+                                self._state.circuit_breaker_activations,
+                            )
+                            self._post_systemic_failure_alert(error_code, failures)
+                        else:
+                            logger.warning(
+                                "Circuit breaker activated after %d consecutive failures "
+                                "(activation #%d, cooldown until %s)",
+                                failures,
+                                self._state.circuit_breaker_activations,
+                                cb_expiry,
+                            )
                 self._pipeline_running = False
                 self._persist_state()
                 self._persist_queue()
@@ -1180,6 +1236,66 @@ class Daemon:
         except Exception:
             logger.exception("Error during git state recovery")
 
+    def _is_worktree_dirty(self) -> bool:
+        """Fast check for uncommitted changes before picking a queue item."""
+        try:
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=self.repo_root,
+            )
+            if result.returncode != 0:
+                return False
+            from colonyos.orchestrator import COLONYOS_OUTPUT_PREFIXES
+
+            for line in result.stdout.strip().splitlines():
+                path = line[3:].strip().strip('"')
+                if not any(path.startswith(p) for p in COLONYOS_OUTPUT_PREFIXES):
+                    return True
+            return False
+        except Exception:
+            logger.debug("Pre-execution worktree check failed", exc_info=True)
+            return False
+
+    def _recover_dirty_worktree_preemptive(self) -> bool:
+        """Preserve and reset a dirty worktree before any item is picked.
+
+        Returns True if recovery succeeded and execution can proceed,
+        False if recovery failed and execution should be skipped.
+        """
+        try:
+            from colonyos.recovery import preserve_and_reset_worktree
+
+            preserve_result = preserve_and_reset_worktree(
+                self.repo_root,
+                "daemon-preexec-dirty-recovery",
+            )
+            self._record_runtime_incident(
+                label_prefix="daemon-preexec-dirty-recovery",
+                summary=(
+                    "Pre-execution check found a dirty worktree. "
+                    "State was preserved and the worktree was reset.\n\n"
+                    f"Preservation mode: {preserve_result.preservation_mode}\n"
+                    f"Snapshot dir: {preserve_result.snapshot_dir}\n"
+                    f"Stash message: {preserve_result.stash_message or '(none)'}"
+                ),
+                metadata={
+                    "preservation_mode": preserve_result.preservation_mode,
+                    "snapshot_dir": str(preserve_result.snapshot_dir),
+                    "stash_message": preserve_result.stash_message,
+                },
+            )
+            logger.info(
+                "Pre-execution dirty worktree recovered (mode=%s)",
+                preserve_result.preservation_mode,
+            )
+            return True
+        except Exception:
+            logger.exception("Failed to recover dirty worktree pre-execution")
+            return False
+
     def _should_auto_recover_dirty_worktree(self, exc: Exception) -> bool:
         return (
             self.daemon_config.auto_recover_dirty_worktree
@@ -1427,6 +1543,7 @@ class Daemon:
             def _publish_client(client: Any) -> None:
                 self._slack_client = client
 
+            assert self._slack_watch_state is not None
             slack_engine = SlackQueueEngine(
                 repo_root=self.repo_root,
                 config=self.config,
@@ -1854,6 +1971,22 @@ class Daemon:
         if incident_path is not None:
             return f"{guidance} Incident summary: {incident_path}"
         return guidance
+
+    def _is_systemic_failure(self) -> bool:
+        """True when all recent failure codes are identical (systemic issue)."""
+        codes = self._recent_failure_codes
+        if len(codes) < self.daemon_config.max_consecutive_failures:
+            return False
+        return len(set(codes)) == 1
+
+    def _post_systemic_failure_alert(self, error_code: str, failures: int) -> None:
+        """Post a Slack alert when the daemon auto-pauses due to systemic failures."""
+        self._post_slack_message(
+            f":rotating_light: *Daemon auto-paused*\n"
+            f"{failures} consecutive failures with the same error: `{error_code}`\n"
+            f"The daemon will not process any more items until manually resumed.\n"
+            f"Use `colonyos daemon resume` or send `resume` in this channel to unpause."
+        )
 
     def _failure_summary(self, exc: Exception) -> str:
         """Return a concise failure summary for queue item state and logs."""
