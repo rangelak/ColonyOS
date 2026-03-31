@@ -264,6 +264,38 @@ class TestSanitizeForSlack:
         assert "@HERE" not in result
         assert "@Channel" not in result
 
+    def test_neutralizes_user_mention_injection(self) -> None:
+        """<@U12345> user mention syntax should be neutralized."""
+        result = sanitize_for_slack("<@U12345ABC> pinged you")
+        assert "<@U12345ABC>" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_user_mention_with_display(self) -> None:
+        """<@U12345|display> user mention with display text should be neutralized."""
+        result = sanitize_for_slack("<@U12345|Alice> said hi")
+        assert "<@U12345" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_bot_mention(self) -> None:
+        """<@B12345> bot mention syntax should be neutralized."""
+        result = sanitize_for_slack("<@B12345ABC> bot mention")
+        assert "<@B12345ABC>" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_mailto_link_injection(self) -> None:
+        """<mailto:user@corp.com|click> phishing link should be neutralized."""
+        result = sanitize_for_slack("<mailto:user@corp.com|Click to email>")
+        assert "<mailto:" not in result
+        assert "mailto:user@corp.com" in result
+        assert "Click to email" in result
+
+    def test_neutralizes_slack_protocol_link_injection(self) -> None:
+        """<slack://open?team=T123|text> deep link should be neutralized."""
+        result = sanitize_for_slack("<slack://open?team=T123|Join team>")
+        assert "<slack://" not in result
+        assert "slack://open?team=T123" in result
+        assert "Join team" in result
+
 
 class TestXmlTagRegex:
     def test_matches_opening_tag(self) -> None:

@@ -79,14 +79,16 @@ def strip_slack_links(text: str) -> str:
 _SLACK_MRKDWN_CHARS_RE = re.compile(r"([*_~`])")
 
 # Mention patterns that could be used for injection: @here, @channel,
-# @everyone, and Slack special-mention syntax <!here>, <!channel>, <!everyone>.
+# @everyone, Slack special-mention syntax <!here>, <!channel>, <!everyone>,
+# and user/group mentions like <@U12345> or <@U12345|display>.
 _SLACK_MENTION_RE = re.compile(
-    r"<!(?:here|channel|everyone)(?:\|[^>]*)?>|@(?:here|channel|everyone)",
+    r"<!(?:here|channel|everyone)(?:\|[^>]*)?>|<@[UWB]\w+(?:\|[^>]*)?>|@(?:here|channel|everyone)",
     re.IGNORECASE,
 )
 
 # Slack link markup: <URL|display_text> — used for phishing link injection.
-_SLACK_LINK_INJECTION_RE = re.compile(r"<(https?://[^|>]+)\|([^>]+)>")
+# Covers http, https, mailto, slack, and other URI schemes.
+_SLACK_LINK_INJECTION_RE = re.compile(r"<([a-zA-Z][a-zA-Z0-9+.-]*://[^|>]+|mailto:[^|>]+)\|([^>]+)>")
 
 
 def sanitize_for_slack(text: str) -> str:

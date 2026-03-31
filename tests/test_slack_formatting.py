@@ -439,6 +439,21 @@ class TestExtractReviewFindingsSummary:
         findings = _extract_review_findings_summary(text)
         assert len(findings) >= 1
 
+    def test_blank_lines_between_findings(self):
+        """Blank lines between findings should not stop collection."""
+        text = (
+            "FINDINGS:\n"
+            "- [a.py]: Issue 1\n"
+            "\n"
+            "- [b.py]: Issue 2\n"
+            "\n"
+            "- [c.py]: Issue 3\n"
+            "SYNTHESIS:\n"
+            "Summary."
+        )
+        findings = _extract_review_findings_summary(text, max_findings=3)
+        assert len(findings) == 3
+
 
 # ===================================================================
 # 1.5  Message size cap (3,000 chars)
@@ -468,9 +483,8 @@ class TestMessageSizeCap:
         result = _format_implement_result_note(
             _make_phase_result(artifacts={"task_results": json.dumps(task_results)})
         )
-        # After task 5.0 adds truncation, this should be under 3000 chars.
-        # For now, just verify it produces output.
         assert len(result) > 0
+        assert len(result) <= 3000
 
     def test_review_round_max_length(self):
         """Review round with many reviewers and long findings stays under 3000 chars."""
@@ -484,8 +498,8 @@ class TestMessageSizeCap:
             for _ in range(10)
         ]
         note = _format_review_round_note(results, reviewers, round_num=1, total_rounds=3)
-        # Should produce output without error
         assert len(note) > 0
+        assert len(note) <= 3000
 
 
 # ===================================================================

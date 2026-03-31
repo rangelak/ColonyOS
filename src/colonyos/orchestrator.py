@@ -1351,7 +1351,7 @@ def _format_task_outline_note(tasks: list[tuple[str, str]]) -> str:
         lines.append(f"\u2022 `{task_id}` {short}")
     if len(tasks) > 6:
         lines.append(f"+{len(tasks) - 6} more")
-    return "\n".join(lines)
+    return _truncate_slack_message("\n".join(lines))
 
 
 def _normalize_task_status(raw: object) -> str:
@@ -1465,7 +1465,7 @@ def _format_implement_result_note(result: PhaseResult) -> str:
     if blocked:
         parts.append(":no_entry_sign: *Blocked:*")
         parts.append(_format_task_list_with_descriptions(blocked, task_results))
-    return "\n".join(parts)
+    return _truncate_slack_message("\n".join(parts))
 
 
 def _invoke_ui_factory(
@@ -1531,7 +1531,10 @@ def _extract_review_findings_summary(
         if in_findings:
             if stripped.startswith("- "):
                 findings_lines.append(stripped[2:].strip())
-            elif stripped and not stripped.startswith("-"):
+            elif not stripped:
+                # Blank line between findings — continue collecting
+                continue
+            elif not stripped.startswith("-"):
                 # Hit a non-finding line (e.g. SYNTHESIS:) — stop collecting
                 break
     if findings_lines:
@@ -1630,7 +1633,7 @@ def _format_review_round_note(
     if not requested_changes and not failed:
         details.append("All reviewers approved; moving to the decision gate.")
 
-    return "\n".join(details)
+    return _truncate_slack_message("\n".join(details))
 
 
 def _format_fix_iteration_extra(
