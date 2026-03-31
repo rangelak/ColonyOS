@@ -13,7 +13,7 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager, redirect_stderr, redirect_stdout, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -1280,13 +1280,7 @@ def map(max_tokens: int | None, prompt_text: str) -> None:
 
     if max_tokens is not None:
         # Override the configured max_tokens
-        repo_map_config = type(repo_map_config)(
-            enabled=repo_map_config.enabled,
-            max_tokens=max_tokens,
-            max_files=repo_map_config.max_files,
-            include_patterns=repo_map_config.include_patterns,
-            exclude_patterns=repo_map_config.exclude_patterns,
-        )
+        repo_map_config = dataclass_replace(repo_map_config, max_tokens=max_tokens)
 
     output = generate_repo_map(repo_root, repo_map_config, prompt_text=prompt_text)
     if not output:

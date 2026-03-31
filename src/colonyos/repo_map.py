@@ -20,7 +20,6 @@ from colonyos.config import RepoMapConfig
 
 logger = logging.getLogger(__name__)
 
-# Hardcoded sensitive file patterns that are always excluded (FR-6).
 # Maximum file size (in bytes) to read for symbol extraction.  Files larger
 # than this threshold are recorded with size metadata only — no AST/regex
 # parsing — to avoid OOM on generated or vendored megafiles.
