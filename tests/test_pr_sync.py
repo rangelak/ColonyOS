@@ -385,3 +385,202 @@ class TestCheckMergeState:
         mock_run.side_effect = subprocess.TimeoutExpired("gh", 10)
         result = _check_merge_state(tmp_repo, 42)
         assert result == "UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
+# TestPRSyncIntegration
+# ---------------------------------------------------------------------------
+
+
+class TestPRSyncIntegration:
+    """Integration-style test exercising the full sync flow end-to-end.
+
+    Seeds an OutcomeStore with a tracked PR, mocks GitHub API and git
+    subprocess calls, and verifies that sync_stale_prs completes the
+    full cycle: detect stale → fetch → worktree → merge → push → DB update.
+    """
+
+    @patch("colonyos.pr_sync.post_pr_comment")
+    @patch("subprocess.run")
+    def test_full_sync_success_flow(
+        self, mock_run, mock_comment, tmp_repo: Path, store: OutcomeStore
+    ):
+        """Full flow: stale PR detected, merged, pushed, DB updated."""
+        from colonyos.pr_sync import sync_stale_prs
+
+        config = _make_config(enabled=True, max_sync_failures=3)
+        _seed_pr(store, pr_number=77, branch="colonyos/integration-test")
+
+        # Build a subprocess side-effect that handles all git/gh commands
+        def side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            result = MagicMock(returncode=0, stdout="", stderr="")
+
+            # gh pr view --json mergeStateStatus
+            if "gh" in cmd and "pr" in cmd and "view" in cmd:
+                result.stdout = '{"mergeStateStatus": "BEHIND"}'
+                return result
+
+            # git rev-parse → return a fake SHA
+            if "rev-parse" in cmd:
+                result.stdout = "abcdef1234567890abcdef1234567890abcdef12\n"
+                return result
+
+            # git merge origin/main --no-edit → success
+            if "merge" in cmd and "origin/main" in cmd:
+                result.returncode = 0
+                return result
+
+            # All other git commands (fetch, worktree add/remove, checkout, push) → success
+            result.stdout = "ok\n"
+            return result
+
+        mock_run.side_effect = side_effect
+
+        result = sync_stale_prs(
+            repo_root=tmp_repo,
+            config=config,
+            queue_state_items=[],
+            post_slack_fn=MagicMock(),
+            write_enabled=True,
+        )
+
+        # Sync should succeed
+        assert result is True
+
+        # Verify the database was updated: sync_failures reset to 0, last_sync_at set
+        rows = store.get_sync_candidates(10)
+        assert len(rows) == 1
+        assert rows[0]["pr_number"] == 77
+        assert rows[0]["sync_failures"] == 0
+        assert rows[0]["last_sync_at"] is not None
+
+        # No PR comment should be posted on success
+        mock_comment.assert_not_called()
+
+        # Verify key git operations were called
+        all_cmds = [c[0][0] for c in mock_run.call_args_list]
+
+        # Should have fetched origin main
+        fetch_main = [c for c in all_cmds if "fetch" in c and "main" in c]
+        assert len(fetch_main) >= 1, "Expected git fetch origin main"
+
+        # Should have created and removed a worktree
+        wt_add = [c for c in all_cmds if "worktree" in c and "add" in c]
+        wt_rm = [c for c in all_cmds if "worktree" in c and "remove" in c]
+        assert len(wt_add) >= 1, "Expected git worktree add"
+        assert len(wt_rm) >= 1, "Expected git worktree remove"
+
+        # Should have pushed
+        push_cmds = [c for c in all_cmds if "push" in c]
+        assert len(push_cmds) >= 1, "Expected git push"
+
+    @patch("colonyos.pr_sync.post_pr_comment")
+    @patch("subprocess.run")
+    def test_full_sync_conflict_flow(
+        self, mock_run, mock_comment, tmp_repo: Path, store: OutcomeStore
+    ):
+        """Full flow: stale PR detected, merge conflicts, aborted, notified."""
+        from colonyos.pr_sync import sync_stale_prs
+
+        config = _make_config(enabled=True, max_sync_failures=3)
+        _seed_pr(store, pr_number=88, branch="colonyos/conflict-branch")
+        slack_fn = MagicMock()
+
+        def side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            result = MagicMock(returncode=0, stdout="", stderr="")
+
+            # gh pr view → BEHIND
+            if "gh" in cmd and "pr" in cmd and "view" in cmd:
+                result.stdout = '{"mergeStateStatus": "BEHIND"}'
+                return result
+
+            # git rev-parse
+            if "rev-parse" in cmd:
+                result.stdout = "abcdef1234567890\n"
+                return result
+
+            # git merge origin/main → conflict
+            if "merge" in cmd and "origin/main" in cmd and "--abort" not in cmd:
+                result.returncode = 1
+                result.stderr = "CONFLICT (content): Merge conflict in api.py\n"
+                result.stdout = ""
+                return result
+
+            # git diff --diff-filter=U → conflicting files
+            if "diff" in cmd and "--diff-filter=U" in cmd:
+                result.stdout = "api.py\nmodels.py\n"
+                return result
+
+            # Everything else succeeds
+            result.stdout = "ok\n"
+            return result
+
+        mock_run.side_effect = side_effect
+
+        result = sync_stale_prs(
+            repo_root=tmp_repo,
+            config=config,
+            queue_state_items=[],
+            post_slack_fn=slack_fn,
+            write_enabled=True,
+        )
+
+        # Sync should fail
+        assert result is False
+
+        # Slack notification was sent
+        slack_fn.assert_called_once()
+        slack_msg = slack_fn.call_args[0][0]
+        assert "88" in slack_msg
+        assert "conflict" in slack_msg.lower()
+
+        # PR comment was posted
+        mock_comment.assert_called_once()
+        comment_args = mock_comment.call_args
+        assert comment_args[0][1] == 88  # pr_number
+        assert "api.py" in comment_args[0][2]  # body mentions conflicting file
+
+        # Database updated with failure
+        rows = store.get_sync_candidates(10)
+        assert len(rows) == 1
+        assert rows[0]["pr_number"] == 88
+        assert rows[0]["sync_failures"] == 1
+        assert rows[0]["last_sync_at"] is not None
+
+        # Worktree was cleaned up even after conflict
+        all_cmds = [c[0][0] for c in mock_run.call_args_list]
+        wt_rm = [c for c in all_cmds if "worktree" in c and "remove" in c]
+        assert len(wt_rm) >= 1, "Worktree should be cleaned up after conflict"
+
+    @patch("colonyos.pr_sync.post_pr_comment")
+    @patch("subprocess.run")
+    def test_full_flow_skips_uptodate_pr(
+        self, mock_run, mock_comment, tmp_repo: Path, store: OutcomeStore
+    ):
+        """Full flow: PR is up-to-date, no sync attempted."""
+        from colonyos.pr_sync import sync_stale_prs
+
+        config = _make_config(enabled=True)
+        _seed_pr(store, pr_number=99, branch="colonyos/already-clean")
+
+        def side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            result = MagicMock(returncode=0, stdout="", stderr="")
+            if "gh" in cmd and "pr" in cmd and "view" in cmd:
+                result.stdout = '{"mergeStateStatus": "CLEAN"}'
+            return result
+
+        mock_run.side_effect = side_effect
+
+        result = sync_stale_prs(
+            repo_root=tmp_repo,
+            config=config,
+            queue_state_items=[],
+            post_slack_fn=MagicMock(),
+            write_enabled=True,
+        )
+
+        assert result is None
+        mock_comment.assert_not_called()

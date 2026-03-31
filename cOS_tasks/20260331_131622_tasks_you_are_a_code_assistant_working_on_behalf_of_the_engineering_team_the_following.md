@@ -79,8 +79,8 @@
   - [x] 5.4 Add concern #7 to `_tick()` after PR outcome polling (line 586): check interval elapsed, not paused, not pipeline running, then call `_sync_stale_prs()`
   - [x] 5.5 Gate the sync call on `write_enabled` (the `dashboard_write_enabled` config field or `COLONYOS_WRITE_ENABLED` env var)
 
-- [ ] 6.0 End-to-end verification and documentation
+- [x] 6.0 End-to-end verification and documentation
   depends_on: [5.0]
-  - [ ] 6.1 Write an integration-style test in `tests/test_pr_sync.py` (`TestPRSyncIntegration`) that exercises the full flow: create OutcomeStore with a tracked PR, mock `gh pr view` returning `mergeStateStatus: "BEHIND"`, mock git subprocess calls for fetch/merge/push, verify the sync completes successfully and updates the database
-  - [ ] 6.2 Add a `## PR Sync` section to `README.md` under the Daemon section documenting the feature: what it does, how to enable it, config options, and behavior on conflicts
-  - [ ] 6.3 Run the full test suite (`pytest tests/`) and verify all existing tests still pass plus all new tests pass
+  - [x] 6.1 Write an integration-style test in `tests/test_pr_sync.py` (`TestPRSyncIntegration`) that exercises the full flow: create OutcomeStore with a tracked PR, mock `gh pr view` returning `mergeStateStatus: "BEHIND"`, mock git subprocess calls for fetch/merge/push, verify the sync completes successfully and updates the database
+  - [x] 6.2 Add a `## PR Sync` section to `README.md` under the Daemon section documenting the feature: what it does, how to enable it, config options, and behavior on conflicts
+  - [x] 6.3 Run the full test suite (`pytest tests/`) and verify all existing tests still pass plus all new tests pass
