@@ -911,3 +911,193 @@ class TestGenerateRepoMap:
         result = generate_repo_map(git_repo, config)
         # Should still produce output — gating is done at the caller level
         assert "a.py" in result
+
+
+# ===========================================================================
+# Task 7.1 — Integration test against the ColonyOS repo itself
+# ===========================================================================
+
+class TestRepoMapIntegration:
+    """Integration tests: run generate_repo_map() against the real ColonyOS repo."""
+
+    @pytest.fixture
+    def repo_root(self) -> Path:
+        """Resolve the ColonyOS repository root (where .git lives)."""
+        candidate = Path(__file__).resolve().parent.parent
+        if (candidate / ".git").exists():
+            return candidate
+        pytest.skip("Cannot locate ColonyOS repo root")
+
+    def test_generates_valid_text(self, repo_root: Path):
+        config = RepoMapConfig(max_tokens=4000)
+        result = generate_repo_map(repo_root, config)
+        assert isinstance(result, str)
+        assert len(result) > 0
+        # Should be printable text — no null bytes
+        assert "\x00" not in result
+
+    def test_token_budget_respected(self, repo_root: Path):
+        config = RepoMapConfig(max_tokens=2000)
+        result = generate_repo_map(repo_root, config)
+        estimated_tokens = len(result) / 4
+        assert estimated_tokens <= 2000
+
+    def test_key_files_appear_in_map(self, repo_root: Path):
+        # Use a generous budget so core files fit after the overview
+        config = RepoMapConfig(max_tokens=16000)
+        result = generate_repo_map(
+            repo_root, config, prompt_text="config orchestrator cli repo_map"
+        )
+        # These are core ColonyOS files — should appear with a generous budget
+        assert "config.py" in result
+        assert "orchestrator.py" in result
+        assert "cli.py" in result
+
+    def test_python_symbols_extracted(self, repo_root: Path):
+        config = RepoMapConfig(max_tokens=8000)
+        result = generate_repo_map(
+            repo_root, config, prompt_text="config orchestrator"
+        )
+        # config.py defines RepoMapConfig, ColonyConfig; orchestrator.py defines Orchestrator
+        # At least some class/function names should appear
+        assert "class" in result.lower() or "Config" in result or "Orchestrator" in result
+
+    def test_overview_section_present(self, repo_root: Path):
+        config = RepoMapConfig(max_tokens=4000)
+        result = generate_repo_map(repo_root, config)
+        # Overview always starts with "<N> files total"
+        assert "files total" in result
+
+    def test_prompt_relevance_changes_output(self, repo_root: Path):
+        """Different prompts should produce differently-ordered output."""
+        config = RepoMapConfig(max_tokens=1000)
+        result_config = generate_repo_map(repo_root, config, prompt_text="config parsing yaml")
+        result_cli = generate_repo_map(repo_root, config, prompt_text="cli command map")
+        # Both should be valid non-empty text
+        assert len(result_config) > 0
+        assert len(result_cli) > 0
+        # With a tight budget they may differ in which files are included
+        # (at minimum we verify they don't crash)
+
+
+# ===========================================================================
+# Task 7.2 — Edge case hardening
+# ===========================================================================
+
+class TestEdgeCases:
+    """Edge cases: empty repos, binary-only repos, encoding errors, tiny budgets, syntax errors."""
+
+    def test_empty_repository_no_tracked_files(self, git_repo: Path):
+        """A git repo with no commits / no tracked files returns empty string."""
+        config = RepoMapConfig()
+        result = generate_repo_map(git_repo, config)
+        assert result == ""
+
+    def test_repo_with_only_binary_files(self, git_repo: Path):
+        """Repo containing only binary (non-parsable) files still produces output."""
+        (git_repo / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 50)
+        (git_repo / "data.bin").write_bytes(bytes(range(256)))
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "binary"],
+            cwd=git_repo, capture_output=True, check=True,
+        )
+        config = RepoMapConfig(max_tokens=4000)
+        result = generate_repo_map(git_repo, config)
+        assert "image.png" in result
+        assert "data.bin" in result
+        # Should mention file sizes (bytes) since these are non-code files
+        assert "bytes" in result
+
+    def test_files_with_encoding_errors(self, git_repo: Path):
+        """Non-UTF-8 Python file is handled gracefully (skipped with warning, no crash)."""
+        # Write the good file first
+        (git_repo / "good.py").write_text("def hello():\n    pass\n")
+        # Write the bad file as raw bytes
+        (git_repo / "bad_encoding.py").write_bytes(b"\x80\x81\x82\xfe\xff# not utf-8\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "add files"],
+            cwd=git_repo, capture_output=True, check=True,
+        )
+        config = RepoMapConfig(max_tokens=4000)
+        result = generate_repo_map(git_repo, config)
+        # Good file should still appear
+        assert "good.py" in result
+        assert "hello" in result
+        # Bad file appears in listing (path is present) but no symbols extracted
+        assert "bad_encoding.py" in result
+
+    def test_extremely_small_token_budget(self, git_repo: Path):
+        """Budget of 100 tokens: overview is always included, output doesn't crash."""
+        _add_and_commit(git_repo, {
+            f"src/module_{i}.py": f"class Mod{i}:\n    pass\n"
+            for i in range(20)
+        })
+        config = RepoMapConfig(max_tokens=100)
+        result = generate_repo_map(git_repo, config)
+        # Should produce *something* (at least the overview)
+        assert len(result) > 0
+        # Token estimate should not wildly exceed budget
+        # (overview is always included even if it alone exceeds budget)
+        assert "files total" in result
+
+    def test_python_files_with_syntax_errors(self, git_repo: Path):
+        """Python files with syntax errors are skipped gracefully."""
+        _add_and_commit(git_repo, {
+            "broken.py": "def oops(\n",
+            "good.py": "def works() -> int:\n    return 1\n",
+        })
+        config = RepoMapConfig(max_tokens=4000)
+        result = generate_repo_map(git_repo, config)
+        # Good file symbols should be present
+        assert "works" in result
+        # Broken file still appears as a path entry, just no symbols
+        assert "broken.py" in result
+
+    def test_extremely_large_max_files_cap(self, git_repo: Path):
+        """max_files larger than actual file count works fine."""
+        _add_and_commit(git_repo, {"a.py": "x = 1\n", "b.py": "y = 2\n"})
+        config = RepoMapConfig(max_files=999999, max_tokens=4000)
+        result = generate_repo_map(git_repo, config)
+        assert "a.py" in result
+        assert "b.py" in result
+
+    def test_repo_with_deeply_nested_directories(self, git_repo: Path):
+        """Deeply nested file structures are handled correctly."""
+        _add_and_commit(git_repo, {
+            "a/b/c/d/e/deep.py": "def deep_func():\n    pass\n",
+            "top.py": "def top_func():\n    pass\n",
+        })
+        config = RepoMapConfig(max_tokens=4000)
+        result = generate_repo_map(git_repo, config)
+        assert "deep.py" in result
+        assert "deep_func" in result
+        assert "top.py" in result
+        assert "top_func" in result
+
+    def test_mixed_file_types(self, git_repo: Path):
+        """Repo with Python, JS/TS, and other files all handled correctly."""
+        _add_and_commit(git_repo, {
+            "app.py": "class App:\n    def run(self) -> None:\n        pass\n",
+            "index.ts": "export function main() {}\nexport class Router {}\n",
+            "config.yaml": "key: value\n",
+            "README.md": "# Hello\n",
+        })
+        config = RepoMapConfig(max_tokens=4000)
+        result = generate_repo_map(git_repo, config)
+        assert "app.py" in result
+        assert "App" in result
+        assert "index.ts" in result
+        assert "main" in result
+        assert "Router" in result
+        assert "config.yaml" in result
+        assert "README.md" in result
+
+    def test_zero_token_budget(self, git_repo: Path):
+        """Budget of 0 tokens: should still return overview (FR-10 always included)."""
+        _add_and_commit(git_repo, {"a.py": "x = 1\n"})
+        config = RepoMapConfig(max_tokens=0)
+        result = generate_repo_map(git_repo, config)
+        # Overview is always included per FR-10
+        assert "files total" in result

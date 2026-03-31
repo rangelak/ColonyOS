@@ -62,9 +62,9 @@
   - [x] 6.2 Implement `map` command in `cli.py` as `@app.command()` with options: `--max-tokens` (int, optional), `--prompt` (str, optional). Loads config, calls `generate_repo_map()`, prints to stdout via `click.echo()`.
   - [x] 6.3 Add help text and ensure `colonyos --help` lists the new `map` command
 
-- [ ] 7.0 End-to-end verification and edge case hardening
+- [x] 7.0 End-to-end verification and edge case hardening
   depends_on: [5.0, 6.0]
-  - [ ] 7.1 Write an integration test that runs `generate_repo_map()` against the ColonyOS repo itself and verifies: output is valid text, token budget is respected, key files (config.py, orchestrator.py, cli.py) appear in the map, Python symbols are extracted correctly
-  - [ ] 7.2 Test edge cases: empty repository (no tracked files), repo with only binary files, files with encoding errors (non-UTF-8), extremely small token budget (100 tokens), Python files with syntax errors
-  - [ ] 7.3 Run the full test suite (`pytest tests/`) to verify zero regressions
-  - [ ] 7.4 Manually run `colonyos map` on the ColonyOS repo and verify output quality
+  - [x] 7.1 Write an integration test that runs `generate_repo_map()` against the ColonyOS repo itself and verifies: output is valid text, token budget is respected, key files (config.py, orchestrator.py, cli.py) appear in the map, Python symbols are extracted correctly
+  - [x] 7.2 Test edge cases: empty repository (no tracked files), repo with only binary files, files with encoding errors (non-UTF-8), extremely small token budget (100 tokens), Python files with syntax errors
+  - [x] 7.3 Run the full test suite (`pytest tests/`) to verify zero regressions
+  - [x] 7.4 Manually run `colonyos map` on the ColonyOS repo and verify output quality
