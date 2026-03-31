@@ -39,9 +39,9 @@
   - [x] 3.1 Write tests in `tests/test_github.py`: add `TestPostPRComment` class testing successful comment posting (mock subprocess), handling of `gh` CLI failure (returns False, logs warning), and timeout handling
   - [x] 3.2 Add `post_pr_comment(repo_root: Path, pr_number: int, body: str) -> bool` function to `src/colonyos/github.py` that calls `gh pr comment {pr_number} --body {body}` via subprocess. Return True on success, False on failure. Follow the same error-handling pattern as `fetch_open_prs()` (catch FileNotFoundError, TimeoutExpired, log warnings)
 
-- [ ] 4.0 Core sync logic: Implement pr_sync module
+- [x] 4.0 Core sync logic: Implement pr_sync module
   depends_on: [1.0, 2.0, 3.0]
-  - [ ] 4.1 Write tests in `tests/test_pr_sync.py`: comprehensive test class `TestPRSync` covering:
+  - [x] 4.1 Write tests in `tests/test_pr_sync.py`: comprehensive test class `TestPRSync` covering:
     - `test_skip_when_disabled` — returns early if `config.daemon.pr_sync.enabled` is False
     - `test_skip_non_colonyos_branches` — filters out PRs not matching `branch_prefix`
     - `test_skip_already_uptodate` — skips PRs where `mergeStateStatus` is not BEHIND/DIRTY
@@ -51,20 +51,20 @@
     - `test_worktree_lifecycle` — verifies worktree is created before merge and torn down after (both success and failure paths)
     - `test_skip_branch_with_running_item` — skips PR whose branch matches a RUNNING queue item
     - `test_write_enabled_gate` — sync does nothing if write is not enabled
-  - [ ] 4.2 Create `src/colonyos/pr_sync.py` with the main `sync_stale_prs()` function:
+  - [x] 4.2 Create `src/colonyos/pr_sync.py` with the main `sync_stale_prs()` function:
     - Accept `repo_root`, `config`, `queue_state`, `post_slack_fn` (callback), `write_enabled` flag
     - Gate on `config.daemon.pr_sync.enabled` and `write_enabled`
     - Call `OutcomeStore.get_sync_candidates(max_failures)` to get candidate PRs
     - For each candidate: check `mergeStateStatus` from latest outcome poll data, filter by `branch_prefix`, skip if branch has a RUNNING queue item
     - Process at most 1 PR per invocation (return after first sync attempt)
-  - [ ] 4.3 Implement `_sync_single_pr()` helper in `pr_sync.py`:
+  - [x] 4.3 Implement `_sync_single_pr()` helper in `pr_sync.py`:
     - `git fetch origin main` + `git fetch origin {branch}`
     - Create ephemeral worktree via `WorktreeManager` on the PR branch
     - Attempt `git merge origin/main --no-edit` in the worktree
     - On success: `git push origin {branch}`, update `OutcomeStore` with `last_sync_at=now`, `sync_failures=0`
     - On conflict: `git merge --abort`, post Slack notification, post PR comment via `post_pr_comment()`, increment `sync_failures` in OutcomeStore
     - Always: tear down worktree in a `finally` block
-  - [ ] 4.4 Add structured logging for each sync operation: branch name, PR number, pre/post HEAD SHA, outcome
+  - [x] 4.4 Add structured logging for each sync operation: branch name, PR number, pre/post HEAD SHA, outcome
 
 - [ ] 5.0 Daemon integration: Wire sync into the tick loop
   depends_on: [4.0]
