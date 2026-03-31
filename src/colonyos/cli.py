@@ -27,6 +27,7 @@ from colonyos.cancellation import (
 )
 from colonyos.config import ColonyConfig, load_config, save_config, runs_dir_path
 from colonyos.doctor import run_doctor_checks
+from colonyos.repo_map import generate_repo_map
 from colonyos.init import is_git_repo, run_ai_init, run_init
 from colonyos.models import (
     BranchRestoreError,
@@ -1261,6 +1262,37 @@ def doctor() -> None:
     else:
         click.echo("\nSome checks failed. Fix the issues above and re-run `colonyos doctor`.")
         sys.exit(1)
+
+
+@app.command()
+@click.option("--max-tokens", type=int, default=None, help="Override the max token budget for the repo map.")
+@click.option("--prompt", "prompt_text", default="", help="Prompt text to demonstrate relevance-based truncation.")
+def map(max_tokens: int | None, prompt_text: str) -> None:
+    """Generate and display a structural map of the repository.
+
+    Shows file paths, class names, and function signatures — the same
+    context that gets injected into agent phase prompts. Useful for
+    debugging what the agent sees.
+    """
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+    repo_map_config = config.repo_map
+
+    if max_tokens is not None:
+        # Override the configured max_tokens
+        repo_map_config = type(repo_map_config)(
+            enabled=repo_map_config.enabled,
+            max_tokens=max_tokens,
+            max_files=repo_map_config.max_files,
+            include_patterns=repo_map_config.include_patterns,
+            exclude_patterns=repo_map_config.exclude_patterns,
+        )
+
+    output = generate_repo_map(repo_root, repo_map_config, prompt_text=prompt_text)
+    if not output:
+        click.echo("No tracked files found or repo map is empty.")
+        return
+    click.echo(output)
 
 
 @app.command()

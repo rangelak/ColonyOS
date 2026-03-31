@@ -56,11 +56,11 @@
   - [ ] 5.4 Call `_inject_repo_map()` in `_format_base()` or at each prompt-building call site (whichever is cleaner), injecting after user_directions. Skip when `config.repo_map.enabled` is False.
   - [ ] 5.5 Pass the current task/feature description as `prompt_text` to `generate_repo_map()` so relevance ranking works against the actual user request
 
-- [ ] 6.0 Add `colonyos map` CLI command
+- [x] 6.0 Add `colonyos map` CLI command
   depends_on: [4.0]
-  - [ ] 6.1 Write tests in `tests/test_cli.py` for: `colonyos map` invocation produces output, `--max-tokens` overrides config value, `--prompt` text triggers relevance-based truncation, command fails gracefully outside a git repo
-  - [ ] 6.2 Implement `map` command in `cli.py` as `@app.command()` with options: `--max-tokens` (int, optional), `--prompt` (str, optional). Loads config, calls `generate_repo_map()`, prints to stdout via `click.echo()`.
-  - [ ] 6.3 Add help text and ensure `colonyos --help` lists the new `map` command
+  - [x] 6.1 Write tests in `tests/test_cli.py` for: `colonyos map` invocation produces output, `--max-tokens` overrides config value, `--prompt` text triggers relevance-based truncation, command fails gracefully outside a git repo
+  - [x] 6.2 Implement `map` command in `cli.py` as `@app.command()` with options: `--max-tokens` (int, optional), `--prompt` (str, optional). Loads config, calls `generate_repo_map()`, prints to stdout via `click.echo()`.
+  - [x] 6.3 Add help text and ensure `colonyos --help` lists the new `map` command
 
 - [ ] 7.0 End-to-end verification and edge case hardening
   depends_on: [5.0, 6.0]
