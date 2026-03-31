@@ -348,7 +348,6 @@ class TestFormatReviewRoundNote:
         note = _format_review_round_note(results, reviewers, round_num=1, total_rounds=3)
         assert "1 failed" in note
 
-    @pytest.mark.xfail(reason="Finding summaries not yet included in review notes (task 4.0)", strict=True)
     def test_findings_in_output(self):
         """When a reviewer requests changes with FINDINGS, those should appear in the note."""
         reviewers = self._personas(2)
@@ -385,13 +384,6 @@ class TestFormatReviewRoundNote:
 # 1.4  _extract_review_findings_summary (new helper)
 # ===================================================================
 
-_extract_findings_available = pytest.mark.skipif(
-    _extract_review_findings_summary is None,
-    reason="_extract_review_findings_summary not yet implemented (task 4.0)",
-)
-
-
-@_extract_findings_available
 class TestExtractReviewFindingsSummary:
     """Tests for the _extract_review_findings_summary() helper."""
 

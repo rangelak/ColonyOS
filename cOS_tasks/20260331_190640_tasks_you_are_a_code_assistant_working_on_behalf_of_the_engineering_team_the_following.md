@@ -31,11 +31,11 @@
   - [x] 3.2 Modify `_format_implement_result_note()` (line 1364) to include task descriptions from `task_results` artifacts. For each completed/failed/blocked task, show `• \`{task_id}\` {description}` with optional `— ${cost:.2f}, {secs}s` suffix for tasks that have cost/duration. Use `•` bullets and newlines. Cap at 6 tasks per category with `+N more`.
   - [x] 3.3 Modify `_format_task_ids()` (line 1359) or create a new `_format_task_ids_with_descriptions()` helper that accepts a `task_results` dict and renders task IDs with descriptions.
 
-- [ ] 4.0 Add review finding summaries to review round messages (FR-4)
+- [x] 4.0 Add review finding summaries to review round messages (FR-4)
   depends_on: []
-  - [ ] 4.1 Create a new helper `_extract_review_findings_summary(text: str, max_findings: int = 2, max_chars: int = 80) -> list[str]` that extracts findings from review result text. Strategy: find `FINDINGS:` line, collect subsequent `- ` prefixed lines, truncate each to `max_chars`. If no FINDINGS section found, extract first non-empty line as fallback. If `SYNTHESIS:` section exists, use its first sentence as an alternative fallback.
-  - [ ] 4.2 Modify `_format_review_round_note()` (line 1434) to include finding summaries for reviewers who requested changes. For each reviewer in `requested_changes`, call `_extract_review_findings_summary()` on their result text and append findings as sub-bullets. Add approved reviewer list with `:white_check_mark:` prefix and changes list with `:warning:` prefix for visual hierarchy.
-  - [ ] 4.3 Ensure the function signature change is backward-compatible: add `results` data to the existing parameters (results are already passed, just not used for finding extraction — the full text is in `result.artifacts["result"]`).
+  - [x] 4.1 Create a new helper `_extract_review_findings_summary(text: str, max_findings: int = 2, max_chars: int = 80) -> list[str]` that extracts findings from review result text. Strategy: find `FINDINGS:` line, collect subsequent `- ` prefixed lines, truncate each to `max_chars`. If no FINDINGS section found, extract first non-empty line as fallback. If `SYNTHESIS:` section exists, use its first sentence as an alternative fallback.
+  - [x] 4.2 Modify `_format_review_round_note()` (line 1434) to include finding summaries for reviewers who requested changes. For each reviewer in `requested_changes`, call `_extract_review_findings_summary()` on their result text and append findings as sub-bullets. Add approved reviewer list with `:white_check_mark:` prefix and changes list with `:warning:` prefix for visual hierarchy.
+  - [x] 4.3 Ensure the function signature change is backward-compatible: add `results` data to the existing parameters (results are already passed, just not used for finding extraction — the full text is in `result.artifacts["result"]`).
 
 - [ ] 5.0 Add message size safety and sanitization (FR-5)
   depends_on: [2.0, 3.0, 4.0]
