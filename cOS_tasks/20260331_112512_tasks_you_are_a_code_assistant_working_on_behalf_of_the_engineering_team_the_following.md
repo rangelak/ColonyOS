@@ -60,12 +60,12 @@
   - [x] 4.4 Create `web/src/pages/Analytics.tsx` — page assembling charts: cost trend, phase cost breakdown, failure hotspots, model usage breakdown, duration stats, review loop summary
   - [x] 4.5 Add `/analytics` route to `web/src/App.tsx` and "Analytics" nav item to `Layout.tsx`
 
-- [ ] 5.0 Enhanced Dashboard and improved existing components
+- [x] 5.0 Enhanced Dashboard and improved existing components
   depends_on: [2.0, 3.0]
-  - [ ] 5.1 Write Vitest tests for enhanced Dashboard (renders health summary, queue summary, enriched run list)
-  - [ ] 5.2 Update `web/src/pages/Dashboard.tsx` — add daemon health summary card at top (from `/healthz`), add queue summary section showing pending count + currently running item
-  - [ ] 5.3 Update `web/src/components/RunList.tsx` — add source type badge column, add PR URL link column, improve prompt display
-  - [ ] 5.4 Update `web/src/components/StatsPanel.tsx` — add failure rate card, avg cost per run card, review loop stats (first-pass approval rate)
+  - [x] 5.1 Write Vitest tests for enhanced Dashboard (renders health summary, queue summary, enriched run list)
+  - [x] 5.2 Update `web/src/pages/Dashboard.tsx` — add daemon health summary card at top (from `/healthz`), add queue summary section showing pending count + currently running item
+  - [x] 5.3 Update `web/src/components/RunList.tsx` — add source type badge column, add PR URL link column, improve prompt display
+  - [x] 5.4 Update `web/src/components/StatsPanel.tsx` — add failure rate card, avg cost per run card, review loop stats (first-pass approval rate)
 
 - [x] 6.0 Improved Phase Timeline
   depends_on: [1.0]
