@@ -350,6 +350,48 @@ def fetch_open_prs(
     return prs
 
 
+def post_pr_comment(
+    repo_root: Path,
+    pr_number: int,
+    body: str,
+    timeout: int = 10,
+) -> bool:
+    """Post a comment on a pull request via ``gh pr comment``.
+
+    Non-blocking — all errors are caught and logged, returning ``False``
+    on failure.  Mirrors :func:`fetch_open_prs` in error-handling style.
+
+    Returns
+    -------
+    bool
+        ``True`` if the comment was posted successfully, ``False`` otherwise.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh", "pr", "comment", str(pr_number),
+                "--body", body,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=repo_root,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Failed to post comment on PR #%d: %s", pr_number, exc)
+        return False
+
+    if result.returncode != 0:
+        logger.warning(
+            "gh pr comment failed for PR #%d: %s",
+            pr_number,
+            result.stderr.strip(),
+        )
+        return False
+
+    return True
+
+
 def fetch_open_issues(
     repo_root: Path,
     limit: int = 20,

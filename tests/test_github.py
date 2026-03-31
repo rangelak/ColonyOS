@@ -21,6 +21,7 @@ from colonyos.github import (
     fetch_open_prs,
     format_issue_as_prompt,
     parse_issue_ref,
+    post_pr_comment,
 )
 
 
@@ -550,3 +551,54 @@ class TestFetchOpenPrs:
         assert prs[0].branch == ""
         assert prs[0].url == ""
         assert prs[0].labels == []
+
+
+# ---------------------------------------------------------------------------
+# post_pr_comment
+# ---------------------------------------------------------------------------
+
+
+class TestPostPRComment:
+    @patch("colonyos.github.subprocess.run")
+    def test_success(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(  # type: ignore[attr-defined]
+            args=[], returncode=0, stdout="", stderr="",
+        )
+        result = post_pr_comment(tmp_path, 42, "Sync failed due to conflicts")
+        assert result is True
+        call_args = mock_run.call_args[0][0]  # type: ignore[attr-defined]
+        assert "gh" in call_args
+        assert "pr" in call_args
+        assert "comment" in call_args
+        assert "42" in call_args
+        assert "--body" in call_args
+        assert "Sync failed due to conflicts" in call_args
+
+    @patch("colonyos.github.subprocess.run")
+    def test_gh_failure_returns_false(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(  # type: ignore[attr-defined]
+            args=[], returncode=1, stdout="", stderr="Resource not accessible by integration",
+        )
+        result = post_pr_comment(tmp_path, 42, "body")
+        assert result is False
+
+    @patch("colonyos.github.subprocess.run")
+    def test_gh_not_installed_returns_false(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.side_effect = FileNotFoundError()  # type: ignore[attr-defined]
+        result = post_pr_comment(tmp_path, 42, "body")
+        assert result is False
+
+    @patch("colonyos.github.subprocess.run")
+    def test_timeout_returns_false(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=10)  # type: ignore[attr-defined]
+        result = post_pr_comment(tmp_path, 42, "body")
+        assert result is False
+
+    @patch("colonyos.github.subprocess.run")
+    def test_cwd_is_repo_root(self, mock_run: object, tmp_path: Path) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(  # type: ignore[attr-defined]
+            args=[], returncode=0, stdout="", stderr="",
+        )
+        post_pr_comment(tmp_path, 99, "test body")
+        call_kwargs = mock_run.call_args[1]  # type: ignore[attr-defined]
+        assert call_kwargs["cwd"] == tmp_path

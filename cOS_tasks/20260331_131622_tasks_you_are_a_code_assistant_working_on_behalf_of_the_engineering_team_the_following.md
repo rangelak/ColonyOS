@@ -34,10 +34,10 @@
   - [x] 2.4 Add `get_sync_candidates(max_failures)` method that returns open PRs where `sync_failures < max_failures`, ordered by `last_sync_at ASC NULLS FIRST` (oldest-synced first)
   - [x] 2.5 Add `mergeStateStatus` to the `--json` field list in `_call_gh_pr_view()` and surface it in the returned dict
 
-- [ ] 3.0 GitHub helper: Add PR comment posting function
+- [x] 3.0 GitHub helper: Add PR comment posting function
   depends_on: []
-  - [ ] 3.1 Write tests in `tests/test_github.py`: add `TestPostPRComment` class testing successful comment posting (mock subprocess), handling of `gh` CLI failure (returns False, logs warning), and timeout handling
-  - [ ] 3.2 Add `post_pr_comment(repo_root: Path, pr_number: int, body: str) -> bool` function to `src/colonyos/github.py` that calls `gh pr comment {pr_number} --body {body}` via subprocess. Return True on success, False on failure. Follow the same error-handling pattern as `fetch_open_prs()` (catch FileNotFoundError, TimeoutExpired, log warnings)
+  - [x] 3.1 Write tests in `tests/test_github.py`: add `TestPostPRComment` class testing successful comment posting (mock subprocess), handling of `gh` CLI failure (returns False, logs warning), and timeout handling
+  - [x] 3.2 Add `post_pr_comment(repo_root: Path, pr_number: int, body: str) -> bool` function to `src/colonyos/github.py` that calls `gh pr comment {pr_number} --body {body}` via subprocess. Return True on success, False on failure. Follow the same error-handling pattern as `fetch_open_prs()` (catch FileNotFoundError, TimeoutExpired, log warnings)
 
 - [ ] 4.0 Core sync logic: Implement pr_sync module
   depends_on: [1.0, 2.0, 3.0]
