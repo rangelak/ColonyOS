@@ -19,6 +19,17 @@ Adds a `RepoMap` module (`src/colonyos/repo_map.py`) that generates a condensed 
 
 **PRD:** `cOS_prds/20260331_135929_prd_build_a_repomap_module_src_colonyos_repo_map_py_that_generates_a_condensed_struc.md`
 **Tasks:** `cOS_tasks/20260331_135929_tasks_build_a_repomap_module_src_colonyos_repo_map_py_that_generates_a_condensed_struc.md`
+## 20260331_153500 — Parallel Slack Intake: Decouple Triage from Pipeline Execution
+
+Decouples Slack message triage from the pipeline execution lock so that incoming messages are classified and enqueued within seconds, regardless of whether a pipeline is actively running. Also adds bounded retry for transient triage failures, marks failed triages to prevent Slack redelivery loops, and closes a TOCTOU gap in hourly rate-limit tracking.
+
+**Modified:**
+- `src/colonyos/slack_queue.py` — Removed `agent_lock` from triage path, added 1-retry with 3s backoff for transient failures, moved `increment_hourly_count` to reservation time, mark failed triages as `"triage-error"`
+- `src/colonyos/daemon.py` — Added comment clarifying `agent_lock` is no longer used for triage serialization
+- `tests/test_slack_queue.py` — Comprehensive test coverage for all changes including integration test
+
+**PRD:** `cOS_prds/20260331_150608_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260331_150608_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
 
 ## 20260331_140000 — Daemon PR Sync: Keep ColonyOS PRs Up-to-Date with Main
 
