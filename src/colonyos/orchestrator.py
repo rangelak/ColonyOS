@@ -873,9 +873,9 @@ def _run_sequential_implement(
         ui = _make_ui()
         if ui is not None:
             safe_desc = sanitize_for_slack(sanitize_untrusted_content(task_desc))
-            short_desc = safe_desc[:60]
-            if len(safe_desc) > 60:
-                short_desc = safe_desc[:57] + "..."
+            short_desc = safe_desc[:_SLACK_TASK_DESC_MAX]
+            if len(safe_desc) > _SLACK_TASK_DESC_MAX:
+                short_desc = safe_desc[:_SLACK_TASK_DESC_MAX - 3] + "..."
             ui.phase_header(
                 f"Implement [{task_id}] {short_desc}",
                 per_task_budget,

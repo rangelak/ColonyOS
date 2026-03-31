@@ -296,6 +296,34 @@ class TestSanitizeForSlack:
         assert "slack://open?team=T123" in result
         assert "Join team" in result
 
+    def test_neutralizes_bare_mailto_link(self) -> None:
+        """Bare <mailto:user@corp.com> without display text should be stripped of angle brackets."""
+        result = sanitize_for_slack("<mailto:user@corp.com>")
+        assert "<mailto:" not in result
+        assert "mailto:user@corp.com" in result
+
+    def test_neutralizes_bare_slack_protocol_link(self) -> None:
+        """Bare <slack://open?team=T123> without display text should be stripped."""
+        result = sanitize_for_slack("<slack://open?team=T123>")
+        assert "<slack://" not in result
+        assert "slack://open?team=T123" in result
+
+    def test_audit_log_on_neutralization(self) -> None:
+        """sanitize_for_slack should log at DEBUG when content is neutralized."""
+        import logging
+        with unittest.mock.patch("colonyos.sanitize.logger") as mock_logger:
+            sanitize_for_slack("*bold* @here injection")
+            mock_logger.debug.assert_called()
+            # Verify log message mentions sanitize_for_slack
+            call_args = mock_logger.debug.call_args[0][0]
+            assert "sanitize_for_slack" in call_args
+
+    def test_no_audit_log_for_clean_content(self) -> None:
+        """sanitize_for_slack should NOT log when content is already clean."""
+        with unittest.mock.patch("colonyos.sanitize.logger") as mock_logger:
+            sanitize_for_slack("clean plain text")
+            mock_logger.debug.assert_not_called()
+
 
 class TestXmlTagRegex:
     def test_matches_opening_tag(self) -> None:

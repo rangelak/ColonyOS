@@ -48,7 +48,7 @@ _REDACTED = "[REDACTED]"
 # Regex to strip Slack link markup: ``<URL|display_text>`` → ``display_text``
 # and bare ``<URL>`` → ``URL`` (without angle brackets).
 _SLACK_LINK_RE = re.compile(r"<([^|>]+)\|([^>]+)>")
-_SLACK_BARE_LINK_RE = re.compile(r"<(https?://[^>]+)>")
+_SLACK_BARE_LINK_RE = re.compile(r"<([a-zA-Z][a-zA-Z0-9+.-]*://[^>]+|mailto:[^>]+)>")
 
 
 def strip_slack_links(text: str) -> str:
@@ -104,6 +104,7 @@ def sanitize_for_slack(text: str) -> str:
     review findings) that will be interpolated into Slack mrkdwn messages.  It does
     NOT strip XML tags — call ``sanitize_untrusted_content()`` separately for that.
     """
+    original = text
     # 1. Neutralize link injection: <url|display> → url - display
     text = _SLACK_LINK_INJECTION_RE.sub(r"\1 - \2", text)
     # Also strip bare Slack link markup: <url> → url
@@ -117,7 +118,10 @@ def sanitize_for_slack(text: str) -> str:
     for i, line in enumerate(lines):
         if line.lstrip().startswith(">"):
             lines[i] = "\u200b" + line
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    if result != original:
+        logger.debug("sanitize_for_slack neutralized content (len=%d→%d)", len(original), len(result))
+    return result
 
 
 def sanitize_ci_logs(text: str) -> str:
