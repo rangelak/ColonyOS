@@ -21,13 +21,13 @@
   - [x] 1.4 Add `_parse_repo_map_config()` function following the pattern of `_parse_memory_config()`
   - [x] 1.5 Wire `_parse_repo_map_config()` into `load_config()` and add `repo_map` serialization to `save_config()`
 
-- [ ] 2.0 Build core repo map generator — file walking and Python AST extraction
+- [x] 2.0 Build core repo map generator — file walking and Python AST extraction
   depends_on: []
-  - [ ] 2.1 Write tests in `tests/test_repo_map.py` for: `get_tracked_files()` returning file list from `git ls-files`, sensitive file filtering (`.env`, `*credential*`, `*secret*`, `*.pem`, `*.key`), `include_patterns`/`exclude_patterns` glob filtering, file count cap behavior and warning logging
-  - [ ] 2.2 Write tests for Python extraction: module docstrings, class names with bases, method signatures (name + params), top-level function signatures, handling of syntax errors (graceful skip), handling of empty files
-  - [ ] 2.3 Implement `get_tracked_files(repo_root, config)` in `src/colonyos/repo_map.py`: call `git ls-files` with `subprocess.run(timeout=30)`, filter by sensitive denylist, apply include/exclude patterns via `fnmatch`, cap at `config.max_files` with warning log
-  - [ ] 2.4 Implement `extract_python_symbols(file_path)` using `ast.parse()`: return a structured list of symbols (classes with methods, functions, module docstring). Handle `SyntaxError` gracefully by returning empty result with a warning.
-  - [ ] 2.5 Define data structures: `FileSymbols` (path, symbols list, line_count), `Symbol` (name, kind: class/function/method, params, bases), `RepoMap` (files: list[FileSymbols], overview: str)
+  - [x] 2.1 Write tests in `tests/test_repo_map.py` for: `get_tracked_files()` returning file list from `git ls-files`, sensitive file filtering (`.env`, `*credential*`, `*secret*`, `*.pem`, `*.key`), `include_patterns`/`exclude_patterns` glob filtering, file count cap behavior and warning logging
+  - [x] 2.2 Write tests for Python extraction: module docstrings, class names with bases, method signatures (name + params), top-level function signatures, handling of syntax errors (graceful skip), handling of empty files
+  - [x] 2.3 Implement `get_tracked_files(repo_root, config)` in `src/colonyos/repo_map.py`: call `git ls-files` with `subprocess.run(timeout=30)`, filter by sensitive denylist, apply include/exclude patterns via `fnmatch`, cap at `config.max_files` with warning log
+  - [x] 2.4 Implement `extract_python_symbols(file_path)` using `ast.parse()`: return a structured list of symbols (classes with methods, functions, module docstring). Handle `SyntaxError` gracefully by returning empty result with a warning.
+  - [x] 2.5 Define data structures: `FileSymbols` (path, symbols list, line_count), `Symbol` (name, kind: class/function/method, params, bases), `RepoMap` (files: list[FileSymbols], overview: str)
 
 - [ ] 3.0 Build JS/TS regex extraction and other-file handling
   depends_on: []
