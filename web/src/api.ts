@@ -119,7 +119,9 @@ export function fetchReviews(): Promise<ReviewEntry[]> {
 // Daemon health and control endpoints
 
 export async function fetchDaemonHealth(): Promise<DaemonHealth> {
-  const resp = await fetch("/healthz");
+  const resp = await fetch(`${BASE}/healthz`, {
+    headers: authHeaders(),
+  });
   if (!resp.ok && resp.status !== 503) {
     throw new Error(`API error ${resp.status}: ${resp.statusText}`);
   }

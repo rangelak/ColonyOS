@@ -363,6 +363,116 @@ class TestArtifactSanitization:
         assert "world" in content
 
 
+class TestPauseResumeRateLimit:
+    """Test that pause/resume endpoints enforce a cooldown."""
+
+    def test_rapid_pause_returns_429(self, tmp_repo: Path, write_env):
+        client, token = _create_app_with_token(tmp_repo)
+        write_config(tmp_repo)
+        auth = {"Authorization": f"Bearer {token}"}
+
+        # First call should succeed
+        resp1 = client.post("/api/daemon/pause", json={}, headers=auth)
+        assert resp1.status_code == 200
+
+        # Immediate second call should be rate limited
+        resp2 = client.post("/api/daemon/pause", json={}, headers=auth)
+        assert resp2.status_code == 429
+
+    def test_rapid_resume_returns_429(self, tmp_repo: Path, write_env):
+        client, token = _create_app_with_token(tmp_repo)
+        write_config(tmp_repo)
+        auth = {"Authorization": f"Bearer {token}"}
+
+        resp1 = client.post("/api/daemon/resume", json={}, headers=auth)
+        assert resp1.status_code == 200
+
+        resp2 = client.post("/api/daemon/resume", json={}, headers=auth)
+        assert resp2.status_code == 429
+
+
+class TestCORSOriginValidation:
+    """Test that malformed and wildcard CORS origins are rejected."""
+
+    def test_wildcard_origin_rejected(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.setenv("COLONYOS_ALLOWED_ORIGINS", "*")
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, _ = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get(
+            "/api/health",
+            headers={"Origin": "http://evil.com"},
+        )
+        assert resp.status_code == 200
+        # Wildcard should not be in CORS — no allow-origin header for evil.com
+        assert resp.headers.get("access-control-allow-origin") is None
+
+    def test_malformed_origin_rejected(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.setenv("COLONYOS_ALLOWED_ORIGINS", "not-a-url,ftp://bad.com")
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, _ = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get(
+            "/api/health",
+            headers={"Origin": "not-a-url"},
+        )
+        assert resp.status_code == 200
+        assert resp.headers.get("access-control-allow-origin") is None
+
+    def test_valid_origin_accepted(self, tmp_repo: Path, monkeypatch):
+        monkeypatch.setenv("COLONYOS_ALLOWED_ORIGINS", "https://dashboard.example.com")
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, _ = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get(
+            "/api/health",
+            headers={"Origin": "https://dashboard.example.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.headers.get("access-control-allow-origin") == "https://dashboard.example.com"
+
+
+class TestHealthzSubdomainAuth:
+    """Test that /healthz requires auth in subdomain mode."""
+
+    def test_healthz_no_auth_localhost(self, tmp_repo: Path, monkeypatch):
+        """Without allowed origins, healthz should not require auth."""
+        monkeypatch.delenv("COLONYOS_ALLOWED_ORIGINS", raising=False)
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, _ = create_app(tmp_repo)
+        client = TestClient(app)
+        resp = client.get("/api/healthz")
+        assert resp.status_code in (200, 503)
+
+    def test_healthz_requires_auth_subdomain(self, tmp_repo: Path, monkeypatch):
+        """With allowed origins set, healthz should require auth."""
+        monkeypatch.setenv("COLONYOS_ALLOWED_ORIGINS", "https://dashboard.example.com")
+        from colonyos.server import create_app
+        from starlette.testclient import TestClient
+
+        app, token = create_app(tmp_repo)
+        client = TestClient(app)
+
+        # No auth → 401
+        resp = client.get("/api/healthz")
+        assert resp.status_code == 401
+
+        # With auth → success
+        resp2 = client.get(
+            "/api/healthz",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp2.status_code in (200, 503)
+
+
 class TestSemaphoreSafety:
     """Verify semaphore is released if Thread creation fails."""
 

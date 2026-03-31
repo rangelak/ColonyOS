@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import threading
+import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -89,6 +91,10 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
     # Semaphore for rate limiting: max 1 concurrent run
     active_run_semaphore = threading.Semaphore(1)
 
+    # Rate limiter for state-changing daemon endpoints (pause/resume)
+    _last_state_change: dict[str, float] = {}
+    _STATE_CHANGE_COOLDOWN = 5.0  # seconds
+
     # Build CORS origins list from env vars
     cors_origins: list[str] = []
 
@@ -97,12 +103,23 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
         cors_origins.extend(["http://localhost:5173", "http://127.0.0.1:5173"])
 
     # Configurable extra origins for subdomain deployment
+    _ORIGIN_RE = re.compile(r"^https?://[a-zA-Z0-9._\-]+(:\d+)?$")
     allowed_origins_env = os.environ.get("COLONYOS_ALLOWED_ORIGINS", "").strip()
+    subdomain_mode = False
     if allowed_origins_env:
         for origin in allowed_origins_env.split(","):
             origin = origin.strip()
-            if origin and origin not in cors_origins:
+            if not origin:
+                continue
+            if origin == "*" or not _ORIGIN_RE.match(origin):
+                logger.warning(
+                    "Ignoring invalid CORS origin %r — must be scheme://host[:port]",
+                    origin,
+                )
+                continue
+            if origin not in cors_origins:
                 cors_origins.append(origin)
+        subdomain_mode = bool(cors_origins)
 
     if cors_origins:
         allowed_methods = ["GET", "PUT", "POST"] if write_enabled else ["GET"]
@@ -140,13 +157,26 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
     # Live daemon reference — set by Daemon.start() when running in daemon mode
     app.state.daemon_instance = None
 
+    @app.get("/api/healthz")
     @app.get("/healthz")
-    async def healthz() -> JSONResponse:
+    async def healthz(request: Request) -> JSONResponse:
         """Daemon health check endpoint (FR-10).
 
         Uses the live daemon instance's in-memory state when available,
         falling back to reading from disk for standalone server mode.
+        Requires auth when deployed in subdomain mode (COLONYOS_ALLOWED_ORIGINS set).
         """
+        if subdomain_mode:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                provided_token = auth_header[7:]
+                if not secrets.compare_digest(provided_token, auth_token):
+                    raise HTTPException(status_code=401, detail="Invalid bearer token")
+            else:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Authentication required for health endpoint in subdomain mode",
+                )
         daemon = app.state.daemon_instance
         if daemon is not None:
             body = daemon.get_health()
@@ -386,10 +416,25 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
         _require_write_auth(request)
         return {"status": "ok"}
 
+    def _check_state_change_cooldown(action: str) -> None:
+        """Enforce a cooldown period between state-changing operations."""
+        now = time.monotonic()
+        last = _last_state_change.get(action, 0.0)
+        if now - last < _STATE_CHANGE_COOLDOWN:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limited — wait {_STATE_CHANGE_COOLDOWN:.0f}s between {action} calls",
+            )
+        _last_state_change[action] = now
+
     @app.post("/api/daemon/pause")
     async def daemon_pause(request: Request) -> JSONResponse:
         """Pause the daemon — stop picking up new work (FR-8)."""
         _require_write_auth(request)
+        _check_state_change_cooldown("pause")
+
+        client_ip = request.client.host if request.client else "unknown"
+        logger.info("AUDIT: pause requested from %s", client_ip)
 
         daemon = app.state.daemon_instance
         if daemon is not None:
@@ -410,6 +455,10 @@ def create_app(repo_root: Path) -> tuple[FastAPI, str]:
     async def daemon_resume(request: Request) -> JSONResponse:
         """Resume the daemon — start picking up work again (FR-8)."""
         _require_write_auth(request)
+        _check_state_change_cooldown("resume")
+
+        client_ip = request.client.host if request.client else "unknown"
+        logger.info("AUDIT: resume requested from %s", client_ip)
 
         daemon = app.state.daemon_instance
         if daemon is not None:

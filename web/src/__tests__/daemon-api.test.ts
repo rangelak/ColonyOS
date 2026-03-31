@@ -53,7 +53,7 @@ describe("fetchDaemonHealth", () => {
 
     const result = await fetchDaemonHealth();
     expect(result).toEqual(health);
-    expect(mockFetch).toHaveBeenCalledWith("/healthz");
+    expect(mockFetch).toHaveBeenCalledWith("/api/healthz", { headers: {} });
   });
 
   it("returns health data even on 503 (degraded/stopped)", async () => {

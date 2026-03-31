@@ -439,15 +439,20 @@ class Daemon:
 
         port = self.daemon_config.dashboard_port
 
+        write_enabled = self.daemon_config.dashboard_write_enabled
+
         def _serve() -> None:
             try:
-                os.environ.setdefault("COLONYOS_WRITE_ENABLED", "1")
+                if write_enabled:
+                    os.environ.setdefault("COLONYOS_WRITE_ENABLED", "1")
                 app, auth_token = create_app(self.repo_root)
                 app.state.daemon_instance = self
+                masked = auth_token[-4:] if len(auth_token) >= 4 else "****"
                 logger.info(
-                    "Dashboard started on http://127.0.0.1:%d (token: %s)",
+                    "Dashboard started on http://127.0.0.1:%d (write=%s, token: ...%s)",
                     port,
-                    auth_token,
+                    write_enabled,
+                    masked,
                 )
                 config = uvicorn.Config(
                     app,

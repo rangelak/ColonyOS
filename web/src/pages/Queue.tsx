@@ -61,7 +61,7 @@ export default function Queue() {
       )}
 
       {/* Empty queue state */}
-      {!error && queue === null && !error && (
+      {!error && queue === null && (
         <div className="text-center py-16 text-gray-500">
           <p className="text-lg">No queue active</p>
           <p className="text-sm mt-1">The daemon has no active queue session.</p>
