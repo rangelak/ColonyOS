@@ -68,12 +68,12 @@
     - Accept optional `offline: bool = False` parameter; skip pull when True
     - Thread `offline` flag from daemon loop config into `_run_single_iteration()` → `_ensure_on_main()`
 
-- [ ] 5.0 Integration verification and edge case testing
+- [x] 5.0 Integration verification and edge case testing
   depends_on: [2.0, 3.0, 4.0]
-  - [ ] 5.1 Write integration-style tests verifying end-to-end pull behavior:
+  - [x] 5.1 Write integration-style tests verifying end-to-end pull behavior:
     - Daemon queue item: `restore_to_branch()` pulls before next item starts
     - Orchestrator `run()`: main is pulled in preflight, base branch is pulled at checkout
     - Thread-fix path: confirm no pull occurs (SHA check remains intact)
     - Offline mode: confirm zero network calls across all paths
-  - [ ] 5.2 Run full test suite (`pytest`) to verify no regressions
+  - [x] 5.2 Run full test suite (`pytest`) to verify no regressions
   - [ ] 5.3 Manual smoke test: run daemon with a stale local main, verify it auto-pulls before starting next queue item
