@@ -37,9 +37,9 @@
   - [x] 4.2 In `src/colonyos/tui/widgets/hint_bar.py` `_render_hints`: add "Shift+drag" and "select" to the keybinding hints line
   - [x] 4.3 In `src/colonyos/tui/widgets/transcript.py` `append_welcome_banner` and `append_daemon_monitor_banner`: add "Shift+drag to select" to the shortcuts text
 
-- [ ] 5.0 Integration testing and regression check
+- [x] 5.0 Integration testing and regression check
   depends_on: [1.0, 2.0, 3.0, 4.0]
-  - [ ] 5.1 Run the full existing test suite (`pytest tests/tui/`) to verify no regressions
-  - [ ] 5.2 Add an integration test in `tests/tui/test_app.py` that mounts `AssistantApp`, pushes multiple messages via the queue, and verifies that scroll position is preserved when `_auto_scroll` is `False`
-  - [ ] 5.3 Add an integration test for monitor mode (`monitor_mode=True`) verifying single scrollbar behavior and no Composer/HintBar widgets
-  - [ ] 5.4 Run the full project test suite to verify no regressions outside the TUI
+  - [x] 5.1 Run the full existing test suite (`pytest tests/tui/`) to verify no regressions
+  - [x] 5.2 Add an integration test in `tests/tui/test_app.py` that mounts `AssistantApp`, pushes multiple messages via the queue, and verifies that scroll position is preserved when `_auto_scroll` is `False`
+  - [x] 5.3 Add an integration test for monitor mode (`monitor_mode=True`) verifying single scrollbar behavior and no Composer/HintBar widgets
+  - [x] 5.4 Run the full project test suite to verify no regressions outside the TUI
