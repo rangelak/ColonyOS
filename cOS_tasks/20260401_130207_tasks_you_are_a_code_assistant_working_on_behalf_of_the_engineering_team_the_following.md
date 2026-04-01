@@ -26,7 +26,7 @@
   - [x] 2.3 Rewrite Step 1 to use concrete Glob pattern: `Glob` with pattern `{reviews_dir}/**/*.md` for file discovery, then `Read` for each file
   - [x] 2.4 Run the new test from 1.1 to confirm it now PASSES
 
-- [ ] 3.0 Verify full test suite passes with no regressions
+- [x] 3.0 Verify full test suite passes with no regressions
   depends_on: [2.0]
-  - [ ] 3.1 Run the full pytest suite (`pytest --tb=short -q`) and confirm all tests pass (expected: 2919+ tests, 0 failures)
-  - [ ] 3.2 Manually verify `_build_learn_prompt()` output includes the new tool constraints by inspecting the formatted prompt
+  - [x] 3.1 Run the full pytest suite (`pytest --tb=short -q`) and confirm all tests pass (expected: 2919+ tests, 0 failures)
+  - [x] 3.2 Manually verify `_build_learn_prompt()` output includes the new tool constraints by inspecting the formatted prompt
