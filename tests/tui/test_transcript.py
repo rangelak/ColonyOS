@@ -290,6 +290,65 @@ class TestAutoScrollBehavior:
 
 
 @pytest.mark.asyncio
+class TestUnreadLinesIndicator:
+    """Tests for task 3.0: 'new content below' indicator."""
+
+    async def test_unread_lines_starts_at_zero(self, require_tui: None) -> None:
+        """_unread_lines counter should initialize to 0."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            assert tv._unread_lines == 0
+
+    async def test_unread_lines_increments_when_auto_scroll_off(self, require_tui: None) -> None:
+        """_unread_lines should increment when content is written while _auto_scroll is False."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv._auto_scroll = False
+            tv.append_tool_line("Read", "/file.py")
+            assert tv._unread_lines >= 1
+
+    async def test_unread_lines_does_not_increment_when_auto_scroll_on(self, require_tui: None) -> None:
+        """_unread_lines should stay 0 when auto_scroll is active."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            assert tv._auto_scroll is True
+            tv.append_tool_line("Read", "/file.py")
+            assert tv._unread_lines == 0
+
+    async def test_unread_lines_resets_when_auto_scroll_reengages(self, require_tui: None) -> None:
+        """_unread_lines should reset to 0 when auto-scroll re-engages via on_scroll_y."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv._auto_scroll = False
+            tv._unread_lines = 5
+            # Simulate scrolling to the bottom
+            tv._auto_scroll = True
+            tv._unread_lines = 0  # This is what re_enable_auto_scroll does
+            assert tv._unread_lines == 0
+
+    async def test_unread_lines_resets_on_re_enable_auto_scroll(self, require_tui: None) -> None:
+        """re_enable_auto_scroll should clear the unread counter."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv._auto_scroll = False
+            tv._unread_lines = 10
+            tv.re_enable_auto_scroll()
+            assert tv._unread_lines == 0
+            assert tv._auto_scroll is True
+
+    async def test_unread_lines_accumulates_across_multiple_writes(self, require_tui: None) -> None:
+        """Multiple writes while scrolled up should accumulate unread count."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv._auto_scroll = False
+            tv.append_tool_line("Read", "/a.py")
+            first = tv._unread_lines
+            tv.append_tool_line("Write", "/b.py")
+            second = tv._unread_lines
+            assert second > first
+
+
+@pytest.mark.asyncio
 class TestTranscriptViewCSS:
     """Verify CSS properties are correctly applied to TranscriptView."""
 

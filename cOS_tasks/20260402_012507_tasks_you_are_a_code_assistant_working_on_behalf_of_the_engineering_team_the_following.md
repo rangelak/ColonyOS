@@ -24,12 +24,12 @@
   - [x] 2.3 In `src/colonyos/tui/widgets/transcript.py` `on_scroll_y`: add a 3-line tolerance threshold so auto-scroll re-engages when user scrolls near the bottom (`self.scroll_y >= max_scroll - 3` instead of `self.scroll_y >= max_scroll`)
   - [x] 2.4 Fix `_programmatic_scroll` flag timing: instead of clearing the flag synchronously after `scroll_end()`, set a `_pending_programmatic_clear` flag and clear `_programmatic_scroll` at the start of the next `on_scroll_y` call, ensuring the guard works correctly with async scroll events
 
-- [ ] 3.0 Add "new content below" indicator
+- [x] 3.0 Add "new content below" indicator
   depends_on: [2.0]
-  - [ ] 3.1 Write tests: verify `_unread_lines` counter increments when content is written while `_auto_scroll` is `False`; verify counter resets when auto-scroll re-engages; verify indicator text appears/disappears correctly
-  - [ ] 3.2 In `src/colonyos/tui/widgets/transcript.py`: add `_unread_lines: int = 0` counter; increment in `_scroll_to_end` when `_auto_scroll` is `False`; reset to 0 when `_auto_scroll` becomes `True`
-  - [ ] 3.3 In `src/colonyos/tui/widgets/transcript.py`: add a method to render a subtle notification (e.g., `self.notify("↓ N new lines — press End to resume", severity="information")` using Textual's built-in notification system, or a reactive label) when `_unread_lines` transitions from 0 to >0
-  - [ ] 3.4 In `src/colonyos/tui/app.py` `action_scroll_to_end`: ensure unread counter is cleared when user presses End
+  - [x] 3.1 Write tests: verify `_unread_lines` counter increments when content is written while `_auto_scroll` is `False`; verify counter resets when auto-scroll re-engages; verify indicator text appears/disappears correctly
+  - [x] 3.2 In `src/colonyos/tui/widgets/transcript.py`: add `_unread_lines: int = 0` counter; increment in `_scroll_to_end` when `_auto_scroll` is `False`; reset to 0 when `_auto_scroll` becomes `True`
+  - [x] 3.3 In `src/colonyos/tui/widgets/transcript.py`: add a method to render a subtle notification (e.g., `self.notify("↓ N new lines — press End to resume", severity="information")` using Textual's built-in notification system, or a reactive label) when `_unread_lines` transitions from 0 to >0
+  - [x] 3.4 In `src/colonyos/tui/app.py` `action_scroll_to_end`: ensure unread counter is cleared when user presses End
 
 - [ ] 4.0 Add text selection hints and improve copy discoverability
   depends_on: []
