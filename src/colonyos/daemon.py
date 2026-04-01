@@ -1887,6 +1887,56 @@ class Daemon:
         today_str = datetime.now(tz).strftime("%Y-%m-%d")
         return self._state.daily_thread_date != today_str
 
+    def _create_daily_summary(self) -> str:
+        """Build a formatted summary of items completed/failed since the last daily thread.
+
+        Filters ``self._queue_state.items`` for items whose ``added_at``
+        timestamp falls on or after the previous daily thread date (stored in
+        ``self._state.daily_thread_date``).  When no previous date exists, all
+        terminal items are included.
+
+        Returns the formatted summary string produced by
+        :func:`colonyos.slack.format_daily_summary`.
+        """
+        from zoneinfo import ZoneInfo
+
+        from colonyos.slack import format_daily_summary
+
+        tz = ZoneInfo(self.config.slack.daily_thread_timezone)
+        now = datetime.now(tz)
+        period_label = now.strftime("%B %-d, %Y")
+
+        # Determine the cutoff: only include items added since the last rotation
+        cutoff_iso: str | None = self._state.daily_thread_date  # e.g. "2026-04-01"
+
+        def _since_cutoff(item: QueueItem) -> bool:
+            if cutoff_iso is None:
+                return True
+            # added_at is an ISO-8601 datetime string; compare date portion
+            return item.added_at[:10] >= cutoff_iso
+
+        completed = [
+            item for item in self._queue_state.items
+            if item.status == QueueItemStatus.COMPLETED and _since_cutoff(item)
+        ]
+        failed = [
+            item for item in self._queue_state.items
+            if item.status == QueueItemStatus.FAILED and _since_cutoff(item)
+        ]
+        pending_count = sum(
+            1 for item in self._queue_state.items
+            if item.status == QueueItemStatus.PENDING
+        )
+        total_cost = sum(item.cost_usd for item in completed + failed)
+
+        return format_daily_summary(
+            completed_items=completed,
+            failed_items=failed,
+            total_cost=total_cost,
+            queue_depth=pending_count,
+            period_label=period_label,
+        )
+
     def _ensure_daily_thread(self) -> tuple[Any, str, str] | None:
         """Ensure a daily thread exists for today, creating one if needed.
 
@@ -1916,34 +1966,9 @@ class Daemon:
         # Need to create a new daily thread
         from zoneinfo import ZoneInfo
 
-        from colonyos.slack import format_daily_summary, post_message
+        from colonyos.slack import post_message
 
-        tz = ZoneInfo(self.config.slack.daily_thread_timezone)
-        now = datetime.now(tz)
-        period_label = now.strftime("%B %-d, %Y")
-
-        # Gather completed and failed items for the summary
-        completed = [
-            item for item in self._queue_state.items
-            if item.status == QueueItemStatus.COMPLETED
-        ]
-        failed = [
-            item for item in self._queue_state.items
-            if item.status == QueueItemStatus.FAILED
-        ]
-        pending_count = sum(
-            1 for item in self._queue_state.items
-            if item.status == QueueItemStatus.PENDING
-        )
-        total_cost = sum(item.cost_usd for item in completed + failed)
-
-        summary_text = format_daily_summary(
-            completed_items=completed,
-            failed_items=failed,
-            total_cost=total_cost,
-            queue_depth=pending_count,
-            period_label=period_label,
-        )
+        summary_text = self._create_daily_summary()
 
         try:
             response = post_message(client, channel, summary_text)
@@ -1956,13 +1981,15 @@ class Daemon:
             return None
 
         # Persist the new daily thread info
+        tz = ZoneInfo(self.config.slack.daily_thread_timezone)
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
         with self._lock:
             self._state.daily_thread_ts = thread_ts
-            self._state.daily_thread_date = now.strftime("%Y-%m-%d")
+            self._state.daily_thread_date = today_str
             self._state.daily_thread_channel = channel
             self._persist_state()
 
-        logger.info("Created daily thread %s for %s in %s", thread_ts, now.strftime("%Y-%m-%d"), channel)
+        logger.info("Created daily thread %s for %s in %s", thread_ts, today_str, channel)
         return client, channel, thread_ts
 
     def _format_phase_breakdown(self, log: Any) -> list[str]:

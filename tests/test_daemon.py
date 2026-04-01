@@ -2032,3 +2032,176 @@ class TestDailyThreadRouting:
         if mock_client.chat_postMessage.called:
             call_kwargs = mock_client.chat_postMessage.call_args[1]
             assert call_kwargs.get("thread_ts") == "daily.thread.ts"
+
+
+class TestCreateDailySummary:
+    """Tests for task 6.0: overnight summary generation via _create_daily_summary()."""
+
+    def test_collects_completed_and_failed_items(self, daemon_instance: Daemon):
+        """_create_daily_summary includes completed and failed items in the output."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_date = None  # no cutoff — include all
+
+        daemon_instance._queue_state = QueueState(
+            queue_id="test-q",
+            items=[
+                QueueItem(
+                    id="item-1",
+                    source_type="issue",
+                    source_value="fix auth",
+                    status=QueueItemStatus.COMPLETED,
+                    cost_usd=2.50,
+                    pr_url="https://github.com/org/repo/pull/1",
+                    summary="Fix auth bug",
+                ),
+                QueueItem(
+                    id="item-2",
+                    source_type="issue",
+                    source_value="add caching",
+                    status=QueueItemStatus.FAILED,
+                    cost_usd=0.45,
+                    error="branch conflict",
+                    summary="Add caching layer",
+                ),
+                QueueItem(
+                    id="item-3",
+                    source_type="issue",
+                    source_value="pending work",
+                    status=QueueItemStatus.PENDING,
+                ),
+            ],
+        )
+
+        result = daemon_instance._create_daily_summary()
+
+        assert "Fix auth bug" in result
+        assert "Add caching layer" in result
+        assert "branch conflict" in result
+        assert "$2.95" in result  # total cost 2.50 + 0.45
+        assert "1 pending" in result
+        assert "Completed (1):" in result
+        assert "Failed (1):" in result
+
+    def test_filters_items_by_cutoff_date(self, daemon_instance: Daemon):
+        """_create_daily_summary only includes items added since the last rotation date."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_date = "2026-04-01"
+
+        daemon_instance._queue_state = QueueState(
+            queue_id="test-q",
+            items=[
+                QueueItem(
+                    id="old-item",
+                    source_type="issue",
+                    source_value="old work",
+                    status=QueueItemStatus.COMPLETED,
+                    cost_usd=5.00,
+                    added_at="2026-03-31T10:00:00+00:00",
+                    summary="Old completed work",
+                ),
+                QueueItem(
+                    id="new-item",
+                    source_type="issue",
+                    source_value="new work",
+                    status=QueueItemStatus.COMPLETED,
+                    cost_usd=1.50,
+                    added_at="2026-04-01T14:00:00+00:00",
+                    summary="New completed work",
+                ),
+                QueueItem(
+                    id="new-fail",
+                    source_type="issue",
+                    source_value="new fail",
+                    status=QueueItemStatus.FAILED,
+                    cost_usd=0.30,
+                    added_at="2026-04-01T16:00:00+00:00",
+                    error="timeout",
+                    summary="New failed work",
+                ),
+            ],
+        )
+
+        result = daemon_instance._create_daily_summary()
+
+        # Old item should be excluded
+        assert "Old completed work" not in result
+        # New items should be included
+        assert "New completed work" in result
+        assert "New failed work" in result
+        assert "$1.80" in result  # 1.50 + 0.30
+
+    def test_empty_period_produces_no_activity_message(self, daemon_instance: Daemon):
+        """_create_daily_summary with no terminal items produces a no-activity message."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_date = "2026-04-01"
+
+        daemon_instance._queue_state = QueueState(
+            queue_id="test-q",
+            items=[
+                QueueItem(
+                    id="pending-item",
+                    source_type="issue",
+                    source_value="pending",
+                    status=QueueItemStatus.PENDING,
+                ),
+            ],
+        )
+
+        result = daemon_instance._create_daily_summary()
+
+        assert "No activity during this period" in result
+        assert "1 pending" in result
+
+    def test_computes_aggregate_cost(self, daemon_instance: Daemon):
+        """_create_daily_summary computes total cost across completed and failed items."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_date = None
+
+        daemon_instance._queue_state = QueueState(
+            queue_id="test-q",
+            items=[
+                QueueItem(
+                    id="c1", source_type="issue", source_value="a",
+                    status=QueueItemStatus.COMPLETED, cost_usd=1.10,
+                ),
+                QueueItem(
+                    id="c2", source_type="issue", source_value="b",
+                    status=QueueItemStatus.COMPLETED, cost_usd=2.20,
+                ),
+                QueueItem(
+                    id="f1", source_type="issue", source_value="c",
+                    status=QueueItemStatus.FAILED, cost_usd=0.70,
+                ),
+            ],
+        )
+
+        result = daemon_instance._create_daily_summary()
+        assert "$4.00" in result
+
+    def test_wired_into_ensure_daily_thread(self, daemon_instance: Daemon):
+        """_ensure_daily_thread uses _create_daily_summary for the opening message."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_ts = None
+        daemon_instance._state.daily_thread_date = None
+
+        daemon_instance._queue_state = QueueState(queue_id="test-q", items=[])
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True, "ts": "new.thread.ts"}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client), \
+             patch.object(daemon_instance, "_create_daily_summary", return_value="MOCK SUMMARY") as mock_summary:
+            result = daemon_instance._ensure_daily_thread()
+
+        mock_summary.assert_called_once()
+        # The summary text should be posted as the opening message
+        call_kwargs = mock_client.chat_postMessage.call_args[1]
+        assert call_kwargs["text"] == "MOCK SUMMARY"
+        assert result is not None
+        assert result[2] == "new.thread.ts"

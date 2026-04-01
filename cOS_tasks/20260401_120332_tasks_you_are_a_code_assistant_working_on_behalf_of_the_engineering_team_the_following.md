@@ -46,11 +46,11 @@
   - [x] 5.4 Modify `_ensure_notification_thread()`: when `notification_mode == "daily"`, call `_ensure_daily_thread()` to get the daily thread, then post the per-item intro as a reply to the daily thread. Use the reply's `ts` as `item.notification_thread_ts` so phase updates still nest correctly under the per-item sub-reply
   - [x] 5.5 Modify `_post_heartbeat()` and `_post_daily_digest_if_due()` to use `_post_slack_message()` (they already do — just verify they route correctly through the daily thread in daily mode)
 
-- [ ] 6.0 Implement overnight summary generation
+- [x] 6.0 Implement overnight summary generation
   depends_on: [4.0]
-  - [ ] 6.1 Write tests for `_create_daily_summary()`: collects completed and failed items since the last rotation time from `self._queue_state.items`, computes total cost, passes to `format_daily_summary()`
-  - [ ] 6.2 Implement `_create_daily_summary() -> str` in daemon.py: filter `self._queue_state.items` for items completed/failed since the last daily thread date, categorize by status, compute aggregate cost for the period, count pending items, call `format_daily_summary()` to produce the formatted message
-  - [ ] 6.3 Wire `_create_daily_summary()` into `_ensure_daily_thread()` as the opening message text for new daily threads
+  - [x] 6.1 Write tests for `_create_daily_summary()`: collects completed and failed items since the last rotation time from `self._queue_state.items`, computes total cost, passes to `format_daily_summary()`
+  - [x] 6.2 Implement `_create_daily_summary() -> str` in daemon.py: filter `self._queue_state.items` for items completed/failed since the last daily thread date, categorize by status, compute aggregate cost for the period, count pending items, call `format_daily_summary()` to produce the formatted message
+  - [x] 6.3 Wire `_create_daily_summary()` into `_ensure_daily_thread()` as the opening message text for new daily threads
 
 - [ ] 7.0 End-to-end integration and backward compatibility verification
   depends_on: [5.0, 6.0]
