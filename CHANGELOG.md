@@ -1,5 +1,21 @@
 # Changelog
 
+## 20260401_153000 — Listen to All Channel Messages (trigger_mode: "all")
+
+Adds passive channel listening so ColonyOS can process every message in configured channels, not just @mentions. When `trigger_mode` is set to `"all"`, the bot binds Slack `message` events alongside `app_mention`, extracts prompts from non-mention messages, skips the 👀 reaction for passive messages (only reacting after triage confirms actionability), and leverages existing dedup infrastructure for dual-event delivery. Startup warnings guide operators to configure `allowed_user_ids` and `triage_scope` for safe passive mode usage.
+
+**Modified:**
+- `src/colonyos/config.py` — Added `"all"` to `_VALID_TRIGGER_MODES`
+- `src/colonyos/slack_queue.py` — Bound `message` event handler in `register()`, updated `_handle_event` for passive message prompt extraction and conditional 👀 reaction
+- `src/colonyos/slack.py` — Added `extract_prompt_from_channel_message()` for non-mention messages
+- `src/colonyos/daemon.py` — Added startup warnings for `trigger_mode: "all"` without safety configs
+- `tests/test_slack_queue.py` — Comprehensive tests for all-mode flow, dedup verification, passive message handling
+- `tests/test_slack.py` — Tests for channel message prompt extraction
+- `tests/test_daemon.py` — Tests for startup warnings
+
+**PRD:** `cOS_prds/20260401_131917_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260401_131917_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260331_220500 — Replace :eyes: Emoji with Completion Emoji on Pipeline Finish
 
 Adds clean emoji state transitions to Slack messages: when a ColonyOS pipeline completes, the `:eyes:` (in-progress) reaction is removed before adding the terminal status emoji (`:white_check_mark:` / `:x:`), plus `:tada:` on success. This eliminates ambiguous dual-emoji states so each message shows exactly one reaction reflecting its current state.
