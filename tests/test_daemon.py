@@ -2031,3 +2031,117 @@ class TestWatchdogThread:
         daemon._stop_event.set()
         for t in threads:
             t.join(timeout=5)
+
+    def test_slack_alert_on_stall_detection(self, tmp_repo: Path):
+        """_post_slack_message is called with stuck-detection message when watchdog fires."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=120,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        item = QueueItem(
+            id="slack-alert-item",
+            source_type="prompt",
+            source_value="stuck thing",
+            status=QueueItemStatus.RUNNING,
+            priority=1,
+        )
+        daemon._queue_state.items = [item]
+        daemon._pipeline_running = True
+        daemon._pipeline_started_at = time.monotonic() - 300
+        daemon._current_running_item = item
+
+        with patch("colonyos.daemon.request_active_phase_cancel", return_value=1), \
+             patch("colonyos.daemon.request_cancel", return_value=1), \
+             patch.object(daemon, "_stop_event") as mock_stop, \
+             patch.object(daemon, "_post_slack_message") as mock_slack:
+            mock_stop.wait.return_value = False
+            mock_stop.is_set.return_value = False
+            daemon._watchdog_recover(stall_duration=300.0)
+
+        mock_slack.assert_called_once()
+        msg = mock_slack.call_args[0][0]
+        assert "Stuck Pipeline Detected" in msg
+        assert "slack-alert-item" in msg
+        assert "prompt" in msg
+        assert "Auto-recovery initiated" in msg
+
+    def test_slack_alert_uses_timeout(self, tmp_repo: Path):
+        """Slack post should use a timeout so the alert itself cannot hang the watchdog."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=120,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        item = QueueItem(
+            id="timeout-item",
+            source_type="prompt",
+            source_value="hang slack",
+            status=QueueItemStatus.RUNNING,
+            priority=1,
+        )
+        daemon._queue_state.items = [item]
+        daemon._pipeline_running = True
+        daemon._pipeline_started_at = time.monotonic() - 300
+        daemon._current_running_item = item
+
+        # Simulate _post_slack_message raising an exception (e.g., timeout)
+        with patch("colonyos.daemon.request_active_phase_cancel", return_value=1), \
+             patch("colonyos.daemon.request_cancel", return_value=1), \
+             patch.object(daemon, "_stop_event") as mock_stop, \
+             patch.object(daemon, "_post_slack_message", side_effect=Exception("Slack timeout")):
+            mock_stop.wait.return_value = False
+            mock_stop.is_set.return_value = False
+            # Should NOT raise — Slack failure must not break recovery
+            daemon._watchdog_recover(stall_duration=300.0)
+
+        # Recovery should still complete despite Slack failure
+        assert daemon._pipeline_running is False
+        assert item.status == QueueItemStatus.FAILED
+
+    def test_monitor_event_emitted_on_stall(self, tmp_repo: Path):
+        """A monitor event with type watchdog_stall_detected should be emitted."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=120,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        item = QueueItem(
+            id="monitor-event-item",
+            source_type="prompt",
+            source_value="emit event",
+            status=QueueItemStatus.RUNNING,
+            priority=1,
+        )
+        daemon._queue_state.items = [item]
+        daemon._pipeline_running = True
+        daemon._pipeline_started_at = time.monotonic() - 300
+        daemon._current_running_item = item
+
+        captured_output: list[str] = []
+
+        with patch("colonyos.daemon.request_active_phase_cancel", return_value=1), \
+             patch("colonyos.daemon.request_cancel", return_value=1), \
+             patch.object(daemon, "_stop_event") as mock_stop, \
+             patch.object(daemon, "_post_slack_message"), \
+             patch("sys.stdout") as mock_stdout:
+            mock_stop.wait.return_value = False
+            mock_stop.is_set.return_value = False
+            mock_stdout.write.side_effect = lambda s: captured_output.append(s)
+            daemon._watchdog_recover(stall_duration=300.0)
+
+        # Find the monitor event in captured output
+        from colonyos.tui.monitor_protocol import MONITOR_EVENT_PREFIX
+        import json
+        monitor_lines = [line for line in captured_output if MONITOR_EVENT_PREFIX in line]
+        assert len(monitor_lines) >= 1, f"Expected monitor event, got: {captured_output}"
+        # Parse the event
+        raw = monitor_lines[0].strip().replace(MONITOR_EVENT_PREFIX, "")
+        event = json.loads(raw)
+        assert event["type"] == "watchdog_stall_detected"
+        assert event["item_id"] == "monitor-event-item"
+        assert event["stall_duration_seconds"] == 300.0
+        assert event["action_taken"] == "auto_cancel"

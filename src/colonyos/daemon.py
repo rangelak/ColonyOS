@@ -1757,6 +1757,37 @@ class Daemon:
         """Recover from a stalled pipeline: cancel, wait, force-reset, mark FAILED."""
         item = self._current_running_item
 
+        # Step 0: Emit monitor event for TUI consumption
+        try:
+            event_payload = {
+                "type": "watchdog_stall_detected",
+                "item_id": item.id if item is not None else None,
+                "stall_duration_seconds": stall_duration,
+                "action_taken": "auto_cancel",
+            }
+            sys.stdout.write(encode_monitor_event(event_payload) + "\n")
+            sys.stdout.flush()
+        except Exception:
+            logger.exception("Watchdog: failed to emit monitor event")
+
+        # Step 0.5: Post Slack alert (wrapped in try/except to avoid hanging the watchdog)
+        try:
+            if item is not None:
+                duration_min = stall_duration / 60
+                alert_msg = (
+                    f"⚠️ *Stuck Pipeline Detected*\n"
+                    f"Item {item.id} ({item.source_type}) running for {duration_min:.0f}m. "
+                    f"No progress for {stall_duration:.0f}s. Auto-recovery initiated."
+                )
+            else:
+                alert_msg = (
+                    f"⚠️ *Stuck Pipeline Detected*\n"
+                    f"No progress for {stall_duration:.0f}s. Auto-recovery initiated."
+                )
+            self._post_slack_message(alert_msg)
+        except Exception:
+            logger.exception("Watchdog: failed to post Slack alert")
+
         # Step 1: Request graceful phase cancellation
         logger.warning("Watchdog: requesting active phase cancel")
         try:

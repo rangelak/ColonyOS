@@ -58,14 +58,14 @@
   - [x] 4.4 Start the watchdog thread in `Daemon.start()` (after existing thread starts, around line ~400). Store as `self._watchdog_thread`. Set `daemon=True`.
   - [x] 4.5 Track `self._current_running_item: QueueItem | None = None` in `Daemon.__init__()`. Set it when transitioning to RUNNING, clear it when pipeline completes/fails. The watchdog needs this to mark the correct item as FAILED.
 
-- [ ] 5.0 Add Slack alert and monitor event on stall detection (depends on watchdog)
+- [x] 5.0 Add Slack alert and monitor event on stall detection (depends on watchdog)
   depends_on: [4.0]
-  - [ ] 5.1 Write tests in `tests/test_daemon.py`:
+  - [x] 5.1 Write tests in `tests/test_daemon.py`:
     - Test that `_post_slack_message()` is called with appropriate stuck-detection message when watchdog fires.
     - Test that the Slack post uses a timeout to avoid the alert itself hanging.
     - Test that a monitor event is emitted with type `"watchdog_stall_detected"`.
-  - [ ] 5.2 In `_watchdog_recover()`, call `self._post_slack_message()` with a formatted alert: `"⚠️ *Stuck Pipeline Detected*\nItem {item.id} ({source_type}) running for {duration}. No progress for {stall}s. Auto-recovery initiated."`. Wrap in a try/except with a 10-second timeout.
-  - [ ] 5.3 Emit a structured monitor event via `encode_monitor_event()` with event type `"watchdog_stall_detected"`, including `item_id`, `stall_duration_seconds`, and `action_taken: "auto_cancel"`.
+  - [x] 5.2 In `_watchdog_recover()`, call `self._post_slack_message()` with a formatted alert: `"⚠️ *Stuck Pipeline Detected*\nItem {item.id} ({source_type}) running for {duration}. No progress for {stall}s. Auto-recovery initiated."`. Wrap in a try/except with a 10-second timeout.
+  - [x] 5.3 Emit a structured monitor event via `encode_monitor_event()` with event type `"watchdog_stall_detected"`, including `item_id`, `stall_duration_seconds`, and `action_taken: "auto_cancel"`.
 
 - [ ] 6.0 Enhance `/healthz` endpoint with pipeline duration and stall status (depends on 3.0)
   depends_on: [3.0]
