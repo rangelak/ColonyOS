@@ -139,3 +139,12 @@ _Date: 2026-04-01 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[code-quality]** Private aliases (`_fn = fn`) for brand-new functions under backward-compat claims add noise; pick one canonical name.
 - **[code-quality]** LLM agent instruction templates should prohibit suppression annotations (`# type: ignore`, `# noqa`) as valid fixes.
 - **[architecture]** Aggregation modules that dynamically enumerate categories from data avoid code changes when new variants are added.
+
+## Run: run-20260401_235107-7d1db511f2
+_Date: 2026-04-02 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
+
+- **[architecture]** Public functions must validate own inputs (e.g., path traversal), not assume callers pre-validated; enforce at API boundary.
+- **[code-quality]** Functions returning untagged unions (`str | list[str]`) for branching are fragile; use dedicated result dataclasses.
+- **[architecture]** Read-only polling endpoints re-reading all files from disk per request need a TTL cache layer under frequent polling.
+- **[code-quality]** `--json` CLI output should serialize the computed view model, not raw persisted data, to match terminal UI fields.
+- **[security]** SPA catch-all routes serving static files must validate resolved paths stay within the dist directory via containment check.
