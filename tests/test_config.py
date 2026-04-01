@@ -19,6 +19,7 @@ from colonyos.config import (
     RetryConfig,
     RouterConfig,
     SlackConfig,
+    VerifyConfig,
     VALID_MODELS,
     _SAFETY_CRITICAL_PHASES,
     load_config,
@@ -1945,3 +1946,74 @@ class TestSlackDailyThreadConfig:
         assert config.slack.notification_mode == "daily"
         assert config.slack.daily_thread_hour == 8
         assert config.slack.daily_thread_timezone == "UTC"
+
+
+class TestVerifyConfig:
+    """Tests for VerifyConfig dataclass and its integration into PhasesConfig/DEFAULTS."""
+
+    def test_verify_config_defaults(self) -> None:
+        vc = VerifyConfig()
+        assert vc.max_fix_attempts == 2
+
+    def test_verify_config_custom_value(self) -> None:
+        vc = VerifyConfig(max_fix_attempts=5)
+        assert vc.max_fix_attempts == 5
+
+    def test_phases_config_verify_defaults_true(self) -> None:
+        pc = PhasesConfig()
+        assert pc.verify is True
+
+    def test_phases_config_verify_can_be_disabled(self) -> None:
+        pc = PhasesConfig(verify=False)
+        assert pc.verify is False
+
+    def test_defaults_phases_verify_is_true(self) -> None:
+        assert DEFAULTS["phases"]["verify"] is True
+
+    def test_defaults_verify_section_exists(self) -> None:
+        assert "verify" in DEFAULTS
+        assert DEFAULTS["verify"]["max_fix_attempts"] == 2
+
+    def test_colony_config_has_verify(self) -> None:
+        cc = ColonyConfig()
+        assert isinstance(cc.verify, VerifyConfig)
+        assert cc.verify.max_fix_attempts == 2
+
+    def test_load_config_defaults_verify(self, tmp_repo: Path) -> None:
+        config = load_config(tmp_repo)
+        assert config.phases.verify is True
+        assert config.verify.max_fix_attempts == 2
+
+    def test_load_config_verify_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "phases": {"verify": False},
+                "verify": {"max_fix_attempts": 4},
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.phases.verify is False
+        assert config.verify.max_fix_attempts == 4
+
+    def test_load_config_verify_invalid_max_fix_attempts(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"verify": {"max_fix_attempts": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="verify.max_fix_attempts must be positive"):
+            load_config(tmp_repo)
+
+    def test_roundtrip_verify_config(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            phases=PhasesConfig(verify=False),
+            verify=VerifyConfig(max_fix_attempts=5),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.phases.verify is False
+        assert loaded.verify.max_fix_attempts == 5
