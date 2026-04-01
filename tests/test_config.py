@@ -1436,6 +1436,55 @@ class TestRetryConfig:
         assert DEFAULTS["retry"]["fallback_model"] is None
 
 
+class TestRecoveryConfig:
+    def test_default_max_task_retries(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.recovery.max_task_retries == 1
+
+    def test_max_task_retries_parsed_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"recovery": {"max_task_retries": 2}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.recovery.max_task_retries == 2
+
+    def test_max_task_retries_zero_disables_retry(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"recovery": {"max_task_retries": 0}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.recovery.max_task_retries == 0
+
+    def test_negative_max_task_retries_raises(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"recovery": {"max_task_retries": -1}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="non-negative"):
+            load_config(tmp_repo)
+
+    def test_max_task_retries_roundtrip(self, tmp_repo: Path):
+        original = ColonyConfig(
+            recovery=RecoveryConfig(
+                max_task_retries=3,
+            )
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.recovery.max_task_retries == 3
+
+    def test_defaults_dict_has_max_task_retries(self):
+        assert DEFAULTS["recovery"]["max_task_retries"] == 1
+
+
 class TestDaemonOutcomePollInterval:
     """Tests for DaemonConfig.outcome_poll_interval_minutes."""
 

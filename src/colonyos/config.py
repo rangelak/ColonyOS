@@ -90,6 +90,7 @@ DEFAULTS = {
     "recovery": {
         "enabled": True,
         "max_phase_retries": 1,
+        "max_task_retries": 1,
         "allow_nuke": True,
         "max_nuke_attempts": 1,
         "incident_char_cap": 4000,
@@ -252,6 +253,7 @@ class RecoveryConfig:
 
     enabled: bool = True
     max_phase_retries: int = 1
+    max_task_retries: int = 1
     allow_nuke: bool = True
     max_nuke_attempts: int = 1
     incident_char_cap: int = 4000
@@ -785,6 +787,11 @@ def _parse_recovery_config(raw: dict) -> RecoveryConfig:
         raise ValueError(
             f"recovery.max_phase_retries must be non-negative, got {max_phase_retries}"
         )
+    max_task_retries = int(raw.get("max_task_retries", defaults["max_task_retries"]))
+    if max_task_retries < 0:
+        raise ValueError(
+            f"recovery.max_task_retries must be non-negative, got {max_task_retries}"
+        )
     allow_nuke = bool(raw.get("allow_nuke", defaults["allow_nuke"]))
     max_nuke_attempts = int(raw.get("max_nuke_attempts", defaults["max_nuke_attempts"]))
     if max_nuke_attempts < 0:
@@ -799,6 +806,7 @@ def _parse_recovery_config(raw: dict) -> RecoveryConfig:
     return RecoveryConfig(
         enabled=enabled,
         max_phase_retries=max_phase_retries,
+        max_task_retries=max_task_retries,
         allow_nuke=allow_nuke,
         max_nuke_attempts=max_nuke_attempts,
         incident_char_cap=incident_char_cap,
@@ -1285,6 +1293,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
     if (
         config.recovery.enabled != recovery_defaults["enabled"]
         or config.recovery.max_phase_retries != recovery_defaults["max_phase_retries"]
+        or config.recovery.max_task_retries != recovery_defaults["max_task_retries"]
         or config.recovery.allow_nuke != recovery_defaults["allow_nuke"]
         or config.recovery.max_nuke_attempts != recovery_defaults["max_nuke_attempts"]
         or config.recovery.incident_char_cap != recovery_defaults["incident_char_cap"]
@@ -1292,6 +1301,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         data["recovery"] = {
             "enabled": config.recovery.enabled,
             "max_phase_retries": config.recovery.max_phase_retries,
+            "max_task_retries": config.recovery.max_task_retries,
             "allow_nuke": config.recovery.allow_nuke,
             "max_nuke_attempts": config.recovery.max_nuke_attempts,
             "incident_char_cap": config.recovery.incident_char_cap,
