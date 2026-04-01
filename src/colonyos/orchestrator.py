@@ -56,7 +56,7 @@ from colonyos.recovery import (
     recovery_dir_path,
     write_incident_summary,
 )
-from colonyos.sanitize import sanitize_untrusted_content
+from colonyos.sanitize import sanitize_for_slack, sanitize_untrusted_content
 from colonyos.slack import is_valid_git_ref
 from colonyos.ui import (
     NullUI,
@@ -872,8 +872,12 @@ def _run_sequential_implement(
 
         ui = _make_ui()
         if ui is not None:
+            safe_desc = sanitize_for_slack(sanitize_untrusted_content(task_desc))
+            short_desc = safe_desc[:_SLACK_TASK_DESC_MAX]
+            if len(safe_desc) > _SLACK_TASK_DESC_MAX:
+                short_desc = safe_desc[:_SLACK_TASK_DESC_MAX - 3] + "..."
             ui.phase_header(
-                f"Implement [{task_id}]",
+                f"Implement [{task_id}] {short_desc}",
                 per_task_budget,
                 config.get_model(Phase.IMPLEMENT),
                 branch_name,
@@ -1314,17 +1318,54 @@ def _load_task_outline(repo_root: Path, task_rel: str) -> list[tuple[str, str]]:
     return outline
 
 
+# ---------------------------------------------------------------------------
+# Slack formatting constants
+# ---------------------------------------------------------------------------
+# Maximum character length for Slack thread notes.  Keeps messages well under
+# Slack's 40,000-char limit while remaining scannable.
+_SLACK_MAX_CHARS = 3000
+# Maximum visible tasks / task descriptions shown before ``+N more`` overflow.
+_SLACK_MAX_SHOWN_TASKS = 6
+# Maximum length for a single task description line (truncated with ``...``).
+_SLACK_TASK_DESC_MAX = 72
+# Maximum length for a single review finding summary line.
+_SLACK_FINDING_MAX = 80
+
+
+def _truncate_slack_message(text: str, max_chars: int = _SLACK_MAX_CHARS) -> str:
+    """Truncate a Slack message to *max_chars* at a newline boundary.
+
+    If *text* exceeds *max_chars*, it is cut at the last newline before the
+    limit and a ``_(truncated)_`` indicator is appended.  This keeps messages
+    well under Slack's 40,000-char limit while remaining scannable.
+    """
+    if len(text) <= max_chars:
+        return text
+    # Find last newline before the limit (leave room for the indicator)
+    indicator = "\n_(truncated)_"
+    cut = text.rfind("\n", 0, max_chars - len(indicator))
+    if cut <= 0:
+        # No newline found — hard cut
+        cut = max_chars - len(indicator)
+    return text[:cut] + indicator
+
+
 def _format_task_outline_note(tasks: list[tuple[str, str]]) -> str:
-    """Summarize the planned task list for the implement phase."""
+    """Summarize the planned task list for the implement phase.
+
+    Returns a Slack mrkdwn formatted bullet list with a bold header line,
+    one ``•`` bullet per task (up to 6), and a ``+N more`` overflow line.
+    """
     if not tasks:
         return ""
-    rendered: list[str] = []
-    for task_id, description in tasks[:6]:
-        short = description if len(description) <= 72 else f"{description[:69]}..."
-        rendered.append(f"`{task_id}` {short}")
-    if len(tasks) > 6:
-        rendered.append(f"+{len(tasks) - 6} more")
-    return f"Implement tasks ({len(tasks)}): " + "; ".join(rendered)
+    lines: list[str] = [f"*Implement tasks ({len(tasks)}):*"]
+    for task_id, description in tasks[:_SLACK_MAX_SHOWN_TASKS]:
+        safe_desc = sanitize_for_slack(sanitize_untrusted_content(description))
+        short = safe_desc if len(safe_desc) <= _SLACK_TASK_DESC_MAX else f"{safe_desc[:_SLACK_TASK_DESC_MAX - 3]}..."
+        lines.append(f"\u2022 `{task_id}` {short}")
+    if len(tasks) > _SLACK_MAX_SHOWN_TASKS:
+        lines.append(f"+{len(tasks) - _SLACK_MAX_SHOWN_TASKS} more")
+    return _truncate_slack_message("\n".join(lines))
 
 
 def _normalize_task_status(raw: object) -> str:
@@ -1361,8 +1402,48 @@ def _format_task_ids(task_ids: list[str]) -> str:
     return ", ".join(f"`{task_id}`" for task_id in ordered)
 
 
+def _format_task_list_with_descriptions(
+    task_ids: list[str],
+    task_results: dict[str, dict[str, object]],
+    *,
+    max_shown: int = _SLACK_MAX_SHOWN_TASKS,
+) -> str:
+    """Format task IDs with descriptions as bullet points.
+
+    Each line is ``• `{id}` {description}`` with optional cost/duration suffix.
+    Shows up to *max_shown* tasks with ``+N more`` overflow.
+    """
+    ordered = sorted(task_ids, key=_task_sort_key)
+    lines: list[str] = []
+    for task_id in ordered[:max_shown]:
+        info = task_results.get(task_id, {})
+        desc = str(info.get("description", ""))
+        desc = sanitize_for_slack(sanitize_untrusted_content(desc))
+        if len(desc) > _SLACK_TASK_DESC_MAX:
+            desc = desc[:_SLACK_TASK_DESC_MAX - 3] + "..."
+        suffix = ""
+        cost = info.get("cost_usd")
+        dur = info.get("duration_ms")
+        if cost is not None and dur is not None:
+            try:
+                secs = int(dur) // 1000
+                suffix = f" — ${float(cost):.2f}, {secs}s"
+            except (ValueError, TypeError):
+                logger.debug("Skipping malformed cost/duration for task %s: cost=%r, dur=%r", task_id, cost, dur)
+        line = f"• `{task_id}` {desc}{suffix}" if desc else f"• `{task_id}`{suffix}"
+        lines.append(line)
+    if len(ordered) > max_shown:
+        lines.append(f"+{len(ordered) - max_shown} more")
+    return "\n".join(lines)
+
+
 def _format_implement_result_note(result: PhaseResult) -> str:
-    """Summarize completed/failed/blocked task IDs for a finished implement phase."""
+    """Summarize completed/failed/blocked tasks for a finished implement phase.
+
+    When structured ``task_results`` are available, renders a categorized bullet
+    list with descriptions and optional cost/duration per task.  Falls back to
+    plain counts when the artifact is missing or unparseable.
+    """
     task_results = _parse_task_results_artifact(result.artifacts.get("task_results"))
     if task_results:
         completed = [
@@ -1387,15 +1468,18 @@ def _format_implement_result_note(result: PhaseResult) -> str:
         )
 
     parts: list[str] = [
-        f"Task results: {len(completed)} completed, {len(failed)} failed, {len(blocked)} blocked."
+        f"*Task results:* {len(completed)} completed, {len(failed)} failed, {len(blocked)} blocked."
     ]
     if completed:
-        parts.append(f"Completed: {_format_task_ids(completed)}")
+        parts.append(":white_check_mark: *Completed:*")
+        parts.append(_format_task_list_with_descriptions(completed, task_results))
     if failed:
-        parts.append(f"Failed: {_format_task_ids(failed)}")
+        parts.append(":x: *Failed:*")
+        parts.append(_format_task_list_with_descriptions(failed, task_results))
     if blocked:
-        parts.append(f"Blocked: {_format_task_ids(blocked)}")
-    return "\n".join(parts)
+        parts.append(":no_entry_sign: *Blocked:*")
+        parts.append(_format_task_list_with_descriptions(blocked, task_results))
+    return _truncate_slack_message("\n".join(parts))
 
 
 def _invoke_ui_factory(
@@ -1431,15 +1515,97 @@ def _reviewer_reference(index: int, role: str) -> str:
     return f"R{index + 1} {role}"
 
 
+def _extract_review_findings_summary(
+    text: str,
+    max_findings: int = 2,
+    max_chars: int = _SLACK_FINDING_MAX,
+) -> list[str]:
+    """Extract a condensed list of findings from review result text.
+
+    Strategy:
+    1. Look for a ``FINDINGS:`` section and collect ``- `` prefixed lines.
+    2. If no FINDINGS section, try ``SYNTHESIS:`` and use its first sentence.
+    3. Fall back to the first non-empty, non-verdict line of text.
+
+    Each returned string is truncated to *max_chars*.
+    """
+    if not text or not text.strip():
+        return []
+
+    lines = text.splitlines()
+
+    # --- attempt 1: explicit FINDINGS section ---
+    findings_lines: list[str] = []
+    in_findings = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.upper().startswith("FINDINGS:"):
+            in_findings = True
+            continue
+        if in_findings:
+            if stripped.startswith("- "):
+                findings_lines.append(stripped[2:].strip())
+            elif not stripped and len(findings_lines) < max_findings:
+                # Tolerate a single blank line between findings, but only
+                # while we haven't yet collected enough.
+                continue
+            else:
+                # Hit a non-finding line or blank after enough findings — stop
+                break
+    if findings_lines:
+        truncated = []
+        for f in findings_lines[:max_findings]:
+            f = sanitize_for_slack(sanitize_untrusted_content(f))
+            if len(f) > max_chars:
+                truncated.append(f[: max_chars - 3] + "...")
+            else:
+                truncated.append(f)
+        return truncated
+
+    # --- attempt 2: SYNTHESIS section ---
+    in_synthesis = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.upper().startswith("SYNTHESIS:"):
+            in_synthesis = True
+            continue
+        if in_synthesis and stripped:
+            # Take the first sentence / first non-empty line
+            sentence = stripped.split(". ")[0]
+            if not sentence.endswith("."):
+                sentence += "."
+            sentence = sanitize_for_slack(sanitize_untrusted_content(sentence))
+            if len(sentence) > max_chars:
+                sentence = sentence[: max_chars - 3] + "..."
+            return [sentence]
+
+    # --- attempt 3: first non-empty, non-verdict line ---
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.upper().startswith("VERDICT:"):
+            stripped = sanitize_for_slack(sanitize_untrusted_content(stripped))
+            if len(stripped) > max_chars:
+                stripped = stripped[: max_chars - 3] + "..."
+            return [stripped]
+
+    return []
+
+
 def _format_review_round_note(
     results: list[PhaseResult],
     reviewers: list[Persona],
     round_num: int,
     total_rounds: int,
 ) -> str:
-    """Summarize one full review round for Slack and terminal milestone updates."""
+    """Summarize one full review round for Slack and terminal milestone updates.
+
+    Groups reviewers into approved / requested-changes / failed categories
+    with emoji markers for visual hierarchy.  For reviewers who requested
+    changes, includes condensed finding summaries extracted from the review
+    result text via :func:`_extract_review_findings_summary`.
+    """
     approved: list[str] = []
-    requested_changes: list[str] = []
+    requested_changes: list[tuple[str, str]] = []  # (reviewer_ref, result_text)
     failed: list[str] = []
 
     for index, (persona, result) in enumerate(zip(reviewers, results)):
@@ -1447,9 +1613,10 @@ def _format_review_round_note(
         if not result.success:
             failed.append(reviewer_ref)
             continue
-        verdict = extract_review_verdict(result.artifacts.get("result", ""))
+        result_text = result.artifacts.get("result", "")
+        verdict = extract_review_verdict(result_text)
         if verdict == "request-changes":
-            requested_changes.append(reviewer_ref)
+            requested_changes.append((reviewer_ref, result_text))
         else:
             approved.append(reviewer_ref)
 
@@ -1459,13 +1626,29 @@ def _format_review_round_note(
         f"{len(failed)} failed."
     )
     details: list[str] = [summary]
+
+    if approved:
+        details.append("")
+        details.append(":white_check_mark: *Approved:* " + ", ".join(approved))
+
     if requested_changes:
-        details.append("Requested changes: " + ", ".join(requested_changes))
+        details.append("")
+        details.append(":warning: *Requested changes:*")
+        for reviewer_ref, result_text in requested_changes:
+            findings = _extract_review_findings_summary(result_text)
+            if findings:
+                details.append(f"• *{reviewer_ref}:* " + "; ".join(findings))
+            else:
+                details.append(f"• *{reviewer_ref}*")
+
     if failed:
+        details.append("")
         details.append("Failed reviewers: " + ", ".join(failed))
+
     if not requested_changes and not failed:
         details.append("All reviewers approved; moving to the decision gate.")
-    return "\n".join(details)
+
+    return _truncate_slack_message("\n".join(details))
 
 
 def _format_fix_iteration_extra(

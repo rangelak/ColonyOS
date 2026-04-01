@@ -48,7 +48,7 @@ _REDACTED = "[REDACTED]"
 # Regex to strip Slack link markup: ``<URL|display_text>`` → ``display_text``
 # and bare ``<URL>`` → ``URL`` (without angle brackets).
 _SLACK_LINK_RE = re.compile(r"<([^|>]+)\|([^>]+)>")
-_SLACK_BARE_LINK_RE = re.compile(r"<(https?://[^>]+)>")
+_SLACK_BARE_LINK_RE = re.compile(r"<([a-zA-Z][a-zA-Z0-9+.-]*://[^>]+|mailto:[^>]+)>")
 
 
 def strip_slack_links(text: str) -> str:
@@ -69,6 +69,59 @@ def strip_slack_links(text: str) -> str:
     # Second pass: bare <URL> → URL (angle brackets removed, URL kept)
     text = _SLACK_BARE_LINK_RE.sub(r"\1", text)
     return text
+
+
+# Slack mrkdwn metacharacters that must be escaped in untrusted content to
+# prevent formatting injection.  We escape ``*``, ``_``, ``~``, and `` ` ``
+# which control bold, italic, strikethrough, and inline code respectively.
+# ``>`` at the start of a line creates a blockquote — we prefix it with a
+# zero-width space to neutralize it.
+_SLACK_MRKDWN_CHARS_RE = re.compile(r"([*_~`])")
+
+# Mention patterns that could be used for injection: @here, @channel,
+# @everyone, Slack special-mention syntax <!here>, <!channel>, <!everyone>,
+# and user/group mentions like <@U12345> or <@U12345|display>.
+_SLACK_MENTION_RE = re.compile(
+    r"<!(?:here|channel|everyone)(?:\|[^>]*)?>|<@[UWB]\w+(?:\|[^>]*)?>|@(?:here|channel|everyone)",
+    re.IGNORECASE,
+)
+
+# Slack link markup: <URL|display_text> — used for phishing link injection.
+# Covers http, https, mailto, slack, and other URI schemes.
+_SLACK_LINK_INJECTION_RE = re.compile(r"<([a-zA-Z][a-zA-Z0-9+.-]*://[^|>]+|mailto:[^|>]+)\|([^>]+)>")
+
+
+def sanitize_for_slack(text: str) -> str:
+    """Escape Slack mrkdwn metacharacters and neutralize injection in untrusted content.
+
+    Applies four sanitization passes:
+    1. Neutralize Slack link markup (``<url|text>`` → ``url - text``)
+    2. Escape mrkdwn formatting characters (``*``, ``_``, ``~``, `` ` ``)
+    3. Neutralize mention injection (``@here``, ``@channel``, ``<!everyone>``, etc.)
+    4. Neutralize leading ``>`` (blockquote) with a zero-width space prefix
+
+    This function is intended for untrusted user-derived content (task descriptions,
+    review findings) that will be interpolated into Slack mrkdwn messages.  It does
+    NOT strip XML tags — call ``sanitize_untrusted_content()`` separately for that.
+    """
+    original = text
+    # 1. Neutralize link injection: <url|display> → url - display
+    text = _SLACK_LINK_INJECTION_RE.sub(r"\1 - \2", text)
+    # Also strip bare Slack link markup: <url> → url
+    text = _SLACK_BARE_LINK_RE.sub(r"\1", text)
+    # 2. Escape mrkdwn metacharacters
+    text = _SLACK_MRKDWN_CHARS_RE.sub(r"\\\1", text)
+    # 3. Neutralize mention injection
+    text = _SLACK_MENTION_RE.sub("[mention]", text)
+    # 4. Neutralize leading > (blockquote) on each line
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(">"):
+            lines[i] = "\u200b" + line
+    result = "\n".join(lines)
+    if result != original:
+        logger.debug("sanitize_for_slack neutralized content (len=%d→%d)", len(original), len(result))
+    return result
 
 
 def sanitize_ci_logs(text: str) -> str:
