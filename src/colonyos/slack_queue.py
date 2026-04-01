@@ -31,6 +31,7 @@ from colonyos.slack import (
     format_fix_error,
     format_fix_round_limit,
     format_slack_as_prompt,
+    has_bot_mention,
     increment_hourly_count,
     post_message,
     post_triage_acknowledgment,
@@ -211,10 +212,13 @@ class SlackQueueEngine:
             logger.info("[DRY RUN] Would trigger pipeline for Slack prompt: %s", prompt_text[:120])
             return
 
-        try:
-            react_to_message(client, channel, ts, "eyes")
-        except Exception:
-            logger.debug("Failed to add :eyes: reaction", exc_info=True)
+        is_passive = not has_bot_mention(raw_text, self.bot_user_id)
+
+        if not is_passive:
+            try:
+                react_to_message(client, channel, ts, "eyes")
+            except Exception:
+                logger.debug("Failed to add :eyes: reaction", exc_info=True)
 
         self._ensure_triage_worker()
         try:
@@ -224,6 +228,7 @@ class SlackQueueEngine:
                 "ts": ts,
                 "user": user,
                 "prompt_text": prompt_text,
+                "is_passive": is_passive,
             })
         except queue_module.Full:
             with self.state_lock:
@@ -247,6 +252,7 @@ class SlackQueueEngine:
         ts: str,
         user: str,
         prompt_text: str,
+        is_passive: bool = False,
     ) -> None:
         if self.shutdown_event.is_set():
             return
@@ -333,6 +339,12 @@ class SlackQueueEngine:
                 self.watch_state.mark_processed(channel, ts, "triage-skip")
                 self.persist_watch_state()
             return
+
+        if is_passive:
+            try:
+                react_to_message(client, channel, ts, "eyes")
+            except Exception:
+                logger.debug("Failed to add :eyes: reaction after triage", exc_info=True)
 
         base_branch = triage_result.base_branch or extract_base_branch(prompt_text)
         formatted_prompt = format_slack_as_prompt(prompt_text, channel, user)

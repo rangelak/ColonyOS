@@ -28,10 +28,10 @@
   - [x] 3.1 Write tests: when `trigger_mode` is `"all"`, assert `bolt_app.event("message")` is called in `register()`; when `trigger_mode` is `"mention"`, assert only `app_mention` is bound
   - [x] 3.2 Update `SlackQueueEngine.register()` in `src/colonyos/slack_queue.py` to bind `bolt_app.event("message")(self._handle_event)` when `trigger_mode` is `"all"`
 
-- [ ] 4.0 Conditional 👀 reaction — skip for passive messages, react after triage for "all" mode (depends on 2.0, 3.0)
+- [x] 4.0 Conditional 👀 reaction — skip for passive messages, react after triage for "all" mode (depends on 2.0, 3.0)
   depends_on: [2.0, 3.0]
-  - [ ] 4.1 Write tests: in `trigger_mode: "all"`, a non-mention message does NOT get 👀 reaction in `_handle_event`; a direct @mention still gets 👀; in `trigger_mode: "mention"`, behavior is unchanged
-  - [ ] 4.2 Update `_handle_event()` in `src/colonyos/slack_queue.py` (line 211-214) to skip 👀 reaction when the message is a passive channel message (no bot mention in text). Pass a flag through the triage queue so `_triage_and_enqueue` can add 👀 after confirming actionable.
+  - [x] 4.1 Write tests: in `trigger_mode: "all"`, a non-mention message does NOT get 👀 reaction in `_handle_event`; a direct @mention still gets 👀; in `trigger_mode: "mention"`, behavior is unchanged
+  - [x] 4.2 Update `_handle_event()` in `src/colonyos/slack_queue.py` (line 211-214) to skip 👀 reaction when the message is a passive channel message (no bot mention in text). Pass a flag through the triage queue so `_triage_and_enqueue` can add 👀 after confirming actionable.
 
 - [ ] 5.0 Dedup verification for dual-event delivery (no dependencies — test-only task)
   depends_on: []

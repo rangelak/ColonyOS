@@ -845,3 +845,188 @@ def test_register_message_handler_is_handle_event(tmp_path: Path) -> None:
     message_handlers = [h for et, h in registrations if et == "message"]
     assert len(message_handlers) == 1, f"Expected 1 message handler, got {len(message_handlers)}"
     assert message_handlers[0] == engine._handle_event
+
+
+# ---------------------------------------------------------------------------
+# Task 4.0: Conditional 👀 reaction — skip for passive messages
+# ---------------------------------------------------------------------------
+
+
+def test_passive_message_does_not_get_eyes_reaction(tmp_path: Path) -> None:
+    """In trigger_mode 'all', a non-mention message does NOT get 👀 in _handle_event."""
+    engine = _make_engine_with_trigger_mode(tmp_path, "all")
+    client = MagicMock()
+    event = {
+        "channel": "C1",
+        "ts": "200.0",
+        "user": "U1",
+        "text": "fix the flaky login test",  # no bot mention
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message") as mock_react:
+        engine._handle_event(event, client)
+
+    mock_react.assert_not_called()
+
+
+def test_mention_message_gets_eyes_reaction(tmp_path: Path) -> None:
+    """In trigger_mode 'all', a direct @mention still gets 👀 immediately."""
+    engine = _make_engine_with_trigger_mode(tmp_path, "all")
+    client = MagicMock()
+    event = {
+        "channel": "C1",
+        "ts": "201.0",
+        "user": "U1",
+        "text": "<@UBOT> fix the flaky login test",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message") as mock_react:
+        engine._handle_event(event, client)
+
+    mock_react.assert_called_once_with(client, "C1", "201.0", "eyes")
+
+
+def test_mention_mode_always_gets_eyes_reaction(tmp_path: Path) -> None:
+    """In trigger_mode 'mention', behavior is unchanged — 👀 fires immediately."""
+    engine = _make_engine_with_trigger_mode(tmp_path, "mention")
+    client = MagicMock()
+    event = {
+        "channel": "C1",
+        "ts": "202.0",
+        "user": "U1",
+        "text": "<@UBOT> fix the flaky login test",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message") as mock_react:
+        engine._handle_event(event, client)
+
+    mock_react.assert_called_once_with(client, "C1", "202.0", "eyes")
+
+
+def test_passive_message_gets_eyes_after_triage_confirms_actionable(tmp_path: Path) -> None:
+    """In trigger_mode 'all', a passive message gets 👀 only after triage says actionable."""
+    engine = _make_engine_with_trigger_mode(tmp_path, "all")
+    client = MagicMock()
+    triage_completed = threading.Event()
+
+    def _mock_triage(*args, **kwargs):
+        triage_completed.set()
+        return TriageResult(
+            actionable=True,
+            confidence=0.95,
+            summary="Fix flaky login test",
+            base_branch=None,
+            reasoning="clear fix request",
+        )
+
+    event = {
+        "channel": "C1",
+        "ts": "203.0",
+        "user": "U1",
+        "text": "fix the flaky login test",  # no mention — passive
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch("colonyos.slack_queue.react_to_message") as mock_react, \
+         patch("colonyos.slack_queue.triage_message", side_effect=_mock_triage), \
+         patch("colonyos.slack_queue.post_triage_acknowledgment"):
+        engine._handle_event(event, client)
+
+        # No 👀 reaction immediately
+        mock_react.assert_not_called()
+
+        # Wait for triage worker to finish
+        assert triage_completed.wait(timeout=3)
+        engine._triage_queue.join()
+
+        # After triage confirms actionable, 👀 should be added
+        mock_react.assert_called_once_with(client, "C1", "203.0", "eyes")
+
+
+def test_passive_message_no_eyes_when_triage_skips(tmp_path: Path) -> None:
+    """In trigger_mode 'all', a passive message that triage skips never gets 👀."""
+    engine = _make_engine_with_trigger_mode(tmp_path, "all")
+    client = MagicMock()
+    triage_completed = threading.Event()
+
+    def _mock_triage(*args, **kwargs):
+        triage_completed.set()
+        return TriageResult(
+            actionable=False,
+            confidence=0.9,
+            summary="",
+            base_branch=None,
+            reasoning="casual chat",
+        )
+
+    event = {
+        "channel": "C1",
+        "ts": "204.0",
+        "user": "U1",
+        "text": "hey how's everyone doing today",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch("colonyos.slack_queue.react_to_message") as mock_react, \
+         patch("colonyos.slack_queue.triage_message", side_effect=_mock_triage), \
+         patch("colonyos.slack_queue.post_triage_skip"):
+        engine._handle_event(event, client)
+
+        assert triage_completed.wait(timeout=3)
+        engine._triage_queue.join()
+
+        # No 👀 at any point — message was not actionable
+        mock_react.assert_not_called()
+
+
+def test_triage_queue_passes_is_passive_flag(tmp_path: Path) -> None:
+    """_handle_event passes is_passive=True for non-mention messages to triage queue."""
+    engine = _make_engine_with_trigger_mode(tmp_path, "all")
+    client = MagicMock()
+    event = {
+        "channel": "C1",
+        "ts": "205.0",
+        "user": "U1",
+        "text": "fix the flaky login test",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message"):
+        engine._handle_event(event, client)
+
+    task_item = engine._triage_queue.get_nowait()
+    assert task_item["is_passive"] is True
+
+
+def test_triage_queue_passes_is_passive_false_for_mention(tmp_path: Path) -> None:
+    """_handle_event passes is_passive=False for @mention messages to triage queue."""
+    engine = _make_engine_with_trigger_mode(tmp_path, "all")
+    client = MagicMock()
+    event = {
+        "channel": "C1",
+        "ts": "206.0",
+        "user": "U1",
+        "text": "<@UBOT> fix the flaky login test",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message"):
+        engine._handle_event(event, client)
+
+    task_item = engine._triage_queue.get_nowait()
+    assert task_item["is_passive"] is False
