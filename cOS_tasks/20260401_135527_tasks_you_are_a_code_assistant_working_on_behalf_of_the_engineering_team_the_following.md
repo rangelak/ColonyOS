@@ -34,29 +34,29 @@
   - [x] 3.3 Set `self._pipeline_started_at = time.monotonic()` at the same point `_pipeline_running = True` is set (daemon.py:709, inside the `with self._lock:` block).
   - [x] 3.4 Reset `self._pipeline_started_at = None` at every point `_pipeline_running = False` is set (daemon.py:735 in success path, daemon.py:756+ in failure/exception paths). Audit all code paths that set `_pipeline_running = False` to ensure `_pipeline_started_at` is also reset.
 
-- [ ] 4.0 Implement watchdog thread with stall detection and auto-recovery (core feature)
+- [x] 4.0 Implement watchdog thread with stall detection and auto-recovery (core feature)
   depends_on: [2.0, 3.0]
-  - [ ] 4.1 Write tests in `tests/test_daemon.py`:
+  - [x] 4.1 Write tests in `tests/test_daemon.py`:
     - Test that the watchdog thread starts when the daemon starts and stops when the daemon stops.
     - Test stall detection: mock `_pipeline_running = True`, set heartbeat file mtime to >1920s ago, assert watchdog calls `request_active_phase_cancel()`.
     - Test auto-recovery: after stall detection, assert `_pipeline_running` is reset to `False`, current item status is set to FAILED with appropriate error message.
     - Test no false positive: mock `_pipeline_running = True` with fresh heartbeat file mtime, assert watchdog does NOT fire.
     - Test watchdog is inactive when no pipeline is running: mock `_pipeline_running = False`, assert watchdog does not check heartbeat.
     - Test grace period: after initial cancel, if still stuck after 30s, assert `request_cancel()` is called as fallback.
-  - [ ] 4.2 Add `_watchdog_loop()` method to `Daemon`:
+  - [x] 4.2 Add `_watchdog_loop()` method to `Daemon`:
     - Runs in a `while not self._stop_event.is_set()` loop, waking every 30 seconds via `self._stop_event.wait(30)`.
     - If `self._pipeline_running` is False, skip (no-op).
     - If `self._pipeline_running` is True, stat the heartbeat file mtime. Calculate `stall_duration = time.monotonic() - heartbeat_mtime_monotonic`. If `stall_duration > watchdog_stall_seconds`, trigger recovery.
     - Note: heartbeat file mtime is wall-clock (`os.path.getmtime`) but we need to compare against pipeline start. Use `_pipeline_started_at` as the reference: compute `time_since_last_heartbeat = time.time() - os.path.getmtime(heartbeat_path)`. If this exceeds `watchdog_stall_seconds` AND `time.monotonic() - _pipeline_started_at > watchdog_stall_seconds`, declare stall.
-  - [ ] 4.3 Add `_watchdog_recover()` method:
+  - [x] 4.3 Add `_watchdog_recover()` method:
     - Call `request_active_phase_cancel("watchdog: no progress for N seconds")`.
     - Wait 30 seconds (via `self._stop_event.wait(30)`).
     - If `_pipeline_running` is still True, call `request_cancel("watchdog: forced cancellation after grace period")`.
     - Set `_pipeline_running = False` and `_pipeline_started_at = None` under `self._lock`.
     - Mark the current running item as FAILED with error `"watchdog: no progress for {stall_duration}s"`.
     - Persist queue state.
-  - [ ] 4.4 Start the watchdog thread in `Daemon.start()` (after existing thread starts, around line ~400). Store as `self._watchdog_thread`. Set `daemon=True`.
-  - [ ] 4.5 Track `self._current_running_item: QueueItem | None = None` in `Daemon.__init__()`. Set it when transitioning to RUNNING, clear it when pipeline completes/fails. The watchdog needs this to mark the correct item as FAILED.
+  - [x] 4.4 Start the watchdog thread in `Daemon.start()` (after existing thread starts, around line ~400). Store as `self._watchdog_thread`. Set `daemon=True`.
+  - [x] 4.5 Track `self._current_running_item: QueueItem | None = None` in `Daemon.__init__()`. Set it when transitioning to RUNNING, clear it when pipeline completes/fails. The watchdog needs this to mark the correct item as FAILED.
 
 - [ ] 5.0 Add Slack alert and monitor event on stall detection (depends on watchdog)
   depends_on: [4.0]
