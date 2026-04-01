@@ -2205,3 +2205,190 @@ class TestCreateDailySummary:
         assert call_kwargs["text"] == "MOCK SUMMARY"
         assert result is not None
         assert result[2] == "new.thread.ts"
+
+
+class TestDailyThreadIntegration:
+    """End-to-end integration tests for daily thread consolidation (task 7.0)."""
+
+    def test_daily_mode_processes_items_single_top_level_thread(
+        self, daemon_instance: Daemon
+    ):
+        """In daily mode, processing 3 items creates 1 top-level message (the daily thread).
+
+        All item intros are replies to the daily thread, and phase updates nest
+        under the item reply (task 7.1).
+        """
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_ts = None
+        daemon_instance._state.daily_thread_date = None
+        daemon_instance._queue_state = QueueState(queue_id="q", items=[])
+
+        mock_client = MagicMock()
+
+        # Track all chat_postMessage calls to verify threading structure
+        call_log: list[dict] = []
+        call_counter = {"n": 0}
+
+        def _fake_post(**kwargs: Any) -> dict:
+            call_counter["n"] += 1
+            ts = f"ts.{call_counter['n']}"
+            call_log.append({**kwargs, "_ts": ts})
+            return {"ok": True, "ts": ts}
+
+        mock_client.chat_postMessage.side_effect = _fake_post
+
+        items = [
+            QueueItem(id=f"item-{i}", source_type="issue", source_value=f"work-{i}",
+                      status=QueueItemStatus.PENDING)
+            for i in range(3)
+        ]
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            # First call creates the daily thread (top-level message)
+            daily = daemon_instance._ensure_daily_thread()
+            assert daily is not None
+            _, _, daily_ts = daily
+
+            # Each item creates a notification thread as a reply to the daily thread
+            for item in items:
+                result = daemon_instance._ensure_notification_thread(item, f"Starting {item.id}")
+                assert result is not None
+
+        # Verify: exactly 1 top-level message (the daily thread opener)
+        top_level_calls = [c for c in call_log if "thread_ts" not in c]
+        assert len(top_level_calls) == 1, (
+            f"Expected 1 top-level message, got {len(top_level_calls)}"
+        )
+
+        # Verify: 3 replies to the daily thread (the item intros)
+        reply_calls = [c for c in call_log if c.get("thread_ts") == daily_ts]
+        assert len(reply_calls) == 3
+
+        # Verify each item got its own notification_thread_ts for sub-threading
+        item_thread_tss = {item.notification_thread_ts for item in items}
+        assert len(item_thread_tss) == 3
+        assert None not in item_thread_tss
+
+    def test_per_item_mode_creates_separate_top_level_threads(
+        self, daemon_instance: Daemon
+    ):
+        """In per_item mode, processing 3 items creates 3 top-level messages (task 7.2)."""
+        daemon_instance.config.slack.notification_mode = "per_item"
+        daemon_instance.config.slack.channels = ["C123"]
+
+        mock_client = MagicMock()
+
+        call_counter = {"n": 0}
+
+        def _fake_post(**kwargs: Any) -> dict:
+            call_counter["n"] += 1
+            return {"ok": True, "ts": f"top.{call_counter['n']}"}
+
+        mock_client.chat_postMessage.side_effect = _fake_post
+
+        items = [
+            QueueItem(id=f"item-{i}", source_type="issue", source_value=f"work-{i}",
+                      status=QueueItemStatus.PENDING)
+            for i in range(3)
+        ]
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client), \
+             patch("colonyos.slack.post_message", side_effect=[
+                 {"ts": "top.1"}, {"ts": "top.2"}, {"ts": "top.3"}
+             ]) as mock_post:
+            for item in items:
+                result = daemon_instance._ensure_notification_thread(item, f"Starting {item.id}")
+                assert result is not None
+
+        # All 3 calls should be top-level (no thread_ts)
+        assert mock_post.call_count == 3
+        for call in mock_post.call_args_list:
+            args, kwargs = call
+            assert "thread_ts" not in kwargs
+
+    def test_daemon_restart_resumes_daily_thread(
+        self, tmp_repo: Path, config: ColonyConfig
+    ):
+        """After a restart, the daemon loads persisted daily_thread_ts and continues
+        posting to the same thread (task 7.3).
+        """
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("UTC")
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+
+        # Simulate previous daemon run that created a daily thread
+        state = DaemonState(
+            daily_thread_ts="original.daily.ts",
+            daily_thread_date=today_str,
+            daily_thread_channel="C123",
+        )
+        save_daemon_state(tmp_repo, state)
+
+        # Create a fresh daemon (simulates restart)
+        d = Daemon(tmp_repo, config, dry_run=True)
+        d.config.slack.notification_mode = "daily"
+        d.config.slack.channels = ["C123"]
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True, "ts": "reply.ts"}
+
+        item = QueueItem(id="post-restart-item", source_type="issue",
+                         source_value="work", status=QueueItemStatus.PENDING)
+
+        with patch.object(d, "_get_notification_client", return_value=mock_client), \
+             patch("colonyos.slack.post_message", return_value={"ts": "reply.ts"}) as mock_post:
+            # Ensure daily thread reuses persisted ts
+            daily = d._ensure_daily_thread()
+            assert daily is not None
+            _, _, daily_ts = daily
+            assert daily_ts == "original.daily.ts"
+
+            # Notification thread should post as reply to the persisted daily thread
+            result = d._ensure_notification_thread(item, "Starting post-restart-item")
+            assert result is not None
+
+        mock_post.assert_called_once_with(
+            mock_client, "C123", "Starting post-restart-item",
+            thread_ts="original.daily.ts",
+        )
+        # No new top-level message should have been created
+        mock_client.chat_postMessage.assert_not_called()
+
+    def test_critical_alert_posts_top_level_in_daily_mode(
+        self, daemon_instance: Daemon
+    ):
+        """Critical alerts (auto-pause) post to the main channel even in daily mode (task 7.4)."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+
+        # Set up an active daily thread
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("UTC")
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+        daemon_instance._state.daily_thread_ts = "daily.thread.ts"
+        daemon_instance._state.daily_thread_date = today_str
+        daemon_instance._state.daily_thread_channel = "C123"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            # Non-critical goes to daily thread
+            daemon_instance._post_slack_message("routine update")
+            # Critical goes top-level
+            daemon_instance._post_slack_message("CRITICAL: auto-paused!", critical=True)
+
+        assert mock_client.chat_postMessage.call_count == 2
+        calls = mock_client.chat_postMessage.call_args_list
+
+        # First call (routine) should be threaded
+        routine_kwargs = calls[0][1]
+        assert routine_kwargs.get("thread_ts") == "daily.thread.ts"
+
+        # Second call (critical) should be top-level
+        critical_kwargs = calls[1][1]
+        assert "thread_ts" not in critical_kwargs

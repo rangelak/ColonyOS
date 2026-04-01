@@ -52,10 +52,10 @@
   - [x] 6.2 Implement `_create_daily_summary() -> str` in daemon.py: filter `self._queue_state.items` for items completed/failed since the last daily thread date, categorize by status, compute aggregate cost for the period, count pending items, call `format_daily_summary()` to produce the formatted message
   - [x] 6.3 Wire `_create_daily_summary()` into `_ensure_daily_thread()` as the opening message text for new daily threads
 
-- [ ] 7.0 End-to-end integration and backward compatibility verification
+- [x] 7.0 End-to-end integration and backward compatibility verification
   depends_on: [5.0, 6.0]
-  - [ ] 7.1 Write integration test: daemon in `notification_mode: "daily"` processes 3 queue items, verify only 1 top-level message created (the daily thread), all item intros are replies to it, phase updates nest under item replies
-  - [ ] 7.2 Write integration test: daemon in `notification_mode: "per_item"` processes 3 queue items, verify 3 top-level messages created (existing behavior preserved)
-  - [ ] 7.3 Write integration test: daemon restarts mid-day, loads persisted `daily_thread_ts`, continues posting to same thread
-  - [ ] 7.4 Write integration test: critical alert (auto-pause) posts to main channel even in daily mode
-  - [ ] 7.5 Run full test suite (`pytest tests/ -x`) to verify no regressions
+  - [x] 7.1 Write integration test: daemon in `notification_mode: "daily"` processes 3 queue items, verify only 1 top-level message created (the daily thread), all item intros are replies to it, phase updates nest under item replies
+  - [x] 7.2 Write integration test: daemon in `notification_mode: "per_item"` processes 3 queue items, verify 3 top-level messages created (existing behavior preserved)
+  - [x] 7.3 Write integration test: daemon restarts mid-day, loads persisted `daily_thread_ts`, continues posting to same thread
+  - [x] 7.4 Write integration test: critical alert (auto-pause) posts to main channel even in daily mode
+  - [x] 7.5 Run full test suite (`pytest tests/ -x`) to verify no regressions
