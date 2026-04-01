@@ -131,3 +131,11 @@ _Date: 2026-03-31 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[security]** Fix-loop re-invocations of review agents must carry the same `allowed_tools` restrictions as the initial review call.
 - **[code-quality]** Falsy-zero bugs (`max_budget or default`) silently discard explicit zero values; use `is None` checks for optional numerics.
 - **[architecture]** Extract repeated fix-loop and cost-computation logic into dedicated helpers; inline duplication causes silent divergence.
+
+## Run: run-20260401_130207-e353c24c35
+_Date: 2026-04-01 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
+
+- **[architecture]** Retry loops polling external systems must confirm state refresh between iterations; re-fetching before propagation wastes cycles.
+- **[code-quality]** Private aliases (`_fn = fn`) for brand-new functions under backward-compat claims add noise; pick one canonical name.
+- **[code-quality]** LLM agent instruction templates should prohibit suppression annotations (`# type: ignore`, `# noqa`) as valid fixes.
+- **[architecture]** Aggregation modules that dynamically enumerate categories from data avoid code changes when new variants are added.

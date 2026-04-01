@@ -1743,6 +1743,31 @@ class TestBuildLearnPrompt:
         assert "review artifacts" in system.lower() or "review" in system.lower()
         assert config.reviews_dir in user
 
+    def test_learn_prompt_contains_tool_constraint_language(self, tmp_repo: Path, config: ColonyConfig):
+        """Regression: learn.md must explicitly state available tools so the agent
+        does not reach for disallowed tools (Bash, Agent) and crash."""
+        system, _user = _build_learn_prompt(config, tmp_repo)
+        system_lower = system.lower()
+        # Must mention the three allowed tools
+        assert "read" in system_lower, "learn prompt must mention Read tool"
+        assert "glob" in system_lower, "learn prompt must mention Glob tool"
+        assert "grep" in system_lower, "learn prompt must mention Grep tool"
+        # Must contain a negative constraint about disallowed tools
+        assert "do not" in system_lower or "must not" in system_lower or "never" in system_lower, (
+            "learn prompt must contain a negative constraint about disallowed tools"
+        )
+        assert "bash" in system_lower, (
+            "learn prompt must explicitly warn against using Bash"
+        )
+
+    def test_learn_prompt_contains_glob_pattern_for_reviews(self, tmp_repo: Path, config: ColonyConfig):
+        """Regression: learn.md must provide concrete Glob patterns instead of
+        vague 'read all recursively' instructions that lead the agent to use Bash find."""
+        system, _user = _build_learn_prompt(config, tmp_repo)
+        assert "**/*.md" in system, (
+            "learn prompt must include a concrete Glob pattern like **/*.md for file discovery"
+        )
+
 
 @patch("colonyos.orchestrator.run_phases_parallel_sync")
 @patch("colonyos.orchestrator.run_phase_sync")

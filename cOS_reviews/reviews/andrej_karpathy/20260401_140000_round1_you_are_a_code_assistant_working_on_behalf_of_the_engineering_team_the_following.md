@@ -1,44 +1,61 @@
-# Review: Andrej Karpathy — Round 1
-**Branch:** `colonyos/add_detection_when_the_daemon_is_stuck_a1a5e19963`
-**PRD:** `cOS_prds/20260401_135527_prd_...`
-**Tests:** 377 passed, 0 failed
+# Andrej Karpathy — Review Round 1
+
+**Branch:** `colonyos/add_the_option_to_listen_to_every_message_in_a_c_305511536b`
+**PRD:** `cOS_prds/20260401_131917_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
 
 ## Checklist
 
 ### Completeness
-- [x] FR-1: Watchdog Thread — daemon thread, 30s wake interval, reads only GIL-safe primitives + filesystem stat, fully independent of `_agent_lock`
-- [x] FR-2: Auto-Recovery — graceful cancel → 30s grace → force cancel → state reset → mark FAILED
-- [x] FR-3: Slack Alert — posts via `_post_slack_message()`, wrapped in try/except so Slack failure cannot break recovery
-- [x] FR-4: `started_at` on QueueItem — field added, schema v4→v5, set atomically under `_lock` with RUNNING transition
-- [x] FR-5: Enhanced `/healthz` — `pipeline_started_at`, `pipeline_duration_seconds`, `pipeline_stalled` all present
-- [x] FR-6: Monitor Event — `watchdog_stall_detected` with correct fields (`item_id`, `stall_duration_seconds`, `action_taken`)
-- [x] FR-7: Configurable Threshold — `watchdog_stall_seconds` with 120s floor, clamping with warning, logged at startup
-- [x] All tasks complete, no TODO/placeholder code
+- [x] FR-1: `"all"` added to `_VALID_TRIGGER_MODES` — single-line change in `config.py`
+- [x] FR-2: `bolt_app.event("message")` bound when `trigger_mode == "all"` in `register()`
+- [x] FR-3: `extract_prompt_text()` + `has_bot_mention()` correctly dispatch between mention-stripping and raw-text paths
+- [x] FR-4: `is_passive` flag gates 👀 — immediate for mentions, deferred-to-post-triage for passive messages
+- [x] FR-5: Dedup verified with 3 dedicated tests covering pending-set, processed-set, and end-to-end dual-event delivery
+- [x] FR-6: `_warn_all_mode_safety` logs warning when `allowed_user_ids` empty
+- [x] FR-7: `_warn_all_mode_safety` logs warning when `triage_scope` empty
+- [x] FR-8: `should_process_message()` unchanged — all existing filters still apply
+- [x] No placeholder or TODO code remains
 
 ### Quality
-- [x] 377 tests pass, 0 failures
-- [x] Code follows existing project conventions (threading patterns, lock discipline, config parsing)
-- [x] No unnecessary dependencies — only adds `request_active_phase_cancel` import from existing `colonyos.agent`
-- [x] No unrelated changes
-- [x] ~4:1 test-to-production ratio (664 test lines vs 162 production lines)
+- [x] All 316 tests pass (test_slack.py, test_slack_queue.py, test_daemon.py)
+- [x] Code follows existing project conventions (pytest fixtures, patch patterns, threading.Event for async coordination)
+- [x] No unnecessary dependencies added
+- [x] No unrelated changes included — diff is tightly scoped to 5 source files + 3 test files + 2 artifact files
 
 ### Safety
 - [x] No secrets or credentials in committed code
-- [x] Error handling present for all failure cases in watchdog (try/except around Slack, cancel calls, monitor event)
-- [x] Dual-gate stall detection prevents false positives (both elapsed time AND heartbeat staleness must exceed threshold)
+- [x] No destructive database operations
+- [x] Error handling present for reaction failures, queue-full, rate-limit
 
----
+## Findings
+
+### Strengths
+
+1. **Right-sized change**: ~63 lines of production code, ~612 lines of tests. The test-to-code ratio is excellent. This is how you build reliable systems that use LLMs — the stochastic component (triage LLM) is treated as a black box with deterministic integration tests around it.
+
+2. **Prompt extraction design is clean**: `extract_prompt_text()` is a simple dispatcher — mention present? strip it. No mention? pass through. No regex, no heuristics, just a string containment check. This is exactly right. The function is deterministic, testable, and doesn't try to be clever.
+
+3. **The 👀 reaction logic is the right UX decision**: For passive messages, the bot stays invisible until triage confirms the message is actionable. This is critical for trust — users in busy channels would immediately turn off a bot that reacts to every message with 👀. The deferred reaction (post-triage) gives the user a clear signal: "I saw this AND I'm going to act on it."
+
+4. **Dedup is verified, not re-implemented**: The PRD correctly identified that dedup already works via `channel:ts` keying. The implementation adds verification tests (task 5.0) without touching the dedup code. This is the right call — the existing infrastructure was already correct.
+
+5. **Startup warnings are operator-friendly**: The warning messages are specific and actionable ("Consider restricting allowed_user_ids"). They don't block startup — this respects the operator's judgment while surfacing risk.
+
+### Minor Observations
+
+1. **`is_passive` could theoretically be wrong in mention mode**: In `trigger_mode: "mention"`, `_handle_event` still computes `is_passive = not has_bot_mention(raw_text, self.bot_user_id)`. If Slack somehow delivers a message event without a mention in mention mode, `is_passive` would be True and skip 👀. This is a non-issue in practice (mention mode only binds `app_mention`, which always contains the mention), but it's worth noting the implicit assumption.
+
+2. **No triage prompt modification for passive messages**: Open Question #1 in the PRD asks whether the triage prompt should note that a message was passively ingested (raising the actionability bar). The implementation doesn't modify the triage prompt. This is fine for v1 — the triage LLM already handles message classification — but if false-positive rates are high in practice, adding a `"This message was NOT directed at you — only act if it's a clear engineering request"` prefix would be a cheap, high-leverage fix.
+
+3. **Queue-full for passive messages posts a visible warning**: When `_triage_queue` is full, the code posts `:warning: Triage backlog is full...` in the channel (line 239-244). For passive messages in a busy channel, this would be a surprising visible response. Consider gating this message behind `is_passive` in a follow-up.
 
 VERDICT: approve
 
 FINDINGS:
-- [src/colonyos/daemon.py]: Dual-condition stall detection (elapsed >= threshold AND heartbeat_age >= threshold) is the correct conservative classifier design — requires consensus from two independent signals before triggering recovery, making false positives essentially impossible
-- [src/colonyos/daemon.py]: Watchdog thread architecture is correct — reads only `_pipeline_running` (bool, GIL-safe), `_pipeline_started_at` (float, GIL-safe), and heartbeat file mtime (filesystem stat, no lock) — cannot deadlock with the stuck pipeline holding `_agent_lock`
-- [src/colonyos/daemon.py]: The `_post_slack_message()` call in `_watchdog_recover` lacks an explicit socket timeout; if the Slack API itself hangs, the watchdog thread blocks until the SDK's internal timeout fires. Non-blocking for v1 since recovery proceeds regardless of Slack failure via try/except, but worth adding an explicit timeout in v2.
-- [src/colonyos/daemon.py]: The `if stall_seconds is None: return` guard in `_watchdog_check` is unreachable code — `watchdog_stall_seconds` is always an int with default 1920 and minimum 120. Harmless but could be removed for clarity.
-- [src/colonyos/daemon.py]: Three pipeline exit paths (success/exception/KeyboardInterrupt) all correctly reset `_pipeline_started_at = None` and `_current_running_item = None` — verified by tests
-- [src/colonyos/models.py]: Schema v4→v5 migration is backward-compatible via `data.get("started_at")` returning None for old items — correct
-- [tests/test_daemon.py]: Test suite is thorough: covers stall detection, false-positive prevention, Slack failure isolation, monitor event emission, grace period fallback, end-to-end integration, and startup logging
+- [src/colonyos/slack_queue.py]: Queue-full warning message (line 239) is posted even for passive messages — could surprise users in busy channels. Low severity, v2 fix.
+- [src/colonyos/slack_queue.py]: `is_passive` computed after dedup/rate-limit checks, which is correct — but note that in `trigger_mode: "mention"`, `is_passive` is always False by construction (only `app_mention` events bound). The code handles this correctly but the invariant is implicit.
+- [src/colonyos/slack.py]: `extract_prompt_text` is clean and deterministic. No issues.
+- [src/colonyos/daemon.py]: `_warn_all_mode_safety` is well-placed (after engine creation, before registration) and covers both safety configs.
 
 SYNTHESIS:
-From an AI engineering perspective, this is a clean, well-designed implementation. The core architectural insight — a watchdog thread that's fully decoupled from the lock held by the stuck pipeline — is the only correct approach. The dual-gate detection (both wall-clock elapsed AND heartbeat staleness must exceed the threshold) is exactly the kind of conservative classifier you want when false positives mean killing healthy work. The two-phase escalation ladder (graceful phase cancel → grace period → force cancel → state reset) mirrors standard process supervision patterns. At 162 lines of production code across 4 files with 664 lines of tests, the implementation is appropriately minimal — no over-engineering, no unnecessary abstractions. The one legitimate gap is the lack of an explicit timeout on the Slack alert call within the watchdog, but since recovery proceeds regardless of Slack failure (try/except), this is a v2 concern. Ship it.
+This is a textbook example of activating a latent capability with minimal new code. The implementation correctly identifies that 90% of the infrastructure already exists (event subscriptions, dedup, triage, filters) and adds only the thin binding layer needed to wire `trigger_mode: "all"` into the event loop. The prompt extraction is simple and deterministic — no fancy NLP, just a string containment check, which is exactly what you want when the real intelligence lives in the triage LLM downstream. The 👀 reaction UX is the single most important detail in the whole feature (silent until actionable), and it's implemented correctly with the deferred-reaction pattern. Test coverage is thorough — 612 lines covering dedup races, dual-event delivery, and end-to-end flows. The only nit worth tracking for v2 is the queue-full message leaking to passive messages. Ship it.
