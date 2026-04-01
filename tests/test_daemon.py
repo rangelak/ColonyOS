@@ -625,6 +625,8 @@ class TestBudgetAlerts:
             assert mock_slack.called
             args = mock_slack.call_args_list[0][0][0]
             assert "100%" in args or "exhausted" in args.lower()
+            # Budget exhaustion is critical — must not be buried in daily thread
+            assert mock_slack.call_args_list[0][1].get("critical") is True
 
         assert daemon_instance._budget_100_alerted is True
 
@@ -1772,6 +1774,29 @@ class TestDailyThreadLifecycle:
         _, _, thread_ts = result
         assert thread_ts == "new.thread"
         assert daemon_instance._state.daily_thread_ts == "new.thread"
+
+    def test_rotation_logs_previous_thread_ts(self, daemon_instance: Daemon, caplog):
+        """_ensure_daily_thread logs previous thread_ts when rotating for audit trail."""
+        import logging
+
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+
+        daemon_instance._state.daily_thread_ts = "old.thread.ts"
+        daemon_instance._state.daily_thread_date = "2020-01-01"
+        daemon_instance._state.daily_thread_channel = "C123"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True, "ts": "new.thread.ts"}
+
+        with caplog.at_level(logging.DEBUG, logger="colonyos.daemon"):
+            with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+                daemon_instance._ensure_daily_thread()
+
+        assert any("old.thread.ts" in record.message for record in caplog.records), (
+            "Expected log message with previous thread_ts for audit trail"
+        )
 
     def test_recovers_from_persisted_state_on_restart(self, tmp_repo: Path, config: ColonyConfig):
         """On restart, daemon picks up daily_thread_ts from persisted state."""

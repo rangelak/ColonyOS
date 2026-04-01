@@ -629,7 +629,8 @@ class Daemon:
                     self._budget_100_alerted = True
                     self._post_slack_message(
                         f":red_circle: Budget exhausted — ${spend:.2f}/${self.daily_budget:.2f} "
-                        f"(100%). Daemon will not execute further items today."
+                        f"(100%). Daemon will not execute further items today.",
+                        critical=True,
                     )
                 elif pct >= 0.8 and not self._budget_80_alerted:
                     self._budget_80_alerted = True
@@ -1994,6 +1995,13 @@ class Daemon:
         tz = ZoneInfo(self.config.slack.daily_thread_timezone)
         today_str = datetime.now(tz).strftime("%Y-%m-%d")
         with self._lock:
+            prev_ts = self._state.daily_thread_ts
+            if prev_ts:
+                logger.debug(
+                    "Rotating daily thread: previous ts=%s date=%s",
+                    prev_ts,
+                    self._state.daily_thread_date,
+                )
             self._state.daily_thread_ts = thread_ts
             self._state.daily_thread_date = today_str
             self._state.daily_thread_channel = channel
