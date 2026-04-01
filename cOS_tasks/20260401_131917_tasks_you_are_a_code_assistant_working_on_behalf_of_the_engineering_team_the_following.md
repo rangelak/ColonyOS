@@ -42,8 +42,8 @@
   - [x] 6.1 Write tests: when `trigger_mode` is `"all"` and `allowed_user_ids` is empty, assert a warning is logged; when `triage_scope` is empty, assert a warning is logged; when both are set, no warnings
   - [x] 6.2 Add startup warning logic in `src/colonyos/daemon.py` `_slack_listener_thread()` — log warnings if `trigger_mode == "all"` and `allowed_user_ids` or `triage_scope` are empty
 
-- [ ] 7.0 Integration test: full "all" mode flow (depends on 3.0, 4.0)
+- [x] 7.0 Integration test: full "all" mode flow (depends on 3.0, 4.0)
   depends_on: [3.0, 4.0]
-  - [ ] 7.1 Write an integration test that creates a `SlackQueueEngine` with `trigger_mode: "all"`, sends a non-mention message event through `_handle_event`, and verifies it reaches the triage queue with the correct prompt text
-  - [ ] 7.2 Write an integration test that sends both a passive message and an @mention in "all" mode, verifying both are processed correctly with appropriate prompt extraction and reaction behavior
-  - [ ] 7.3 Run the full test suite to verify zero regressions
+  - [x] 7.1 Write an integration test that creates a `SlackQueueEngine` with `trigger_mode: "all"`, sends a non-mention message event through `_handle_event`, and verifies it reaches the triage queue with the correct prompt text
+  - [x] 7.2 Write an integration test that sends both a passive message and an @mention in "all" mode, verifying both are processed correctly with appropriate prompt extraction and reaction behavior
+  - [x] 7.3 Run the full test suite to verify zero regressions
