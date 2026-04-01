@@ -26,15 +26,15 @@
     - Return `(True, None)` on success, `(False, error_message)` on failure
     - Log success/failure with branch name via `_LOGGER`
 
-- [ ] 2.0 Add pull to `restore_to_branch()` in `recovery.py` (daemon entry point)
+- [x] 2.0 Add pull to `restore_to_branch()` in `recovery.py` (daemon entry point)
   depends_on: [1.0]
-  - [ ] 2.1 Write tests for `restore_to_branch()` pull behavior in `tests/test_recovery.py`:
+  - [x] 2.1 Write tests for `restore_to_branch()` pull behavior in `tests/test_recovery.py`:
     - After checkout, pull is attempted when `pull=True` (default)
     - Pull failure is logged as warning, does not raise, function still returns success description
     - Pull is skipped when `pull=False`
     - Pull is skipped when already on target branch (no checkout needed)
     - Never-raises contract is preserved even if pull throws unexpected exception
-  - [ ] 2.2 Modify `restore_to_branch()` to accept optional `pull: bool = True` parameter:
+  - [x] 2.2 Modify `restore_to_branch()` to accept optional `pull: bool = True` parameter:
     - After successful checkout (line 325), call `pull_branch()` if `pull=True`
     - On pull failure, log warning via `_LOGGER.warning()`
     - Include pull status in return description (e.g., "Restored to main (was on feature-x), pulled latest" or "Restored to main (was on feature-x), pull failed: ...")

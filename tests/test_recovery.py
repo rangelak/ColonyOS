@@ -8,6 +8,7 @@ from colonyos.recovery import (
     dirty_paths_from_status,
     preserve_and_reset_worktree,
     pull_branch,
+    restore_to_branch,
     snapshot_dirty_state,
 )
 
@@ -166,3 +167,112 @@ def test_pull_branch_custom_timeout(mock_git: object, tmp_path: Path) -> None:
     calls = mock_git.call_args_list  # type: ignore[attr-defined]
     # The pull call (3rd _git call) should have timeout=10
     assert calls[2].kwargs.get("timeout") == 10
+
+
+# ---------------------------------------------------------------------------
+# restore_to_branch() pull behaviour tests
+# ---------------------------------------------------------------------------
+
+
+@patch("colonyos.recovery.pull_branch")
+@patch("colonyos.recovery._git")
+def test_restore_to_branch_pulls_after_checkout(
+    mock_git: object, mock_pull: object, tmp_path: Path,
+) -> None:
+    """After checkout, pull is attempted when pull=True (the default)."""
+    mock_git.side_effect = [  # type: ignore[attr-defined]
+        # rev-parse --abbrev-ref HEAD → current branch
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="feature-x\n", stderr=""),
+        # status --porcelain → clean
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        # checkout target_branch
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        # stash list (from _prune_old_safety_stashes)
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    ]
+    mock_pull.return_value = (True, None)  # type: ignore[attr-defined]
+
+    desc = restore_to_branch(tmp_path, "main")
+
+    mock_pull.assert_called_once_with(tmp_path)  # type: ignore[attr-defined]
+    assert desc is not None
+    assert "pulled latest" in desc
+
+
+@patch("colonyos.recovery.pull_branch")
+@patch("colonyos.recovery._git")
+def test_restore_to_branch_pull_failure_warns_and_succeeds(
+    mock_git: object, mock_pull: object, tmp_path: Path,
+) -> None:
+    """Pull failure is logged as warning; function still returns success description."""
+    mock_git.side_effect = [  # type: ignore[attr-defined]
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="feature-x\n", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    ]
+    mock_pull.return_value = (False, "ff-only failed")  # type: ignore[attr-defined]
+
+    desc = restore_to_branch(tmp_path, "main")
+
+    assert desc is not None
+    assert "pull failed" in desc.lower()
+    assert "ff-only failed" in desc
+
+
+@patch("colonyos.recovery.pull_branch")
+@patch("colonyos.recovery._git")
+def test_restore_to_branch_pull_skipped_when_false(
+    mock_git: object, mock_pull: object, tmp_path: Path,
+) -> None:
+    """Pull is skipped when pull=False."""
+    mock_git.side_effect = [  # type: ignore[attr-defined]
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="feature-x\n", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    ]
+
+    desc = restore_to_branch(tmp_path, "main", pull=False)
+
+    mock_pull.assert_not_called()  # type: ignore[attr-defined]
+    assert desc is not None
+    assert "Restored to main" in desc
+
+
+@patch("colonyos.recovery.pull_branch")
+@patch("colonyos.recovery._git")
+def test_restore_to_branch_pull_skipped_when_already_on_target(
+    mock_git: object, mock_pull: object, tmp_path: Path,
+) -> None:
+    """Pull is skipped when already on target branch (no checkout needed)."""
+    mock_git.side_effect = [  # type: ignore[attr-defined]
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="main\n", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    ]
+
+    desc = restore_to_branch(tmp_path, "main")
+
+    mock_pull.assert_not_called()  # type: ignore[attr-defined]
+    assert desc is None
+
+
+@patch("colonyos.recovery.pull_branch")
+@patch("colonyos.recovery._git")
+def test_restore_to_branch_never_raises_on_pull_exception(
+    mock_git: object, mock_pull: object, tmp_path: Path,
+) -> None:
+    """Never-raises contract is preserved even if pull throws unexpected exception."""
+    mock_git.side_effect = [  # type: ignore[attr-defined]
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="feature-x\n", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    ]
+    mock_pull.side_effect = RuntimeError("unexpected network error")  # type: ignore[attr-defined]
+
+    desc = restore_to_branch(tmp_path, "main")
+
+    # Should not raise, and should still return a description
+    assert desc is not None
+    assert "Restored to main" in desc
