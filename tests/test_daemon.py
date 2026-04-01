@@ -695,6 +695,8 @@ class TestBudgetAlerts:
             assert mock_slack.called
             args = mock_slack.call_args_list[0][0][0]
             assert "100%" in args or "exhausted" in args.lower()
+            # Budget exhaustion is critical — must not be buried in daily thread
+            assert mock_slack.call_args_list[0][1].get("critical") is True
 
         assert daemon_instance._budget_100_alerted is True
 
@@ -1775,6 +1777,755 @@ class TestPRSync:
         assert call_kwargs["write_enabled"] is True
 
 
+class TestDailyThreadLifecycle:
+    """Tests for _ensure_daily_thread(), _should_rotate_daily_thread(), and rotation in _tick."""
+
+    def test_creates_new_thread_when_none_exists(self, daemon_instance: Daemon):
+        """_ensure_daily_thread creates a new daily thread when state has no thread_ts."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True, "ts": "1111.2222"}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            result = daemon_instance._ensure_daily_thread()
+
+        assert result is not None
+        client, channel, thread_ts = result
+        assert thread_ts == "1111.2222"
+        assert channel == "C123"
+        # State should be persisted
+        assert daemon_instance._state.daily_thread_ts == "1111.2222"
+        assert daemon_instance._state.daily_thread_date is not None
+        assert daemon_instance._state.daily_thread_channel == "C123"
+
+    def test_reuses_existing_thread_when_date_matches(self, daemon_instance: Daemon):
+        """_ensure_daily_thread returns cached thread when date matches today."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("UTC")
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+        daemon_instance._state.daily_thread_ts = "9999.0000"
+        daemon_instance._state.daily_thread_date = today_str
+        daemon_instance._state.daily_thread_channel = "C123"
+
+        mock_client = MagicMock()
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            result = daemon_instance._ensure_daily_thread()
+
+        assert result is not None
+        _, _, thread_ts = result
+        assert thread_ts == "9999.0000"
+        # Should NOT have posted a new message
+        mock_client.chat_postMessage.assert_not_called()
+
+    def test_rotates_thread_when_date_is_stale(self, daemon_instance: Daemon):
+        """_ensure_daily_thread creates new thread if persisted date is yesterday."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+
+        daemon_instance._state.daily_thread_ts = "old.thread"
+        daemon_instance._state.daily_thread_date = "2020-01-01"
+        daemon_instance._state.daily_thread_channel = "C123"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True, "ts": "new.thread"}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            result = daemon_instance._ensure_daily_thread()
+
+        assert result is not None
+        _, _, thread_ts = result
+        assert thread_ts == "new.thread"
+        assert daemon_instance._state.daily_thread_ts == "new.thread"
+
+    def test_rotation_logs_previous_thread_ts(self, daemon_instance: Daemon, caplog):
+        """_ensure_daily_thread logs previous thread_ts when rotating for audit trail."""
+        import logging
+
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+
+        daemon_instance._state.daily_thread_ts = "old.thread.ts"
+        daemon_instance._state.daily_thread_date = "2020-01-01"
+        daemon_instance._state.daily_thread_channel = "C123"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True, "ts": "new.thread.ts"}
+
+        with caplog.at_level(logging.DEBUG, logger="colonyos.daemon"):
+            with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+                daemon_instance._ensure_daily_thread()
+
+        assert any("old.thread.ts" in record.message for record in caplog.records), (
+            "Expected log message with previous thread_ts for audit trail"
+        )
+
+    def test_recovers_from_persisted_state_on_restart(self, tmp_repo: Path, config: ColonyConfig):
+        """On restart, daemon picks up daily_thread_ts from persisted state."""
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("UTC")
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+
+        state = DaemonState(
+            daily_thread_ts="persisted.ts",
+            daily_thread_date=today_str,
+            daily_thread_channel="C123",
+        )
+        save_daemon_state(tmp_repo, state)
+
+        d = Daemon(tmp_repo, config, dry_run=True)
+        d.config.slack.notification_mode = "daily"
+        d.config.slack.channels = ["C123"]
+
+        mock_client = MagicMock()
+        with patch.object(d, "_get_notification_client", return_value=mock_client):
+            result = d._ensure_daily_thread()
+
+        assert result is not None
+        _, _, thread_ts = result
+        assert thread_ts == "persisted.ts"
+        mock_client.chat_postMessage.assert_not_called()
+
+    def test_returns_none_in_per_item_mode(self, daemon_instance: Daemon):
+        """_ensure_daily_thread returns None when notification_mode is per_item."""
+        daemon_instance.config.slack.notification_mode = "per_item"
+        result = daemon_instance._ensure_daily_thread()
+        assert result is None
+
+    def test_returns_none_when_no_client(self, daemon_instance: Daemon):
+        """_ensure_daily_thread returns None when no Slack client available."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=None):
+            result = daemon_instance._ensure_daily_thread()
+        assert result is None
+
+    def test_returns_none_when_no_channels(self, daemon_instance: Daemon):
+        """_ensure_daily_thread returns None when no channels configured."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = []
+
+        result = daemon_instance._ensure_daily_thread()
+        assert result is None
+
+    def test_should_rotate_false_same_day(self, daemon_instance: Daemon):
+        """_should_rotate_daily_thread returns False when date matches."""
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("UTC")
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+        daemon_instance._state.daily_thread_date = today_str
+        assert daemon_instance._should_rotate_daily_thread() is False
+
+    def test_should_rotate_true_stale_date_past_hour(self, daemon_instance: Daemon):
+        """_should_rotate_daily_thread returns True when date is old and hour is past configured."""
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance.config.slack.daily_thread_hour = 0  # hour 0 so it's always past
+        daemon_instance._state.daily_thread_date = "2020-01-01"
+        assert daemon_instance._should_rotate_daily_thread() is True
+
+    def test_should_rotate_false_stale_date_before_hour(self, daemon_instance: Daemon):
+        """_should_rotate_daily_thread returns False when date is stale but hour not yet reached."""
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance.config.slack.daily_thread_hour = 23  # set to 23 so it's unlikely to be reached
+        from zoneinfo import ZoneInfo
+        from unittest.mock import patch as _patch
+
+        tz = ZoneInfo("UTC")
+        # Simulate being at hour 6 on a new day
+        fake_now = datetime(2026, 4, 1, 6, 0, 0, tzinfo=tz)
+        daemon_instance._state.daily_thread_date = "2026-03-31"
+
+        with _patch("colonyos.daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            result = daemon_instance._should_rotate_daily_thread()
+
+        assert result is False
+
+    def test_should_rotate_true_stale_date_at_configured_hour(self, daemon_instance: Daemon):
+        """_should_rotate_daily_thread returns True when date is stale and hour matches configured."""
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance.config.slack.daily_thread_hour = 8
+
+        from zoneinfo import ZoneInfo
+        from unittest.mock import patch as _patch
+
+        tz = ZoneInfo("UTC")
+        fake_now = datetime(2026, 4, 1, 8, 0, 0, tzinfo=tz)
+        daemon_instance._state.daily_thread_date = "2026-03-31"
+
+        with _patch("colonyos.daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            result = daemon_instance._should_rotate_daily_thread()
+
+        assert result is True
+
+    def test_should_rotate_true_no_thread(self, daemon_instance: Daemon):
+        """_should_rotate_daily_thread returns True when no thread exists."""
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_date = None
+        assert daemon_instance._should_rotate_daily_thread() is True
+
+    def test_rotation_in_tick(self, daemon_instance: Daemon):
+        """_tick triggers daily thread rotation when mode is daily and rotation is due."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_date = "2020-01-01"
+
+        with patch.object(daemon_instance, "_try_execute_next", return_value=False), \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_post_heartbeat"), \
+             patch.object(daemon_instance, "_post_daily_digest_if_due"), \
+             patch.object(daemon_instance, "_poll_pr_outcomes"), \
+             patch.object(daemon_instance, "_ensure_daily_thread", return_value=None) as mock_ensure:
+            daemon_instance._tick()
+
+        mock_ensure.assert_called_once()
+
+
+class TestDailyThreadRouting:
+    """Tests for task 5.0: routing notification messages through daily thread."""
+
+    def test_post_slack_message_routes_to_daily_thread_in_daily_mode(
+        self, daemon_instance: Daemon
+    ):
+        """_post_slack_message routes to daily thread when mode is daily."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_ts = "daily.thread.ts"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            daemon_instance._post_slack_message("hello")
+
+        mock_client.chat_postMessage.assert_called_once()
+        call_kwargs = mock_client.chat_postMessage.call_args[1]
+        assert call_kwargs["thread_ts"] == "daily.thread.ts"
+        assert call_kwargs["channel"] == "C123"
+
+    def test_post_slack_message_critical_always_top_level(
+        self, daemon_instance: Daemon
+    ):
+        """_post_slack_message with critical=True always posts top-level even in daily mode."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_ts = "daily.thread.ts"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            daemon_instance._post_slack_message("ALERT!", critical=True)
+
+        mock_client.chat_postMessage.assert_called_once()
+        call_kwargs = mock_client.chat_postMessage.call_args[1]
+        assert "thread_ts" not in call_kwargs
+
+    def test_post_slack_message_per_item_mode_always_top_level(
+        self, daemon_instance: Daemon
+    ):
+        """_post_slack_message in per_item mode always posts top-level (no thread_ts)."""
+        daemon_instance.config.slack.notification_mode = "per_item"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_ts = "daily.thread.ts"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            daemon_instance._post_slack_message("hello")
+
+        mock_client.chat_postMessage.assert_called_once()
+        call_kwargs = mock_client.chat_postMessage.call_args[1]
+        assert "thread_ts" not in call_kwargs
+
+    def test_post_slack_message_no_daily_thread_ts_posts_top_level(
+        self, daemon_instance: Daemon
+    ):
+        """_post_slack_message in daily mode without daily_thread_ts posts top-level."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_ts = None
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            daemon_instance._post_slack_message("hello")
+
+        mock_client.chat_postMessage.assert_called_once()
+        call_kwargs = mock_client.chat_postMessage.call_args[1]
+        assert "thread_ts" not in call_kwargs
+
+    def test_ensure_notification_thread_daily_mode_posts_to_daily_thread(
+        self, daemon_instance: Daemon
+    ):
+        """_ensure_notification_thread in daily mode posts intro as reply to daily thread."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+
+        item = QueueItem(
+            id="item-1",
+            source_type="issue",
+            source_value="test",
+            status=QueueItemStatus.PENDING,
+        )
+
+        mock_client = MagicMock()
+        daily_result = (mock_client, "C123", "daily.thread.ts")
+        reply_response = {"ok": True, "ts": "reply.ts"}
+
+        with patch.object(daemon_instance, "_ensure_daily_thread", return_value=daily_result), \
+             patch("colonyos.slack.post_message", return_value=reply_response) as mock_post:
+            result = daemon_instance._ensure_notification_thread(item, "intro text")
+
+        assert result is not None
+        _, _, thread_ts = result
+        assert thread_ts == "reply.ts"
+        assert item.notification_thread_ts == "reply.ts"
+        # The intro should have been posted as a reply to the daily thread
+        mock_post.assert_called_once_with(
+            mock_client, "C123", "intro text", thread_ts="daily.thread.ts"
+        )
+
+    def test_ensure_notification_thread_per_item_mode_unchanged(
+        self, daemon_instance: Daemon
+    ):
+        """_ensure_notification_thread in per_item mode posts top-level (original behavior)."""
+        daemon_instance.config.slack.notification_mode = "per_item"
+        daemon_instance.config.slack.channels = ["C123"]
+
+        item = QueueItem(
+            id="item-2",
+            source_type="issue",
+            source_value="test",
+            status=QueueItemStatus.PENDING,
+        )
+
+        mock_client = MagicMock()
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client), \
+             patch("colonyos.slack.post_message", return_value={"ts": "top-level.ts"}) as mock_post:
+            result = daemon_instance._ensure_notification_thread(item, "intro text")
+
+        assert result is not None
+        _, _, thread_ts = result
+        assert thread_ts == "top-level.ts"
+        # Should post without thread_ts (top-level)
+        mock_post.assert_called_once_with(mock_client, "C123", "intro text")
+
+    def test_heartbeat_routes_through_daily_thread(
+        self, daemon_instance: Daemon
+    ):
+        """_post_heartbeat routes through daily thread in daily mode."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_ts = "daily.thread.ts"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            daemon_instance._post_heartbeat()
+
+        # Heartbeat calls _post_slack_message, which should route to daily thread
+        mock_client.chat_postMessage.assert_called_once()
+        call_kwargs = mock_client.chat_postMessage.call_args[1]
+        assert call_kwargs["thread_ts"] == "daily.thread.ts"
+
+    def test_daily_digest_routes_through_daily_thread(
+        self, daemon_instance: Daemon
+    ):
+        """_post_daily_digest_if_due routes through daily thread in daily mode."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_ts = "daily.thread.ts"
+        daemon_instance._last_digest_date = None
+
+        # Force digest to be due by setting digest hour in the past
+        daemon_instance.daemon_config.digest_hour_utc = 0
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            daemon_instance._post_daily_digest_if_due()
+
+        # Should have posted via _post_slack_message which routes to daily thread
+        if mock_client.chat_postMessage.called:
+            call_kwargs = mock_client.chat_postMessage.call_args[1]
+            assert call_kwargs.get("thread_ts") == "daily.thread.ts"
+
+
+class TestCreateDailySummary:
+    """Tests for task 6.0: overnight summary generation via _create_daily_summary()."""
+
+    def test_collects_completed_and_failed_items(self, daemon_instance: Daemon):
+        """_create_daily_summary includes completed and failed items in the output."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_date = None  # no cutoff — include all
+
+        daemon_instance._queue_state = QueueState(
+            queue_id="test-q",
+            items=[
+                QueueItem(
+                    id="item-1",
+                    source_type="issue",
+                    source_value="fix auth",
+                    status=QueueItemStatus.COMPLETED,
+                    cost_usd=2.50,
+                    pr_url="https://github.com/org/repo/pull/1",
+                    summary="Fix auth bug",
+                ),
+                QueueItem(
+                    id="item-2",
+                    source_type="issue",
+                    source_value="add caching",
+                    status=QueueItemStatus.FAILED,
+                    cost_usd=0.45,
+                    error="branch conflict",
+                    summary="Add caching layer",
+                ),
+                QueueItem(
+                    id="item-3",
+                    source_type="issue",
+                    source_value="pending work",
+                    status=QueueItemStatus.PENDING,
+                ),
+            ],
+        )
+
+        result = daemon_instance._create_daily_summary()
+
+        assert "Fix auth bug" in result
+        assert "Add caching layer" in result
+        assert "branch conflict" in result
+        assert "$2.95" in result  # total cost 2.50 + 0.45
+        assert "1 pending" in result
+        assert "Completed (1):" in result
+        assert "Failed (1):" in result
+
+    def test_filters_items_by_cutoff_date(self, daemon_instance: Daemon):
+        """_create_daily_summary only includes items added since the last rotation date."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_date = "2026-04-01"
+
+        daemon_instance._queue_state = QueueState(
+            queue_id="test-q",
+            items=[
+                QueueItem(
+                    id="old-item",
+                    source_type="issue",
+                    source_value="old work",
+                    status=QueueItemStatus.COMPLETED,
+                    cost_usd=5.00,
+                    added_at="2026-03-31T10:00:00+00:00",
+                    summary="Old completed work",
+                ),
+                QueueItem(
+                    id="new-item",
+                    source_type="issue",
+                    source_value="new work",
+                    status=QueueItemStatus.COMPLETED,
+                    cost_usd=1.50,
+                    added_at="2026-04-01T14:00:00+00:00",
+                    summary="New completed work",
+                ),
+                QueueItem(
+                    id="new-fail",
+                    source_type="issue",
+                    source_value="new fail",
+                    status=QueueItemStatus.FAILED,
+                    cost_usd=0.30,
+                    added_at="2026-04-01T16:00:00+00:00",
+                    error="timeout",
+                    summary="New failed work",
+                ),
+            ],
+        )
+
+        result = daemon_instance._create_daily_summary()
+
+        # Old item should be excluded
+        assert "Old completed work" not in result
+        # New items should be included
+        assert "New completed work" in result
+        assert "New failed work" in result
+        assert "$1.80" in result  # 1.50 + 0.30
+
+    def test_empty_period_produces_no_activity_message(self, daemon_instance: Daemon):
+        """_create_daily_summary with no terminal items produces a no-activity message."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_date = "2026-04-01"
+
+        daemon_instance._queue_state = QueueState(
+            queue_id="test-q",
+            items=[
+                QueueItem(
+                    id="pending-item",
+                    source_type="issue",
+                    source_value="pending",
+                    status=QueueItemStatus.PENDING,
+                ),
+            ],
+        )
+
+        result = daemon_instance._create_daily_summary()
+
+        assert "No activity during this period" in result
+        assert "1 pending" in result
+
+    def test_computes_aggregate_cost(self, daemon_instance: Daemon):
+        """_create_daily_summary computes total cost across completed and failed items."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_date = None
+
+        daemon_instance._queue_state = QueueState(
+            queue_id="test-q",
+            items=[
+                QueueItem(
+                    id="c1", source_type="issue", source_value="a",
+                    status=QueueItemStatus.COMPLETED, cost_usd=1.10,
+                ),
+                QueueItem(
+                    id="c2", source_type="issue", source_value="b",
+                    status=QueueItemStatus.COMPLETED, cost_usd=2.20,
+                ),
+                QueueItem(
+                    id="f1", source_type="issue", source_value="c",
+                    status=QueueItemStatus.FAILED, cost_usd=0.70,
+                ),
+            ],
+        )
+
+        result = daemon_instance._create_daily_summary()
+        assert "$4.00" in result
+
+    def test_wired_into_ensure_daily_thread(self, daemon_instance: Daemon):
+        """_ensure_daily_thread uses _create_daily_summary for the opening message."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_ts = None
+        daemon_instance._state.daily_thread_date = None
+
+        daemon_instance._queue_state = QueueState(queue_id="test-q", items=[])
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True, "ts": "new.thread.ts"}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client), \
+             patch.object(daemon_instance, "_create_daily_summary", return_value="MOCK SUMMARY") as mock_summary:
+            result = daemon_instance._ensure_daily_thread()
+
+        mock_summary.assert_called_once()
+        # The summary text should be posted as the opening message
+        call_kwargs = mock_client.chat_postMessage.call_args[1]
+        assert call_kwargs["text"] == "MOCK SUMMARY"
+        assert result is not None
+        assert result[2] == "new.thread.ts"
+
+
+class TestDailyThreadIntegration:
+    """End-to-end integration tests for daily thread consolidation (task 7.0)."""
+
+    def test_daily_mode_processes_items_single_top_level_thread(
+        self, daemon_instance: Daemon
+    ):
+        """In daily mode, processing 3 items creates 1 top-level message (the daily thread).
+
+        All item intros are replies to the daily thread, and phase updates nest
+        under the item reply (task 7.1).
+        """
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_ts = None
+        daemon_instance._state.daily_thread_date = None
+        daemon_instance._queue_state = QueueState(queue_id="q", items=[])
+
+        mock_client = MagicMock()
+
+        # Track all chat_postMessage calls to verify threading structure
+        call_log: list[dict] = []
+        call_counter = {"n": 0}
+
+        def _fake_post(**kwargs: Any) -> dict:
+            call_counter["n"] += 1
+            ts = f"ts.{call_counter['n']}"
+            call_log.append({**kwargs, "_ts": ts})
+            return {"ok": True, "ts": ts}
+
+        mock_client.chat_postMessage.side_effect = _fake_post
+
+        items = [
+            QueueItem(id=f"item-{i}", source_type="issue", source_value=f"work-{i}",
+                      status=QueueItemStatus.PENDING)
+            for i in range(3)
+        ]
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            # First call creates the daily thread (top-level message)
+            daily = daemon_instance._ensure_daily_thread()
+            assert daily is not None
+            _, _, daily_ts = daily
+
+            # Each item creates a notification thread as a reply to the daily thread
+            for item in items:
+                result = daemon_instance._ensure_notification_thread(item, f"Starting {item.id}")
+                assert result is not None
+
+        # Verify: exactly 1 top-level message (the daily thread opener)
+        top_level_calls = [c for c in call_log if "thread_ts" not in c]
+        assert len(top_level_calls) == 1, (
+            f"Expected 1 top-level message, got {len(top_level_calls)}"
+        )
+
+        # Verify: 3 replies to the daily thread (the item intros)
+        reply_calls = [c for c in call_log if c.get("thread_ts") == daily_ts]
+        assert len(reply_calls) == 3
+
+        # Verify each item got its own notification_thread_ts for sub-threading
+        item_thread_tss = {item.notification_thread_ts for item in items}
+        assert len(item_thread_tss) == 3
+        assert None not in item_thread_tss
+
+    def test_per_item_mode_creates_separate_top_level_threads(
+        self, daemon_instance: Daemon
+    ):
+        """In per_item mode, processing 3 items creates 3 top-level messages (task 7.2)."""
+        daemon_instance.config.slack.notification_mode = "per_item"
+        daemon_instance.config.slack.channels = ["C123"]
+
+        mock_client = MagicMock()
+
+        call_counter = {"n": 0}
+
+        def _fake_post(**kwargs: Any) -> dict:
+            call_counter["n"] += 1
+            return {"ok": True, "ts": f"top.{call_counter['n']}"}
+
+        mock_client.chat_postMessage.side_effect = _fake_post
+
+        items = [
+            QueueItem(id=f"item-{i}", source_type="issue", source_value=f"work-{i}",
+                      status=QueueItemStatus.PENDING)
+            for i in range(3)
+        ]
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client), \
+             patch("colonyos.slack.post_message", side_effect=[
+                 {"ts": "top.1"}, {"ts": "top.2"}, {"ts": "top.3"}
+             ]) as mock_post:
+            for item in items:
+                result = daemon_instance._ensure_notification_thread(item, f"Starting {item.id}")
+                assert result is not None
+
+        # All 3 calls should be top-level (no thread_ts)
+        assert mock_post.call_count == 3
+        for call in mock_post.call_args_list:
+            args, kwargs = call
+            assert "thread_ts" not in kwargs
+
+    def test_daemon_restart_resumes_daily_thread(
+        self, tmp_repo: Path, config: ColonyConfig
+    ):
+        """After a restart, the daemon loads persisted daily_thread_ts and continues
+        posting to the same thread (task 7.3).
+        """
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("UTC")
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+
+        # Simulate previous daemon run that created a daily thread
+        state = DaemonState(
+            daily_thread_ts="original.daily.ts",
+            daily_thread_date=today_str,
+            daily_thread_channel="C123",
+        )
+        save_daemon_state(tmp_repo, state)
+
+        # Create a fresh daemon (simulates restart)
+        d = Daemon(tmp_repo, config, dry_run=True)
+        d.config.slack.notification_mode = "daily"
+        d.config.slack.channels = ["C123"]
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True, "ts": "reply.ts"}
+
+        item = QueueItem(id="post-restart-item", source_type="issue",
+                         source_value="work", status=QueueItemStatus.PENDING)
+
+        with patch.object(d, "_get_notification_client", return_value=mock_client), \
+             patch("colonyos.slack.post_message", return_value={"ts": "reply.ts"}) as mock_post:
+            # Ensure daily thread reuses persisted ts
+            daily = d._ensure_daily_thread()
+            assert daily is not None
+            _, _, daily_ts = daily
+            assert daily_ts == "original.daily.ts"
+
+            # Notification thread should post as reply to the persisted daily thread
+            result = d._ensure_notification_thread(item, "Starting post-restart-item")
+            assert result is not None
+
+        mock_post.assert_called_once_with(
+            mock_client, "C123", "Starting post-restart-item",
+            thread_ts="original.daily.ts",
+        )
+        # No new top-level message should have been created
+        mock_client.chat_postMessage.assert_not_called()
+
+    def test_critical_alert_posts_top_level_in_daily_mode(
+        self, daemon_instance: Daemon
+    ):
+        """Critical alerts (auto-pause) post to the main channel even in daily mode (task 7.4)."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+
+        # Set up an active daily thread
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("UTC")
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+        daemon_instance._state.daily_thread_ts = "daily.thread.ts"
+        daemon_instance._state.daily_thread_date = today_str
+        daemon_instance._state.daily_thread_channel = "C123"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            # Non-critical goes to daily thread
+            daemon_instance._post_slack_message("routine update")
+            # Critical goes top-level
+            daemon_instance._post_slack_message("CRITICAL: auto-paused!", critical=True)
+
+        assert mock_client.chat_postMessage.call_count == 2
+        calls = mock_client.chat_postMessage.call_args_list
+
+        # First call (routine) should be threaded
+        routine_kwargs = calls[0][1]
+        assert routine_kwargs.get("thread_ts") == "daily.thread.ts"
+
+        # Second call (critical) should be top-level
+        critical_kwargs = calls[1][1]
+        assert "thread_ts" not in critical_kwargs
 class TestPipelineStartedAtTracking:
     """Tests for _pipeline_started_at monotonic timestamp tracking (task 3.0)."""
 

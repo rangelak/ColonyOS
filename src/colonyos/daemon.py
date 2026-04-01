@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Literal
 
@@ -590,6 +591,10 @@ class Daemon:
             self._last_heartbeat_time = now
         self._post_daily_digest_if_due()
 
+        # 5.5 Daily thread rotation (create/rotate daily thread if due)
+        if self.config.slack.notification_mode == "daily" and self._should_rotate_daily_thread():
+            self._ensure_daily_thread()
+
         # 6. PR outcome polling
         outcome_interval = self.daemon_config.outcome_poll_interval_minutes * 60
         if now - self._last_outcome_poll_time >= outcome_interval:
@@ -634,7 +639,8 @@ class Daemon:
                     self._budget_100_alerted = True
                     self._post_slack_message(
                         f":red_circle: Budget exhausted — ${spend:.2f}/${self.daily_budget:.2f} "
-                        f"(100%). Daemon will not execute further items today."
+                        f"(100%). Daemon will not execute further items today.",
+                        critical=True,
                     )
                 elif pct >= 0.8 and not self._budget_80_alerted:
                     self._budget_80_alerted = True
@@ -1079,7 +1085,7 @@ class Daemon:
                 with self._lock:
                     self._queue_state.items.append(item)
                     self._persist_queue()
-                    self._post_queue_enqueued(item)
+                self._post_queue_enqueued(item)
 
                 logger.info(
                     "Enqueued GitHub issue #%d (P%d): %s",
@@ -1206,7 +1212,7 @@ class Daemon:
                 with self._lock:
                     self._queue_state.items.append(item)
                     self._persist_queue()
-                    self._post_queue_enqueued(item)
+                self._post_queue_enqueued(item)
                 logger.info("CEO proposed work enqueued (P%d): %s", item.priority, proposal_prompt[:120])
             else:
                 logger.info("CEO idle-fill produced no actionable proposal")
@@ -1262,9 +1268,15 @@ class Daemon:
             if enqueued:
                 with self._lock:
                     self._persist_queue()
-                    for item in self._queue_state.items:
-                        if item.source_type == "cleanup" and item.status == QueueItemStatus.PENDING and not item.notification_thread_ts:
-                            self._post_queue_enqueued(item)
+                    items_to_notify = [
+                        item
+                        for item in self._queue_state.items
+                        if item.source_type == "cleanup"
+                        and item.status == QueueItemStatus.PENDING
+                        and not item.notification_thread_ts
+                    ]
+                for item in items_to_notify:
+                    self._post_queue_enqueued(item)
                 logger.info("Enqueued %d cleanup items", enqueued)
 
         except Exception:
@@ -1940,25 +1952,33 @@ class Daemon:
     # Slack helpers & kill switch (FR-11)
     # ------------------------------------------------------------------
 
-    def _post_slack_message(self, text: str) -> None:
+    def _post_slack_message(self, text: str, *, critical: bool = False) -> None:
         """Post a message to the first configured Slack channel.
 
-        Uses ``slack_sdk.WebClient`` directly to avoid circular dependencies.
         Errors are logged and swallowed so Slack failures never block the daemon.
+
+        When ``notification_mode == "daily"`` and ``critical`` is False and a
+        daily thread exists, the message is posted as a reply to the daily
+        thread.  Critical alerts and per-item mode always post top-level.
         """
         try:
-            token = os.environ.get("COLONYOS_SLACK_BOT_TOKEN")
-            if not token:
-                logger.debug("No COLONYOS_SLACK_BOT_TOKEN set, skipping Slack message")
+            client = self._get_notification_client()
+            channel = self._default_notification_channel()
+            if client is None or not channel:
+                logger.debug("No Slack client or channel available, skipping Slack message")
                 return
-            channels = self.config.slack.channels
-            if not channels:
-                logger.debug("No Slack channels configured, skipping Slack message")
-                return
-            from slack_sdk import WebClient  # imported inline to avoid hard dep
 
-            client = WebClient(token=token)
-            client.chat_postMessage(channel=channels[0], text=text)
+            kwargs: dict[str, Any] = {"channel": channel, "text": text}
+
+            # In daily mode with a daily thread, route non-critical messages there
+            if (
+                not critical
+                and self.config.slack.notification_mode == "daily"
+                and self._state.daily_thread_ts
+            ):
+                kwargs["thread_ts"] = self._state.daily_thread_ts
+
+            client.chat_postMessage(**kwargs)
         except Exception:
             logger.exception("Failed to post Slack message")
 
@@ -1994,21 +2014,42 @@ class Daemon:
             self._notification_thread_locks.pop(item_id, None)
 
     def _ensure_notification_thread(self, item: QueueItem, intro_text: str) -> tuple[Any, str, str] | None:
-        client = self._get_notification_client()
         channel = item.notification_channel or self._default_notification_channel()
-        if client is None or not channel:
-            return None
         if item.notification_thread_ts:
+            client = self._get_notification_client()
+            if client is None or not channel:
+                return None
             return client, channel, item.notification_thread_ts
         item_lock = self._notification_thread_lock_for(item.id)
         with item_lock:
             with self._lock:
                 if item.notification_thread_ts:
+                    client = self._get_notification_client()
+                    if client is None or not channel:
+                        return None
                     return client, channel, item.notification_thread_ts
             try:
                 from colonyos.slack import post_message
 
-                response = post_message(client, channel, intro_text)
+                # In daily mode, post the per-item intro as a reply to the daily thread
+                if self.config.slack.notification_mode == "daily":
+                    daily = self._ensure_daily_thread()
+                    if daily is not None:
+                        client, channel, daily_thread_ts = daily
+                        response = post_message(
+                            client, channel, intro_text,
+                            thread_ts=daily_thread_ts,
+                        )
+                    else:
+                        client = self._get_notification_client()
+                        if client is None or not channel:
+                            return None
+                        response = post_message(client, channel, intro_text)
+                else:
+                    client = self._get_notification_client()
+                    if client is None or not channel:
+                        return None
+                    response = post_message(client, channel, intro_text)
             except Exception:
                 logger.debug("Failed to create notification thread", exc_info=True)
                 return None
@@ -2022,6 +2063,135 @@ class Daemon:
                 item.notification_thread_ts = thread_ts
                 self._persist_queue()
             return client, channel, thread_ts
+
+    def _should_rotate_daily_thread(self) -> bool:
+        """Return True if the daily thread should be rotated.
+
+        Rotation occurs when the current time in the configured timezone is at
+        or past ``daily_thread_hour`` on a date later than the stored thread
+        date.  If no thread exists yet (``daily_thread_date is None``), rotation
+        is always required.
+        """
+        tz = ZoneInfo(self.config.slack.daily_thread_timezone)
+        now = datetime.now(tz)
+        today_str = now.strftime("%Y-%m-%d")
+
+        if self._state.daily_thread_date is None:
+            return True
+
+        if self._state.daily_thread_date >= today_str:
+            return False
+
+        # Date has changed — only rotate once we've reached the configured hour
+        return now.hour >= self.config.slack.daily_thread_hour
+
+    def _create_daily_summary(self) -> str:
+        """Build a formatted summary of items completed/failed since the last daily thread.
+
+        Filters ``self._queue_state.items`` for items whose ``added_at``
+        timestamp falls on or after the previous daily thread date (stored in
+        ``self._state.daily_thread_date``).  When no previous date exists, all
+        terminal items are included.
+
+        Returns the formatted summary string produced by
+        :func:`colonyos.slack.format_daily_summary`.
+        """
+        from colonyos.slack import format_daily_summary
+
+        tz = ZoneInfo(self.config.slack.daily_thread_timezone)
+        now = datetime.now(tz)
+        period_label = f"{now.strftime('%B')} {now.day}, {now.year}"
+
+        # Determine the cutoff: only include items added since the last rotation
+        cutoff_iso: str | None = self._state.daily_thread_date  # e.g. "2026-04-01"
+
+        def _since_cutoff(item: QueueItem) -> bool:
+            if cutoff_iso is None:
+                return True
+            # added_at is an ISO-8601 datetime string; compare date portion
+            return item.added_at[:10] >= cutoff_iso
+
+        completed = [
+            item for item in self._queue_state.items
+            if item.status == QueueItemStatus.COMPLETED and _since_cutoff(item)
+        ]
+        failed = [
+            item for item in self._queue_state.items
+            if item.status == QueueItemStatus.FAILED and _since_cutoff(item)
+        ]
+        pending_count = sum(
+            1 for item in self._queue_state.items
+            if item.status == QueueItemStatus.PENDING
+        )
+        total_cost = sum(item.cost_usd for item in completed + failed)
+
+        return format_daily_summary(
+            completed_items=completed,
+            failed_items=failed,
+            total_cost=total_cost,
+            queue_depth=pending_count,
+            period_label=period_label,
+        )
+
+    def _ensure_daily_thread(self) -> tuple[Any, str, str] | None:
+        """Ensure a daily thread exists for today, creating one if needed.
+
+        Returns ``(client, channel, daily_thread_ts)`` or ``None`` if daily
+        mode is disabled or Slack is unavailable.
+
+        In ``per_item`` notification mode this always returns ``None``.
+        When the persisted daily thread date matches today (in the configured
+        timezone), the cached thread is returned without posting a new message.
+        Otherwise a new daily thread is created with a summary opening post.
+        """
+        if self.config.slack.notification_mode != "daily":
+            return None
+
+        channel = self._default_notification_channel()
+        if not channel:
+            return None
+
+        client = self._get_notification_client()
+        if client is None:
+            return None
+
+        # Check if existing thread is still valid for today
+        if not self._should_rotate_daily_thread() and self._state.daily_thread_ts:
+            return client, self._state.daily_thread_channel or channel, self._state.daily_thread_ts
+
+        # Need to create a new daily thread
+        from colonyos.slack import post_message
+
+        summary_text = self._create_daily_summary()
+
+        try:
+            response = post_message(client, channel, summary_text)
+        except Exception:
+            logger.debug("Failed to create daily thread", exc_info=True)
+            return None
+
+        thread_ts = response.get("ts")
+        if not thread_ts:
+            return None
+
+        # Persist the new daily thread info
+        tz = ZoneInfo(self.config.slack.daily_thread_timezone)
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+        with self._lock:
+            prev_ts = self._state.daily_thread_ts
+            if prev_ts:
+                logger.debug(
+                    "Rotating daily thread: previous ts=%s date=%s",
+                    prev_ts,
+                    self._state.daily_thread_date,
+                )
+            self._state.daily_thread_ts = thread_ts
+            self._state.daily_thread_date = today_str
+            self._state.daily_thread_channel = channel
+            self._persist_state()
+
+        logger.info("Created daily thread %s for %s in %s", thread_ts, today_str, channel)
+        return client, channel, thread_ts
 
     def _format_phase_breakdown(self, log: Any) -> list[str]:
         from colonyos.slack import format_phase_breakdown_line
@@ -2363,7 +2533,8 @@ class Daemon:
             f":rotating_light: *Daemon auto-paused (same error)*\n"
             f"{failures} consecutive failures with the same error: `{error_code}`\n"
             f"The daemon will not process any more items until manually resumed.\n"
-            "Send `resume` in this channel to unpause."
+            "Send `resume` in this channel to unpause.",
+            critical=True,
         )
 
     def _post_circuit_breaker_cooldown_notice(
@@ -2377,7 +2548,8 @@ class Daemon:
             f":electric_plug: *Circuit breaker cooldown*\n"
             f"After {consecutive_failures} consecutive failures, activation "
             f"#{activation_count}. Cooldown until `{cooldown_until_iso}` (ISO UTC). "
-            f"Execution resumes automatically after that unless the daemon is paused."
+            f"Execution resumes automatically after that unless the daemon is paused.",
+            critical=True,
         )
 
     def _post_circuit_breaker_escalation_pause_alert(
@@ -2391,7 +2563,8 @@ class Daemon:
             f"Breaker activation #{activation_count} without an intervening success "
             f"(last trip after {consecutive_failures} consecutive failures). "
             f"This is not the same-error systemic case.\n"
-            "Send `resume` in this channel to unpause."
+            "Send `resume` in this channel to unpause.",
+            critical=True,
         )
 
     def _pause_for_pre_execution_blocker(self, item: QueueItem, reason: str) -> None:
@@ -2424,7 +2597,8 @@ class Daemon:
             f"{reason}\n"
             f"Pending item: `{item.id}`\n"
             f"Incident summary: `{incident_path}`\n"
-            "Fix the repo state, then send `resume` in Slack."
+            "Fix the repo state, then send `resume` in Slack.",
+            critical=True,
         )
 
     def _failure_summary(self, exc: Exception) -> str:

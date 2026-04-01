@@ -43,6 +43,23 @@ Fixes a prompt-tool constraint mismatch that caused the learn phase to fail on e
 **PRD:** `cOS_prds/20260401_130207_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
 **Tasks:** `cOS_tasks/20260401_130207_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
 
+## 20260401_130000 — Daily Slack Thread Consolidation
+
+Consolidates all pipeline lifecycle messages (queue arrivals, phase updates, completions, heartbeats) into a single daily Slack thread that rotates at a configurable hour, reducing channel noise by ~90%. Critical alerts (auto-pause, circuit breaker) remain top-level. Includes overnight summary generation, daemon restart recovery via persisted thread state, and a `per_item` config toggle to preserve legacy behavior.
+
+**Created/Modified:**
+- `src/colonyos/config.py` — Added `notification_mode`, `daily_thread_hour`, `daily_thread_timezone` to `SlackConfig`
+- `src/colonyos/daemon_state.py` — Added `daily_thread_ts`, `daily_thread_date`, `daily_thread_channel` fields
+- `src/colonyos/daemon.py` — New `_ensure_daily_thread()`, modified `_ensure_notification_thread()` and `_post_slack_message()` routing, overnight summary generation
+- `src/colonyos/slack.py` — Added `format_daily_summary()` formatting function
+- `tests/test_daemon.py` — Tests for daily thread creation, rotation, restart recovery
+- `tests/test_daemon_state.py` — Tests for new state field serialization
+- `tests/test_config.py` — Tests for new config fields and validation
+- `tests/test_slack.py` — Tests for `format_daily_summary()`
+
+**PRD:** `cOS_prds/20260401_120332_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260401_120332_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260331_220500 — Replace :eyes: Emoji with Completion Emoji on Pipeline Finish
 
 Adds clean emoji state transitions to Slack messages: when a ColonyOS pipeline completes, the `:eyes:` (in-progress) reaction is removed before adding the terminal status emoji (`:white_check_mark:` / `:x:`), plus `:tada:` on success. This eliminates ambiguous dual-emoji states so each message shows exactly one reaction reflecting its current state.

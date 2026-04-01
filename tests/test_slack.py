@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,6 +25,7 @@ from colonyos.slack import (
     extract_prompt_text,
     has_bot_mention,
     extract_raw_from_formatted_prompt,
+    format_daily_summary,
     format_phase_breakdown_line,
     format_acknowledgment,
     format_phase_update,
@@ -1842,6 +1844,177 @@ class TestRemoveReaction:
         client.reactions_remove.side_effect = RuntimeError("no_reaction")
         with pytest.raises(RuntimeError, match="no_reaction"):
             remove_reaction(client, "C123", "1234567890.123456", "eyes")
+
+
+# ---------------------------------------------------------------------------
+# format_daily_summary tests (Task 3.1)
+# ---------------------------------------------------------------------------
+
+
+def _make_queue_item(**overrides: Any) -> "QueueItem":
+    """Create a minimal QueueItem for testing format_daily_summary."""
+    from colonyos.models import QueueItem, QueueItemStatus
+
+    defaults: dict[str, Any] = {
+        "id": "test-id",
+        "source_type": "prompt",
+        "source_value": "do something",
+        "status": QueueItemStatus.COMPLETED,
+        "summary": "cli-refactor",
+        "pr_url": None,
+        "cost_usd": 0.0,
+        "error": None,
+    }
+    defaults.update(overrides)
+    return QueueItem(**defaults)
+
+
+class TestFormatDailySummary:
+    def test_completed_items_with_pr_links(self) -> None:
+        completed = [
+            _make_queue_item(summary="cli-refactor", pr_url="https://github.com/o/r/pull/142", cost_usd=2.10),
+            _make_queue_item(summary="fix-auth-bug", pr_url="https://github.com/o/r/pull/143", cost_usd=1.80),
+        ]
+        result = format_daily_summary(
+            completed_items=completed,
+            failed_items=[],
+            total_cost=3.90,
+            queue_depth=0,
+            period_label="April 1, 2026",
+        )
+        assert ":sunrise:" in result
+        assert "April 1, 2026" in result
+        assert "cli-refactor" in result
+        assert "fix-auth-bug" in result
+        assert "pull/142" in result
+        assert "pull/143" in result
+        assert "$2.10" in result
+        assert "$1.80" in result
+        assert "Completed" in result
+
+    def test_failed_items_with_error(self) -> None:
+        from colonyos.models import QueueItemStatus
+
+        failed = [
+            _make_queue_item(
+                summary="add-caching",
+                status=QueueItemStatus.FAILED,
+                error="branch conflict during merge",
+                cost_usd=0.45,
+            ),
+        ]
+        result = format_daily_summary(
+            completed_items=[],
+            failed_items=failed,
+            total_cost=0.45,
+            queue_depth=1,
+            period_label="April 1, 2026",
+        )
+        assert "Failed" in result
+        assert "add-caching" in result
+        assert "branch conflict" in result
+        assert "$0.45" in result
+
+    def test_empty_period(self) -> None:
+        result = format_daily_summary(
+            completed_items=[],
+            failed_items=[],
+            total_cost=0.0,
+            queue_depth=0,
+            period_label="April 1, 2026",
+        )
+        assert "April 1, 2026" in result
+        assert "No activity" in result
+        assert "$0.00" in result
+
+    def test_mixed_results(self) -> None:
+        from colonyos.models import QueueItemStatus
+
+        completed = [
+            _make_queue_item(summary="update-docs", pr_url="https://github.com/o/r/pull/144", cost_usd=0.60),
+        ]
+        failed = [
+            _make_queue_item(
+                summary="add-caching",
+                status=QueueItemStatus.FAILED,
+                error="timeout",
+                cost_usd=0.45,
+            ),
+        ]
+        result = format_daily_summary(
+            completed_items=completed,
+            failed_items=failed,
+            total_cost=1.05,
+            queue_depth=2,
+            period_label="April 1, 2026",
+        )
+        assert "Completed (1)" in result
+        assert "Failed (1)" in result
+        assert "update-docs" in result
+        assert "add-caching" in result
+        assert "$1.05" in result
+        assert "2 pending" in result
+
+    def test_cost_and_queue_depth_footer(self) -> None:
+        result = format_daily_summary(
+            completed_items=[],
+            failed_items=[],
+            total_cost=4.95,
+            queue_depth=3,
+            period_label="April 1, 2026",
+        )
+        assert "$4.95" in result
+        assert "3 pending" in result
+
+    def test_completed_item_without_pr(self) -> None:
+        completed = [
+            _make_queue_item(summary="internal-cleanup", cost_usd=0.30),
+        ]
+        result = format_daily_summary(
+            completed_items=completed,
+            failed_items=[],
+            total_cost=0.30,
+            queue_depth=0,
+            period_label="April 1, 2026",
+        )
+        assert "internal-cleanup" in result
+        assert "$0.30" in result
+        # No PR link present
+        assert "pull/" not in result
+
+    def test_failed_item_without_error(self) -> None:
+        from colonyos.models import QueueItemStatus
+
+        failed = [
+            _make_queue_item(
+                summary="broken-thing",
+                status=QueueItemStatus.FAILED,
+                error=None,
+                cost_usd=0.10,
+            ),
+        ]
+        result = format_daily_summary(
+            completed_items=[],
+            failed_items=failed,
+            total_cost=0.10,
+            queue_depth=0,
+            period_label="April 1, 2026",
+        )
+        assert "broken-thing" in result
+        assert "unknown error" in result.lower() or "no details" in result.lower()
+
+    def test_item_without_summary_uses_source_value(self) -> None:
+        completed = [
+            _make_queue_item(summary=None, source_value="fix the login page", cost_usd=1.00),
+        ]
+        result = format_daily_summary(
+            completed_items=completed,
+            failed_items=[],
+            total_cost=1.00,
+            queue_depth=0,
+            period_label="April 1, 2026",
+        )
+        assert "fix the login page" in result
 
 
 class TestThreadFixTemplateDefensiveInstructions:

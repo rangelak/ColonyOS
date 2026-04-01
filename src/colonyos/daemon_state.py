@@ -40,6 +40,9 @@ class DaemonState:
     )
     last_heartbeat: str | None = None
     paused: bool = False
+    daily_thread_ts: str | None = None
+    daily_thread_date: str | None = None
+    daily_thread_channel: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -52,6 +55,9 @@ class DaemonState:
             "daemon_started_at": self.daemon_started_at,
             "last_heartbeat": self.last_heartbeat,
             "paused": self.paused,
+            "daily_thread_ts": self.daily_thread_ts,
+            "daily_thread_date": self.daily_thread_date,
+            "daily_thread_channel": self.daily_thread_channel,
         }
 
     @classmethod
@@ -72,6 +78,9 @@ class DaemonState:
             ),
             last_heartbeat=data.get("last_heartbeat"),
             paused=bool(data.get("paused", False)),
+            daily_thread_ts=data.get("daily_thread_ts"),
+            daily_thread_date=data.get("daily_thread_date"),
+            daily_thread_channel=data.get("daily_thread_channel"),
         )
 
     def check_daily_budget(self, cap: float | None) -> tuple[bool, float | None]:
