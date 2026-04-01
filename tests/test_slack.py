@@ -103,6 +103,18 @@ class TestSlackConfigParsing:
         assert config.slack.trigger_mode == "mention"
         assert config.slack.max_runs_per_hour == 3
 
+    def test_trigger_mode_all_accepted(self, tmp_repo: Path) -> None:
+        import yaml
+
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"trigger_mode": "all"}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.trigger_mode == "all"
+
     def test_invalid_trigger_mode_raises(self, tmp_repo: Path) -> None:
         import yaml
 
