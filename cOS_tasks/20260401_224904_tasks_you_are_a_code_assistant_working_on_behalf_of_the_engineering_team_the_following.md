@@ -53,10 +53,10 @@
     - If loop exhausts, call `_fail_run_log()` and return
   - [ ] 4.5 Run full test suite to confirm no regressions
 
-- [ ] 5.0 Add verify-fix phase to safety-critical phases list
+- [x] 5.0 Add verify-fix phase to safety-critical phases list
   depends_on: [1.0]
-  - [ ] 5.1 Write test that `Phase.FIX` behavior in verify context does not use fallback model
-  - [ ] 5.2 Evaluate whether the verify-fix agent should be added to `_SAFETY_CRITICAL_PHASES` (config.py line 25) — if using `Phase.FIX` for the verify-fix step, it's already covered; if using a new phase enum, add it
+  - [x] 5.1 Write test that `Phase.FIX` behavior in verify context does not use fallback model
+  - [x] 5.2 Evaluate whether the verify-fix agent should be added to `_SAFETY_CRITICAL_PHASES` (config.py line 25) — if using `Phase.FIX` for the verify-fix step, it's already covered; if using a new phase enum, add it
 
 - [ ] 6.0 Integration testing and edge cases
   depends_on: [4.0]

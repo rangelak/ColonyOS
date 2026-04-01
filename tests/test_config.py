@@ -648,6 +648,32 @@ class TestPhaseModels:
     def test_safety_critical_phases_constant(self):
         assert _SAFETY_CRITICAL_PHASES == frozenset({"review", "decision", "fix"})
 
+    def test_fix_phase_is_safety_critical_covers_verify_fix(self):
+        """Phase.FIX is safety-critical, so the verify-fix agent (which reuses
+        Phase.FIX) inherits the haiku-warning guard automatically — no
+        separate entry is needed for verify-fix."""
+        assert Phase.FIX.value in _SAFETY_CRITICAL_PHASES
+
+    def test_verify_phase_not_safety_critical(self):
+        """Phase.VERIFY is a read-only test runner intentionally designed to
+        use a lightweight model (haiku).  It must NOT be in the safety-critical
+        set so that assigning haiku to verify does not trigger a warning."""
+        assert Phase.VERIFY.value not in _SAFETY_CRITICAL_PHASES
+
+    def test_no_warning_when_haiku_assigned_to_verify(self, tmp_repo: Path, caplog):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "model": "sonnet",
+                "phase_models": {"verify": "haiku"},
+            }),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="colonyos.config"):
+            load_config(tmp_repo)
+        assert "safety gate" not in caplog.text
+
     def test_invalid_model_error_mentions_short_names(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
