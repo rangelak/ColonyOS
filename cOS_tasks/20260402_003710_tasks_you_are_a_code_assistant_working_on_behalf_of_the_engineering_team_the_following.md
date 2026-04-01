@@ -48,17 +48,17 @@
   - [x] 4.3 Implement `find_branches_with_failing_ci()`: use `gh pr list --state open --json number,headRefName` then `gh pr checks <number>` for each, filter to failing
   - [x] 4.4 Implement `build_ci_fix_queue_items()`: create `QueueItem` with `source_type="ci-fix"`, `source_value=<pr_number>`, standard priority via `compute_priority("ci-fix")`, dedup against existing items
 
-- [ ] 5.0 Integrate maintenance cycle into daemon
+- [x] 5.0 Integrate maintenance cycle into daemon
   depends_on: [2.0, 3.0, 4.0]
-  - [ ] 5.1 Write tests for `Daemon._run_maintenance_cycle()` — verify it calls self-update check, branch scan, CI-fix enqueue in order; verify it skips when `self_update` is False; verify it respects maintenance budget; verify exec is called after successful self-update
-  - [ ] 5.2 Write tests for startup rollback: daemon detects `last_good_commit` mismatch + recent start → rolls back
-  - [ ] 5.3 Write tests for self-update circuit breaker: after 2 consecutive rollbacks, self-update disabled and Slack alert sent
-  - [ ] 5.4 Implement `_run_maintenance_cycle()` method in `Daemon` class: called from `_run_pipeline_for_item()` finally block (after `restore_to_branch()` at line 1681). Sequence: (1) `pull_and_check_update()`, (2) if changed and `self_update` enabled → `run_self_update()` → persist state → `os.execv()`, (3) `scan_diverged_branches()` → post to Slack, (4) `find_branches_with_failing_ci()` → `build_ci_fix_queue_items()` → enqueue
-  - [ ] 5.5 Implement startup rollback check in `Daemon.start()`: before entering main loop, check `should_rollback()`. If true, checkout last good commit, reinstall, exec. If 2+ consecutive failures, disable self-update and alert.
-  - [ ] 5.6 Add maintenance budget tracking: tag CI-fix queue items with `source_type="ci-fix"`, track spend in `DaemonState.daily_maintenance_spend_usd`, check against `daemon.maintenance_budget_usd` before enqueueing new items
-  - [ ] 5.7 Update `last_good_commit` on successful startup (after 60 seconds of uptime, write current SHA)
+  - [x] 5.1 Write tests for `Daemon._run_maintenance_cycle()` — verify it calls self-update check, branch scan, CI-fix enqueue in order; verify it skips when `self_update` is False; verify it respects maintenance budget; verify exec is called after successful self-update
+  - [x] 5.2 Write tests for startup rollback: daemon detects `last_good_commit` mismatch + recent start → rolls back
+  - [x] 5.3 Write tests for self-update circuit breaker: after 2 consecutive rollbacks, self-update disabled and Slack alert sent
+  - [x] 5.4 Implement `_run_maintenance_cycle()` method in `Daemon` class: called from `_run_pipeline_for_item()` finally block (after `restore_to_branch()` at line 1681). Sequence: (1) `pull_and_check_update()`, (2) if changed and `self_update` enabled → `run_self_update()` → persist state → `os.execv()`, (3) `scan_diverged_branches()` → post to Slack, (4) `find_branches_with_failing_ci()` → `build_ci_fix_queue_items()` → enqueue
+  - [x] 5.5 Implement startup rollback check in `Daemon.start()`: before entering main loop, check `should_rollback()`. If true, checkout last good commit, reinstall, exec. If 2+ consecutive failures, disable self-update and alert.
+  - [x] 5.6 Add maintenance budget tracking: tag CI-fix queue items with `source_type="ci-fix"`, track spend in `DaemonState.daily_maintenance_spend_usd`, check against `daemon.maintenance_budget_usd` before enqueueing new items
+  - [x] 5.7 Update `last_good_commit` on successful startup (after 60 seconds of uptime, write current SHA)
 
-- [ ] 6.0 Update ColonyOS repo config and documentation
+- [x] 6.0 Update ColonyOS repo config and documentation
   depends_on: [1.0]
-  - [ ] 6.1 Add `self_update: true`, `maintenance_budget_usd: 20.0`, and `branch_sync_enabled: true` to `.colonyos/config.yaml` under the `daemon:` section
-  - [ ] 6.2 Verify all existing tests pass with the new config fields (no regressions)
+  - [x] 6.1 Add `self_update: true`, `maintenance_budget_usd: 20.0`, and `branch_sync_enabled: true` to `.colonyos/config.yaml` under the `daemon:` section
+  - [x] 6.2 Verify all existing tests pass with the new config fields (no regressions)
