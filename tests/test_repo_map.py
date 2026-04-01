@@ -1063,8 +1063,8 @@ class TestEdgeCases:
         """Repo containing only binary (non-parsable) files still produces output."""
         (git_repo / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 50)
         (git_repo / "data.bin").write_bytes(bytes(range(256)))
-        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
-        subprocess.run(
+        REAL_SUBPROCESS_RUN(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+        REAL_SUBPROCESS_RUN(
             ["git", "commit", "-m", "binary"],
             cwd=git_repo, capture_output=True, check=True,
         )
@@ -1081,8 +1081,8 @@ class TestEdgeCases:
         (git_repo / "good.py").write_text("def hello():\n    pass\n")
         # Write the bad file as raw bytes
         (git_repo / "bad_encoding.py").write_bytes(b"\x80\x81\x82\xfe\xff# not utf-8\n")
-        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
-        subprocess.run(
+        REAL_SUBPROCESS_RUN(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+        REAL_SUBPROCESS_RUN(
             ["git", "commit", "-m", "add files"],
             cwd=git_repo, capture_output=True, check=True,
         )

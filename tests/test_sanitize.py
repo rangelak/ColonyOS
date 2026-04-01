@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest.mock
 
-from colonyos.sanitize import XML_TAG_RE, sanitize_ci_logs, sanitize_untrusted_content, strip_slack_links
+from colonyos.sanitize import XML_TAG_RE, sanitize_ci_logs, sanitize_for_slack, sanitize_untrusted_content, strip_slack_links
 
 
 class TestSanitizeUntrustedContent:
@@ -174,6 +174,155 @@ class TestStripSlackLinks:
             call_args = mock_debug.call_args
             assert "evil.com" in str(call_args)
             assert "click here" in str(call_args)
+
+
+class TestSanitizeForSlack:
+    """Tests for sanitize_for_slack() — Slack mrkdwn injection prevention."""
+
+    def test_escapes_bold_asterisks(self) -> None:
+        assert sanitize_for_slack("*bold*") == "\\*bold\\*"
+
+    def test_escapes_italic_underscores(self) -> None:
+        assert sanitize_for_slack("_italic_") == "\\_italic\\_"
+
+    def test_escapes_strikethrough_tildes(self) -> None:
+        assert sanitize_for_slack("~strike~") == "\\~strike\\~"
+
+    def test_escapes_inline_code_backticks(self) -> None:
+        assert sanitize_for_slack("`code`") == "\\`code\\`"
+
+    def test_neutralizes_at_here(self) -> None:
+        result = sanitize_for_slack("Hey @here check this")
+        assert "@here" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_at_channel(self) -> None:
+        result = sanitize_for_slack("Alert @channel!")
+        assert "@channel" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_at_everyone(self) -> None:
+        result = sanitize_for_slack("Hello @everyone")
+        assert "@everyone" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_slack_special_mention_here(self) -> None:
+        result = sanitize_for_slack("<!here> alert")
+        assert "<!here>" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_slack_special_mention_channel(self) -> None:
+        result = sanitize_for_slack("<!channel|channel> notice")
+        assert "<!channel" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_slack_special_mention_everyone(self) -> None:
+        result = sanitize_for_slack("<!everyone> wake up")
+        assert "<!everyone>" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_link_injection(self) -> None:
+        result = sanitize_for_slack("<https://evil.com|Click here for free money>")
+        assert "<https://evil.com|" not in result
+        assert "evil.com" in result
+        assert "Click here" in result
+
+    def test_neutralizes_bare_link(self) -> None:
+        result = sanitize_for_slack("<https://example.com>")
+        assert "<https://example.com>" not in result
+        assert "https://example.com" in result
+
+    def test_neutralizes_blockquote(self) -> None:
+        result = sanitize_for_slack("> quoted text")
+        assert result.startswith("\u200b")  # zero-width space prefix
+
+    def test_neutralizes_blockquote_multiline(self) -> None:
+        result = sanitize_for_slack("line 1\n> quoted\nline 3")
+        lines = result.split("\n")
+        assert lines[0] == "line 1"
+        assert lines[1].startswith("\u200b")
+        assert lines[2] == "line 3"
+
+    def test_preserves_plain_text(self) -> None:
+        assert sanitize_for_slack("Hello world 123") == "Hello world 123"
+
+    def test_empty_string(self) -> None:
+        assert sanitize_for_slack("") == ""
+
+    def test_combined_injection_attempt(self) -> None:
+        """A malicious task description combining multiple injection vectors."""
+        malicious = "*URGENT* @here — visit <https://evil.com|our portal> for `secrets`"
+        result = sanitize_for_slack(malicious)
+        assert "@here" not in result
+        assert "<https://evil.com|" not in result
+        # Asterisks and backticks should be escaped
+        assert "\\*URGENT\\*" in result
+        assert "\\`secrets\\`" in result
+
+    def test_case_insensitive_mentions(self) -> None:
+        result = sanitize_for_slack("@HERE and @Channel")
+        assert "@HERE" not in result
+        assert "@Channel" not in result
+
+    def test_neutralizes_user_mention_injection(self) -> None:
+        """<@U12345> user mention syntax should be neutralized."""
+        result = sanitize_for_slack("<@U12345ABC> pinged you")
+        assert "<@U12345ABC>" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_user_mention_with_display(self) -> None:
+        """<@U12345|display> user mention with display text should be neutralized."""
+        result = sanitize_for_slack("<@U12345|Alice> said hi")
+        assert "<@U12345" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_bot_mention(self) -> None:
+        """<@B12345> bot mention syntax should be neutralized."""
+        result = sanitize_for_slack("<@B12345ABC> bot mention")
+        assert "<@B12345ABC>" not in result
+        assert "[mention]" in result
+
+    def test_neutralizes_mailto_link_injection(self) -> None:
+        """<mailto:user@corp.com|click> phishing link should be neutralized."""
+        result = sanitize_for_slack("<mailto:user@corp.com|Click to email>")
+        assert "<mailto:" not in result
+        assert "mailto:user@corp.com" in result
+        assert "Click to email" in result
+
+    def test_neutralizes_slack_protocol_link_injection(self) -> None:
+        """<slack://open?team=T123|text> deep link should be neutralized."""
+        result = sanitize_for_slack("<slack://open?team=T123|Join team>")
+        assert "<slack://" not in result
+        assert "slack://open?team=T123" in result
+        assert "Join team" in result
+
+    def test_neutralizes_bare_mailto_link(self) -> None:
+        """Bare <mailto:user@corp.com> without display text should be stripped of angle brackets."""
+        result = sanitize_for_slack("<mailto:user@corp.com>")
+        assert "<mailto:" not in result
+        assert "mailto:user@corp.com" in result
+
+    def test_neutralizes_bare_slack_protocol_link(self) -> None:
+        """Bare <slack://open?team=T123> without display text should be stripped."""
+        result = sanitize_for_slack("<slack://open?team=T123>")
+        assert "<slack://" not in result
+        assert "slack://open?team=T123" in result
+
+    def test_audit_log_on_neutralization(self) -> None:
+        """sanitize_for_slack should log at DEBUG when content is neutralized."""
+        import logging
+        with unittest.mock.patch("colonyos.sanitize.logger") as mock_logger:
+            sanitize_for_slack("*bold* @here injection")
+            mock_logger.debug.assert_called()
+            # Verify log message mentions sanitize_for_slack
+            call_args = mock_logger.debug.call_args[0][0]
+            assert "sanitize_for_slack" in call_args
+
+    def test_no_audit_log_for_clean_content(self) -> None:
+        """sanitize_for_slack should NOT log when content is already clean."""
+        with unittest.mock.patch("colonyos.sanitize.logger") as mock_logger:
+            sanitize_for_slack("clean plain text")
+            mock_logger.debug.assert_not_called()
 
 
 class TestXmlTagRegex:

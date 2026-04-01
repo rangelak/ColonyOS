@@ -1,5 +1,18 @@
 # Changelog
 
+## 20260331_210000 — Informative Slack Pipeline Notifications
+
+Enriches Slack thread messages with human-readable context so non-technical readers can understand pipeline progress without leaving the thread. Task completion messages now include descriptions, task outlines use bullet formatting, result summaries show what each task did, and review round messages surface reviewer findings — all without additional LLM calls.
+
+**Modified:**
+- `src/colonyos/orchestrator.py` — Updated `_format_task_outline_note()`, `_format_implement_result_note()`, phase header calls, and review round messages to include descriptions and findings
+- `src/colonyos/sanitize.py` — Added Slack mrkdwn sanitization and message size safety utilities
+- `tests/test_slack_formatting.py` — Comprehensive test suite for all Slack formatting functions
+- `tests/test_sanitize.py` — Extended tests for sanitization utilities
+
+**PRD:** `cOS_prds/20260331_190640_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260331_190640_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260331_160000 — RepoMap Module for Agent Structural Context
 
 Adds a `RepoMap` module (`src/colonyos/repo_map.py`) that generates a condensed structural summary of the repository — file paths, class names, function signatures — and injects it into every pipeline phase prompt. This eliminates agent cold-start overhead by giving each phase a "table of contents" of the codebase from the first token. Includes a `colonyos map` CLI command for debugging visibility.
