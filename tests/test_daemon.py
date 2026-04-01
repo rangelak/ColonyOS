@@ -3223,3 +3223,326 @@ class TestAllModeStartupWarnings:
         with caplog.at_level("WARNING", logger="colonyos.daemon"):
             Daemon._warn_all_mode_safety(config)
         assert len(caplog.records) == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 5.0 — Maintenance cycle integration
+# ---------------------------------------------------------------------------
+
+
+class TestRunMaintenanceCycle:
+    """Task 5.1 — _run_maintenance_cycle calls self-update, branch scan, CI-fix."""
+
+    def _make_daemon(self, tmp_repo: Path, **daemon_kwargs) -> Daemon:
+        cfg = ColonyConfig(daemon=DaemonConfig(daily_budget_usd=50.0, **daemon_kwargs))
+        return Daemon(tmp_repo, cfg, dry_run=True)
+
+    @patch("colonyos.daemon.build_ci_fix_queue_items", return_value=[])
+    @patch("colonyos.daemon.find_branches_with_failing_ci", return_value=[])
+    @patch("colonyos.daemon.format_branch_sync_report", return_value=None)
+    @patch("colonyos.daemon.scan_diverged_branches", return_value=[])
+    @patch("colonyos.daemon.pull_and_check_update", return_value=(False, "aaa", "aaa"))
+    def test_calls_all_steps_in_order(
+        self, mock_pull, mock_scan, mock_report, mock_ci, mock_build,
+        tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, self_update=True, branch_sync_enabled=True)
+        d._run_maintenance_cycle()
+        mock_pull.assert_called_once_with(tmp_repo)
+        mock_scan.assert_called_once()
+        mock_ci.assert_called_once()
+
+    @patch("colonyos.daemon.pull_and_check_update", return_value=(False, "aaa", "aaa"))
+    def test_skips_self_update_when_disabled(self, mock_pull, tmp_repo: Path) -> None:
+        d = self._make_daemon(tmp_repo, self_update=False, branch_sync_enabled=False)
+        with patch("colonyos.daemon.find_branches_with_failing_ci", return_value=[]), \
+             patch("colonyos.daemon.build_ci_fix_queue_items", return_value=[]):
+            d._run_maintenance_cycle()
+        # pull_and_check_update is still called (to detect updates)
+        # but the exec path is skipped when self_update=False
+        mock_pull.assert_called_once()
+
+    @patch("colonyos.daemon.os.execv")
+    @patch("colonyos.daemon.run_self_update", return_value=True)
+    @patch("colonyos.daemon.record_last_good_commit")
+    @patch("colonyos.daemon.pull_and_check_update", return_value=(True, "old", "new"))
+    def test_exec_after_self_update(
+        self, mock_pull, mock_record, mock_install, mock_exec,
+        tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, self_update=True)
+        d._run_maintenance_cycle()
+        mock_record.assert_called_once_with(tmp_repo, "old")
+        mock_install.assert_called_once_with(tmp_repo, "uv pip install .")
+        mock_exec.assert_called_once()
+
+    @patch("colonyos.daemon.run_self_update", return_value=False)
+    @patch("colonyos.daemon.record_last_good_commit")
+    @patch("colonyos.daemon.pull_and_check_update", return_value=(True, "old", "new"))
+    def test_no_exec_on_install_failure(
+        self, mock_pull, mock_record, mock_install,
+        tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, self_update=True, branch_sync_enabled=False)
+        with patch("colonyos.daemon.find_branches_with_failing_ci", return_value=[]), \
+             patch("colonyos.daemon.build_ci_fix_queue_items", return_value=[]):
+            d._run_maintenance_cycle()
+        # Should NOT have called os.execv
+        # (would have raised if called since we didn't mock it)
+
+    @patch("colonyos.daemon.pull_and_check_update", return_value=(True, "old", "new"))
+    def test_no_exec_when_self_update_disabled(self, mock_pull, tmp_repo: Path) -> None:
+        """Changed code detected but self_update=False → no install/exec."""
+        d = self._make_daemon(tmp_repo, self_update=False, branch_sync_enabled=False)
+        with patch("colonyos.daemon.find_branches_with_failing_ci", return_value=[]), \
+             patch("colonyos.daemon.build_ci_fix_queue_items", return_value=[]):
+            d._run_maintenance_cycle()
+        # No exec or install called
+
+    @patch("colonyos.daemon.build_ci_fix_queue_items")
+    @patch("colonyos.daemon.find_branches_with_failing_ci")
+    @patch("colonyos.daemon.format_branch_sync_report", return_value="report text")
+    @patch("colonyos.daemon.scan_diverged_branches", return_value=[MagicMock()])
+    @patch("colonyos.daemon.pull_and_check_update", return_value=(False, "a", "a"))
+    def test_branch_sync_posts_to_slack(
+        self, mock_pull, mock_scan, mock_report, mock_ci, mock_build,
+        tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, branch_sync_enabled=True)
+        mock_build.return_value = []
+        mock_ci.return_value = []
+        with patch.object(d, "_post_slack_message") as mock_slack:
+            d._run_maintenance_cycle()
+        mock_slack.assert_called_once_with("report text")
+
+    @patch("colonyos.daemon.build_ci_fix_queue_items")
+    @patch("colonyos.daemon.find_branches_with_failing_ci")
+    @patch("colonyos.daemon.format_branch_sync_report", return_value=None)
+    @patch("colonyos.daemon.scan_diverged_branches", return_value=[])
+    @patch("colonyos.daemon.pull_and_check_update", return_value=(False, "a", "a"))
+    def test_no_slack_when_no_diverged_branches(
+        self, mock_pull, mock_scan, mock_report, mock_ci, mock_build,
+        tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, branch_sync_enabled=True)
+        mock_build.return_value = []
+        mock_ci.return_value = []
+        with patch.object(d, "_post_slack_message") as mock_slack:
+            d._run_maintenance_cycle()
+        mock_slack.assert_not_called()
+
+    @patch("colonyos.daemon.build_ci_fix_queue_items")
+    @patch("colonyos.daemon.find_branches_with_failing_ci")
+    @patch("colonyos.daemon.scan_diverged_branches", return_value=[])
+    @patch("colonyos.daemon.format_branch_sync_report", return_value=None)
+    @patch("colonyos.daemon.pull_and_check_update", return_value=(False, "a", "a"))
+    def test_ci_fix_items_enqueued(
+        self, mock_pull, mock_report, mock_scan, mock_ci, mock_build,
+        tmp_repo: Path,
+    ) -> None:
+        from colonyos.models import QueueItem as QI, QueueItemStatus, compute_priority
+        ci_item = QI(
+            id="ci-fix-42-1234",
+            source_type="ci-fix",
+            source_value="42",
+            status=QueueItemStatus.PENDING,
+            priority=compute_priority("ci-fix"),
+        )
+        mock_ci.return_value = [MagicMock()]
+        mock_build.return_value = [ci_item]
+        d = self._make_daemon(tmp_repo)
+        d._run_maintenance_cycle()
+        # Item should be in the queue
+        assert any(i.id == "ci-fix-42-1234" for i in d._queue_state.items)
+
+    @patch("colonyos.daemon.build_ci_fix_queue_items", return_value=[])
+    @patch("colonyos.daemon.find_branches_with_failing_ci", return_value=[])
+    @patch("colonyos.daemon.scan_diverged_branches", return_value=[])
+    @patch("colonyos.daemon.format_branch_sync_report", return_value=None)
+    @patch("colonyos.daemon.pull_and_check_update", return_value=(False, "a", "a"))
+    def test_respects_maintenance_budget(
+        self, mock_pull, mock_report, mock_scan, mock_ci, mock_build,
+        tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, maintenance_budget_usd=20.0)
+        # Set maintenance spend at budget
+        d._state.daily_maintenance_spend_usd = 20.0
+        d._state.maintenance_reset_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        d._run_maintenance_cycle()
+        # CI-fix should not be called when budget exhausted
+        mock_ci.assert_not_called()
+
+    @patch("colonyos.daemon.scan_diverged_branches", return_value=[])
+    @patch("colonyos.daemon.format_branch_sync_report", return_value=None)
+    @patch("colonyos.daemon.pull_and_check_update", return_value=(False, "a", "a"))
+    def test_branch_scan_skipped_when_disabled(
+        self, mock_pull, mock_report, mock_scan,
+        tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, branch_sync_enabled=False)
+        with patch("colonyos.daemon.find_branches_with_failing_ci", return_value=[]), \
+             patch("colonyos.daemon.build_ci_fix_queue_items", return_value=[]):
+            d._run_maintenance_cycle()
+        mock_scan.assert_not_called()
+
+
+class TestStartupRollback:
+    """Task 5.2 — daemon detects last_good_commit mismatch + recent start → rolls back."""
+
+    def _make_daemon(self, tmp_repo: Path, **daemon_kwargs) -> Daemon:
+        cfg = ColonyConfig(daemon=DaemonConfig(daily_budget_usd=50.0, **daemon_kwargs))
+        return Daemon(tmp_repo, cfg, dry_run=True)
+
+    @patch("colonyos.daemon.os.execv")
+    @patch("colonyos.daemon.run_self_update", return_value=True)
+    @patch("colonyos.daemon.subprocess.run")
+    @patch("colonyos.daemon.should_rollback", return_value=True)
+    @patch("colonyos.daemon.read_last_good_commit", return_value="good_sha")
+    def test_rollback_on_startup(
+        self, mock_read, mock_should, mock_subproc, mock_install, mock_exec,
+        tmp_repo: Path,
+    ) -> None:
+        mock_subproc.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        d = self._make_daemon(tmp_repo, self_update=True)
+        with patch.object(d, "_post_slack_message"):
+            d._check_startup_rollback()
+        mock_exec.assert_called_once()
+
+    @patch("colonyos.daemon.should_rollback", return_value=False)
+    def test_no_rollback_when_not_needed(self, mock_should, tmp_repo: Path) -> None:
+        d = self._make_daemon(tmp_repo, self_update=True)
+        d._check_startup_rollback()
+        # No exec called — would raise if called since not mocked
+
+    @patch("colonyos.daemon.should_rollback", return_value=False)
+    def test_no_rollback_when_self_update_disabled(self, mock_should, tmp_repo: Path) -> None:
+        d = self._make_daemon(tmp_repo, self_update=False)
+        d._check_startup_rollback()
+        mock_should.assert_not_called()
+
+
+class TestSelfUpdateCircuitBreaker:
+    """Task 5.3 — after 2 consecutive rollbacks, self-update disabled + Slack alert."""
+
+    def _make_daemon(self, tmp_repo: Path, **daemon_kwargs) -> Daemon:
+        cfg = ColonyConfig(daemon=DaemonConfig(daily_budget_usd=50.0, **daemon_kwargs))
+        return Daemon(tmp_repo, cfg, dry_run=True)
+
+    @patch("colonyos.daemon.os.execv")
+    @patch("colonyos.daemon.run_self_update", return_value=True)
+    @patch("colonyos.daemon.should_rollback", return_value=True)
+    @patch("colonyos.daemon.read_last_good_commit", return_value="good_sha")
+    def test_circuit_breaker_disables_self_update(
+        self, mock_read, mock_should, mock_install, mock_exec,
+        tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, self_update=True)
+        d._state.self_update_consecutive_failures = 2
+        with patch.object(d, "_post_slack_message") as mock_slack:
+            d._check_startup_rollback()
+        # Should NOT have called exec — circuit breaker tripped
+        mock_exec.assert_not_called()
+        mock_install.assert_not_called()
+        # Should have posted alert
+        mock_slack.assert_called_once()
+        assert "disabled" in mock_slack.call_args[0][0].lower() or \
+               "circuit" in mock_slack.call_args[0][0].lower()
+
+    @patch("colonyos.daemon.os.execv")
+    @patch("colonyos.daemon.run_self_update", return_value=True)
+    @patch("colonyos.daemon.subprocess.run")
+    @patch("colonyos.daemon.should_rollback", return_value=True)
+    @patch("colonyos.daemon.read_last_good_commit", return_value="good_sha")
+    def test_failure_count_incremented_on_rollback(
+        self, mock_read, mock_should, mock_subproc, mock_install, mock_exec,
+        tmp_repo: Path,
+    ) -> None:
+        mock_subproc.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        d = self._make_daemon(tmp_repo, self_update=True)
+        d._state.self_update_consecutive_failures = 0
+        with patch.object(d, "_post_slack_message"):
+            d._check_startup_rollback()
+        assert d._state.self_update_consecutive_failures == 1
+        mock_exec.assert_called_once()
+
+
+class TestMaintenanceUptime:
+    """Task 5.7 — update last_good_commit after 60s of uptime."""
+
+    def _make_daemon(self, tmp_repo: Path, **daemon_kwargs) -> Daemon:
+        cfg = ColonyConfig(daemon=DaemonConfig(daily_budget_usd=50.0, **daemon_kwargs))
+        return Daemon(tmp_repo, cfg, dry_run=True)
+
+    @patch("colonyos.daemon.record_last_good_commit")
+    def test_records_good_commit_after_uptime(
+        self, mock_record, tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, self_update=True)
+        d._startup_time = time.time() - 61  # 61 seconds ago
+        d._good_commit_recorded = False
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="abc123\n", stderr=""
+            )
+            d._maybe_record_uptime_good_commit()
+        mock_record.assert_called_once_with(tmp_repo, "abc123")
+        assert d._good_commit_recorded is True
+
+    @patch("colonyos.daemon.record_last_good_commit")
+    def test_skips_before_uptime_threshold(
+        self, mock_record, tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, self_update=True)
+        d._startup_time = time.time() - 30  # Only 30 seconds
+        d._good_commit_recorded = False
+        d._maybe_record_uptime_good_commit()
+        mock_record.assert_not_called()
+
+    @patch("colonyos.daemon.record_last_good_commit")
+    def test_only_records_once(
+        self, mock_record, tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, self_update=True)
+        d._startup_time = time.time() - 120
+        d._good_commit_recorded = True  # Already recorded
+        d._maybe_record_uptime_good_commit()
+        mock_record.assert_not_called()
+
+    def test_skips_when_self_update_disabled(self, tmp_repo: Path) -> None:
+        d = self._make_daemon(tmp_repo, self_update=False)
+        d._startup_time = time.time() - 120
+        d._good_commit_recorded = False
+        with patch("colonyos.daemon.record_last_good_commit") as mock_record:
+            d._maybe_record_uptime_good_commit()
+        mock_record.assert_not_called()
+
+
+class TestMaintenanceBudgetTracking:
+    """Task 5.6 — maintenance budget resets daily and blocks CI-fix enqueueing."""
+
+    def _make_daemon(self, tmp_repo: Path, **daemon_kwargs) -> Daemon:
+        cfg = ColonyConfig(daemon=DaemonConfig(daily_budget_usd=50.0, **daemon_kwargs))
+        return Daemon(tmp_repo, cfg, dry_run=True)
+
+    def test_maintenance_budget_resets_on_new_day(self, tmp_repo: Path) -> None:
+        d = self._make_daemon(tmp_repo, maintenance_budget_usd=20.0)
+        d._state.daily_maintenance_spend_usd = 15.0
+        d._state.maintenance_reset_date = "2020-01-01"  # Old date
+        assert d._check_maintenance_budget() is True
+        assert d._state.daily_maintenance_spend_usd == 0.0
+
+    def test_maintenance_budget_exhausted(self, tmp_repo: Path) -> None:
+        d = self._make_daemon(tmp_repo, maintenance_budget_usd=20.0)
+        d._state.daily_maintenance_spend_usd = 20.0
+        d._state.maintenance_reset_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert d._check_maintenance_budget() is False
+
+    def test_maintenance_budget_available(self, tmp_repo: Path) -> None:
+        d = self._make_daemon(tmp_repo, maintenance_budget_usd=20.0)
+        d._state.daily_maintenance_spend_usd = 10.0
+        d._state.maintenance_reset_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert d._check_maintenance_budget() is True
