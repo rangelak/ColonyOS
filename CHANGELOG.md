@@ -1,5 +1,24 @@
 # Changelog
 
+## 20260402_004500 — Auto-Pull Latest on Branch Switch
+
+Adds automatic `git pull --ff-only` at all pipeline entry points so that every new run starts from the latest remote state, eliminating stale-base merge conflicts and wasted CI minutes. A shared `pull_branch()` helper in `recovery.py` is used consistently across `restore_to_branch()`, orchestrator base-branch checkout, preflight checks, and `_ensure_on_main()`. Offline mode and thread-fix paths are correctly excluded.
+
+**Modified:**
+- `src/colonyos/recovery.py` — Added `pull_branch()` helper; integrated into `restore_to_branch()`
+- `src/colonyos/orchestrator.py` — Auto-pull at base-branch checkout and preflight check
+- `src/colonyos/cli.py` — Refactored `_ensure_on_main()` to use shared `pull_branch()` helper
+
+**Tests:**
+- `tests/test_recovery.py` — Tests for `pull_branch()` and `restore_to_branch()` pull integration
+- `tests/test_orchestrator.py` — Tests for base-branch and preflight pull behavior
+- `tests/test_cli.py` — Tests for refactored `_ensure_on_main()`
+- `tests/test_pull_branch_integration.py` — End-to-end integration tests
+- `tests/test_preflight.py` — Updated preflight tests
+
+**PRD:** `cOS_prds/20260401_235107_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260401_235107_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260401_173000 — Stuck Daemon Detection and Auto-Recovery
 
 Adds an in-process watchdog thread that detects when a pipeline has stalled (no heartbeat progress beyond a configurable threshold) and automatically recovers: canceling the stuck pipeline, marking the item as FAILED, alerting operators via Slack, and resuming the main loop. Also enriches `/healthz` with pipeline duration and stall status, adds `started_at` to `QueueItem`, and bumps the schema to v5.
