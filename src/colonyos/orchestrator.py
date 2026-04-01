@@ -1697,6 +1697,41 @@ def _extract_verdict(result_text: str) -> str:
     return match.group(1).upper() if match else "UNKNOWN"
 
 
+def _verify_detected_failures(verify_output: str) -> bool:
+    """Return True if the verify agent output indicates test failures.
+
+    Looks for common failure indicators from pytest, npm test, cargo test, etc.
+    Defaults to False (tests passed) when the output is ambiguous or empty.
+    """
+    if not verify_output:
+        return False
+    lower = verify_output.lower()
+    failure_patterns = [
+        "failed",
+        "failure",
+        "error",
+        "failing",
+        "tests failed",
+        "test failed",
+    ]
+    pass_patterns = [
+        "all tests passed",
+        "all tests pass",
+        "0 failed",
+        "0 failures",
+        "passed",
+    ]
+    # Check for explicit pass statements first
+    for pat in pass_patterns:
+        if pat in lower:
+            # But make sure there aren't also failures mentioned
+            has_failure = any(fp in lower for fp in failure_patterns)
+            if not has_failure:
+                return False
+    # Check for failure indicators
+    return any(fp in lower for fp in failure_patterns)
+
+
 def _build_fix_prompt(
     config: ColonyConfig,
     prd_path: str,
@@ -1752,6 +1787,50 @@ def _build_ci_fix_prompt(
     user = (
         f"Fix the CI failures on branch `{branch_name}`. "
         f"This is attempt {fix_attempt} of {max_retries}."
+    )
+    return system, user
+
+
+def _build_verify_prompt(
+    config: ColonyConfig,
+    branch_name: str,
+    change_summary: str = "",
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the verify (test-run) phase."""
+    verify_template = _load_instruction("verify.md")
+
+    system = _format_base(config) + "\n\n" + verify_template.format(
+        branch_name=branch_name,
+        change_summary=change_summary or "No summary available.",
+    )
+
+    user = (
+        f"Run the full test suite for this project on branch `{branch_name}`. "
+        f"Report whether all tests pass or list the failures."
+    )
+    return system, user
+
+
+def _build_verify_fix_prompt(
+    config: ColonyConfig,
+    branch_name: str,
+    test_failure_output: str,
+    fix_attempt: int,
+    max_fix_attempts: int,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the verify-fix phase."""
+    fix_template = _load_instruction("verify_fix.md")
+
+    system = _format_base(config) + "\n\n" + fix_template.format(
+        branch_name=branch_name,
+        test_failure_output=test_failure_output,
+        fix_attempt=fix_attempt,
+        max_fix_attempts=max_fix_attempts,
+    )
+
+    user = (
+        f"Fix the test failures on branch `{branch_name}`. "
+        f"This is fix attempt {fix_attempt} of {max_fix_attempts}."
     )
     return system, user
 
@@ -4900,6 +4979,125 @@ def _run_pipeline(
 
         # --- Learn Phase ---
         _run_learn_phase(config, repo_root, log, prompt, _make_ui, memory_store=memory_store)
+
+        # --- Verify Phase (pre-delivery test suite) ---
+        _touch_heartbeat(repo_root)
+        if "verify" in skip_phases:
+            _log("Skipping verify phase (already completed in previous run)")
+        elif config.phases.verify:
+            verify_ui = _make_ui()
+            if verify_ui is not None:
+                verify_ui.phase_header(
+                    "Verify (tests)",
+                    config.budget.per_phase,
+                    config.get_model(Phase.VERIFY),
+                )
+            else:
+                _log("=== Verify Phase (tests) ===")
+
+            verify_tools = ["Read", "Bash", "Glob", "Grep"]
+            verify_passed = False
+
+            for attempt in range(config.verify.max_fix_attempts + 1):
+                # Budget guard (same pattern as review loop)
+                cost_so_far = sum(
+                    p.cost_usd for p in log.phases if p.cost_usd is not None
+                )
+                remaining = config.budget.per_run - cost_so_far
+                if remaining < config.budget.per_phase:
+                    _log(
+                        f"Verify loop: budget exhausted "
+                        f"({remaining:.2f} remaining). Blocking delivery."
+                    )
+                    break
+
+                # Run verify agent (read-only)
+                verify_system, verify_user = _build_verify_prompt(
+                    config, branch_name,
+                )
+                verify_result = run_phase_sync(
+                    Phase.VERIFY,
+                    verify_user,
+                    cwd=repo_root,
+                    system_prompt=verify_system,
+                    model=config.get_model(Phase.VERIFY),
+                    budget_usd=config.budget.per_phase,
+                    allowed_tools=verify_tools,
+                    ui=verify_ui if attempt == 0 else _make_ui(),
+                    retry_config=config.retry,
+                    timeout_seconds=config.budget.phase_timeout_seconds,
+                )
+                _append_phase(verify_result)
+                _capture_phase_memory(memory_store, verify_result, log.run_id, config)
+
+                # Determine if tests passed by checking the output
+                verify_output = verify_result.artifacts.get("result", "")
+                tests_failed = _verify_detected_failures(verify_output)
+
+                if not tests_failed:
+                    _log("  Verify: all tests passed")
+                    verify_passed = True
+                    break
+
+                _log(f"  Verify: test failures detected (attempt {attempt + 1}/{config.verify.max_fix_attempts + 1})")
+
+                # If we've used all fix attempts, don't try to fix again
+                if attempt >= config.verify.max_fix_attempts:
+                    break
+
+                # Budget guard before fix
+                cost_so_far = sum(
+                    p.cost_usd for p in log.phases if p.cost_usd is not None
+                )
+                remaining = config.budget.per_run - cost_so_far
+                if remaining < config.budget.per_phase:
+                    _log(
+                        f"Verify loop: budget exhausted before fix "
+                        f"({remaining:.2f} remaining). Blocking delivery."
+                    )
+                    break
+
+                # Run fix agent (full tools)
+                fix_system, fix_user = _build_verify_fix_prompt(
+                    config,
+                    branch_name,
+                    verify_output,
+                    fix_attempt=attempt + 1,
+                    max_fix_attempts=config.verify.max_fix_attempts,
+                )
+                fix_ui = _make_ui()
+                if fix_ui is not None:
+                    fix_ui.phase_header(
+                        f"Verify Fix (attempt {attempt + 1})",
+                        config.budget.per_phase,
+                        config.get_model(Phase.FIX),
+                    )
+                else:
+                    _log(f"  Running verify-fix agent (attempt {attempt + 1})...")
+                fix_result = run_phase_sync(
+                    Phase.FIX,
+                    fix_user,
+                    cwd=repo_root,
+                    system_prompt=fix_system,
+                    model=config.get_model(Phase.FIX),
+                    budget_usd=config.budget.per_phase,
+                    ui=fix_ui,
+                    retry_config=config.retry,
+                    timeout_seconds=config.budget.phase_timeout_seconds,
+                )
+                _append_phase(fix_result)
+                _capture_phase_memory(memory_store, fix_result, log.run_id, config)
+
+                if not fix_result.success:
+                    _log(f"  Verify-fix agent failed: {fix_result.error}")
+                    break
+
+            if not verify_passed:
+                _fail_run_log(
+                    repo_root, log,
+                    "Verify phase: tests still failing after all fix attempts. Delivery blocked.",
+                )
+                return log
 
         # --- Deliver Phase ---
         _touch_heartbeat(repo_root)
