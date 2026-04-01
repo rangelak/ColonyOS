@@ -719,6 +719,8 @@ class Daemon:
             item.started_at = datetime.now(timezone.utc).isoformat()
             self._pipeline_running = True
             self._pipeline_started_at = time.monotonic()
+            # Reset stall flag — it stays True after recovery until the next
+            # pipeline run so /healthz can report the stall that just happened.
             self._pipeline_stalled = False
             self._current_running_item = item
             self._persist_queue()
@@ -1728,8 +1730,6 @@ class Daemon:
             return
 
         stall_seconds = self.daemon_config.watchdog_stall_seconds
-        if stall_seconds is None:
-            return
 
         # Check 1: Has the pipeline been running longer than the threshold?
         pipeline_started = self._pipeline_started_at
