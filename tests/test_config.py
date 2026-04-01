@@ -1776,3 +1776,126 @@ class TestPRSyncConfig:
         assert DEFAULTS["daemon"]["pr_sync"]["enabled"] is False
         assert DEFAULTS["daemon"]["pr_sync"]["interval_minutes"] == 60
         assert DEFAULTS["daemon"]["pr_sync"]["max_sync_failures"] == 3
+
+
+class TestSlackDailyThreadConfig:
+    """Tests for SlackConfig daily thread fields: notification_mode,
+    daily_thread_hour, daily_thread_timezone."""
+
+    def test_defaults(self) -> None:
+        config = SlackConfig()
+        assert config.notification_mode == "daily"
+        assert config.daily_thread_hour == 8
+        assert config.daily_thread_timezone == "UTC"
+
+    def test_per_item_mode(self) -> None:
+        config = SlackConfig(notification_mode="per_item")
+        assert config.notification_mode == "per_item"
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "slack": {
+                    "enabled": True,
+                    "channels": ["C12345"],
+                    "notification_mode": "per_item",
+                    "daily_thread_hour": 9,
+                    "daily_thread_timezone": "America/New_York",
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.notification_mode == "per_item"
+        assert config.slack.daily_thread_hour == 9
+        assert config.slack.daily_thread_timezone == "America/New_York"
+
+    def test_daily_mode_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "slack": {
+                    "enabled": True,
+                    "channels": ["C12345"],
+                    "notification_mode": "daily",
+                    "daily_thread_hour": 0,
+                    "daily_thread_timezone": "Europe/London",
+                },
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.notification_mode == "daily"
+        assert config.slack.daily_thread_hour == 0
+        assert config.slack.daily_thread_timezone == "Europe/London"
+
+    def test_invalid_notification_mode_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"notification_mode": "weekly"}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Invalid slack notification_mode"):
+            load_config(tmp_repo)
+
+    def test_daily_thread_hour_negative_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"daily_thread_hour": -1}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="daily_thread_hour must be 0-23"):
+            load_config(tmp_repo)
+
+    def test_daily_thread_hour_24_raises(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"daily_thread_hour": 24}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="daily_thread_hour must be 0-23"):
+            load_config(tmp_repo)
+
+    def test_invalid_timezone_falls_back_to_utc(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"daily_thread_timezone": "Not/A/Timezone"}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.daily_thread_timezone == "UTC"
+
+    def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                channels=["C123"],
+                notification_mode="per_item",
+                daily_thread_hour=14,
+                daily_thread_timezone="Asia/Tokyo",
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.slack.notification_mode == "per_item"
+        assert loaded.slack.daily_thread_hour == 14
+        assert loaded.slack.daily_thread_timezone == "Asia/Tokyo"
+
+    def test_defaults_when_omitted_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"enabled": True, "channels": ["C123"]}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.notification_mode == "daily"
+        assert config.slack.daily_thread_hour == 8
+        assert config.slack.daily_thread_timezone == "UTC"

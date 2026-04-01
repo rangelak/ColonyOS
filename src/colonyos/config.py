@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -277,6 +278,12 @@ class SlackConfig:
     max_consecutive_failures: int = 3
     circuit_breaker_cooldown_minutes: int = 30
     max_fix_rounds_per_thread: int = 3
+    notification_mode: str = "daily"
+    daily_thread_hour: int = 8
+    daily_thread_timezone: str = "UTC"
+
+
+_VALID_NOTIFICATION_MODES: frozenset[str] = frozenset({"daily", "per_item"})
 
 
 @dataclass
@@ -437,6 +444,29 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
     enabled = bool(raw.get("enabled", False))
     auto_approve = bool(raw.get("auto_approve", False))
 
+    notification_mode = str(raw.get("notification_mode", "daily"))
+    if notification_mode not in _VALID_NOTIFICATION_MODES:
+        raise ValueError(
+            f"Invalid slack notification_mode '{notification_mode}'. "
+            f"Valid options: {sorted(_VALID_NOTIFICATION_MODES)}"
+        )
+
+    daily_thread_hour = int(raw.get("daily_thread_hour", 8))
+    if daily_thread_hour < 0 or daily_thread_hour > 23:
+        raise ValueError(
+            f"slack.daily_thread_hour must be 0-23, got {daily_thread_hour}"
+        )
+
+    daily_thread_timezone = str(raw.get("daily_thread_timezone", "UTC"))
+    try:
+        ZoneInfo(daily_thread_timezone)
+    except (KeyError, Exception):
+        logger.warning(
+            "Invalid timezone '%s', falling back to UTC",
+            daily_thread_timezone,
+        )
+        daily_thread_timezone = "UTC"
+
     return SlackConfig(
         enabled=enabled,
         channels=list(raw.get("channels", [])),
@@ -451,6 +481,9 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
         max_consecutive_failures=max_consecutive_failures,
         circuit_breaker_cooldown_minutes=circuit_breaker_cooldown_minutes,
         max_fix_rounds_per_thread=max_fix_rounds_per_thread,
+        notification_mode=notification_mode,
+        daily_thread_hour=daily_thread_hour,
+        daily_thread_timezone=daily_thread_timezone,
     )
 
 
@@ -1093,6 +1126,9 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "max_consecutive_failures": config.slack.max_consecutive_failures,
             "circuit_breaker_cooldown_minutes": config.slack.circuit_breaker_cooldown_minutes,
             "max_fix_rounds_per_thread": config.slack.max_fix_rounds_per_thread,
+            "notification_mode": config.slack.notification_mode,
+            "daily_thread_hour": config.slack.daily_thread_hour,
+            "daily_thread_timezone": config.slack.daily_thread_timezone,
         }
         if config.slack.triage_scope:
             slack_data["triage_scope"] = config.slack.triage_scope
