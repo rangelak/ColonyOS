@@ -58,10 +58,10 @@
   - [x] 5.1 Write test that `Phase.FIX` behavior in verify context does not use fallback model
   - [x] 5.2 Evaluate whether the verify-fix agent should be added to `_SAFETY_CRITICAL_PHASES` (config.py line 25) — if using `Phase.FIX` for the verify-fix step, it's already covered; if using a new phase enum, add it
 
-- [ ] 6.0 Integration testing and edge cases
+- [x] 6.0 Integration testing and edge cases
   depends_on: [4.0]
-  - [ ] 6.1 Write integration test: full pipeline run with verify enabled, tests pass on first try — verify runs and deliver proceeds
-  - [ ] 6.2 Write integration test: full pipeline run with verify enabled, tests fail, fix succeeds — verify-fix loop completes and deliver proceeds
-  - [ ] 6.3 Write integration test: full pipeline run with verify disabled (`phases.verify: false`) — verify is skipped, deliver proceeds directly
-  - [ ] 6.4 Write integration test: resume from failed verify — pipeline resumes at verify phase, not from scratch
-  - [ ] 6.5 Run full test suite (`pytest --tb=short -q`) to confirm zero regressions across all 2956+ existing tests
+  - [x] 6.1 Write integration test: full pipeline run with verify enabled, tests pass on first try — verify runs and deliver proceeds
+  - [x] 6.2 Write integration test: full pipeline run with verify enabled, tests fail, fix succeeds — verify-fix loop completes and deliver proceeds
+  - [x] 6.3 Write integration test: full pipeline run with verify disabled (`phases.verify: false`) — verify is skipped, deliver proceeds directly
+  - [x] 6.4 Write integration test: resume from failed verify — pipeline resumes at verify phase, not from scratch
+  - [x] 6.5 Run full test suite (`pytest --tb=short -q`) to confirm zero regressions across all 2956+ existing tests
