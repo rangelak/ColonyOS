@@ -239,6 +239,57 @@ class TestTranscriptView:
 
 
 @pytest.mark.asyncio
+class TestAutoScrollBehavior:
+    """Tests for task 2.0: auto-scroll behavior with RichLog built-in disabled."""
+
+    async def test_richlog_auto_scroll_disabled(self, require_tui: None) -> None:
+        """RichLog's built-in auto_scroll must be False so it doesn't fight our custom logic."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            assert tv.auto_scroll is False
+
+    async def test_custom_auto_scroll_starts_true(self, require_tui: None) -> None:
+        """Custom _auto_scroll flag should start True (follow output by default)."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            assert tv._auto_scroll is True
+
+    async def test_no_forced_scroll_when_auto_scroll_false(self, require_tui: None) -> None:
+        """When _auto_scroll is False, writing content should not scroll to end."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv._auto_scroll = False
+            initial_scroll = tv.scroll_y
+            tv.append_tool_line("Read", "/some/file.py")
+            # scroll_y should not have changed since _auto_scroll is off
+            assert tv.scroll_y == initial_scroll
+
+    async def test_scroll_reengages_near_bottom(self, require_tui: None) -> None:
+        """Auto-scroll should re-engage when user scrolls within 3 lines of bottom."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv._auto_scroll = False
+            # Simulate being near the bottom: max_scroll - 2
+            max_scroll = tv.virtual_size.height - tv.size.height
+            if max_scroll > 0:
+                tv.scroll_y = max_scroll - 2
+                tv.on_scroll_y()
+                assert tv._auto_scroll is True
+
+    async def test_programmatic_scroll_flag_cleared_in_on_scroll_y(self, require_tui: None) -> None:
+        """_pending_programmatic_clear should cause on_scroll_y to clear the flag and skip the check."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv._auto_scroll = True
+            tv._programmatic_scroll = True
+            tv._pending_programmatic_clear = True
+            tv.on_scroll_y()
+            # Flag should be cleared, and _auto_scroll should remain unchanged
+            assert tv._programmatic_scroll is False
+            assert tv._auto_scroll is True
+
+
+@pytest.mark.asyncio
 class TestTranscriptViewCSS:
     """Verify CSS properties are correctly applied to TranscriptView."""
 

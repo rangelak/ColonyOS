@@ -40,29 +40,46 @@ class TranscriptView(RichLog):
     # Layout CSS is defined in APP_CSS (styles.py) — no DEFAULT_CSS needed.
 
     def __init__(self, **kwargs: object) -> None:
-        # RichLog constructor args
-        super().__init__(highlight=False, markup=True, wrap=True, **kwargs)
+        # Disable RichLog's built-in auto_scroll so our custom _auto_scroll
+        # is the sole scroll controller (FR-2.1).
+        super().__init__(highlight=False, markup=True, wrap=True, auto_scroll=False, **kwargs)
         self._auto_scroll = True
         self._programmatic_scroll: bool = False
+        self._pending_programmatic_clear: bool = False
 
     # -- scroll tracking -----------------------------------------------------
 
+    # Number of lines from the bottom within which auto-scroll re-engages.
+    _SCROLL_REENGAGE_THRESHOLD = 3
+
     def on_scroll_y(self) -> None:
         """Track whether the user has scrolled away from the bottom."""
+        # Clear the programmatic-scroll flag asynchronously: the flag was
+        # set before scroll_end() but on_scroll_y fires on the next event-
+        # loop tick, so we clear it here instead of synchronously (FR-2.3).
+        if self._pending_programmatic_clear:
+            self._programmatic_scroll = False
+            self._pending_programmatic_clear = False
+            return
         if self._programmatic_scroll:
             return
         max_scroll = self.virtual_size.height - self.size.height
         if max_scroll <= 0:
             self._auto_scroll = True
         else:
-            self._auto_scroll = self.scroll_y >= max_scroll
+            # Re-engage auto-scroll when within a small threshold of the
+            # bottom so users don't have to hit the exact last pixel (FR-2.2).
+            self._auto_scroll = self.scroll_y >= max_scroll - self._SCROLL_REENGAGE_THRESHOLD
 
     def _scroll_to_end(self) -> None:
         """Scroll to the bottom if auto-scroll is active."""
         if self._auto_scroll:
             self._programmatic_scroll = True
             self.scroll_end(animate=False)
-            self._programmatic_scroll = False
+            # Don't clear _programmatic_scroll synchronously — scroll_end
+            # posts an async message.  Set a pending flag so on_scroll_y
+            # clears it on the next tick (FR-2.3).
+            self._pending_programmatic_clear = True
 
     # -- public API ----------------------------------------------------------
 

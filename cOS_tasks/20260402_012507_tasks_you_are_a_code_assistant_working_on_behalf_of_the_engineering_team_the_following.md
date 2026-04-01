@@ -17,12 +17,12 @@
   - [x] 1.2 In `src/colonyos/tui/styles.py`: change `TranscriptView RichLog` selector to `TranscriptView` so padding and scrollbar-size are applied to the widget itself (it IS a RichLog, not a parent of one)
   - [x] 1.3 In `src/colonyos/tui/styles.py`: add `overflow: hidden;` to the `Screen` CSS rule to prevent the Screen from creating a second scrollbar
 
-- [ ] 2.0 Fix auto-scroll behavior: disable RichLog built-in auto_scroll
+- [x] 2.0 Fix auto-scroll behavior: disable RichLog built-in auto_scroll
   depends_on: []
-  - [ ] 2.1 Write tests in `tests/tui/test_transcript.py`: verify `TranscriptView` initializes with `RichLog.auto_scroll == False`; verify custom `_auto_scroll` starts as `True`; verify writing content does not force scroll when `_auto_scroll` is `False`
-  - [ ] 2.2 In `src/colonyos/tui/widgets/transcript.py` `__init__`: pass `auto_scroll=False` to `super().__init__()` so the base class's built-in auto-scroll is disabled
-  - [ ] 2.3 In `src/colonyos/tui/widgets/transcript.py` `on_scroll_y`: add a 3-line tolerance threshold so auto-scroll re-engages when user scrolls near the bottom (`self.scroll_y >= max_scroll - 3` instead of `self.scroll_y >= max_scroll`)
-  - [ ] 2.4 Fix `_programmatic_scroll` flag timing: instead of clearing the flag synchronously after `scroll_end()`, set a `_pending_programmatic_clear` flag and clear `_programmatic_scroll` at the start of the next `on_scroll_y` call, ensuring the guard works correctly with async scroll events
+  - [x] 2.1 Write tests in `tests/tui/test_transcript.py`: verify `TranscriptView` initializes with `RichLog.auto_scroll == False`; verify custom `_auto_scroll` starts as `True`; verify writing content does not force scroll when `_auto_scroll` is `False`
+  - [x] 2.2 In `src/colonyos/tui/widgets/transcript.py` `__init__`: pass `auto_scroll=False` to `super().__init__()` so the base class's built-in auto-scroll is disabled
+  - [x] 2.3 In `src/colonyos/tui/widgets/transcript.py` `on_scroll_y`: add a 3-line tolerance threshold so auto-scroll re-engages when user scrolls near the bottom (`self.scroll_y >= max_scroll - 3` instead of `self.scroll_y >= max_scroll`)
+  - [x] 2.4 Fix `_programmatic_scroll` flag timing: instead of clearing the flag synchronously after `scroll_end()`, set a `_pending_programmatic_clear` flag and clear `_programmatic_scroll` at the start of the next `on_scroll_y` call, ensuring the guard works correctly with async scroll events
 
 - [ ] 3.0 Add "new content below" indicator
   depends_on: [2.0]
