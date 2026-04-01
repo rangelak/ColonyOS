@@ -18,10 +18,10 @@
   - [x] 1.1 Write tests: assert `"all"` is accepted by `_parse_slack_config()` without raising `ValueError`; assert existing modes still work; assert invalid modes still raise
   - [x] 1.2 Add `"all"` to `_VALID_TRIGGER_MODES` frozenset in `src/colonyos/config.py` line 390
 
-- [ ] 2.0 Handle prompt extraction for non-mention messages (no dependencies)
+- [x] 2.0 Handle prompt extraction for non-mention messages (no dependencies)
   depends_on: []
-  - [ ] 2.1 Write tests: given a message without `<@BOT_ID>` prefix, the full text is used as the prompt; given a message with `<@BOT_ID>` prefix, `extract_prompt_from_mention()` behavior is preserved
-  - [ ] 2.2 Add a helper function or update `_handle_event()` logic in `src/colonyos/slack_queue.py` to detect whether the message contains a bot mention (`f"<@{bot_user_id}>"` in text) and use `extract_prompt_from_mention()` if yes, or raw text if no
+  - [x] 2.1 Write tests: given a message without `<@BOT_ID>` prefix, the full text is used as the prompt; given a message with `<@BOT_ID>` prefix, `extract_prompt_from_mention()` behavior is preserved
+  - [x] 2.2 Add a helper function or update `_handle_event()` logic in `src/colonyos/slack_queue.py` to detect whether the message contains a bot mention (`f"<@{bot_user_id}>"` in text) and use `extract_prompt_from_mention()` if yes, or raw text if no
 
 - [ ] 3.0 Bind `message` event in `register()` when `trigger_mode == "all"` (depends on 1.0)
   depends_on: [1.0]

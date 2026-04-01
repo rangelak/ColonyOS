@@ -208,7 +208,7 @@ def test_handle_event_rejects_duplicate_while_pending(tmp_path: Path) -> None:
     }
 
     with patch("colonyos.slack_queue.should_process_message", return_value=True), \
-         patch("colonyos.slack_queue.extract_prompt_from_mention", return_value="Add brew installation support"), \
+         patch("colonyos.slack_queue.extract_prompt_text", return_value="Add brew installation support"), \
          patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
          patch.object(engine, "_ensure_triage_worker"), \
          patch("colonyos.slack_queue.react_to_message") as mock_react:
@@ -489,7 +489,7 @@ def test_triage_error_message_rejected_by_handle_event(tmp_path: Path) -> None:
     }
 
     with patch("colonyos.slack_queue.should_process_message", return_value=True), \
-         patch("colonyos.slack_queue.extract_prompt_from_mention", return_value="Add brew installation support"), \
+         patch("colonyos.slack_queue.extract_prompt_text", return_value="Add brew installation support"), \
          patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
          patch.object(engine, "_ensure_triage_worker") as mock_ensure, \
          patch("colonyos.slack_queue.react_to_message"):
@@ -519,7 +519,7 @@ def test_increment_hourly_count_called_during_handle_event(tmp_path: Path) -> No
     }
 
     with patch("colonyos.slack_queue.should_process_message", return_value=True), \
-         patch("colonyos.slack_queue.extract_prompt_from_mention", return_value="Add brew installation support"), \
+         patch("colonyos.slack_queue.extract_prompt_text", return_value="Add brew installation support"), \
          patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
          patch("colonyos.slack_queue.increment_hourly_count") as mock_increment, \
          patch.object(engine, "_ensure_triage_worker"), \
@@ -588,7 +588,7 @@ def test_eager_increment_makes_rate_limit_reject_burst(tmp_path: Path) -> None:
     event2 = {"channel": "C1", "ts": "41.0", "user": "U2", "text": "<@UBOT> second request"}
 
     with patch("colonyos.slack_queue.should_process_message", return_value=True), \
-         patch("colonyos.slack_queue.extract_prompt_from_mention", side_effect=lambda t, _: t.replace("<@UBOT> ", "")), \
+         patch("colonyos.slack_queue.extract_prompt_text", side_effect=lambda t, _: t.replace("<@UBOT> ", "")), \
          patch.object(engine, "_ensure_triage_worker"), \
          patch("colonyos.slack_queue.react_to_message"), \
          patch("colonyos.slack_queue.post_message") as mock_post:
@@ -674,7 +674,7 @@ def test_integration_triage_completes_while_pipeline_holds_agent_lock(tmp_path: 
         }
 
         with patch("colonyos.slack_queue.should_process_message", return_value=True), \
-             patch("colonyos.slack_queue.extract_prompt_from_mention", return_value="Add dark mode toggle"), \
+             patch("colonyos.slack_queue.extract_prompt_text", return_value="Add dark mode toggle"), \
              patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
              patch("colonyos.slack_queue.react_to_message") as mock_react, \
              patch("colonyos.slack_queue.triage_message", side_effect=_mock_triage), \
@@ -707,3 +707,56 @@ def test_integration_triage_completes_while_pipeline_holds_agent_lock(tmp_path: 
         assert watch_state.is_processed("C1", "100.0")
     finally:
         agent_lock.release()
+
+
+# ---------------------------------------------------------------------------
+# Task 2.0: Prompt extraction for non-mention messages
+# ---------------------------------------------------------------------------
+
+
+def test_handle_event_uses_full_text_for_non_mention_message(tmp_path: Path) -> None:
+    """When a message has no bot mention, _handle_event passes the full text as prompt."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+    event = {
+        "channel": "C1",
+        "ts": "50.0",
+        "user": "U1",
+        "text": "fix the flaky login test",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message"):
+        engine._handle_event(event, client)
+
+    assert engine._triage_queue.qsize() == 1
+    task = engine._triage_queue.get_nowait()
+    assert task["prompt_text"] == "fix the flaky login test"
+
+
+def test_handle_event_strips_mention_for_mention_message(tmp_path: Path) -> None:
+    """When a message has a bot mention, _handle_event strips it from the prompt."""
+    queue_state = QueueState(queue_id="q")
+    watch_state = SlackWatchState(watch_id="w")
+    engine = _make_engine(tmp_path, queue_state, watch_state)
+    client = MagicMock()
+    event = {
+        "channel": "C1",
+        "ts": "51.0",
+        "user": "U1",
+        "text": "<@UBOT> fix the flaky login test",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message"):
+        engine._handle_event(event, client)
+
+    assert engine._triage_queue.qsize() == 1
+    task = engine._triage_queue.get_nowait()
+    assert task["prompt_text"] == "fix the flaky login test"

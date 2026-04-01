@@ -25,6 +25,7 @@ from colonyos.slack import (
     check_rate_limit,
     extract_base_branch,
     extract_prompt_from_mention,
+    extract_prompt_text,
     find_parent_queue_item,
     format_fix_acknowledgment,
     format_fix_error,
@@ -176,7 +177,7 @@ class SlackQueueEngine:
         ts = event.get("ts", "")
         user = event.get("user", "unknown")
         raw_text = event.get("text", "")
-        prompt_text = extract_prompt_from_mention(raw_text, self.bot_user_id)
+        prompt_text = extract_prompt_text(raw_text, self.bot_user_id)
         if not prompt_text.strip():
             return
 
