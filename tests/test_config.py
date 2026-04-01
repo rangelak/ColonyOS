@@ -1945,3 +1945,119 @@ class TestSlackDailyThreadConfig:
         assert config.slack.notification_mode == "daily"
         assert config.slack.daily_thread_hour == 8
         assert config.slack.daily_thread_timezone == "UTC"
+
+
+class TestDaemonMaintenanceConfig:
+    """Tests for daemon maintenance configuration fields (task 1.1)."""
+
+    def test_default_self_update_is_false(self) -> None:
+        cfg = DaemonConfig()
+        assert cfg.self_update is False
+
+    def test_default_self_update_command(self) -> None:
+        cfg = DaemonConfig()
+        assert cfg.self_update_command == "uv pip install ."
+
+    def test_default_maintenance_budget_usd(self) -> None:
+        cfg = DaemonConfig()
+        assert cfg.maintenance_budget_usd == 20.0
+
+    def test_default_max_ci_fix_items(self) -> None:
+        cfg = DaemonConfig()
+        assert cfg.max_ci_fix_items == 2
+
+    def test_default_branch_sync_enabled(self) -> None:
+        cfg = DaemonConfig()
+        assert cfg.branch_sync_enabled is True
+
+    def test_defaults_in_defaults_dict(self) -> None:
+        d = DEFAULTS["daemon"]
+        assert d["self_update"] is False
+        assert d["self_update_command"] == "uv pip install ."
+        assert d["maintenance_budget_usd"] == 20.0
+        assert d["max_ci_fix_items"] == 2
+        assert d["branch_sync_enabled"] is True
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "daemon": {
+                    "self_update": True,
+                    "self_update_command": "pip install -e .",
+                    "maintenance_budget_usd": 50.0,
+                    "max_ci_fix_items": 5,
+                    "branch_sync_enabled": False,
+                }
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.self_update is True
+        assert config.daemon.self_update_command == "pip install -e ."
+        assert config.daemon.maintenance_budget_usd == 50.0
+        assert config.daemon.max_ci_fix_items == 5
+        assert config.daemon.branch_sync_enabled is False
+
+    def test_defaults_when_omitted_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"daily_budget_usd": 100.0}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.self_update is False
+        assert config.daemon.self_update_command == "uv pip install ."
+        assert config.daemon.maintenance_budget_usd == 20.0
+        assert config.daemon.max_ci_fix_items == 2
+        assert config.daemon.branch_sync_enabled is True
+
+    def test_maintenance_budget_must_be_positive(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"maintenance_budget_usd": -5.0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="maintenance_budget_usd"):
+            load_config(tmp_repo)
+
+    def test_maintenance_budget_zero_rejected(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"maintenance_budget_usd": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="maintenance_budget_usd"):
+            load_config(tmp_repo)
+
+    def test_max_ci_fix_items_must_be_positive(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"max_ci_fix_items": 0}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="max_ci_fix_items"):
+            load_config(tmp_repo)
+
+    def test_roundtrip_save_load(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            daemon=DaemonConfig(
+                self_update=True,
+                self_update_command="pip install .",
+                maintenance_budget_usd=30.0,
+                max_ci_fix_items=4,
+                branch_sync_enabled=False,
+            ),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.self_update is True
+        assert loaded.daemon.self_update_command == "pip install ."
+        assert loaded.daemon.maintenance_budget_usd == 30.0
+        assert loaded.daemon.max_ci_fix_items == 4
+        assert loaded.daemon.branch_sync_enabled is False
