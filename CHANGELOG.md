@@ -1,5 +1,16 @@
 # Changelog
 
+## 20260401_133000 — Fix Learn Phase 100% Failure Rate
+
+Fixes a prompt-tool constraint mismatch that caused the learn phase to fail on every pipeline run. The `learn.md` instruction template now explicitly states which tools (Read, Glob, Grep) are available, provides concrete Glob patterns for file discovery, and includes negative constraints against disallowed tools (Bash, Agent, etc.). Adds regression tests to prevent future misalignment.
+
+**Modified:**
+- `src/colonyos/instructions/learn.md` — Added "Available Tools" section, concrete Glob patterns, negative tool constraints
+- `tests/test_orchestrator.py` — Added `test_learn_prompt_contains_tool_constraint_language` and `test_learn_prompt_contains_glob_pattern_for_reviews` regression tests
+
+**PRD:** `cOS_prds/20260401_130207_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260401_130207_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260331_220500 — Replace :eyes: Emoji with Completion Emoji on Pipeline Finish
 
 Adds clean emoji state transitions to Slack messages: when a ColonyOS pipeline completes, the `:eyes:` (in-progress) reaction is removed before adding the terminal status emoji (`:white_check_mark:` / `:x:`), plus `:tada:` on success. This eliminates ambiguous dual-emoji states so each message shows exactly one reaction reflecting its current state.
