@@ -23,16 +23,16 @@
   - [x] 1.3 Update `_parse_daemon_config()` in `config.py` to read the new fields from YAML
   - [x] 1.4 Add self-update tracking fields to `DaemonState` in `daemon_state.py`: `last_good_commit: str | None`, `self_update_consecutive_failures: int`, `daily_maintenance_spend_usd: float`, `maintenance_reset_date: str | None`
 
-- [ ] 2.0 Implement self-update detection and installation (`maintenance.py`)
+- [x] 2.0 Implement self-update detection and installation (`maintenance.py`)
   depends_on: [1.0]
-  - [ ] 2.1 Write tests for `pull_and_check_update(repo_root) -> tuple[bool, str | None, str | None]` — returns `(changed, old_sha, new_sha)`. Test cases: no changes, fast-forward success, pull failure (returns `(False, ...)` without raising), no tracking branch
-  - [ ] 2.2 Write tests for `run_self_update(repo_root, command) -> bool` — runs `uv pip install .` via subprocess, returns success/failure. Test cases: success, non-zero exit code, timeout
-  - [ ] 2.3 Write tests for `record_last_good_commit(repo_root, sha)` and `read_last_good_commit(repo_root) -> str | None` — file I/O to `.colonyos/last_good_commit`
-  - [ ] 2.4 Write tests for `should_rollback(repo_root, startup_time) -> bool` — checks if last_good_commit differs from HEAD and process started < 60 seconds ago
-  - [ ] 2.5 Implement `pull_and_check_update()` in `maintenance.py`: `git rev-parse HEAD` → `git pull --ff-only` → `git rev-parse HEAD` → compare SHAs
-  - [ ] 2.6 Implement `run_self_update()` in `maintenance.py`: `subprocess.run(command, shell=True, cwd=repo_root, timeout=120)`
-  - [ ] 2.7 Implement `record_last_good_commit()` and `read_last_good_commit()` in `maintenance.py`
-  - [ ] 2.8 Implement `should_rollback()` in `maintenance.py`
+  - [x] 2.1 Write tests for `pull_and_check_update(repo_root) -> tuple[bool, str | None, str | None]` — returns `(changed, old_sha, new_sha)`. Test cases: no changes, fast-forward success, pull failure (returns `(False, ...)` without raising), no tracking branch
+  - [x] 2.2 Write tests for `run_self_update(repo_root, command) -> bool` — runs `uv pip install .` via subprocess, returns success/failure. Test cases: success, non-zero exit code, timeout
+  - [x] 2.3 Write tests for `record_last_good_commit(repo_root, sha)` and `read_last_good_commit(repo_root) -> str | None` — file I/O to `.colonyos/last_good_commit`
+  - [x] 2.4 Write tests for `should_rollback(repo_root, startup_time) -> bool` — checks if last_good_commit differs from HEAD and process started < 60 seconds ago
+  - [x] 2.5 Implement `pull_and_check_update()` in `maintenance.py`: `git rev-parse HEAD` → `git pull --ff-only` → `git rev-parse HEAD` → compare SHAs
+  - [x] 2.6 Implement `run_self_update()` in `maintenance.py`: `subprocess.run(command, shell=True, cwd=repo_root, timeout=120)`
+  - [x] 2.7 Implement `record_last_good_commit()` and `read_last_good_commit()` in `maintenance.py`
+  - [x] 2.8 Implement `should_rollback()` in `maintenance.py`
 
 - [ ] 3.0 Implement branch sync scan (`maintenance.py`)
   depends_on: [1.0]
