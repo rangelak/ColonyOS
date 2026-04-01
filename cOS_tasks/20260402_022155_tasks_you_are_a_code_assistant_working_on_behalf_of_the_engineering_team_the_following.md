@@ -46,8 +46,8 @@
     - On all retries exhausted: existing failure behavior (add to `failed`, compute blocked set).
   - [x] 4.3 Verify the full sequential flow works end-to-end: run existing tests in `tests/test_sequential_implement.py` and `tests/test_orchestrator.py` to confirm no regressions. Fix any test failures.
 
-- [ ] 5.0 Final validation and cleanup
+- [x] 5.0 Final validation and cleanup
   depends_on: [4.0]
-  - [ ] 5.1 Run the full test suite (`pytest tests/`) and confirm all tests pass (both new and existing).
-  - [ ] 5.2 Verify no commented-out code, no TODOs, no placeholder implementations in any changed files.
-  - [ ] 5.3 Verify the recovery cascade still works end-to-end: task retry (new) → phase retry (existing at line 4433) → nuke (existing). The `PhaseResult` returned by `_run_sequential_implement()` with `success=False` should still trigger `_attempt_phase_recovery()` exactly as before when all task retries are exhausted.
+  - [x] 5.1 Run the full test suite (`pytest tests/`) and confirm all tests pass (both new and existing).
+  - [x] 5.2 Verify no commented-out code, no TODOs, no placeholder implementations in any changed files.
+  - [x] 5.3 Verify the recovery cascade still works end-to-end: task retry (new) → phase retry (existing at line 4433) → nuke (existing). The `PhaseResult` returned by `_run_sequential_implement()` with `success=False` should still trigger `_attempt_phase_recovery()` exactly as before when all task retries are exhausted.
