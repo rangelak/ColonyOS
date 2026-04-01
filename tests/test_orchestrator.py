@@ -1743,7 +1743,6 @@ class TestBuildLearnPrompt:
         assert "review artifacts" in system.lower() or "review" in system.lower()
         assert config.reviews_dir in user
 
-    @pytest.mark.xfail(reason="learn.md missing tool constraints — will pass after task 2.0 fix", strict=True)
     def test_learn_prompt_contains_tool_constraint_language(self, tmp_repo: Path, config: ColonyConfig):
         """Regression: learn.md must explicitly state available tools so the agent
         does not reach for disallowed tools (Bash, Agent) and crash."""
@@ -1761,7 +1760,6 @@ class TestBuildLearnPrompt:
             "learn prompt must explicitly warn against using Bash"
         )
 
-    @pytest.mark.xfail(reason="learn.md missing glob patterns — will pass after task 2.0 fix", strict=True)
     def test_learn_prompt_contains_glob_pattern_for_reviews(self, tmp_repo: Path, config: ColonyConfig):
         """Regression: learn.md must provide concrete Glob patterns instead of
         vague 'read all recursively' instructions that lead the agent to use Bash find."""

@@ -19,12 +19,12 @@
   - [x] 1.2 Add test that asserts the learn phase `allowed_tools` passed to `run_phase_sync` is exactly `["Read", "Glob", "Grep"]` (may already exist as `test_learn_phase_uses_read_only_tools` — verify and strengthen if needed)
   - [x] 1.3 Run tests to confirm the new test FAILS (proving the constraint language is missing from learn.md)
 
-- [ ] 2.0 Fix learn.md instruction template to include tool constraints and explicit Glob patterns
+- [x] 2.0 Fix learn.md instruction template to include tool constraints and explicit Glob patterns
   depends_on: [1.0]
-  - [ ] 2.1 Add an "Available Tools" section to `src/colonyos/instructions/learn.md` listing Read, Glob, and Grep with brief descriptions
-  - [ ] 2.2 Add explicit negative constraint: "Do not attempt to use Bash, Write, Edit, Agent, or any other tool"
-  - [ ] 2.3 Rewrite Step 1 to use concrete Glob pattern: `Glob` with pattern `{reviews_dir}/**/*.md` for file discovery, then `Read` for each file
-  - [ ] 2.4 Run the new test from 1.1 to confirm it now PASSES
+  - [x] 2.1 Add an "Available Tools" section to `src/colonyos/instructions/learn.md` listing Read, Glob, and Grep with brief descriptions
+  - [x] 2.2 Add explicit negative constraint: "Do not attempt to use Bash, Write, Edit, Agent, or any other tool"
+  - [x] 2.3 Rewrite Step 1 to use concrete Glob pattern: `Glob` with pattern `{reviews_dir}/**/*.md` for file discovery, then `Read` for each file
+  - [x] 2.4 Run the new test from 1.1 to confirm it now PASSES
 
 - [ ] 3.0 Verify full test suite passes with no regressions
   depends_on: [2.0]
