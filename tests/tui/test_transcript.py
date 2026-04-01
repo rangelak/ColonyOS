@@ -236,3 +236,41 @@ class TestTranscriptView:
             tv._auto_scroll = False
             tv.re_enable_auto_scroll()
             assert tv._auto_scroll is True
+
+
+@pytest.mark.asyncio
+class TestTranscriptViewCSS:
+    """Verify CSS properties are correctly applied to TranscriptView."""
+
+    async def test_transcript_has_scrollbar_size(self, require_tui: None) -> None:
+        """TranscriptView should have scrollbar-size from CSS (not from dead descendant selector)."""
+        from colonyos.tui.app import AssistantApp
+
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            tv = pilot.app.query_one(TranscriptView)
+            # scrollbar-size: 1 1 should be applied directly to TranscriptView
+            assert tv.styles.scrollbar_size_horizontal == 1
+            assert tv.styles.scrollbar_size_vertical == 1
+
+    async def test_transcript_has_padding(self, require_tui: None) -> None:
+        """TranscriptView should have padding from CSS (not from dead descendant selector)."""
+        from colonyos.tui.app import AssistantApp
+
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            tv = pilot.app.query_one(TranscriptView)
+            # padding: 0 2 should be applied directly to TranscriptView
+            assert tv.styles.padding.right == 2
+            assert tv.styles.padding.left == 2
+
+    async def test_screen_has_overflow_hidden(self, require_tui: None) -> None:
+        """Screen should have overflow: hidden to prevent a second scrollbar."""
+        from colonyos.tui.app import AssistantApp
+
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            screen = pilot.app.screen
+            # Screen overflow should be hidden so it doesn't create its own scrollbar
+            assert screen.styles.overflow_x == "hidden"
+            assert screen.styles.overflow_y == "hidden"
