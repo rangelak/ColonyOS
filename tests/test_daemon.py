@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from colonyos.cleanup import ComplexityCategory, FileComplexity
-from colonyos.config import ColonyConfig, DaemonConfig
+from colonyos.config import ColonyConfig, DaemonConfig, SlackConfig
 from colonyos.daemon import Daemon, DaemonError, _CombinedUI
 from colonyos.daemon_state import DaemonState, save_daemon_state
 from colonyos.models import (
@@ -1703,3 +1703,76 @@ class TestPRSync:
         mock_sync.assert_called_once()
         call_kwargs = mock_sync.call_args[1]
         assert call_kwargs["write_enabled"] is True
+
+
+# Task 6.0: Startup warnings for trigger_mode: "all" without safety configs
+class TestAllModeStartupWarnings:
+    """Verify that _warn_all_mode_safety logs warnings when trigger_mode is 'all'
+    and safety configs (allowed_user_ids, triage_scope) are missing."""
+
+    def test_warns_when_allowed_user_ids_empty(self, caplog: pytest.LogCaptureFixture):
+        config = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                trigger_mode="all",
+                allowed_user_ids=[],
+                triage_scope="Bug reports",
+            ),
+        )
+        with caplog.at_level("WARNING", logger="colonyos.daemon"):
+            Daemon._warn_all_mode_safety(config)
+        assert any("allowed_user_ids" in r.message for r in caplog.records)
+
+    def test_warns_when_triage_scope_empty(self, caplog: pytest.LogCaptureFixture):
+        config = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                trigger_mode="all",
+                allowed_user_ids=["U123"],
+                triage_scope="",
+            ),
+        )
+        with caplog.at_level("WARNING", logger="colonyos.daemon"):
+            Daemon._warn_all_mode_safety(config)
+        assert any("triage_scope" in r.message for r in caplog.records)
+
+    def test_warns_both_when_both_missing(self, caplog: pytest.LogCaptureFixture):
+        config = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                trigger_mode="all",
+                allowed_user_ids=[],
+                triage_scope="",
+            ),
+        )
+        with caplog.at_level("WARNING", logger="colonyos.daemon"):
+            Daemon._warn_all_mode_safety(config)
+        messages = [r.message for r in caplog.records]
+        assert any("allowed_user_ids" in m for m in messages)
+        assert any("triage_scope" in m for m in messages)
+
+    def test_no_warnings_when_both_set(self, caplog: pytest.LogCaptureFixture):
+        config = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                trigger_mode="all",
+                allowed_user_ids=["U123"],
+                triage_scope="Bug reports for backend",
+            ),
+        )
+        with caplog.at_level("WARNING", logger="colonyos.daemon"):
+            Daemon._warn_all_mode_safety(config)
+        assert len(caplog.records) == 0
+
+    def test_no_warnings_when_trigger_mode_mention(self, caplog: pytest.LogCaptureFixture):
+        config = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                trigger_mode="mention",
+                allowed_user_ids=[],
+                triage_scope="",
+            ),
+        )
+        with caplog.at_level("WARNING", logger="colonyos.daemon"):
+            Daemon._warn_all_mode_safety(config)
+        assert len(caplog.records) == 0

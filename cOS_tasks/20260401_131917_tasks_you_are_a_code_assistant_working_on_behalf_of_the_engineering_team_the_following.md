@@ -37,10 +37,10 @@
   depends_on: []
   - [x] 5.1 Write tests: simulate an @mention in `trigger_mode: "all"` that delivers both `app_mention` and `message` events with the same `(channel, ts)`. Assert only one is processed and the second is dropped by dedup (`_is_pending_message` or `watch_state.is_processed`)
 
-- [ ] 6.0 Add startup warnings for `trigger_mode: "all"` without safety configs (depends on 1.0)
+- [x] 6.0 Add startup warnings for `trigger_mode: "all"` without safety configs (depends on 1.0)
   depends_on: [1.0]
-  - [ ] 6.1 Write tests: when `trigger_mode` is `"all"` and `allowed_user_ids` is empty, assert a warning is logged; when `triage_scope` is empty, assert a warning is logged; when both are set, no warnings
-  - [ ] 6.2 Add startup warning logic in `src/colonyos/daemon.py` `_slack_listener_thread()` — log warnings if `trigger_mode == "all"` and `allowed_user_ids` or `triage_scope` are empty
+  - [x] 6.1 Write tests: when `trigger_mode` is `"all"` and `allowed_user_ids` is empty, assert a warning is logged; when `triage_scope` is empty, assert a warning is logged; when both are set, no warnings
+  - [x] 6.2 Add startup warning logic in `src/colonyos/daemon.py` `_slack_listener_thread()` — log warnings if `trigger_mode == "all"` and `allowed_user_ids` or `triage_scope` are empty
 
 - [ ] 7.0 Integration test: full "all" mode flow (depends on 3.0, 4.0)
   depends_on: [3.0, 4.0]
