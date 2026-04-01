@@ -83,6 +83,8 @@ class SlackQueueEngine:
     def register(self, bolt_app: Any) -> None:
         self._ensure_triage_worker()
         bolt_app.event("app_mention")(self._handle_event)
+        if self.config.slack.trigger_mode == "all":
+            bolt_app.event("message")(self._handle_event)
         if self.config.slack.trigger_mode not in ("reaction", "all"):
             bolt_app.event("reaction_added")(lambda event, client: None)
             return

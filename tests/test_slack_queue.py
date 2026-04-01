@@ -734,8 +734,8 @@ def test_handle_event_uses_full_text_for_non_mention_message(tmp_path: Path) -> 
         engine._handle_event(event, client)
 
     assert engine._triage_queue.qsize() == 1
-    task = engine._triage_queue.get_nowait()
-    assert task["prompt_text"] == "fix the flaky login test"
+    task_item = engine._triage_queue.get_nowait()
+    assert task_item["prompt_text"] == "fix the flaky login test"
 
 
 def test_handle_event_strips_mention_for_mention_message(tmp_path: Path) -> None:
@@ -760,3 +760,88 @@ def test_handle_event_strips_mention_for_mention_message(tmp_path: Path) -> None
     assert engine._triage_queue.qsize() == 1
     task = engine._triage_queue.get_nowait()
     assert task["prompt_text"] == "fix the flaky login test"
+
+
+# ---------------------------------------------------------------------------
+# Task 3.0: Bind `message` event in register() when trigger_mode == "all"
+# ---------------------------------------------------------------------------
+
+
+def _make_engine_with_trigger_mode(
+    tmp_path: Path,
+    trigger_mode: str,
+) -> SlackQueueEngine:
+    config = ColonyConfig(
+        slack=SlackConfig(enabled=True, channels=["C1"], auto_approve=True, trigger_mode=trigger_mode),
+    )
+    return SlackQueueEngine(
+        repo_root=tmp_path,
+        config=config,
+        queue_state=QueueState(queue_id="q"),
+        watch_state=SlackWatchState(watch_id="w"),
+        state_lock=threading.Lock(),
+        shutdown_event=threading.Event(),
+        bot_user_id="UBOT",
+        slack_client_ready=threading.Event(),
+        publish_client=lambda client: None,
+        persist_queue=lambda: None,
+        persist_watch_state=lambda: None,
+        is_time_exceeded=lambda: False,
+        is_budget_exceeded=lambda: False,
+        is_daily_budget_exceeded=lambda: False,
+    )
+
+
+def test_register_binds_message_event_when_trigger_mode_all(tmp_path: Path) -> None:
+    """When trigger_mode is 'all', register() binds both app_mention and message events."""
+    engine = _make_engine_with_trigger_mode(tmp_path, "all")
+    bolt_app = MagicMock()
+
+    with patch.object(engine, "_ensure_triage_worker"):
+        engine.register(bolt_app)
+
+    event_calls = [call[0][0] for call in bolt_app.event.call_args_list]
+    assert "app_mention" in event_calls
+    assert "message" in event_calls
+
+
+def test_register_does_not_bind_message_event_when_trigger_mode_mention(tmp_path: Path) -> None:
+    """When trigger_mode is 'mention', register() only binds app_mention (not message)."""
+    engine = _make_engine_with_trigger_mode(tmp_path, "mention")
+    bolt_app = MagicMock()
+
+    with patch.object(engine, "_ensure_triage_worker"):
+        engine.register(bolt_app)
+
+    event_calls = [call[0][0] for call in bolt_app.event.call_args_list]
+    assert "app_mention" in event_calls
+    assert "message" not in event_calls
+
+
+def test_register_message_handler_is_handle_event(tmp_path: Path) -> None:
+    """The message event handler should be the same _handle_event method."""
+    engine = _make_engine_with_trigger_mode(tmp_path, "all")
+    bolt_app = MagicMock()
+    # Track all (event_type, handler) pairs registered via bolt_app.event(type)(handler)
+    registrations: list[tuple[str, Any]] = []
+    original_event = bolt_app.event
+
+    def _track_event(event_type):
+        decorator_mock = MagicMock()
+
+        def _capture_handler(handler):
+            registrations.append((event_type, handler))
+            return handler
+
+        decorator_mock.side_effect = _capture_handler
+        return decorator_mock
+
+    bolt_app.event = _track_event
+
+    with patch.object(engine, "_ensure_triage_worker"):
+        engine.register(bolt_app)
+
+    # Verify message event was registered with _handle_event as the handler
+    message_handlers = [h for et, h in registrations if et == "message"]
+    assert len(message_handlers) == 1, f"Expected 1 message handler, got {len(message_handlers)}"
+    assert message_handlers[0] == engine._handle_event
