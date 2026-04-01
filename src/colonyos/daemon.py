@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1880,12 +1881,25 @@ class Daemon:
             return client, channel, thread_ts
 
     def _should_rotate_daily_thread(self) -> bool:
-        """Return True if the daily thread should be rotated (new day in configured tz)."""
-        from zoneinfo import ZoneInfo
+        """Return True if the daily thread should be rotated.
 
+        Rotation occurs when the current time in the configured timezone is at
+        or past ``daily_thread_hour`` on a date later than the stored thread
+        date.  If no thread exists yet (``daily_thread_date is None``), rotation
+        is always required.
+        """
         tz = ZoneInfo(self.config.slack.daily_thread_timezone)
-        today_str = datetime.now(tz).strftime("%Y-%m-%d")
-        return self._state.daily_thread_date != today_str
+        now = datetime.now(tz)
+        today_str = now.strftime("%Y-%m-%d")
+
+        if self._state.daily_thread_date is None:
+            return True
+
+        if self._state.daily_thread_date >= today_str:
+            return False
+
+        # Date has changed — only rotate once we've reached the configured hour
+        return now.hour >= self.config.slack.daily_thread_hour
 
     def _create_daily_summary(self) -> str:
         """Build a formatted summary of items completed/failed since the last daily thread.
@@ -1898,13 +1912,11 @@ class Daemon:
         Returns the formatted summary string produced by
         :func:`colonyos.slack.format_daily_summary`.
         """
-        from zoneinfo import ZoneInfo
-
         from colonyos.slack import format_daily_summary
 
         tz = ZoneInfo(self.config.slack.daily_thread_timezone)
         now = datetime.now(tz)
-        period_label = now.strftime("%B %-d, %Y")
+        period_label = f"{now.strftime('%B')} {now.day}, {now.year}"
 
         # Determine the cutoff: only include items added since the last rotation
         cutoff_iso: str | None = self._state.daily_thread_date  # e.g. "2026-04-01"
@@ -1964,8 +1976,6 @@ class Daemon:
             return client, self._state.daily_thread_channel or channel, self._state.daily_thread_ts
 
         # Need to create a new daily thread
-        from zoneinfo import ZoneInfo
-
         from colonyos.slack import post_message
 
         summary_text = self._create_daily_summary()

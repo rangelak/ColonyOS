@@ -460,7 +460,7 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
     daily_thread_timezone = str(raw.get("daily_thread_timezone", "UTC"))
     try:
         ZoneInfo(daily_thread_timezone)
-    except (KeyError, Exception):
+    except Exception:
         logger.warning(
             "Invalid timezone '%s', falling back to UTC",
             daily_thread_timezone,

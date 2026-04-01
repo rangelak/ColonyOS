@@ -1831,11 +1831,50 @@ class TestDailyThreadLifecycle:
         daemon_instance._state.daily_thread_date = today_str
         assert daemon_instance._should_rotate_daily_thread() is False
 
-    def test_should_rotate_true_stale_date(self, daemon_instance: Daemon):
-        """_should_rotate_daily_thread returns True when date is old."""
+    def test_should_rotate_true_stale_date_past_hour(self, daemon_instance: Daemon):
+        """_should_rotate_daily_thread returns True when date is old and hour is past configured."""
         daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance.config.slack.daily_thread_hour = 0  # hour 0 so it's always past
         daemon_instance._state.daily_thread_date = "2020-01-01"
         assert daemon_instance._should_rotate_daily_thread() is True
+
+    def test_should_rotate_false_stale_date_before_hour(self, daemon_instance: Daemon):
+        """_should_rotate_daily_thread returns False when date is stale but hour not yet reached."""
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance.config.slack.daily_thread_hour = 23  # set to 23 so it's unlikely to be reached
+        from zoneinfo import ZoneInfo
+        from unittest.mock import patch as _patch
+
+        tz = ZoneInfo("UTC")
+        # Simulate being at hour 6 on a new day
+        fake_now = datetime(2026, 4, 1, 6, 0, 0, tzinfo=tz)
+        daemon_instance._state.daily_thread_date = "2026-03-31"
+
+        with _patch("colonyos.daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            result = daemon_instance._should_rotate_daily_thread()
+
+        assert result is False
+
+    def test_should_rotate_true_stale_date_at_configured_hour(self, daemon_instance: Daemon):
+        """_should_rotate_daily_thread returns True when date is stale and hour matches configured."""
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance.config.slack.daily_thread_hour = 8
+
+        from zoneinfo import ZoneInfo
+        from unittest.mock import patch as _patch
+
+        tz = ZoneInfo("UTC")
+        fake_now = datetime(2026, 4, 1, 8, 0, 0, tzinfo=tz)
+        daemon_instance._state.daily_thread_date = "2026-03-31"
+
+        with _patch("colonyos.daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            result = daemon_instance._should_rotate_daily_thread()
+
+        assert result is True
 
     def test_should_rotate_true_no_thread(self, daemon_instance: Daemon):
         """_should_rotate_daily_thread returns True when no thread exists."""
