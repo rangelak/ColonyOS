@@ -33,9 +33,9 @@
   - [x] 4.1 Write tests: in `trigger_mode: "all"`, a non-mention message does NOT get 👀 reaction in `_handle_event`; a direct @mention still gets 👀; in `trigger_mode: "mention"`, behavior is unchanged
   - [x] 4.2 Update `_handle_event()` in `src/colonyos/slack_queue.py` (line 211-214) to skip 👀 reaction when the message is a passive channel message (no bot mention in text). Pass a flag through the triage queue so `_triage_and_enqueue` can add 👀 after confirming actionable.
 
-- [ ] 5.0 Dedup verification for dual-event delivery (no dependencies — test-only task)
+- [x] 5.0 Dedup verification for dual-event delivery (no dependencies — test-only task)
   depends_on: []
-  - [ ] 5.1 Write tests: simulate an @mention in `trigger_mode: "all"` that delivers both `app_mention` and `message` events with the same `(channel, ts)`. Assert only one is processed and the second is dropped by dedup (`_is_pending_message` or `watch_state.is_processed`)
+  - [x] 5.1 Write tests: simulate an @mention in `trigger_mode: "all"` that delivers both `app_mention` and `message` events with the same `(channel, ts)`. Assert only one is processed and the second is dropped by dedup (`_is_pending_message` or `watch_state.is_processed`)
 
 - [ ] 6.0 Add startup warnings for `trigger_mode: "all"` without safety configs (depends on 1.0)
   depends_on: [1.0]

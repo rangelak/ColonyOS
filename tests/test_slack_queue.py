@@ -1030,3 +1030,122 @@ def test_triage_queue_passes_is_passive_false_for_mention(tmp_path: Path) -> Non
 
     task_item = engine._triage_queue.get_nowait()
     assert task_item["is_passive"] is False
+
+
+# ---------------------------------------------------------------------------
+# Task 5.0: Dedup verification for dual-event delivery
+# ---------------------------------------------------------------------------
+
+
+def test_dual_event_delivery_dedup_second_dropped_via_pending(tmp_path: Path) -> None:
+    """An @mention in trigger_mode 'all' fires both app_mention and message events.
+
+    Both events carry the same (channel, ts). The first call to _handle_event
+    reserves the message in _pending_messages; the second call sees it pending
+    and drops the duplicate before it reaches the triage queue.
+    """
+    engine = _make_engine_with_trigger_mode(tmp_path, "all")
+    client = MagicMock()
+
+    # Same (channel, ts) — Slack sends two events for one @mention
+    event = {
+        "channel": "C1",
+        "ts": "300.0",
+        "user": "U1",
+        "text": "<@UBOT> deploy to staging",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message") as mock_react:
+        # First delivery (e.g. app_mention) — accepted
+        engine._handle_event(event, client)
+        # Second delivery (e.g. message) — should be dropped
+        engine._handle_event(event, client)
+
+    # Only one item should reach the triage queue
+    assert engine._triage_queue.qsize() == 1
+    # 👀 reaction should fire only once (first delivery)
+    assert mock_react.call_count == 1
+    # The message should still be in the pending set (not yet triaged)
+    assert engine._is_pending_message("C1", "300.0")
+
+
+def test_dual_event_delivery_dedup_second_dropped_via_processed(tmp_path: Path) -> None:
+    """If triage finishes before the second event arrives, dedup catches it via is_processed.
+
+    Simulates the race where the first event is fully triaged (moved from pending
+    to processed) before the second event arrives.
+    """
+    engine = _make_engine_with_trigger_mode(tmp_path, "all")
+    client = MagicMock()
+
+    event = {
+        "channel": "C1",
+        "ts": "301.0",
+        "user": "U1",
+        "text": "<@UBOT> deploy to staging",
+    }
+
+    # Pre-mark as processed (simulating the first event already completing triage)
+    engine.watch_state.mark_processed("C1", "301.0", "slack-item-001")
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.extract_prompt_text", return_value="deploy to staging"), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message") as mock_react:
+        engine._handle_event(event, client)
+
+    # Nothing should reach the triage queue
+    assert engine._triage_queue.qsize() == 0
+    # No 👀 reaction
+    mock_react.assert_not_called()
+
+
+def test_dual_event_delivery_end_to_end_only_one_queue_item(tmp_path: Path) -> None:
+    """End-to-end: two events with same (channel, ts) result in exactly one queue item.
+
+    Sends both events through _handle_event, lets the triage worker process
+    them, and verifies exactly one QueueItem is created.
+    """
+    engine = _make_engine_with_trigger_mode(tmp_path, "all")
+    client = MagicMock()
+    triage_completed = threading.Event()
+
+    def _mock_triage(*args, **kwargs):
+        triage_completed.set()
+        return TriageResult(
+            actionable=True,
+            confidence=0.95,
+            summary="Deploy to staging",
+            base_branch=None,
+            reasoning="clear deployment request",
+        )
+
+    event = {
+        "channel": "C1",
+        "ts": "302.0",
+        "user": "U1",
+        "text": "<@UBOT> deploy to staging",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch("colonyos.slack_queue.react_to_message"), \
+         patch("colonyos.slack_queue.triage_message", side_effect=_mock_triage), \
+         patch("colonyos.slack_queue.post_triage_acknowledgment"):
+        # Deliver both events (same channel:ts)
+        engine._handle_event(event, client)
+        engine._handle_event(event, client)
+
+        # Wait for triage to process the single accepted event
+        assert triage_completed.wait(timeout=3)
+        engine._triage_queue.join()
+
+    # Exactly one queue item created
+    assert len(engine.queue_state.items) == 1
+    assert engine.queue_state.items[0].summary == "Deploy to staging"
+    # Message is marked as processed
+    assert engine.watch_state.is_processed("C1", "302.0")
