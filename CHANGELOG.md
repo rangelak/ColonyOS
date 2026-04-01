@@ -1,5 +1,24 @@
 # Changelog
 
+## 20260402_020000 — Daemon Inter-Queue Maintenance Cycle
+
+Adds an inter-queue maintenance cycle to the daemon that runs between queue items when switching back to `main`. Performs self-update detection with `os.execv` restart, branch sync scanning with Slack reporting, and CI fix auto-enqueueing for open PRs with failing checks. Includes budget caps, circuit breakers, and branch guards for safety.
+
+**Created:**
+- `src/colonyos/maintenance.py` — Maintenance cycle orchestrator: self-update, branch scan, CI fix enqueueing
+- `tests/test_maintenance.py` — Comprehensive test suite for all maintenance operations
+- `tests/test_daemon.py` — Tests for daemon maintenance integration
+- `tests/test_daemon_state.py` — Tests for maintenance state fields
+
+**Modified:**
+- `src/colonyos/config.py` — Added `self_update`, `maintenance_budget_usd`, `maintenance_circuit_breaker_consecutive_failures` to `DaemonConfig`
+- `src/colonyos/daemon.py` — Integrated maintenance cycle into inter-queue processing
+- `src/colonyos/daemon_state.py` — Added maintenance tracking fields
+- `.colonyos/config.yaml` — Enabled maintenance for ColonyOS repo
+
+**PRD:** `cOS_prds/20260402_003710_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260402_003710_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260401_173000 — Stuck Daemon Detection and Auto-Recovery
 
 Adds an in-process watchdog thread that detects when a pipeline has stalled (no heartbeat progress beyond a configurable threshold) and automatically recovers: canceling the stuck pipeline, marking the item as FAILED, alerting operators via Slack, and resuming the main loop. Also enriches `/healthz` with pipeline duration and stall status, adds `started_at` to `QueueItem`, and bumps the schema to v5.

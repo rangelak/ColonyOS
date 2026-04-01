@@ -139,3 +139,12 @@ _Date: 2026-04-01 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[code-quality]** Private aliases (`_fn = fn`) for brand-new functions under backward-compat claims add noise; pick one canonical name.
 - **[code-quality]** LLM agent instruction templates should prohibit suppression annotations (`# type: ignore`, `# noqa`) as valid fixes.
 - **[architecture]** Aggregation modules that dynamically enumerate categories from data avoid code changes when new variants are added.
+
+## Run: run-20260402_003710-8eeeb1a6b1
+_Date: 2026-04-02 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
+
+- **[architecture]** Pre-flight validation chains should order checks cheapest-first (local before network) to fail fast.
+- **[architecture]** Persist run state before entering crash-prone loops so prior phase results survive unexpected termination.
+- **[architecture]** New feature configs should default to disabled for backward-compatible, opt-in rollout.
+- **[architecture]** Autonomous loops need two independent circuit breakers (budget + retry cap) to bound runaway execution.
+- **[code-quality]** API calls fetching overlapping data (e.g., matrix builds) must deduplicate by natural key to avoid redundant work.
