@@ -30,6 +30,8 @@ from colonyos.slack import (
     format_triage_acknowledgment,
     format_triage_skip,
     increment_hourly_count,
+    react_to_message,
+    remove_reaction,
     load_watch_state,
     sanitize_slack_content,
     save_watch_state,
@@ -1726,7 +1728,7 @@ class TestSlackClientProtocol:
     """Tests for SlackClient Protocol type."""
 
     def test_protocol_defines_required_methods(self) -> None:
-        """SlackClient Protocol should define the 4 Slack methods we use."""
+        """SlackClient Protocol should define the 5 Slack methods we use."""
         from colonyos.slack import SlackClient
         import inspect
 
@@ -1734,6 +1736,7 @@ class TestSlackClientProtocol:
         members = [m for m in dir(SlackClient) if not m.startswith("_")]
         assert "chat_postMessage" in members
         assert "reactions_add" in members
+        assert "reactions_remove" in members
         assert "reactions_get" in members
         assert "conversations_list" in members
 
@@ -1746,6 +1749,39 @@ class TestSlackClientProtocol:
         # The annotation should reference SlackClient, not Any
         client_param = sig.parameters["client"]
         assert "SlackClient" in str(client_param.annotation)
+
+
+class TestReactToMessage:
+    """Tests for react_to_message() helper."""
+
+    def test_calls_reactions_add_with_correct_args(self) -> None:
+        client = MagicMock()
+        react_to_message(client, "C123", "1234567890.123456", "eyes")
+        client.reactions_add.assert_called_once_with(
+            channel="C123",
+            timestamp="1234567890.123456",
+            name="eyes",
+        )
+
+
+class TestRemoveReaction:
+    """Tests for remove_reaction() helper."""
+
+    def test_calls_reactions_remove_with_correct_args(self) -> None:
+        client = MagicMock()
+        remove_reaction(client, "C123", "1234567890.123456", "eyes")
+        client.reactions_remove.assert_called_once_with(
+            channel="C123",
+            timestamp="1234567890.123456",
+            name="eyes",
+        )
+
+    def test_propagates_exception(self) -> None:
+        """remove_reaction does not swallow exceptions — callers handle errors."""
+        client = MagicMock()
+        client.reactions_remove.side_effect = RuntimeError("no_reaction")
+        with pytest.raises(RuntimeError, match="no_reaction"):
+            remove_reaction(client, "C123", "1234567890.123456", "eyes")
 
 
 class TestThreadFixTemplateDefensiveInstructions:

@@ -50,6 +50,10 @@ class SlackClient(Protocol):
         self, *, channel: str, timestamp: str, name: str, **kwargs: Any
     ) -> dict[str, Any]: ...
 
+    def reactions_remove(
+        self, *, channel: str, timestamp: str, name: str, **kwargs: Any
+    ) -> dict[str, Any]: ...
+
     def reactions_get(
         self, *, channel: str, timestamp: str, full: bool, **kwargs: Any
     ) -> dict[str, Any]: ...
@@ -450,6 +454,20 @@ def react_to_message(
 ) -> None:
     """Add an emoji reaction to a message."""
     client.reactions_add(
+        channel=channel,
+        timestamp=timestamp,
+        name=emoji,
+    )
+
+
+def remove_reaction(
+    client: SlackClient,
+    channel: str,
+    timestamp: str,
+    emoji: str,
+) -> None:
+    """Remove an emoji reaction from a message."""
+    client.reactions_remove(
         channel=channel,
         timestamp=timestamp,
         name=emoji,
