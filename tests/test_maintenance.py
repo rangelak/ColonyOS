@@ -1,4 +1,4 @@
-"""Tests for maintenance.py — self-update and branch sync (Tasks 2.0 & 3.0)."""
+"""Tests for maintenance.py — self-update, branch sync, and CI fix (Tasks 2.0–4.0)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,9 @@ import pytest
 
 from colonyos.maintenance import (
     BranchStatus,
+    CIFixCandidate,
+    build_ci_fix_queue_items,
+    find_branches_with_failing_ci,
     format_branch_sync_report,
     pull_and_check_update,
     read_last_good_commit,
@@ -456,3 +459,290 @@ class TestFetchOpenPrsForPrefix:
         mock_run.return_value = _completed(stdout="not json")
         result = _fetch_open_prs_for_prefix(tmp_path, "colonyos/")
         assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# find_branches_with_failing_ci (Task 4.1)
+# ---------------------------------------------------------------------------
+
+
+class TestFindBranchesWithFailingCI:
+    """Task 4.1 — find_branches_with_failing_ci returns list[CIFixCandidate]."""
+
+    @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
+    @patch("colonyos.maintenance._fetch_open_prs_for_ci")
+    def test_no_open_prs(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+        mock_prs.return_value = []
+        result = find_branches_with_failing_ci(tmp_path)
+        assert result == []
+        mock_checks.assert_not_called()
+
+    @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
+    @patch("colonyos.maintenance._fetch_open_prs_for_ci")
+    def test_all_passing(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+        mock_prs.return_value = [
+            {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": False},
+        ]
+        mock_checks.return_value = [
+            {"name": "test", "state": "COMPLETED", "conclusion": "SUCCESS"},
+        ]
+        result = find_branches_with_failing_ci(tmp_path)
+        assert result == []
+
+    @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
+    @patch("colonyos.maintenance._fetch_open_prs_for_ci")
+    def test_some_failing(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+        mock_prs.return_value = [
+            {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": False},
+            {"number": 20, "headRefName": "colonyos/feat-b", "isDraft": False},
+        ]
+        mock_checks.side_effect = [
+            [  # PR 10: one failing check
+                {"name": "test", "state": "COMPLETED", "conclusion": "FAILURE"},
+                {"name": "lint", "state": "COMPLETED", "conclusion": "SUCCESS"},
+            ],
+            [  # PR 20: all passing
+                {"name": "test", "state": "COMPLETED", "conclusion": "SUCCESS"},
+            ],
+        ]
+        result = find_branches_with_failing_ci(tmp_path)
+        assert len(result) == 1
+        assert result[0].pr_number == 10
+        assert result[0].branch == "colonyos/feat-a"
+        assert result[0].failed_checks == ["test"]
+
+    @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
+    @patch("colonyos.maintenance._fetch_open_prs_for_ci")
+    def test_draft_prs_excluded(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+        mock_prs.return_value = [
+            {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": True},
+        ]
+        result = find_branches_with_failing_ci(tmp_path)
+        assert result == []
+        mock_checks.assert_not_called()
+
+    @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
+    @patch("colonyos.maintenance._fetch_open_prs_for_ci")
+    def test_non_prefix_branches_excluded(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+        mock_prs.return_value = [
+            {"number": 10, "headRefName": "feature/other", "isDraft": False},
+        ]
+        result = find_branches_with_failing_ci(tmp_path)
+        assert result == []
+        mock_checks.assert_not_called()
+
+    @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
+    @patch("colonyos.maintenance._fetch_open_prs_for_ci")
+    def test_check_fetch_failure_skips_pr(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+        mock_prs.return_value = [
+            {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": False},
+        ]
+        mock_checks.return_value = []  # empty on failure
+        result = find_branches_with_failing_ci(tmp_path)
+        assert result == []
+
+    @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
+    @patch("colonyos.maintenance._fetch_open_prs_for_ci")
+    def test_pending_checks_not_treated_as_failure(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+        mock_prs.return_value = [
+            {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": False},
+        ]
+        mock_checks.return_value = [
+            {"name": "test", "state": "IN_PROGRESS", "conclusion": ""},
+        ]
+        result = find_branches_with_failing_ci(tmp_path)
+        assert result == []
+
+    @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
+    @patch("colonyos.maintenance._fetch_open_prs_for_ci")
+    def test_multiple_failed_checks(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+        mock_prs.return_value = [
+            {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": False},
+        ]
+        mock_checks.return_value = [
+            {"name": "test", "state": "COMPLETED", "conclusion": "FAILURE"},
+            {"name": "lint", "state": "COMPLETED", "conclusion": "FAILURE"},
+            {"name": "build", "state": "COMPLETED", "conclusion": "SUCCESS"},
+        ]
+        result = find_branches_with_failing_ci(tmp_path)
+        assert len(result) == 1
+        assert sorted(result[0].failed_checks) == ["lint", "test"]
+
+
+# ---------------------------------------------------------------------------
+# build_ci_fix_queue_items (Task 4.2)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCIFixQueueItems:
+    """Task 4.2 — build_ci_fix_queue_items with dedup and max_items cap."""
+
+    def _make_candidate(self, pr_number: int = 10, branch: str = "colonyos/feat") -> CIFixCandidate:
+        return CIFixCandidate(
+            branch=branch,
+            pr_number=pr_number,
+            failed_checks=["test"],
+        )
+
+    def test_creates_queue_items(self) -> None:
+        candidates = [self._make_candidate(pr_number=10)]
+        items = build_ci_fix_queue_items(candidates, max_items=2, existing_queue=[])
+        assert len(items) == 1
+        assert items[0].source_type == "ci-fix"
+        assert items[0].source_value == "10"
+        assert items[0].status.value == "pending"
+
+    def test_respects_max_items_cap(self) -> None:
+        candidates = [
+            self._make_candidate(pr_number=10, branch="colonyos/a"),
+            self._make_candidate(pr_number=20, branch="colonyos/b"),
+            self._make_candidate(pr_number=30, branch="colonyos/c"),
+        ]
+        items = build_ci_fix_queue_items(candidates, max_items=2, existing_queue=[])
+        assert len(items) == 2
+
+    def test_dedup_against_existing_queue(self) -> None:
+        from colonyos.models import QueueItem as QI, QueueItemStatus
+        existing = [
+            QI(
+                id="existing-1",
+                source_type="ci-fix",
+                source_value="10",
+                status=QueueItemStatus.PENDING,
+            ),
+        ]
+        candidates = [
+            self._make_candidate(pr_number=10),
+            self._make_candidate(pr_number=20, branch="colonyos/b"),
+        ]
+        items = build_ci_fix_queue_items(candidates, max_items=5, existing_queue=existing)
+        assert len(items) == 1
+        assert items[0].source_value == "20"
+
+    def test_dedup_running_items_too(self) -> None:
+        from colonyos.models import QueueItem as QI, QueueItemStatus
+        existing = [
+            QI(
+                id="existing-1",
+                source_type="ci-fix",
+                source_value="10",
+                status=QueueItemStatus.RUNNING,
+            ),
+        ]
+        candidates = [self._make_candidate(pr_number=10)]
+        items = build_ci_fix_queue_items(candidates, max_items=5, existing_queue=existing)
+        assert items == []
+
+    def test_does_not_dedup_completed_items(self) -> None:
+        from colonyos.models import QueueItem as QI, QueueItemStatus
+        existing = [
+            QI(
+                id="existing-1",
+                source_type="ci-fix",
+                source_value="10",
+                status=QueueItemStatus.COMPLETED,
+            ),
+        ]
+        candidates = [self._make_candidate(pr_number=10)]
+        items = build_ci_fix_queue_items(candidates, max_items=5, existing_queue=existing)
+        assert len(items) == 1
+
+    def test_empty_candidates(self) -> None:
+        items = build_ci_fix_queue_items([], max_items=2, existing_queue=[])
+        assert items == []
+
+    def test_queue_item_has_branch_name(self) -> None:
+        candidates = [self._make_candidate(pr_number=10, branch="colonyos/feat-x")]
+        items = build_ci_fix_queue_items(candidates, max_items=2, existing_queue=[])
+        assert items[0].branch_name == "colonyos/feat-x"
+
+    def test_queue_item_id_format(self) -> None:
+        candidates = [self._make_candidate(pr_number=42)]
+        items = build_ci_fix_queue_items(candidates, max_items=2, existing_queue=[])
+        assert items[0].id.startswith("ci-fix-42-")
+
+
+# ---------------------------------------------------------------------------
+# _fetch_open_prs_for_ci (internal helper)
+# ---------------------------------------------------------------------------
+
+
+class TestFetchOpenPrsForCI:
+    """Test the internal _fetch_open_prs_for_ci helper."""
+
+    @patch("colonyos.maintenance.subprocess.run")
+    def test_returns_pr_list_with_draft_field(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.maintenance import _fetch_open_prs_for_ci
+
+        mock_run.return_value = _completed(
+            stdout=json.dumps([
+                {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": False},
+                {"number": 20, "headRefName": "colonyos/feat-b", "isDraft": True},
+            ])
+        )
+        result = _fetch_open_prs_for_ci(tmp_path)
+        assert len(result) == 2
+        assert result[0]["isDraft"] is False
+        assert result[1]["isDraft"] is True
+
+    @patch("colonyos.maintenance.subprocess.run")
+    def test_gh_failure_returns_empty(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.maintenance import _fetch_open_prs_for_ci
+
+        mock_run.return_value = _completed(returncode=1, stderr="not logged in")
+        result = _fetch_open_prs_for_ci(tmp_path)
+        assert result == []
+
+    @patch("colonyos.maintenance.subprocess.run")
+    def test_timeout_returns_empty(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.maintenance import _fetch_open_prs_for_ci
+
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=10)
+        result = _fetch_open_prs_for_ci(tmp_path)
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# _fetch_ci_checks_for_pr (internal helper)
+# ---------------------------------------------------------------------------
+
+
+class TestFetchCIChecksForPR:
+    """Test the internal _fetch_ci_checks_for_pr helper."""
+
+    @patch("colonyos.maintenance.subprocess.run")
+    def test_returns_check_list(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.maintenance import _fetch_ci_checks_for_pr
+
+        mock_run.return_value = _completed(
+            stdout=json.dumps([
+                {"name": "test", "state": "COMPLETED", "conclusion": "SUCCESS"},
+                {"name": "lint", "state": "COMPLETED", "conclusion": "FAILURE"},
+            ])
+        )
+        result = _fetch_ci_checks_for_pr(10, tmp_path)
+        assert len(result) == 2
+
+    @patch("colonyos.maintenance.subprocess.run")
+    def test_gh_failure_returns_empty(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.maintenance import _fetch_ci_checks_for_pr
+
+        mock_run.return_value = _completed(returncode=1, stderr="error")
+        result = _fetch_ci_checks_for_pr(10, tmp_path)
+        assert result == []
+
+    @patch("colonyos.maintenance.subprocess.run")
+    def test_timeout_returns_empty(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.maintenance import _fetch_ci_checks_for_pr
+
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=10)
+        result = _fetch_ci_checks_for_pr(10, tmp_path)
+        assert result == []
+
+    @patch("colonyos.maintenance.subprocess.run")
+    def test_invalid_json_returns_empty(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.maintenance import _fetch_ci_checks_for_pr
+
+        mock_run.return_value = _completed(stdout="not json")
+        result = _fetch_ci_checks_for_pr(10, tmp_path)
+        assert result == []

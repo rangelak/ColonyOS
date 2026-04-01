@@ -5,6 +5,8 @@ between queue items.  Task 2.0 covers self-update detection, installation,
 rollback bookkeeping, and the ``should_rollback`` startup check.
 Task 3.0 adds branch sync scanning to identify diverged ``colonyos/``
 branches and report them via Slack.
+Task 4.0 adds CI fix enqueueing — detecting open PRs with failing CI
+and building ``QueueItem`` instances for automatic CI fix attempts.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -390,3 +393,215 @@ def format_branch_sync_report(branches: list[BranchStatus]) -> str | None:
     lines.append("")
     lines.append(f"_{len(branches)} diverged branch(es) found._")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# CI fix enqueueing (FR-4)
+# ---------------------------------------------------------------------------
+
+_CI_FAILURE_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"})
+
+
+@dataclass(frozen=True)
+class CIFixCandidate:
+    """A branch with an open PR and at least one failing CI check."""
+
+    branch: str
+    pr_number: int
+    failed_checks: list[str] = field(default_factory=list)
+
+
+def _fetch_open_prs_for_ci(
+    repo_root: Path,
+) -> list[dict[str, Any]]:
+    """Fetch open PRs with draft status via ``gh pr list``.
+
+    Returns a list of dicts with keys ``number``, ``headRefName``, ``isDraft``.
+    Returns an empty list on any error.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh", "pr", "list",
+                "--state", "open",
+                "--json", "number,headRefName,isDraft",
+                "--limit", "100",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_GH_TIMEOUT,
+            cwd=repo_root,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Failed to fetch open PRs for CI check: %s", exc)
+        return []
+
+    if result.returncode != 0:
+        logger.warning("gh pr list failed: %s", result.stderr.strip())
+        return []
+
+    try:
+        items = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse gh pr list output for CI check")
+        return []
+
+    if not isinstance(items, list):
+        return []
+
+    return items
+
+
+def _fetch_ci_checks_for_pr(
+    pr_number: int,
+    repo_root: Path,
+) -> list[dict[str, str]]:
+    """Fetch CI check statuses for a single PR.
+
+    Returns a list of dicts with ``name``, ``state``, ``conclusion``.
+    Returns an empty list on any error (non-raising variant of
+    :func:`colonyos.ci.fetch_pr_checks`).
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh", "pr", "checks", str(pr_number),
+                "--json", "name,state,conclusion",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_GH_TIMEOUT,
+            cwd=repo_root,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Failed to fetch CI checks for PR #%d: %s", pr_number, exc)
+        return []
+
+    if result.returncode != 0:
+        logger.warning(
+            "gh pr checks failed for PR #%d: %s",
+            pr_number,
+            result.stderr.strip(),
+        )
+        return []
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse CI checks output for PR #%d", pr_number)
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    return data
+
+
+def find_branches_with_failing_ci(
+    repo_root: Path,
+    prefix: str = "colonyos/",
+) -> list[CIFixCandidate]:
+    """Find open, non-draft PRs on *prefix* branches with failing CI.
+
+    For each matching PR, fetches CI check statuses and identifies those
+    with at least one completed-but-failed check.  Pending/in-progress
+    checks are not treated as failures.
+
+    Returns a list of :class:`CIFixCandidate` instances.
+    """
+    prs = _fetch_open_prs_for_ci(repo_root)
+    if not prs:
+        return []
+
+    candidates: list[CIFixCandidate] = []
+    for pr in prs:
+        branch = pr.get("headRefName", "")
+        number = pr.get("number")
+        is_draft = pr.get("isDraft", False)
+
+        # Skip non-prefix branches and drafts
+        if not branch.startswith(prefix):
+            continue
+        if is_draft:
+            continue
+        if not isinstance(number, int):
+            continue
+
+        checks = _fetch_ci_checks_for_pr(number, repo_root)
+        if not checks:
+            continue
+
+        failed = [
+            c.get("name", "")
+            for c in checks
+            if c.get("state") == "COMPLETED"
+            and c.get("conclusion") in _CI_FAILURE_CONCLUSIONS
+        ]
+        if failed:
+            candidates.append(CIFixCandidate(
+                branch=branch,
+                pr_number=number,
+                failed_checks=failed,
+            ))
+
+    return candidates
+
+
+def build_ci_fix_queue_items(
+    candidates: list[CIFixCandidate],
+    max_items: int,
+    existing_queue: list[Any],
+) -> list[Any]:
+    """Build ``QueueItem`` instances for CI-fix candidates.
+
+    * Deduplicates against *existing_queue* — skips if a ``ci-fix`` item
+      for the same PR number already exists with a non-terminal status
+      (``PENDING`` or ``RUNNING``).
+    * Respects the *max_items* cap.
+
+    Returns a list of ``QueueItem`` instances ready to be enqueued.
+    """
+    # Lazy import to avoid circular dependency at module level
+    from colonyos.models import QueueItem, QueueItemStatus, compute_priority
+
+    # Build set of PR numbers already in-flight as ci-fix items
+    active_pr_numbers: set[str] = set()
+    for item in existing_queue:
+        if (
+            getattr(item, "source_type", None) == "ci-fix"
+            and getattr(item, "status", None)
+            in {QueueItemStatus.PENDING, QueueItemStatus.RUNNING}
+        ):
+            active_pr_numbers.add(getattr(item, "source_value", ""))
+
+    items: list[QueueItem] = []
+    for candidate in candidates:
+        pr_str = str(candidate.pr_number)
+        if pr_str in active_pr_numbers:
+            logger.info(
+                "Skipping CI-fix for PR #%d: already in queue",
+                candidate.pr_number,
+            )
+            continue
+
+        if len(items) >= max_items:
+            break
+
+        priority = compute_priority("ci-fix")
+        item = QueueItem(
+            id=f"ci-fix-{candidate.pr_number}-{int(time.time())}",
+            source_type="ci-fix",
+            source_value=pr_str,
+            status=QueueItemStatus.PENDING,
+            priority=priority,
+            branch_name=candidate.branch,
+        )
+        items.append(item)
+        logger.info(
+            "Enqueuing CI-fix for PR #%d on branch %s (%d failed check(s))",
+            candidate.pr_number,
+            candidate.branch,
+            len(candidate.failed_checks),
+        )
+
+    return items

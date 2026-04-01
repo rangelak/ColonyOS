@@ -41,12 +41,12 @@
   - [x] 3.3 Implement `scan_diverged_branches()`: enumerate `colonyos/`-prefixed branches via `git branch -r --list 'origin/colonyos/*'`, compute ahead/behind with `git rev-list --count --left-right`, check open PRs via `gh pr list --head <branch>`
   - [x] 3.4 Implement `format_branch_sync_report()`: Slack mrkdwn format with branch names, ahead/behind counts, PR links
 
-- [ ] 4.0 Implement CI fix enqueueing (`maintenance.py`)
+- [x] 4.0 Implement CI fix enqueueing (`maintenance.py`)
   depends_on: [1.0]
-  - [ ] 4.1 Write tests for `find_branches_with_failing_ci(repo_root, prefix) -> list[CIFixCandidate]` where `CIFixCandidate` has: `branch`, `pr_number`, `failed_checks: list[str]`. Test cases: no PRs, all passing, some failing, draft PRs excluded
-  - [ ] 4.2 Write tests for `build_ci_fix_queue_items(candidates, max_items, existing_queue) -> list[QueueItem]` — deduplication against existing queue, respects max_items cap
-  - [ ] 4.3 Implement `find_branches_with_failing_ci()`: use `gh pr list --state open --json number,headRefName` then `gh pr checks <number>` for each, filter to failing
-  - [ ] 4.4 Implement `build_ci_fix_queue_items()`: create `QueueItem` with `source_type="ci-fix"`, `source_value=<pr_number>`, standard priority via `compute_priority("ci-fix")`, dedup against existing items
+  - [x] 4.1 Write tests for `find_branches_with_failing_ci(repo_root, prefix) -> list[CIFixCandidate]` where `CIFixCandidate` has: `branch`, `pr_number`, `failed_checks: list[str]`. Test cases: no PRs, all passing, some failing, draft PRs excluded
+  - [x] 4.2 Write tests for `build_ci_fix_queue_items(candidates, max_items, existing_queue) -> list[QueueItem]` — deduplication against existing queue, respects max_items cap
+  - [x] 4.3 Implement `find_branches_with_failing_ci()`: use `gh pr list --state open --json number,headRefName` then `gh pr checks <number>` for each, filter to failing
+  - [x] 4.4 Implement `build_ci_fix_queue_items()`: create `QueueItem` with `source_type="ci-fix"`, `source_value=<pr_number>`, standard priority via `compute_priority("ci-fix")`, dedup against existing items
 
 - [ ] 5.0 Integrate maintenance cycle into daemon
   depends_on: [2.0, 3.0, 4.0]
