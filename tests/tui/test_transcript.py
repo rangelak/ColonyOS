@@ -374,6 +374,24 @@ class TestTranscriptViewCSS:
             assert tv.styles.padding.right == 2
             assert tv.styles.padding.left == 2
 
+    async def test_welcome_banner_mentions_shift_drag(self, require_tui: None) -> None:
+        """Welcome banner shortcuts text should mention Shift+drag for text selection."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv.append_welcome_banner()
+            text = tv.get_plain_text()
+            assert "Shift+drag" in text
+            assert "select" in text
+
+    async def test_daemon_monitor_banner_mentions_shift_drag(self, require_tui: None) -> None:
+        """Daemon monitor banner shortcuts text should mention Shift+drag for text selection."""
+        async with TranscriptTestApp().run_test() as pilot:
+            tv = pilot.app.query_one("#tv", TranscriptView)
+            tv.append_daemon_monitor_banner()
+            text = tv.get_plain_text()
+            assert "Shift+drag" in text
+            assert "select" in text
+
     async def test_screen_has_overflow_hidden(self, require_tui: None) -> None:
         """Screen should have overflow: hidden to prevent a second scrollbar."""
         from colonyos.tui.app import AssistantApp

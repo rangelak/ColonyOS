@@ -260,7 +260,7 @@ class TranscriptView(RichLog):
             justify="center",
         )
         shortcuts = Text(
-            "Shift+Enter / Ctrl+J newline   Ctrl+C cancel   Ctrl+L clear",
+            "Shift+Enter / Ctrl+J newline   Ctrl+C cancel   Ctrl+L clear   Shift+drag select",
             style=COLOR_DIM,
             justify="center",
         )
@@ -282,7 +282,7 @@ class TranscriptView(RichLog):
         self.write(Text())
         summary = Text("Monitoring the autonomous daemon and its active work.", style=COLOR_DIM, justify="center")
         shortcuts = Text(
-            "Ctrl+C stop daemon   Ctrl+L clear transcript   Ctrl+S export",
+            "Ctrl+C stop daemon   Ctrl+L clear transcript   Ctrl+S export   Shift+drag select",
             style=COLOR_DIM,
             justify="center",
         )

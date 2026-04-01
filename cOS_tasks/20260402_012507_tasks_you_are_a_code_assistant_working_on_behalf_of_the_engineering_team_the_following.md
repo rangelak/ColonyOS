@@ -31,11 +31,11 @@
   - [x] 3.3 In `src/colonyos/tui/widgets/transcript.py`: add a method to render a subtle notification (e.g., `self.notify("↓ N new lines — press End to resume", severity="information")` using Textual's built-in notification system, or a reactive label) when `_unread_lines` transitions from 0 to >0
   - [x] 3.4 In `src/colonyos/tui/app.py` `action_scroll_to_end`: ensure unread counter is cleared when user presses End
 
-- [ ] 4.0 Add text selection hints and improve copy discoverability
+- [x] 4.0 Add text selection hints and improve copy discoverability
   depends_on: []
-  - [ ] 4.1 Write tests: verify HintBar rendered text includes "Shift+drag" hint; verify welcome banner mentions selection
-  - [ ] 4.2 In `src/colonyos/tui/widgets/hint_bar.py` `_render_hints`: add "Shift+drag" and "select" to the keybinding hints line
-  - [ ] 4.3 In `src/colonyos/tui/widgets/transcript.py` `append_welcome_banner` and `append_daemon_monitor_banner`: add "Shift+drag to select" to the shortcuts text
+  - [x] 4.1 Write tests: verify HintBar rendered text includes "Shift+drag" hint; verify welcome banner mentions selection
+  - [x] 4.2 In `src/colonyos/tui/widgets/hint_bar.py` `_render_hints`: add "Shift+drag" and "select" to the keybinding hints line
+  - [x] 4.3 In `src/colonyos/tui/widgets/transcript.py` `append_welcome_banner` and `append_daemon_monitor_banner`: add "Shift+drag to select" to the shortcuts text
 
 - [ ] 5.0 Integration testing and regression check
   depends_on: [1.0, 2.0, 3.0, 4.0]
