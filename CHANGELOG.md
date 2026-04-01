@@ -1,5 +1,18 @@
 # Changelog
 
+## 20260402_030000 — Task-Level Retry for Auto-Recovery
+
+Adds a task-level retry loop to `_run_sequential_implement()` that retries individual failed tasks with error context injected into the prompt, before falling through to the existing phase-level and nuke recovery cascade. This avoids re-executing already-committed successful tasks when only one task fails.
+
+**Modified:**
+- `src/colonyos/config.py` — Added `max_task_retries` field to `RecoveryConfig` with validation
+- `src/colonyos/orchestrator.py` — Added `_clean_working_tree()` helper, `previous_error` parameter to prompt builder, task-level retry loop with recovery event logging
+- `tests/test_config.py` — Tests for `max_task_retries` configuration and validation
+- `tests/test_sequential_implement.py` — Comprehensive unit tests for retry loop mechanics, git cleanup, error injection, dependent unblocking, and recovery event logging
+
+**PRD:** `cOS_prds/20260402_022155_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260402_022155_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260401_173000 — Stuck Daemon Detection and Auto-Recovery
 
 Adds an in-process watchdog thread that detects when a pipeline has stalled (no heartbeat progress beyond a configurable threshold) and automatically recovers: canceling the stuck pipeline, marking the item as FAILED, alerting operators via Slack, and resuming the main loop. Also enriches `/healthz` with pipeline duration and stall status, adds `started_at` to `QueueItem`, and bumps the schema to v5.
