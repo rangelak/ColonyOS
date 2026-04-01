@@ -1,15 +1,19 @@
-"""Daemon inter-queue maintenance — self-update detection and installation.
+"""Daemon inter-queue maintenance — self-update, branch sync, and CI fix.
 
 This module provides helpers for the daemon maintenance cycle that runs
 between queue items.  Task 2.0 covers self-update detection, installation,
 rollback bookkeeping, and the ``should_rollback`` startup check.
+Task 3.0 adds branch sync scanning to identify diverged ``colonyos/``
+branches and report them via Slack.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -201,3 +205,188 @@ def should_rollback(repo_root: Path, startup_time: float) -> bool:
         elapsed,
     )
     return True
+
+
+# ---------------------------------------------------------------------------
+# Branch sync scan (FR-3)
+# ---------------------------------------------------------------------------
+
+_GH_TIMEOUT = 10
+
+
+@dataclass(frozen=True)
+class BranchStatus:
+    """Divergence status for a single remote branch."""
+
+    name: str
+    ahead: int = 0
+    behind: int = 0
+    has_open_pr: bool = False
+    pr_number: int | None = None
+
+
+def scan_diverged_branches(
+    repo_root: Path,
+    prefix: str = "colonyos/",
+) -> list[BranchStatus]:
+    """Enumerate remote branches with *prefix* and compute divergence from main.
+
+    For each branch that is behind ``origin/main`` by at least one commit,
+    return a :class:`BranchStatus` with ahead/behind counts and open-PR info.
+
+    Branches that are fully up-to-date (behind == 0) are omitted from the
+    result.  All errors are caught and logged — the function never raises.
+    """
+    # 1. Fetch to ensure refs are current (best-effort)
+    try:
+        _git(repo_root, "fetch", "--prune", timeout=_DEFAULT_GIT_TIMEOUT)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        logger.warning("git fetch --prune failed; using stale refs", exc_info=True)
+
+    # 2. List remote branches matching prefix
+    try:
+        result = _git(
+            repo_root,
+            "branch", "-r", "--list", f"origin/{prefix}*",
+            "--format", "%(refname:short)",
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        logger.warning("Failed to list remote branches", exc_info=True)
+        return []
+
+    if result.returncode != 0:
+        logger.warning("git branch -r failed: %s", result.stderr.strip())
+        return []
+
+    branch_refs = [
+        line.strip() for line in result.stdout.splitlines() if line.strip()
+    ]
+    if not branch_refs:
+        return []
+
+    # 3. Batch-fetch open PRs for prefix branches
+    open_prs = _fetch_open_prs_for_prefix(repo_root, prefix)
+
+    # 4. Compute ahead/behind for each branch
+    branches: list[BranchStatus] = []
+    for ref in branch_refs:
+        # ref looks like "origin/colonyos/foo" — strip the "origin/" to get
+        # the logical branch name
+        branch_name = ref.removeprefix("origin/")
+        ahead, behind = _ahead_behind(repo_root, ref)
+        if behind == 0 and ahead == 0:
+            continue
+
+        pr_number = open_prs.get(branch_name)
+        branches.append(BranchStatus(
+            name=branch_name,
+            ahead=ahead,
+            behind=behind,
+            has_open_pr=pr_number is not None,
+            pr_number=pr_number,
+        ))
+
+    return branches
+
+
+def _ahead_behind(repo_root: Path, remote_ref: str) -> tuple[int, int]:
+    """Return ``(ahead, behind)`` counts of *remote_ref* relative to ``origin/main``."""
+    try:
+        result = _git(
+            repo_root,
+            "rev-list", "--count", "--left-right",
+            f"{remote_ref}...origin/main",
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        logger.warning("Failed to compute ahead/behind for %s", remote_ref, exc_info=True)
+        return 0, 0
+
+    if result.returncode != 0:
+        logger.warning(
+            "git rev-list --left-right failed for %s: %s",
+            remote_ref,
+            result.stderr.strip(),
+        )
+        return 0, 0
+
+    parts = result.stdout.strip().split()
+    if len(parts) != 2:
+        return 0, 0
+
+    try:
+        ahead = int(parts[0])
+        behind = int(parts[1])
+    except ValueError:
+        return 0, 0
+
+    return ahead, behind
+
+
+def _fetch_open_prs_for_prefix(
+    repo_root: Path,
+    prefix: str,
+) -> dict[str, int]:
+    """Return a mapping of ``{branch_name: pr_number}`` for open PRs.
+
+    Uses a single ``gh pr list`` call to fetch all open PRs, then filters
+    to branches that start with *prefix*.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh", "pr", "list",
+                "--state", "open",
+                "--json", "number,headRefName",
+                "--limit", "100",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_GH_TIMEOUT,
+            cwd=repo_root,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Failed to fetch open PRs: %s", exc)
+        return {}
+
+    if result.returncode != 0:
+        logger.warning("gh pr list failed: %s", result.stderr.strip())
+        return {}
+
+    try:
+        items = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse gh pr list output")
+        return {}
+
+    if not isinstance(items, list):
+        return {}
+
+    mapping: dict[str, int] = {}
+    for item in items:
+        branch = item.get("headRefName", "")
+        number = item.get("number")
+        if branch.startswith(prefix) and isinstance(number, int):
+            mapping[branch] = number
+
+    return mapping
+
+
+def format_branch_sync_report(branches: list[BranchStatus]) -> str | None:
+    """Format a Slack mrkdwn summary of diverged branches.
+
+    Returns ``None`` if *branches* is empty.
+    """
+    if not branches:
+        return None
+
+    lines = ["*Branch Sync Report*", ""]
+    for b in sorted(branches, key=lambda x: x.behind, reverse=True):
+        pr_tag = f" (PR #{b.pr_number})" if b.pr_number else ""
+        behind_tag = f"{b.behind} behind" if b.behind else ""
+        ahead_tag = f"{b.ahead} ahead" if b.ahead else ""
+        counts = ", ".join(filter(None, [behind_tag, ahead_tag]))
+        lines.append(f"\u2022 `{b.name}` — {counts}{pr_tag}")
+
+    lines.append("")
+    lines.append(f"_{len(branches)} diverged branch(es) found._")
+    return "\n".join(lines)

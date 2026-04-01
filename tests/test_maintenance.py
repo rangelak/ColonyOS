@@ -1,7 +1,8 @@
-"""Tests for maintenance.py — self-update detection and installation (Task 2.0)."""
+"""Tests for maintenance.py — self-update and branch sync (Tasks 2.0 & 3.0)."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -10,10 +11,13 @@ from unittest.mock import patch
 import pytest
 
 from colonyos.maintenance import (
+    BranchStatus,
+    format_branch_sync_report,
     pull_and_check_update,
     read_last_good_commit,
     record_last_good_commit,
     run_self_update,
+    scan_diverged_branches,
     should_rollback,
 )
 
@@ -238,3 +242,217 @@ class TestShouldRollback:
         mock_git.return_value = _completed(returncode=128, stderr="fatal")
         startup_time = time.time() - 10
         assert should_rollback(tmp_path, startup_time) is False
+
+
+# ---------------------------------------------------------------------------
+# scan_diverged_branches (Task 3.1)
+# ---------------------------------------------------------------------------
+
+
+class TestScanDivergedBranches:
+    """Task 3.1 — scan_diverged_branches returns list[BranchStatus]."""
+
+    @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
+    @patch("colonyos.maintenance._git")
+    def test_no_branches(self, mock_git, mock_prs, tmp_path: Path) -> None:
+        mock_git.side_effect = [
+            _completed(),  # fetch --prune
+            _completed(stdout=""),  # branch -r --list
+        ]
+        result = scan_diverged_branches(tmp_path)
+        assert result == []
+
+    @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
+    @patch("colonyos.maintenance._git")
+    def test_all_up_to_date(self, mock_git, mock_prs, tmp_path: Path) -> None:
+        mock_git.side_effect = [
+            _completed(),  # fetch --prune
+            _completed(stdout="origin/colonyos/feat-a\n"),  # branch -r
+            _completed(stdout="0\t0\n"),  # rev-list (ahead=0, behind=0)
+        ]
+        mock_prs.return_value = {}
+        result = scan_diverged_branches(tmp_path)
+        assert result == []
+
+    @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
+    @patch("colonyos.maintenance._git")
+    def test_some_diverged(self, mock_git, mock_prs, tmp_path: Path) -> None:
+        mock_git.side_effect = [
+            _completed(),  # fetch --prune
+            _completed(stdout="origin/colonyos/feat-a\norigin/colonyos/feat-b\n"),
+            _completed(stdout="3\t5\n"),  # feat-a: 3 ahead, 5 behind
+            _completed(stdout="0\t0\n"),  # feat-b: up-to-date
+        ]
+        mock_prs.return_value = {"colonyos/feat-a": 42}
+        result = scan_diverged_branches(tmp_path)
+        assert len(result) == 1
+        assert result[0].name == "colonyos/feat-a"
+        assert result[0].ahead == 3
+        assert result[0].behind == 5
+        assert result[0].has_open_pr is True
+        assert result[0].pr_number == 42
+
+    @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
+    @patch("colonyos.maintenance._git")
+    def test_branch_without_pr(self, mock_git, mock_prs, tmp_path: Path) -> None:
+        mock_git.side_effect = [
+            _completed(),  # fetch --prune
+            _completed(stdout="origin/colonyos/orphan\n"),
+            _completed(stdout="1\t2\n"),  # 1 ahead, 2 behind
+        ]
+        mock_prs.return_value = {}
+        result = scan_diverged_branches(tmp_path)
+        assert len(result) == 1
+        assert result[0].has_open_pr is False
+        assert result[0].pr_number is None
+
+    @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
+    @patch("colonyos.maintenance._git")
+    def test_git_branch_list_failure(self, mock_git, mock_prs, tmp_path: Path) -> None:
+        mock_git.side_effect = [
+            _completed(),  # fetch --prune
+            _completed(returncode=1, stderr="error"),  # branch -r failed
+        ]
+        result = scan_diverged_branches(tmp_path)
+        assert result == []
+
+    @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
+    @patch("colonyos.maintenance._git")
+    def test_fetch_failure_continues(self, mock_git, mock_prs, tmp_path: Path) -> None:
+        """git fetch failure should not prevent scanning with stale refs."""
+        mock_git.side_effect = [
+            subprocess.TimeoutExpired(cmd="git fetch", timeout=30),  # fetch fails
+            _completed(stdout="origin/colonyos/feat-x\n"),  # branch -r works
+            _completed(stdout="0\t3\n"),  # behind only
+        ]
+        mock_prs.return_value = {}
+        result = scan_diverged_branches(tmp_path)
+        assert len(result) == 1
+        assert result[0].behind == 3
+
+    @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
+    @patch("colonyos.maintenance._git")
+    def test_rev_list_failure_skips_branch(self, mock_git, mock_prs, tmp_path: Path) -> None:
+        mock_git.side_effect = [
+            _completed(),  # fetch --prune
+            _completed(stdout="origin/colonyos/broken\n"),
+            _completed(returncode=128, stderr="fatal"),  # rev-list fails
+        ]
+        mock_prs.return_value = {}
+        result = scan_diverged_branches(tmp_path)
+        assert result == []
+
+    @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
+    @patch("colonyos.maintenance._git")
+    def test_only_ahead_included(self, mock_git, mock_prs, tmp_path: Path) -> None:
+        """Branches that are ahead-only (behind=0, ahead>0) are still diverged."""
+        mock_git.side_effect = [
+            _completed(),  # fetch --prune
+            _completed(stdout="origin/colonyos/ahead-only\n"),
+            _completed(stdout="5\t0\n"),  # 5 ahead, 0 behind
+        ]
+        mock_prs.return_value = {}
+        result = scan_diverged_branches(tmp_path)
+        assert len(result) == 1
+        assert result[0].ahead == 5
+        assert result[0].behind == 0
+
+
+# ---------------------------------------------------------------------------
+# format_branch_sync_report (Task 3.2)
+# ---------------------------------------------------------------------------
+
+
+class TestFormatBranchSyncReport:
+    """Task 3.2 — format_branch_sync_report returns Slack mrkdwn summary."""
+
+    def test_empty_list_returns_none(self) -> None:
+        assert format_branch_sync_report([]) is None
+
+    def test_single_branch(self) -> None:
+        branches = [BranchStatus(name="colonyos/feat", ahead=1, behind=3, has_open_pr=True, pr_number=10)]
+        report = format_branch_sync_report(branches)
+        assert report is not None
+        assert "*Branch Sync Report*" in report
+        assert "`colonyos/feat`" in report
+        assert "3 behind" in report
+        assert "1 ahead" in report
+        assert "PR #10" in report
+        assert "1 diverged branch(es)" in report
+
+    def test_multiple_branches_sorted_by_behind(self) -> None:
+        branches = [
+            BranchStatus(name="colonyos/a", ahead=0, behind=2),
+            BranchStatus(name="colonyos/b", ahead=0, behind=10),
+            BranchStatus(name="colonyos/c", ahead=0, behind=5),
+        ]
+        report = format_branch_sync_report(branches)
+        assert report is not None
+        lines = report.splitlines()
+        # Find the bullet lines
+        bullets = [l for l in lines if l.startswith("\u2022")]
+        assert len(bullets) == 3
+        # Most behind first
+        assert "colonyos/b" in bullets[0]
+        assert "colonyos/c" in bullets[1]
+        assert "colonyos/a" in bullets[2]
+
+    def test_branch_without_pr(self) -> None:
+        branches = [BranchStatus(name="colonyos/orphan", ahead=2, behind=1)]
+        report = format_branch_sync_report(branches)
+        assert report is not None
+        assert "PR #" not in report
+
+    def test_ahead_only_branch(self) -> None:
+        branches = [BranchStatus(name="colonyos/ahead", ahead=5, behind=0)]
+        report = format_branch_sync_report(branches)
+        assert report is not None
+        assert "5 ahead" in report
+        assert "behind" not in report.split("`colonyos/ahead`")[1].split("\n")[0]
+
+
+# ---------------------------------------------------------------------------
+# _fetch_open_prs_for_prefix
+# ---------------------------------------------------------------------------
+
+
+class TestFetchOpenPrsForPrefix:
+    """Test the internal _fetch_open_prs_for_prefix helper."""
+
+    @patch("colonyos.maintenance.subprocess.run")
+    def test_returns_matching_prs(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.maintenance import _fetch_open_prs_for_prefix
+
+        mock_run.return_value = _completed(
+            stdout=json.dumps([
+                {"number": 10, "headRefName": "colonyos/feat-a"},
+                {"number": 20, "headRefName": "colonyos/feat-b"},
+                {"number": 30, "headRefName": "other/branch"},
+            ])
+        )
+        result = _fetch_open_prs_for_prefix(tmp_path, "colonyos/")
+        assert result == {"colonyos/feat-a": 10, "colonyos/feat-b": 20}
+
+    @patch("colonyos.maintenance.subprocess.run")
+    def test_gh_failure_returns_empty(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.maintenance import _fetch_open_prs_for_prefix
+
+        mock_run.return_value = _completed(returncode=1, stderr="not logged in")
+        result = _fetch_open_prs_for_prefix(tmp_path, "colonyos/")
+        assert result == {}
+
+    @patch("colonyos.maintenance.subprocess.run")
+    def test_timeout_returns_empty(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.maintenance import _fetch_open_prs_for_prefix
+
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=10)
+        result = _fetch_open_prs_for_prefix(tmp_path, "colonyos/")
+        assert result == {}
+
+    @patch("colonyos.maintenance.subprocess.run")
+    def test_invalid_json_returns_empty(self, mock_run, tmp_path: Path) -> None:
+        from colonyos.maintenance import _fetch_open_prs_for_prefix
+
+        mock_run.return_value = _completed(stdout="not json")
+        result = _fetch_open_prs_for_prefix(tmp_path, "colonyos/")
+        assert result == {}

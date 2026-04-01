@@ -34,12 +34,12 @@
   - [x] 2.7 Implement `record_last_good_commit()` and `read_last_good_commit()` in `maintenance.py`
   - [x] 2.8 Implement `should_rollback()` in `maintenance.py`
 
-- [ ] 3.0 Implement branch sync scan (`maintenance.py`)
+- [x] 3.0 Implement branch sync scan (`maintenance.py`)
   depends_on: [1.0]
-  - [ ] 3.1 Write tests for `scan_diverged_branches(repo_root, prefix) -> list[BranchStatus]` where `BranchStatus` has fields: `name`, `ahead`, `behind`, `has_open_pr`, `pr_number`. Test cases: no branches, all up-to-date, some diverged, branches without PRs
-  - [ ] 3.2 Write tests for `format_branch_sync_report(branches: list[BranchStatus]) -> str` — Slack-formatted summary. Test: empty list returns None, multiple branches produce readable output
-  - [ ] 3.3 Implement `scan_diverged_branches()`: enumerate `colonyos/`-prefixed branches via `git branch -r --list 'origin/colonyos/*'`, compute ahead/behind with `git rev-list --count --left-right`, check open PRs via `gh pr list --head <branch>`
-  - [ ] 3.4 Implement `format_branch_sync_report()`: Slack mrkdwn format with branch names, ahead/behind counts, PR links
+  - [x] 3.1 Write tests for `scan_diverged_branches(repo_root, prefix) -> list[BranchStatus]` where `BranchStatus` has fields: `name`, `ahead`, `behind`, `has_open_pr`, `pr_number`. Test cases: no branches, all up-to-date, some diverged, branches without PRs
+  - [x] 3.2 Write tests for `format_branch_sync_report(branches: list[BranchStatus]) -> str` — Slack-formatted summary. Test: empty list returns None, multiple branches produce readable output
+  - [x] 3.3 Implement `scan_diverged_branches()`: enumerate `colonyos/`-prefixed branches via `git branch -r --list 'origin/colonyos/*'`, compute ahead/behind with `git rev-list --count --left-right`, check open PRs via `gh pr list --head <branch>`
+  - [x] 3.4 Implement `format_branch_sync_report()`: Slack mrkdwn format with branch names, ahead/behind counts, PR links
 
 - [ ] 4.0 Implement CI fix enqueueing (`maintenance.py`)
   depends_on: [1.0]
