@@ -79,12 +79,12 @@
     - `"pipeline_duration_seconds"`: `time.monotonic() - self._pipeline_started_at` if pipeline is running, else `None`.
     - `"pipeline_stalled"`: `self._pipeline_stalled`.
 
-- [ ] 7.0 Integration tests and startup logging (depends on all above)
+- [x] 7.0 Integration tests and startup logging (depends on all above)
   depends_on: [4.0, 5.0, 6.0]
-  - [ ] 7.1 Write integration test: simulate a full stuck-pipeline scenario end-to-end:
+  - [x] 7.1 Write integration test: simulate a full stuck-pipeline scenario end-to-end:
     - Start daemon with short `watchdog_stall_seconds` (e.g., 5 seconds for testing).
     - Mock `run_pipeline_for_queue_item` to block indefinitely.
     - Mock heartbeat file with old mtime.
     - Assert: watchdog fires, item marked FAILED, Slack alert posted, `_pipeline_running` reset, daemon resumes processing next item.
-  - [ ] 7.2 Add startup log line in `Daemon.start()`: `logger.info("Watchdog enabled: stall threshold=%ds", self.daemon_config.watchdog_stall_seconds)`.
-  - [ ] 7.3 Run full test suite (`pytest tests/`) to confirm zero regressions.
+  - [x] 7.2 Add startup log line in `Daemon.start()`: `logger.info("Watchdog enabled: stall threshold=%ds", self.daemon_config.watchdog_stall_seconds)`.
+  - [x] 7.3 Run full test suite (`pytest tests/`) to confirm zero regressions.

@@ -405,6 +405,11 @@ class Daemon:
                 # Start embedded dashboard server
                 self._start_dashboard_server()
 
+                logger.info(
+                    "Watchdog enabled: stall threshold=%ds",
+                    self.daemon_config.watchdog_stall_seconds,
+                )
+
                 # Start background threads
                 threads = self._start_threads()
 

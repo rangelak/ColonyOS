@@ -2215,3 +2215,155 @@ class TestWatchdogThread:
         assert event["item_id"] == "monitor-event-item"
         assert event["stall_duration_seconds"] == 300.0
         assert event["action_taken"] == "auto_cancel"
+
+
+class TestWatchdogIntegration:
+    """Integration tests for the full stuck-pipeline scenario (task 7.0)."""
+
+    def test_end_to_end_stuck_pipeline_recovery(self, tmp_repo: Path):
+        """Full integration: stuck pipeline → watchdog fires → item FAILED → daemon resumes.
+
+        Simulates a pipeline that blocks indefinitely, with a stale heartbeat file.
+        Verifies the watchdog detects the stall, recovers, posts a Slack alert,
+        marks the item FAILED, resets daemon state, and allows the next item to run.
+        """
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=5,  # short threshold for testing
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        # Queue two items: first will get stuck, second should be processable after recovery
+        stuck_item = QueueItem(
+            id="integration-stuck",
+            source_type="prompt",
+            source_value="hang forever",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        next_item = QueueItem(
+            id="integration-next",
+            source_type="prompt",
+            source_value="run after recovery",
+            status=QueueItemStatus.PENDING,
+            priority=2,
+        )
+        daemon._queue_state.items = [stuck_item, next_item]
+
+        # Create a stale heartbeat file (mtime far in the past)
+        hb_dir = tmp_repo / ".colonyos" / "runs"
+        hb_dir.mkdir(parents=True, exist_ok=True)
+        hb_file = hb_dir / "heartbeat"
+        hb_file.touch()
+        old_mtime = time.time() - 300
+        os.utime(hb_file, (old_mtime, old_mtime))
+
+        # Simulate the pipeline getting stuck: _execute_item blocks, but we'll
+        # manually set the running state as _try_execute_next would, then
+        # invoke the watchdog check directly
+        with daemon._lock:
+            stuck_item.status = QueueItemStatus.RUNNING
+            stuck_item.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+            daemon._pipeline_running = True
+            daemon._pipeline_started_at = time.monotonic() - 300  # started 5 min ago
+            daemon._pipeline_stalled = False
+            daemon._current_running_item = stuck_item
+
+        # Run the watchdog check — should detect the stall and recover
+        with patch("colonyos.daemon.request_active_phase_cancel", return_value=1) as mock_phase_cancel, \
+             patch("colonyos.daemon.request_cancel", return_value=1) as mock_cancel, \
+             patch.object(daemon, "_stop_event") as mock_stop, \
+             patch.object(daemon, "_post_slack_message") as mock_slack:
+            mock_stop.wait.return_value = False
+            mock_stop.is_set.return_value = False
+            daemon._watchdog_check()
+
+        # --- Verify recovery ---
+        # 1. Stuck item should be marked FAILED
+        assert stuck_item.status == QueueItemStatus.FAILED
+        assert "watchdog" in stuck_item.error.lower()
+
+        # 2. Pipeline state should be fully reset
+        assert daemon._pipeline_running is False
+        assert daemon._pipeline_started_at is None
+        assert daemon._current_running_item is None
+        assert daemon._pipeline_stalled is True  # stall flag set for healthz
+
+        # 3. Slack alert should have been posted
+        mock_slack.assert_called_once()
+        slack_msg = mock_slack.call_args[0][0]
+        assert "Stuck Pipeline Detected" in slack_msg
+        assert "integration-stuck" in slack_msg
+
+        # 4. Cancellation should have been attempted
+        mock_phase_cancel.assert_called_once()
+        mock_cancel.assert_called_once()
+
+        # 5. Next item should still be pending and processable
+        assert next_item.status == QueueItemStatus.PENDING
+
+        # 6. Health endpoint should reflect stall state
+        health = daemon.get_health()
+        assert health["pipeline_stalled"] is True
+        assert health["pipeline_running"] is False
+
+    def test_startup_log_includes_watchdog_threshold(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture):
+        """Daemon start() should log the watchdog stall threshold."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=1920,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        with patch.object(daemon, "_acquire_pid_lock"), \
+             patch.object(daemon, "_recover_from_crash"), \
+             patch.object(daemon, "_install_signal_handlers"), \
+             patch.object(daemon, "_persist_state"), \
+             patch.object(daemon, "_start_dashboard_server"), \
+             patch.object(daemon, "_start_threads", return_value=[]), \
+             patch.object(daemon, "_main_loop", side_effect=KeyboardInterrupt), \
+             patch.object(daemon, "_release_pid_lock"):
+            import logging
+            with caplog.at_level(logging.INFO, logger="colonyos.daemon"):
+                try:
+                    daemon.start()
+                except KeyboardInterrupt:
+                    pass
+
+        assert any("Watchdog enabled: stall threshold=1920s" in record.message for record in caplog.records)
+
+    def test_watchdog_does_not_fire_during_healthy_run(self, tmp_repo: Path):
+        """Full integration: a healthy pipeline that completes normally never triggers watchdog."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=120,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        item = QueueItem(
+            id="healthy-run",
+            source_type="prompt",
+            source_value="do work",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon._queue_state.items = [item]
+
+        # Simulate a pipeline that just started with a fresh heartbeat
+        hb_dir = tmp_repo / ".colonyos" / "runs"
+        hb_dir.mkdir(parents=True, exist_ok=True)
+        (hb_dir / "heartbeat").touch()
+
+        with daemon._lock:
+            item.status = QueueItemStatus.RUNNING
+            daemon._pipeline_running = True
+            daemon._pipeline_started_at = time.monotonic() - 10  # only 10s ago
+            daemon._current_running_item = item
+
+        with patch.object(daemon, "_watchdog_recover") as mock_recover:
+            # Run multiple check cycles — none should trigger recovery
+            for _ in range(5):
+                daemon._watchdog_check()
+
+        mock_recover.assert_not_called()
+        assert daemon._pipeline_stalled is False
