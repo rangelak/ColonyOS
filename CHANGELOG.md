@@ -1,5 +1,21 @@
 # Changelog
 
+## 20260402_015000 — Fix TUI Double Scrollbar, Auto-Scroll, and Text Selection
+
+Fixes three usability bugs in the daemon monitor and main TUI: eliminates the double scrollbar caused by a dead CSS selector and Screen-level overflow, implements smart auto-scroll that preserves the user's scroll position with a 3-line re-engagement threshold, adds a "new content below" indicator when scrolled up, and surfaces Shift+drag text selection hints.
+
+**Modified:**
+- `src/colonyos/tui/styles.py` — Fixed dead CSS selector `TranscriptView RichLog` → `TranscriptView`, added `overflow: hidden` to Screen
+- `src/colonyos/tui/widgets/transcript.py` — Disabled base `auto_scroll`, added scroll threshold re-engagement, unread lines indicator, fixed `_programmatic_scroll` timing
+- `src/colonyos/tui/widgets/hint_bar.py` — Added Shift+drag selection hint
+
+**Created:**
+- `tests/tui/test_transcript.py` — Tests for scroll behavior, unread counter, auto-scroll threshold
+- `tests/tui/test_app.py` — Integration tests for scroll behavior and monitor mode
+
+**PRD:** `cOS_prds/20260402_012507_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260402_012507_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260401_173000 — Stuck Daemon Detection and Auto-Recovery
 
 Adds an in-process watchdog thread that detects when a pipeline has stalled (no heartbeat progress beyond a configurable threshold) and automatically recovers: canceling the stuck pipeline, marking the item as FAILED, alerting operators via Slack, and resuming the main loop. Also enriches `/healthz` with pipeline duration and stall status, adds `started_at` to `QueueItem`, and bumps the schema to v5.
