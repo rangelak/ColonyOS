@@ -429,7 +429,7 @@ class QueueItem:
     - "cleanup": Cleanup / maintenance
     """
 
-    SCHEMA_VERSION: ClassVar[int] = 4  # class-level constant; kept stable for backward compatibility
+    SCHEMA_VERSION: ClassVar[int] = 5  # class-level constant; kept stable for backward compatibility
 
     id: str
     source_type: str  # "prompt", "issue", "slack", "slack_fix", "pr_review_fix", "ceo", or "cleanup"
@@ -438,6 +438,7 @@ class QueueItem:
     added_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+    started_at: str | None = None
     run_id: str | None = None
     cost_usd: float = 0.0
     duration_ms: int = 0
@@ -472,6 +473,7 @@ class QueueItem:
             "source_value": self.source_value,
             "status": self.status.value,
             "added_at": self.added_at,
+            "started_at": self.started_at,
             "run_id": self.run_id,
             "cost_usd": self.cost_usd,
             "duration_ms": self.duration_ms,
@@ -523,6 +525,7 @@ class QueueItem:
             source_value=data.get("source_value", ""),
             status=status,
             added_at=data.get("added_at", ""),
+            started_at=data.get("started_at"),
             run_id=data.get("run_id"),
             cost_usd=data.get("cost_usd", 0.0),
             duration_ms=data.get("duration_ms", 0),

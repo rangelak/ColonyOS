@@ -706,6 +706,7 @@ class Daemon:
             if item.status != QueueItemStatus.PENDING:
                 return False
             item.status = QueueItemStatus.RUNNING
+            item.started_at = datetime.now(timezone.utc).isoformat()
             self._pipeline_running = True
             self._persist_queue()
 

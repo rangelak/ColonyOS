@@ -34,7 +34,7 @@ class TestQueueItemPriority:
         assert item.priority == 1
 
     def test_schema_version_bumped(self):
-        assert QueueItem.SCHEMA_VERSION == 4
+        assert QueueItem.SCHEMA_VERSION == 5
 
     def test_roundtrip_with_priority(self):
         item = QueueItem(id="t", source_type="ceo", source_value="test", status=QueueItemStatus.PENDING, priority=2)
