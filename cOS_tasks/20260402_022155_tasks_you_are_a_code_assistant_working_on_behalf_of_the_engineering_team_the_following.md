@@ -19,10 +19,10 @@
   - [x] 1.2 Add `max_task_retries: int = 1` to `RecoveryConfig` dataclass in `src/colonyos/config.py` (after line 254, alongside `max_phase_retries`).
   - [x] 1.3 Add parsing and validation for `max_task_retries` in `_parse_recovery_config()` (line 777 of `config.py`), using the same pattern as `max_phase_retries`.
 
-- [ ] 2.0 Add `previous_error` parameter to task prompt builder
+- [x] 2.0 Add `previous_error` parameter to task prompt builder
   depends_on: []
-  - [ ] 2.1 Write tests verifying `_build_single_task_implement_prompt()` includes a `## Previous Attempt Failed` section when `previous_error` is provided, and omits it when `None`. Test that the error string is truncated to `incident_char_cap`.
-  - [ ] 2.2 Add optional `previous_error: str | None = None` parameter to `_build_single_task_implement_prompt()` in `src/colonyos/orchestrator.py` (line 646). When provided, append a delimited error section to the user prompt, truncated to `config.recovery.incident_char_cap`.
+  - [x] 2.1 Write tests verifying `_build_single_task_implement_prompt()` includes a `## Previous Attempt Failed` section when `previous_error` is provided, and omits it when `None`. Test that the error string is truncated to `incident_char_cap`.
+  - [x] 2.2 Add optional `previous_error: str | None = None` parameter to `_build_single_task_implement_prompt()` in `src/colonyos/orchestrator.py` (line 646). When provided, append a delimited error section to the user prompt, truncated to `config.recovery.incident_char_cap`.
 
 - [ ] 3.0 Add `_clean_working_tree()` helper
   depends_on: []

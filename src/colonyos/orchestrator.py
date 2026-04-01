@@ -652,6 +652,7 @@ def _build_single_task_implement_prompt(
     branch_name: str,
     completed_tasks: list[str],
     repo_root: Path | None = None,
+    previous_error: str | None = None,
 ) -> tuple[str, str]:
     """Build system and user prompts scoped to a single task in sequential mode.
 
@@ -699,6 +700,16 @@ def _build_single_task_implement_prompt(
         f"Work on branch `{branch_name}`.\n\n"
         f"Focus exclusively on task {task_id}. Do not implement other tasks."
     )
+
+    if previous_error is not None:
+        truncated_error = previous_error[:config.recovery.incident_char_cap]
+        user += (
+            "\n\n## Previous Attempt Failed\n\n"
+            "The previous attempt to implement this task failed with the "
+            "following error. Fix the issue and try again.\n\n"
+            f"```\n{truncated_error}\n```"
+        )
+
     return system, user
 
 

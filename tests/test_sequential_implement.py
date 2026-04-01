@@ -874,6 +874,65 @@ class TestMemoryInjectionAndContextTrimming:
         assert "10.0: Task 10" in system
 
 
+class TestPreviousErrorInPrompt:
+    """Tests for the previous_error parameter of _build_single_task_implement_prompt."""
+
+    def test_previous_error_included_when_provided(self) -> None:
+        from colonyos.orchestrator import _build_single_task_implement_prompt
+
+        config = ColonyConfig()
+        _system, user = _build_single_task_implement_prompt(
+            config,
+            task_id="2.0",
+            task_description="Add auth",
+            prd_path="cOS_prds/test.md",
+            task_path="cOS_tasks/test.md",
+            branch_name="feature/test",
+            completed_tasks=[],
+            previous_error="TypeError: cannot add int and str",
+        )
+        assert "## Previous Attempt Failed" in user
+        assert "TypeError: cannot add int and str" in user
+
+    def test_previous_error_omitted_when_none(self) -> None:
+        from colonyos.orchestrator import _build_single_task_implement_prompt
+
+        config = ColonyConfig()
+        _system, user = _build_single_task_implement_prompt(
+            config,
+            task_id="2.0",
+            task_description="Add auth",
+            prd_path="cOS_prds/test.md",
+            task_path="cOS_tasks/test.md",
+            branch_name="feature/test",
+            completed_tasks=[],
+            previous_error=None,
+        )
+        assert "Previous Attempt Failed" not in user
+
+    def test_previous_error_truncated_to_incident_char_cap(self) -> None:
+        from colonyos.orchestrator import _build_single_task_implement_prompt
+
+        config = ColonyConfig()
+        cap = config.recovery.incident_char_cap
+        long_error = "x" * (cap + 500)
+        _system, user = _build_single_task_implement_prompt(
+            config,
+            task_id="2.0",
+            task_description="Add auth",
+            prd_path="cOS_prds/test.md",
+            task_path="cOS_tasks/test.md",
+            branch_name="feature/test",
+            completed_tasks=[],
+            previous_error=long_error,
+        )
+        assert "## Previous Attempt Failed" in user
+        # The full long_error should NOT appear (it's truncated)
+        assert long_error not in user
+        # But a truncated version should be present
+        assert "x" * cap in user
+
+
 class TestGitReturnCodeChecking:
     """Tests that git diff/ls-files failures are handled gracefully."""
 
