@@ -26,10 +26,10 @@
   - [x] 2.2 Add `daily_thread_ts: str | None = None`, `daily_thread_date: str | None = None`, `daily_thread_channel: str | None = None` fields to `DaemonState` dataclass
   - [x] 2.3 Update `DaemonState.to_dict()` and `DaemonState.from_dict()` to include the new fields
 
-- [ ] 3.0 Create daily summary formatting function
+- [x] 3.0 Create daily summary formatting function
   depends_on: []
-  - [ ] 3.1 Write tests in `tests/test_slack.py` for `format_daily_summary()`: test with completed items (PR links, cost), failed items (error one-liner, cost), empty periods, mixed results, and cost/queue depth display
-  - [ ] 3.2 Implement `format_daily_summary(completed_items: list[QueueItem], failed_items: list[QueueItem], total_cost: float, queue_depth: int, period_label: str) -> str` in `src/colonyos/slack.py`. Use the structured template format from the PRD (emoji headers, bulleted items with summary/PR/cost, spend + queue depth footer)
+  - [x] 3.1 Write tests in `tests/test_slack.py` for `format_daily_summary()`: test with completed items (PR links, cost), failed items (error one-liner, cost), empty periods, mixed results, and cost/queue depth display
+  - [x] 3.2 Implement `format_daily_summary(completed_items: list[QueueItem], failed_items: list[QueueItem], total_cost: float, queue_depth: int, period_label: str) -> str` in `src/colonyos/slack.py`. Use the structured template format from the PRD (emoji headers, bulleted items with summary/PR/cost, spend + queue depth footer)
 
 - [ ] 4.0 Implement daily thread lifecycle in daemon
   depends_on: [1.0, 2.0, 3.0]

@@ -376,6 +376,66 @@ def format_fix_error(error_type: str, detail: str) -> str:
     return f":x: *{error_type}*: {detail}"
 
 
+def format_daily_summary(
+    completed_items: list[QueueItem],
+    failed_items: list[QueueItem],
+    total_cost: float,
+    queue_depth: int,
+    period_label: str,
+) -> str:
+    """Format the daily summary message used as the opening post of a daily thread.
+
+    Uses a structured template (no LLM call) with emoji headers, bulleted items
+    showing summary/PR/cost, and a spend + queue depth footer.
+
+    Parameters
+    ----------
+    completed_items:
+        Queue items that completed successfully during the period.
+    failed_items:
+        Queue items that failed during the period.
+    total_cost:
+        Aggregate cost in USD for the period.
+    queue_depth:
+        Number of items currently pending in the queue.
+    period_label:
+        Human-readable label for the period (e.g. "April 1, 2026").
+    """
+    parts: list[str] = []
+    parts.append(f":sunrise: *ColonyOS Daily Summary — {period_label}*")
+    parts.append("")
+
+    has_activity = bool(completed_items or failed_items)
+
+    if not has_activity:
+        parts.append("_No activity during this period._")
+        parts.append("")
+
+    if completed_items:
+        parts.append(f"*Completed ({len(completed_items)}):*")
+        for item in completed_items:
+            label = item.summary or item.source_value or item.id
+            line = f"• `{label}`"
+            if item.pr_url:
+                line += f" — {item.pr_url}"
+            line += f" | ${item.cost_usd:.2f}"
+            parts.append(line)
+        parts.append("")
+
+    if failed_items:
+        parts.append(f"*Failed ({len(failed_items)}):*")
+        for item in failed_items:
+            label = item.summary or item.source_value or item.id
+            error_detail = item.error or "no details"
+            line = f"• `{label}` — {error_detail} | ${item.cost_usd:.2f}"
+            parts.append(line)
+        parts.append("")
+
+    parts.append(f"*Spend*: ${total_cost:.2f} | *Queue depth*: {queue_depth} pending")
+
+    return "\n".join(parts)
+
+
 def post_message(
     client: SlackClient,
     channel: str,
