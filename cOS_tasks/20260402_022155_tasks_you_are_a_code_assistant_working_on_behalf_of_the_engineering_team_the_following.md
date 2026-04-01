@@ -29,9 +29,9 @@
   - [x] 3.1 Write tests for `_clean_working_tree()`: verify it calls `git checkout -- .` and `git clean -fd`, verify it handles subprocess errors gracefully (logs warning, does not raise), verify it is scoped to the provided `repo_root`.
   - [x] 3.2 Implement `_clean_working_tree(repo_root: Path)` in `src/colonyos/orchestrator.py` as a module-level helper. Use `subprocess.run()` with the same patterns as existing git helpers in the file (e.g., the git operations around lines 918–976). Log a warning on failure but do not raise — the retry should still proceed even if cleanup is imperfect.
 
-- [ ] 4.0 Implement task retry loop in `_run_sequential_implement()`
+- [x] 4.0 Implement task retry loop in `_run_sequential_implement()`
   depends_on: [1.0, 2.0, 3.0]
-  - [ ] 4.1 Write unit tests in `tests/test_sequential_implement.py` for the retry loop:
+  - [x] 4.1 Write unit tests in `tests/test_sequential_implement.py` for the retry loop:
     - Task fails once, succeeds on retry → task moves to `completed`, dependents execute normally.
     - Task fails all retry attempts → task marked `FAILED`, dependents `BLOCKED` (existing behavior preserved).
     - `_clean_working_tree()` is called before each retry attempt.
@@ -39,12 +39,12 @@
     - `_record_recovery_event()` is called with `kind="task_retry"` for each retry.
     - `max_task_retries=0` disables retry (immediate failure, existing behavior).
     - Budget: retry uses same `per_task_budget`, not additional.
-  - [ ] 4.2 Modify the task failure handling in `_run_sequential_implement()` (around lines 885–995 of `src/colonyos/orchestrator.py`):
+  - [x] 4.2 Modify the task failure handling in `_run_sequential_implement()` (around lines 885–995 of `src/colonyos/orchestrator.py`):
     - Wrap the task execution in a retry loop: `for attempt in range(1 + config.recovery.max_task_retries)`.
     - On failure (attempt < max): call `_clean_working_tree()`, log `"task_retry"` event, rebuild prompt with `previous_error=result.error`, re-invoke `run_phase_sync()`.
     - On retry success: add task to `completed` set (not `failed`), break out of retry loop, continue DAG execution. Blocked dependents auto-unblock via existing set-membership checks (lines 833–837).
     - On all retries exhausted: existing failure behavior (add to `failed`, compute blocked set).
-  - [ ] 4.3 Verify the full sequential flow works end-to-end: run existing tests in `tests/test_sequential_implement.py` and `tests/test_orchestrator.py` to confirm no regressions. Fix any test failures.
+  - [x] 4.3 Verify the full sequential flow works end-to-end: run existing tests in `tests/test_sequential_implement.py` and `tests/test_orchestrator.py` to confirm no regressions. Fix any test failures.
 
 - [ ] 5.0 Final validation and cleanup
   depends_on: [4.0]
