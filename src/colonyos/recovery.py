@@ -167,6 +167,42 @@ def preserve_and_reset_worktree(repo_root: Path, label: str) -> PreservationResu
     )
 
 
+def pull_branch(
+    repo_root: Path, timeout: int = _DEFAULT_GIT_TIMEOUT,
+) -> tuple[bool, str | None]:
+    """Pull the latest from the remote for the current branch using ``--ff-only``.
+
+    Returns ``(True, None)`` on success.  If there is no remote tracking
+    branch the pull is silently skipped and ``(False, None)`` is returned.
+    On failure ``(False, error_message)`` is returned.
+    """
+    # Check for a remote tracking branch first.
+    upstream_result = _git(
+        repo_root, "rev-parse", "--abbrev-ref", "@{upstream}", timeout=10,
+    )
+    if upstream_result.returncode != 0:
+        # No upstream configured — nothing to pull.
+        return False, None
+
+    branch_result = _git(repo_root, "rev-parse", "--abbrev-ref", "HEAD", timeout=10)
+    branch_name = branch_result.stdout.strip() or "unknown"
+
+    try:
+        pull_result = _git(repo_root, "pull", "--ff-only", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        msg = f"git pull --ff-only timed out after {timeout}s on {branch_name}"
+        _LOGGER.warning(msg)
+        return False, msg
+
+    if pull_result.returncode != 0:
+        msg = pull_result.stderr.strip() or f"git pull --ff-only failed on {branch_name}"
+        _LOGGER.warning("Pull failed on %s: %s", branch_name, msg)
+        return False, msg
+
+    _LOGGER.info("Pulled latest for %s", branch_name)
+    return True, None
+
+
 def checkout_branch(repo_root: Path, branch_name: str) -> None:
     """Check out an existing branch."""
     result = _git(repo_root, "checkout", branch_name)
