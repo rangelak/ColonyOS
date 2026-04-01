@@ -1,5 +1,23 @@
 # Changelog
 
+## 20260401_173000 — Stuck Daemon Detection and Auto-Recovery
+
+Adds an in-process watchdog thread that detects when a pipeline has stalled (no heartbeat progress beyond a configurable threshold) and automatically recovers: canceling the stuck pipeline, marking the item as FAILED, alerting operators via Slack, and resuming the main loop. Also enriches `/healthz` with pipeline duration and stall status, adds `started_at` to `QueueItem`, and bumps the schema to v5.
+
+**Created:**
+- `tests/test_daemon.py` — Comprehensive test suite for watchdog thread, stall detection, and auto-recovery
+- `tests/test_models.py` — Tests for `QueueItem.started_at` field and schema v5 migration
+
+**Modified:**
+- `src/colonyos/daemon.py` — Watchdog thread, stall detection, auto-recovery, Slack alerts, enhanced `/healthz` endpoint, monitor events
+- `src/colonyos/config.py` — Added `watchdog_stall_seconds` config field to `DaemonConfig`
+- `src/colonyos/models.py` — Added `started_at` field to `QueueItem`, bumped `SCHEMA_VERSION` to 5
+- `tests/test_config.py` — Tests for `watchdog_stall_seconds` configuration
+- `tests/test_daemon_models.py` — Updated for schema v5
+
+**PRD:** `cOS_prds/20260401_135527_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260401_135527_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260331_220500 — Replace :eyes: Emoji with Completion Emoji on Pipeline Finish
 
 Adds clean emoji state transitions to Slack messages: when a ColonyOS pipeline completes, the `:eyes:` (in-progress) reaction is removed before adding the terminal status emoji (`:white_check_mark:` / `:x:`), plus `:tada:` on success. This eliminates ambiguous dual-emoji states so each message shows exactly one reaction reflecting its current state.
