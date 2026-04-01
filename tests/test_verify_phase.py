@@ -101,7 +101,7 @@ class TestVerifyPhaseInMainPipeline:
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
             # Verify passes
-            _fake_phase_result(Phase.VERIFY, artifacts={"result": "All 100 tests passed"}),
+            _fake_phase_result(Phase.VERIFY, artifacts={"result": "All 100 tests passed\n\nVERIFY_RESULT: PASS"}),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [
@@ -139,11 +139,11 @@ class TestVerifyPhaseInMainPipeline:
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
             # First verify: fails
-            _fake_phase_result(Phase.VERIFY, artifacts={"result": "FAILED: 2 tests failed\n\ntest_foo FAILED\ntest_bar FAILED"}),
+            _fake_phase_result(Phase.VERIFY, artifacts={"result": "FAILED: 2 tests failed\n\ntest_foo FAILED\ntest_bar FAILED\n\nVERIFY_RESULT: FAIL"}),
             # Fix agent
             _fake_phase_result(Phase.FIX),
             # Second verify: passes
-            _fake_phase_result(Phase.VERIFY, artifacts={"result": "All 100 tests passed"}),
+            _fake_phase_result(Phase.VERIFY, artifacts={"result": "All 100 tests passed\n\nVERIFY_RESULT: PASS"}),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [
@@ -172,7 +172,7 @@ class TestVerifyPhaseInMainPipeline:
 
         fail_verify = _fake_phase_result(
             Phase.VERIFY,
-            artifacts={"result": "FAILED: 3 tests failed\n\ntest_foo FAILED"},
+            artifacts={"result": "FAILED: 3 tests failed\n\ntest_foo FAILED\n\nVERIFY_RESULT: FAIL"},
         )
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
@@ -227,7 +227,7 @@ class TestVerifyPhaseInMainPipeline:
             _fake_phase_result(Phase.LEARN, cost_usd=0.5),
             # Verify fails but budget is almost gone (4.5 spent, 1.0 remaining < per_phase)
             _fake_phase_result(Phase.VERIFY, cost_usd=1.0,
-                               artifacts={"result": "FAILED: test_foo FAILED"}),
+                               artifacts={"result": "FAILED: 1 test failed\n\ntest_foo FAILED\n\nVERIFY_RESULT: FAIL"}),
             # No budget left for fix — loop should stop
         ]
         mock_parallel.return_value = [
@@ -296,7 +296,7 @@ class TestVerifyPhaseInMainPipeline:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
-            _fake_phase_result(Phase.VERIFY, artifacts={"result": "All 100 tests passed"}),
+            _fake_phase_result(Phase.VERIFY, artifacts={"result": "All 100 tests passed\n\nVERIFY_RESULT: PASS"}),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [
@@ -339,7 +339,7 @@ class TestVerifyPhaseIntegration:
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN, cost_usd=0.10),
             _fake_phase_result(Phase.VERIFY, cost_usd=0.30,
-                               artifacts={"result": "All 42 tests passed"}),
+                               artifacts={"result": "All 42 tests passed\n\nVERIFY_RESULT: PASS"}),
             _fake_phase_result(Phase.DELIVER, cost_usd=0.40),
         ]
         mock_parallel.return_value = [
@@ -387,12 +387,12 @@ class TestVerifyPhaseIntegration:
             _fake_phase_result(Phase.LEARN),
             # First verify: fails
             _fake_phase_result(Phase.VERIFY,
-                               artifacts={"result": "FAILED: 3 tests failed\n\ntest_auth FAILED\ntest_login FAILED\ntest_perms FAILED"}),
+                               artifacts={"result": "FAILED: 3 tests failed\n\ntest_auth FAILED\ntest_login FAILED\ntest_perms FAILED\n\nVERIFY_RESULT: FAIL"}),
             # Fix agent repairs
             _fake_phase_result(Phase.FIX, cost_usd=0.80),
             # Second verify: passes
             _fake_phase_result(Phase.VERIFY,
-                               artifacts={"result": "All 42 tests passed"}),
+                               artifacts={"result": "All 42 tests passed\n\nVERIFY_RESULT: PASS"}),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [
@@ -492,44 +492,27 @@ class TestVerifyPhaseIntegration:
                 _fake_phase_result(Phase.LEARN),
                 # Verify failed (this is the failing phase)
                 _fake_phase_result(Phase.VERIFY, success=False,
-                                   artifacts={"result": "FAILED: 5 tests failed"}),
+                                   artifacts={"result": "FAILED: 5 tests failed\n\nVERIFY_RESULT: FAIL"}),
             ],
         )
 
-        # On resume: last_successful_phase is "learn" (last successful).
-        # _compute_next_phase("learn") is not in the mapping, so we need
-        # "decision" as the last successful phase. Let me check the logic:
-        # The code iterates over phases and picks the last successful one.
-        # LEARN succeeded, VERIFY failed. So last_successful_phase = "learn".
-        # But "learn" isn't in _compute_next_phase mapping, so we need to
-        # use "decision" which IS in the mapping → "verify".
-        #
-        # Actually, looking at the phases list: PLAN(ok), IMPLEMENT(ok),
-        # REVIEW(ok), DECISION(ok), LEARN(ok), VERIFY(fail).
-        # Last successful = LEARN. "learn" is not in the mapping, so
-        # _compute_next_phase returns None. That would be a bug...
-        #
-        # Let me re-check: prepare_resume looks at the last *successful*
-        # phase. If learn succeeded, last_successful_phase="learn".
-        # _compute_next_phase("learn") returns None. That means we'd have
-        # to manually construct the ResumeState with "decision" to test
-        # the verify resume path. Let's do that.
-
+        # On resume: last_successful_phase is "learn" (last successful before
+        # the failed VERIFY).  _compute_next_phase("learn") → "verify".
         resume_state = ResumeState(
             log=existing_log,
             branch_name="colonyos/build_feature_x",
             prd_rel="cOS_prds/prd.md",
             task_rel="cOS_tasks/tasks.md",
-            last_successful_phase="decision",
+            last_successful_phase="learn",
         )
 
-        # On resume from "decision": skip plan, implement, review;
+        # On resume from "learn": skip plan, implement, review;
         # run learn → verify → deliver
         mock_run.side_effect = [
             _fake_phase_result(Phase.LEARN),
             # Verify now passes on retry
             _fake_phase_result(Phase.VERIFY,
-                               artifacts={"result": "All 42 tests passed"}),
+                               artifacts={"result": "All 42 tests passed\n\nVERIFY_RESULT: PASS"}),
             _fake_phase_result(Phase.DELIVER),
         ]
 
@@ -544,9 +527,95 @@ class TestVerifyPhaseIntegration:
         assert log.status == RunStatus.COMPLETED
         # Plan, implement, review were skipped (from the resume)
         assert mock_parallel.call_count == 0  # No parallel review
-        # Only learn + verify + deliver ran
+        # Learn + verify + deliver ran (resume from learn skips plan/implement/review)
         assert mock_run.call_count == 3
         # Verify and deliver are in the final log
         phase_types = [p.phase for p in log.phases]
         assert Phase.VERIFY in phase_types
         assert Phase.DELIVER in phase_types
+
+
+class TestVerifyDetectedFailures:
+    """Unit tests for _verify_detected_failures — the critical decision boundary."""
+
+    def test_empty_output_returns_false(self):
+        from colonyos.orchestrator import _verify_detected_failures
+        assert _verify_detected_failures("") is False
+        assert _verify_detected_failures(None) is False
+
+    def test_sentinel_pass(self):
+        from colonyos.orchestrator import _verify_detected_failures
+        assert _verify_detected_failures("All 42 tests passed\n\nVERIFY_RESULT: PASS") is False
+
+    def test_sentinel_fail(self):
+        from colonyos.orchestrator import _verify_detected_failures
+        assert _verify_detected_failures("3 tests failed\n\nVERIFY_RESULT: FAIL") is True
+
+    def test_sentinel_case_insensitive(self):
+        from colonyos.orchestrator import _verify_detected_failures
+        assert _verify_detected_failures("verify_result: pass") is False
+        assert _verify_detected_failures("verify_result: fail") is True
+
+    def test_sentinel_overrides_ambiguous_output(self):
+        """Sentinel takes priority even when body mentions 'failed'."""
+        from colonyos.orchestrator import _verify_detected_failures
+        output = "test_error_handler PASSED\n42 passed, 0 failed\n\nVERIFY_RESULT: PASS"
+        assert _verify_detected_failures(output) is False
+
+    def test_sentinel_fail_overrides_pass_language(self):
+        from colonyos.orchestrator import _verify_detected_failures
+        output = "All tests passed... NOT. 1 test actually failed\n\nVERIFY_RESULT: FAIL"
+        assert _verify_detected_failures(output) is True
+
+    def test_fallback_zero_failed_returns_false(self):
+        """'0 failed' in pytest output should NOT trigger false positive."""
+        from colonyos.orchestrator import _verify_detected_failures
+        assert _verify_detected_failures("42 passed, 0 failed") is False
+
+    def test_fallback_zero_errors_returns_false(self):
+        from colonyos.orchestrator import _verify_detected_failures
+        assert _verify_detected_failures("42 passed, 0 errors") is False
+
+    def test_fallback_nonzero_failed(self):
+        from colonyos.orchestrator import _verify_detected_failures
+        assert _verify_detected_failures("40 passed, 2 failed") is True
+
+    def test_fallback_nonzero_errors(self):
+        from colonyos.orchestrator import _verify_detected_failures
+        assert _verify_detected_failures("1 error in test_auth") is True
+
+    def test_fallback_all_tests_passed(self):
+        from colonyos.orchestrator import _verify_detected_failures
+        assert _verify_detected_failures("All tests passed") is False
+        assert _verify_detected_failures("all tests pass") is False
+
+    def test_fallback_no_recognisable_signal(self):
+        """Unknown output defaults to False (tests assumed passing)."""
+        from colonyos.orchestrator import _verify_detected_failures
+        assert _verify_detected_failures("some random output") is False
+
+    def test_class_name_error_handler_no_false_positive(self):
+        """Names like 'ErrorHandler' or 'test_error_handler' must not trigger."""
+        from colonyos.orchestrator import _verify_detected_failures
+        output = "test_error_handler PASSED\nErrorHandler validated\n42 passed"
+        assert _verify_detected_failures(output) is False
+
+    def test_fallback_10_failures(self):
+        from colonyos.orchestrator import _verify_detected_failures
+        assert _verify_detected_failures("10 failed, 32 passed") is True
+
+
+class TestComputeNextPhaseLearn:
+    """Tests for _compute_next_phase with 'learn' mapping."""
+
+    def test_learn_maps_to_verify(self):
+        from colonyos.orchestrator import _compute_next_phase
+        assert _compute_next_phase("learn") == "verify"
+
+    def test_decision_still_maps_to_verify(self):
+        from colonyos.orchestrator import _compute_next_phase
+        assert _compute_next_phase("decision") == "verify"
+
+    def test_verify_maps_to_deliver(self):
+        from colonyos.orchestrator import _compute_next_phase
+        assert _compute_next_phase("verify") == "deliver"

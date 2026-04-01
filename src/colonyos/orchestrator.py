@@ -1700,36 +1700,40 @@ def _extract_verdict(result_text: str) -> str:
 def _verify_detected_failures(verify_output: str) -> bool:
     """Return True if the verify agent output indicates test failures.
 
-    Looks for common failure indicators from pytest, npm test, cargo test, etc.
+    Parses the structured ``VERIFY_RESULT: PASS/FAIL`` sentinel emitted by the
+    verify agent.  Falls back to regex-based heuristics when the sentinel is
+    missing (e.g. older instruction templates or non-standard runners).
+
     Defaults to False (tests passed) when the output is ambiguous or empty.
     """
     if not verify_output:
         return False
+
+    # --- Primary: structured sentinel (matches ``VERIFY_RESULT: PASS`` / ``FAIL``) ---
+    sentinel_match = re.search(r"VERIFY_RESULT:\s*(PASS|FAIL)", verify_output, re.IGNORECASE)
+    if sentinel_match:
+        return sentinel_match.group(1).upper() == "FAIL"
+
+    # --- Fallback: regex heuristics for common test-runner output ---
+    # Match non-zero failure/error counts (e.g. "3 failed", "1 error") but NOT
+    # "0 failed" or "0 errors", which caused false-positives in the previous
+    # substring-matching implementation.
+    nonzero_fail = re.search(r"\b[1-9]\d*\s+(?:failed|failures?|errors?)\b", verify_output, re.IGNORECASE)
+    if nonzero_fail:
+        return True
+
+    # Explicit zero-failure lines → tests passed
+    zero_fail = re.search(r"\b0\s+(?:failed|failures?|errors?)\b", verify_output, re.IGNORECASE)
+    if zero_fail:
+        return False
+
+    # Check for explicit pass statements
     lower = verify_output.lower()
-    failure_patterns = [
-        "failed",
-        "failure",
-        "error",
-        "failing",
-        "tests failed",
-        "test failed",
-    ]
-    pass_patterns = [
-        "all tests passed",
-        "all tests pass",
-        "0 failed",
-        "0 failures",
-        "passed",
-    ]
-    # Check for explicit pass statements first
-    for pat in pass_patterns:
-        if pat in lower:
-            # But make sure there aren't also failures mentioned
-            has_failure = any(fp in lower for fp in failure_patterns)
-            if not has_failure:
-                return False
-    # Check for failure indicators
-    return any(fp in lower for fp in failure_patterns)
+    if "all tests passed" in lower or "all tests pass" in lower:
+        return False
+
+    # No recognisable signal — assume tests passed (safe default)
+    return False
 
 
 def _build_fix_prompt(
@@ -3101,6 +3105,7 @@ def _compute_next_phase(last_successful_phase: str | None) -> str | None:
         "review": "review",
         "fix": "review",
         "decision": "verify",
+        "learn": "verify",
         "verify": "deliver",
     }
     return mapping.get(last_successful_phase)
@@ -3113,6 +3118,7 @@ _SKIP_MAP: dict[str, set[str]] = {
     "review": {"plan", "implement"},
     "fix": {"plan", "implement"},
     "decision": {"plan", "implement", "review"},
+    "learn": {"plan", "implement", "review"},
     "verify": {"plan", "implement", "review", "verify"},
 }
 
@@ -4998,6 +5004,9 @@ def _run_pipeline(
             verify_tools = ["Read", "Bash", "Glob", "Grep"]
             verify_passed = False
 
+            # Loop runs max_fix_attempts + 1 iterations: the first is the initial
+            # verify check, and the remaining max_fix_attempts iterations each
+            # run a fix followed by a re-verify.
             for attempt in range(config.verify.max_fix_attempts + 1):
                 # Budget guard (same pattern as review loop)
                 cost_so_far = sum(

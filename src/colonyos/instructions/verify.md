@@ -36,6 +36,12 @@ Execute the test command using Bash. Use flags that produce concise output (e.g.
 
 ### Step 3: Report Results
 
+You MUST end your response with exactly one of the following sentinel lines:
+
+- `VERIFY_RESULT: PASS` — if **all tests pass**
+- `VERIFY_RESULT: FAIL` — if **any tests fail**
+
+Before the sentinel line, provide details:
 - If **all tests pass**: State clearly that all tests passed with the count of tests run.
 - If **any tests fail**: Report the total pass/fail counts and list each failing test with its error message. Include enough context to diagnose the failure.
 
