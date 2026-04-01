@@ -476,6 +476,84 @@ class TestQueueItemSchemaVersion:
         assert d["schema_version"] == QueueItem.SCHEMA_VERSION
 
 
+class TestQueueItemStartedAt:
+    """Tests for QueueItem.started_at field and SCHEMA_VERSION bump to 5."""
+
+    def test_schema_version_is_5(self) -> None:
+        assert QueueItem.SCHEMA_VERSION == 5
+
+    def test_started_at_defaults_to_none(self) -> None:
+        item = QueueItem(
+            id="q-sa-1", source_type="slack", source_value="test",
+            status=QueueItemStatus.PENDING,
+        )
+        assert item.started_at is None
+
+    def test_started_at_accepts_iso_string(self) -> None:
+        ts = "2026-04-01T12:00:00+00:00"
+        item = QueueItem(
+            id="q-sa-2", source_type="issue", source_value="42",
+            status=QueueItemStatus.RUNNING, started_at=ts,
+        )
+        assert item.started_at == ts
+
+    def test_to_dict_includes_started_at(self) -> None:
+        ts = "2026-04-01T12:00:00+00:00"
+        item = QueueItem(
+            id="q-sa-3", source_type="slack", source_value="test",
+            status=QueueItemStatus.RUNNING, started_at=ts,
+        )
+        d = item.to_dict()
+        assert d["started_at"] == ts
+        assert d["schema_version"] == 5
+
+    def test_to_dict_started_at_none(self) -> None:
+        item = QueueItem(
+            id="q-sa-4", source_type="slack", source_value="test",
+            status=QueueItemStatus.PENDING,
+        )
+        d = item.to_dict()
+        assert d["started_at"] is None
+
+    def test_from_dict_with_started_at(self) -> None:
+        ts = "2026-04-01T12:00:00+00:00"
+        d = {
+            "id": "q-sa-5", "source_type": "slack", "source_value": "test",
+            "status": "running", "started_at": ts,
+        }
+        item = QueueItem.from_dict(d)
+        assert item.started_at == ts
+
+    def test_from_dict_without_started_at_backward_compat(self) -> None:
+        """Old items without started_at load gracefully with None default."""
+        d = {
+            "id": "q-sa-6", "source_type": "slack", "source_value": "test",
+            "status": "pending",
+        }
+        item = QueueItem.from_dict(d)
+        assert item.started_at is None
+
+    def test_roundtrip_with_started_at(self) -> None:
+        ts = "2026-04-01T15:30:00+00:00"
+        item = QueueItem(
+            id="q-sa-rt", source_type="issue", source_value="99",
+            status=QueueItemStatus.RUNNING, started_at=ts,
+        )
+        d = item.to_dict()
+        restored = QueueItem.from_dict(d)
+        assert restored.started_at == ts
+        assert restored.id == item.id
+
+    def test_roundtrip_without_started_at(self) -> None:
+        item = QueueItem(
+            id="q-sa-rt2", source_type="slack", source_value="test",
+            status=QueueItemStatus.PENDING,
+        )
+        d = item.to_dict()
+        restored = QueueItem.from_dict(d)
+        assert restored.started_at is None
+
+
 class TestRunLogPrUrl:
     """Tests for pr_url field on RunLog."""
 

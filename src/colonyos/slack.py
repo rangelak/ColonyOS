@@ -96,6 +96,23 @@ def extract_prompt_from_mention(text: str, bot_user_id: str) -> str:
     return cleaned
 
 
+def has_bot_mention(text: str, bot_user_id: str) -> bool:
+    """Return ``True`` if *text* contains an ``<@bot_user_id>`` mention."""
+    return f"<@{bot_user_id}>" in text
+
+
+def extract_prompt_text(text: str, bot_user_id: str) -> str:
+    """Extract the prompt from a Slack message, handling both mentions and passive messages.
+
+    If the message contains a bot mention (``<@BOT_ID>``), the mention prefix
+    is stripped via :func:`extract_prompt_from_mention`.  Otherwise the full
+    message text is returned as-is (stripped of leading/trailing whitespace).
+    """
+    if has_bot_mention(text, bot_user_id):
+        return extract_prompt_from_mention(text, bot_user_id)
+    return text.strip()
+
+
 def format_slack_as_prompt(message_text: str, channel: str, user: str) -> str:
     """Wrap sanitized Slack content in ``<slack_message>`` delimiters.
 

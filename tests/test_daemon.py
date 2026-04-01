@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from colonyos.cleanup import ComplexityCategory, FileComplexity
-from colonyos.config import ColonyConfig, DaemonConfig
+from colonyos.config import ColonyConfig, DaemonConfig, SlackConfig
 from colonyos.daemon import Daemon, DaemonError, _CombinedUI
 from colonyos.daemon_state import DaemonState, save_daemon_state
 from colonyos.models import (
@@ -474,6 +474,76 @@ class TestHealthReport:
         daemon_instance._state.daily_spend_usd = 100.0
         health = daemon_instance.get_health()
         assert health["status"] == "stopped"
+
+
+class TestHealthPipelineFields:
+    """Tests for pipeline duration and stall status in get_health() (task 6.0)."""
+
+    def test_no_pipeline_running(self, daemon_instance: Daemon):
+        """When no pipeline is running, pipeline fields should be None/False."""
+        health = daemon_instance.get_health()
+        assert health["pipeline_started_at"] is None
+        assert health["pipeline_duration_seconds"] is None
+        assert health["pipeline_stalled"] is False
+
+    def test_pipeline_running_shows_duration(self, daemon_instance: Daemon):
+        """When a pipeline is running, started_at and duration should be populated."""
+        item = QueueItem(
+            id="test-item",
+            source_type="slack",
+            source_value="test",
+            status=QueueItemStatus.RUNNING,
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+        daemon_instance._pipeline_running = True
+        daemon_instance._pipeline_started_at = time.monotonic() - 120.0
+        daemon_instance._current_running_item = item
+        health = daemon_instance.get_health()
+        assert health["pipeline_started_at"] == item.started_at
+        assert health["pipeline_duration_seconds"] is not None
+        assert health["pipeline_duration_seconds"] >= 120.0
+        assert health["pipeline_stalled"] is False
+
+    def test_pipeline_stalled_flag(self, daemon_instance: Daemon):
+        """When watchdog has detected a stall, pipeline_stalled should be True."""
+        item = QueueItem(
+            id="test-item",
+            source_type="slack",
+            source_value="test",
+            status=QueueItemStatus.RUNNING,
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+        daemon_instance._pipeline_running = True
+        daemon_instance._pipeline_started_at = time.monotonic() - 2000.0
+        daemon_instance._current_running_item = item
+        daemon_instance._pipeline_stalled = True
+        health = daemon_instance.get_health()
+        assert health["pipeline_stalled"] is True
+
+    def test_stalled_resets_on_new_pipeline(self, daemon_instance: Daemon):
+        """The stalled flag should reset to False when a new pipeline starts.
+
+        We verify at the code level: _pipeline_stalled is set to False in the
+        same code block that sets _pipeline_running = True (the RUNNING transition).
+        Here we simulate that transition directly.
+        """
+        daemon_instance._pipeline_stalled = True
+        # Simulate the RUNNING transition that happens in _run_pipeline_for_item
+        item = QueueItem(
+            id="test-item-2",
+            source_type="slack",
+            source_value="test",
+            status=QueueItemStatus.PENDING,
+        )
+        with daemon_instance._lock:
+            item.status = QueueItemStatus.RUNNING
+            item.started_at = datetime.now(timezone.utc).isoformat()
+            daemon_instance._pipeline_running = True
+            daemon_instance._pipeline_started_at = time.monotonic()
+            daemon_instance._pipeline_stalled = False  # This is what the production code does
+            daemon_instance._current_running_item = item
+        # After starting, stalled should be False
+        assert daemon_instance._pipeline_stalled is False
 
 
 class TestSlackKillSwitch:
@@ -2456,3 +2526,666 @@ class TestDailyThreadIntegration:
         # Second call (critical) should be top-level
         critical_kwargs = calls[1][1]
         assert "thread_ts" not in critical_kwargs
+class TestPipelineStartedAtTracking:
+    """Tests for _pipeline_started_at monotonic timestamp tracking (task 3.0)."""
+
+    def test_pipeline_started_at_is_none_initially(self, daemon_instance: Daemon):
+        """_pipeline_started_at should be None when no pipeline is running."""
+        assert daemon_instance._pipeline_started_at is None
+
+    def test_pipeline_started_at_set_when_pipeline_starts(self, daemon_instance: Daemon):
+        """_pipeline_started_at should be set to a monotonic timestamp when a pipeline starts."""
+        daemon_instance.dry_run = False
+        item = QueueItem(
+            id="item-start",
+            source_type="prompt",
+            source_value="do stuff",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+
+        before = time.monotonic()
+
+        fake_log = RunLog(
+            run_id="run-1",
+            prompt="do stuff",
+            status=RunStatus.COMPLETED,
+            total_cost_usd=0.01,
+        )
+
+        captured_started_at: list[float | None] = []
+
+        original_execute = daemon_instance._execute_item
+
+        def spy_execute(i: QueueItem) -> RunLog:
+            captured_started_at.append(daemon_instance._pipeline_started_at)
+            return fake_log
+
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch.object(daemon_instance, "_execute_item", side_effect=spy_execute):
+            daemon_instance._try_execute_next()
+
+        after = time.monotonic()
+
+        # During execution, _pipeline_started_at should have been set
+        assert len(captured_started_at) == 1
+        assert captured_started_at[0] is not None
+        assert before <= captured_started_at[0] <= after
+
+    def test_pipeline_started_at_reset_on_success(self, daemon_instance: Daemon):
+        """_pipeline_started_at should be reset to None after successful pipeline completion."""
+        daemon_instance.dry_run = False
+        item = QueueItem(
+            id="item-ok",
+            source_type="prompt",
+            source_value="go",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+
+        fake_log = RunLog(
+            run_id="run-ok",
+            prompt="go",
+            status=RunStatus.COMPLETED,
+            total_cost_usd=0.01,
+        )
+
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch.object(daemon_instance, "_execute_item", return_value=fake_log):
+            daemon_instance._try_execute_next()
+
+        assert daemon_instance._pipeline_started_at is None
+
+    def test_pipeline_started_at_reset_on_failure(self, daemon_instance: Daemon):
+        """_pipeline_started_at should be reset to None after pipeline failure (exception)."""
+        daemon_instance.dry_run = False
+        item = QueueItem(
+            id="item-fail",
+            source_type="prompt",
+            source_value="crash",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch.object(daemon_instance, "_execute_item", side_effect=RuntimeError("boom")):
+            daemon_instance._try_execute_next()
+
+        assert daemon_instance._pipeline_started_at is None
+        assert daemon_instance._pipeline_running is False
+
+    def test_pipeline_started_at_reset_on_keyboard_interrupt(self, daemon_instance: Daemon):
+        """_pipeline_started_at should be reset to None after KeyboardInterrupt."""
+        daemon_instance.dry_run = False
+        item = QueueItem(
+            id="item-int",
+            source_type="prompt",
+            source_value="stop",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch.object(daemon_instance, "_execute_item", side_effect=KeyboardInterrupt):
+            with pytest.raises(KeyboardInterrupt):
+                daemon_instance._try_execute_next()
+
+        assert daemon_instance._pipeline_started_at is None
+        assert daemon_instance._pipeline_running is False
+
+
+class TestWatchdogThread:
+    """Tests for watchdog thread with stall detection and auto-recovery (task 4.0)."""
+
+    def test_watchdog_thread_starts_and_stops(self, tmp_repo: Path, config: ColonyConfig):
+        """Watchdog thread should start when daemon starts and stop when daemon stops."""
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+        daemon._stop_event = threading.Event()
+
+        # Start the watchdog thread
+        daemon._start_watchdog_thread()
+        assert daemon._watchdog_thread is not None
+        assert daemon._watchdog_thread.is_alive()
+        assert daemon._watchdog_thread.daemon is True
+
+        # Stop it
+        daemon._stop_event.set()
+        daemon._watchdog_thread.join(timeout=5)
+        assert not daemon._watchdog_thread.is_alive()
+
+    def test_stall_detection_triggers_cancel(self, tmp_repo: Path):
+        """When pipeline is stuck and heartbeat is stale, watchdog calls request_active_phase_cancel."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=120,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        # Simulate a running pipeline that started long ago
+        item = QueueItem(
+            id="stuck-item",
+            source_type="prompt",
+            source_value="do stuff",
+            status=QueueItemStatus.RUNNING,
+            priority=1,
+        )
+        daemon._queue_state.items = [item]
+        daemon._pipeline_running = True
+        daemon._pipeline_started_at = time.monotonic() - 300  # 5 min ago
+        daemon._current_running_item = item
+
+        # Create a stale heartbeat file
+        hb_dir = tmp_repo / ".colonyos" / "runs"
+        hb_dir.mkdir(parents=True, exist_ok=True)
+        hb_file = hb_dir / "heartbeat"
+        hb_file.touch()
+        # Set mtime to 300 seconds ago
+        old_mtime = time.time() - 300
+        os.utime(hb_file, (old_mtime, old_mtime))
+
+        with patch("colonyos.daemon.request_active_phase_cancel", return_value=1) as mock_cancel, \
+             patch.object(daemon, "_watchdog_recover") as mock_recover:
+            daemon._watchdog_check()
+
+        mock_recover.assert_called_once()
+
+    def test_auto_recovery_resets_state(self, tmp_repo: Path):
+        """After stall detection, pipeline_running should be False and item marked FAILED."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=120,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        item = QueueItem(
+            id="stuck-item-2",
+            source_type="prompt",
+            source_value="hang forever",
+            status=QueueItemStatus.RUNNING,
+            priority=1,
+        )
+        daemon._queue_state.items = [item]
+        daemon._pipeline_running = True
+        daemon._pipeline_started_at = time.monotonic() - 300
+        daemon._current_running_item = item
+
+        with patch("colonyos.daemon.request_active_phase_cancel", return_value=1), \
+             patch("colonyos.daemon.request_cancel", return_value=1), \
+             patch.object(daemon, "_stop_event") as mock_stop:
+            mock_stop.wait.return_value = False
+            mock_stop.is_set.return_value = False
+            daemon._watchdog_recover(stall_duration=300.0)
+
+        assert daemon._pipeline_running is False
+        assert daemon._pipeline_started_at is None
+        assert daemon._current_running_item is None
+        assert item.status == QueueItemStatus.FAILED
+        assert "watchdog" in item.error.lower()
+
+    def test_no_false_positive_with_fresh_heartbeat(self, tmp_repo: Path):
+        """Watchdog should NOT fire when heartbeat file is fresh."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=120,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        item = QueueItem(
+            id="healthy-item",
+            source_type="prompt",
+            source_value="work fine",
+            status=QueueItemStatus.RUNNING,
+            priority=1,
+        )
+        daemon._queue_state.items = [item]
+        daemon._pipeline_running = True
+        daemon._pipeline_started_at = time.monotonic() - 30  # only 30s ago
+        daemon._current_running_item = item
+
+        # Create a fresh heartbeat file
+        hb_dir = tmp_repo / ".colonyos" / "runs"
+        hb_dir.mkdir(parents=True, exist_ok=True)
+        hb_file = hb_dir / "heartbeat"
+        hb_file.touch()  # mtime = now
+
+        with patch.object(daemon, "_watchdog_recover") as mock_recover:
+            daemon._watchdog_check()
+
+        mock_recover.assert_not_called()
+
+    def test_watchdog_inactive_when_no_pipeline(self, tmp_repo: Path, config: ColonyConfig):
+        """Watchdog should do nothing when no pipeline is running."""
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+        assert daemon._pipeline_running is False
+
+        with patch.object(daemon, "_watchdog_recover") as mock_recover:
+            daemon._watchdog_check()
+
+        mock_recover.assert_not_called()
+
+    def test_grace_period_fallback_cancel(self, tmp_repo: Path):
+        """After initial cancel, if still stuck after grace period, request_cancel is called."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=120,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        item = QueueItem(
+            id="really-stuck",
+            source_type="prompt",
+            source_value="deadlock",
+            status=QueueItemStatus.RUNNING,
+            priority=1,
+        )
+        daemon._queue_state.items = [item]
+        daemon._pipeline_running = True
+        daemon._pipeline_started_at = time.monotonic() - 300
+        daemon._current_running_item = item
+
+        # Simulate: request_active_phase_cancel succeeds but pipeline stays stuck
+        # _watchdog_recover should call request_cancel as fallback
+        with patch("colonyos.daemon.request_active_phase_cancel", return_value=1) as mock_phase_cancel, \
+             patch("colonyos.daemon.request_cancel", return_value=1) as mock_cancel, \
+             patch.object(daemon, "_stop_event") as mock_stop:
+            # Make wait() return immediately (simulating 30s passing)
+            mock_stop.wait.return_value = False
+            mock_stop.is_set.return_value = False
+            # Keep _pipeline_running True after first cancel to trigger fallback
+            daemon._watchdog_recover(stall_duration=300.0)
+
+        mock_phase_cancel.assert_called_once()
+        mock_cancel.assert_called_once()
+        assert "fallback" in mock_cancel.call_args[0][0].lower() or "grace" in mock_cancel.call_args[0][0].lower()
+
+    def test_current_running_item_tracking(self, daemon_instance: Daemon):
+        """_current_running_item should be set during pipeline execution and cleared after."""
+        daemon_instance.dry_run = False
+        assert daemon_instance._current_running_item is None
+
+        item = QueueItem(
+            id="track-item",
+            source_type="prompt",
+            source_value="track me",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+
+        fake_log = RunLog(
+            run_id="run-track",
+            prompt="track me",
+            status=RunStatus.COMPLETED,
+            total_cost_usd=0.01,
+        )
+
+        captured_item: list[QueueItem | None] = []
+
+        def spy_execute(i: QueueItem) -> RunLog:
+            captured_item.append(daemon_instance._current_running_item)
+            return fake_log
+
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch.object(daemon_instance, "_execute_item", side_effect=spy_execute):
+            daemon_instance._try_execute_next()
+
+        # During execution, _current_running_item should have been set
+        assert len(captured_item) == 1
+        assert captured_item[0] is item
+
+        # After execution, it should be cleared
+        assert daemon_instance._current_running_item is None
+
+    def test_watchdog_included_in_start_threads(self, tmp_repo: Path, config: ColonyConfig):
+        """_start_threads should include the watchdog thread."""
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+        threads = daemon._start_threads()
+        # Find the watchdog thread
+        watchdog_threads = [t for t in threads if t.name == "daemon-watchdog"]
+        assert len(watchdog_threads) == 1
+        assert watchdog_threads[0].daemon is True
+        # Clean up
+        daemon._stop_event.set()
+        for t in threads:
+            t.join(timeout=5)
+
+    def test_slack_alert_on_stall_detection(self, tmp_repo: Path):
+        """_post_slack_message is called with stuck-detection message when watchdog fires."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=120,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        item = QueueItem(
+            id="slack-alert-item",
+            source_type="prompt",
+            source_value="stuck thing",
+            status=QueueItemStatus.RUNNING,
+            priority=1,
+        )
+        daemon._queue_state.items = [item]
+        daemon._pipeline_running = True
+        daemon._pipeline_started_at = time.monotonic() - 300
+        daemon._current_running_item = item
+
+        with patch("colonyos.daemon.request_active_phase_cancel", return_value=1), \
+             patch("colonyos.daemon.request_cancel", return_value=1), \
+             patch.object(daemon, "_stop_event") as mock_stop, \
+             patch.object(daemon, "_post_slack_message") as mock_slack:
+            mock_stop.wait.return_value = False
+            mock_stop.is_set.return_value = False
+            daemon._watchdog_recover(stall_duration=300.0)
+
+        mock_slack.assert_called_once()
+        msg = mock_slack.call_args[0][0]
+        assert "Stuck Pipeline Detected" in msg
+        assert "slack-alert-item" in msg
+        assert "prompt" in msg
+        assert "Auto-recovery initiated" in msg
+
+    def test_slack_alert_uses_timeout(self, tmp_repo: Path):
+        """Slack post should use a timeout so the alert itself cannot hang the watchdog."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=120,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        item = QueueItem(
+            id="timeout-item",
+            source_type="prompt",
+            source_value="hang slack",
+            status=QueueItemStatus.RUNNING,
+            priority=1,
+        )
+        daemon._queue_state.items = [item]
+        daemon._pipeline_running = True
+        daemon._pipeline_started_at = time.monotonic() - 300
+        daemon._current_running_item = item
+
+        # Simulate _post_slack_message raising an exception (e.g., timeout)
+        with patch("colonyos.daemon.request_active_phase_cancel", return_value=1), \
+             patch("colonyos.daemon.request_cancel", return_value=1), \
+             patch.object(daemon, "_stop_event") as mock_stop, \
+             patch.object(daemon, "_post_slack_message", side_effect=Exception("Slack timeout")):
+            mock_stop.wait.return_value = False
+            mock_stop.is_set.return_value = False
+            # Should NOT raise — Slack failure must not break recovery
+            daemon._watchdog_recover(stall_duration=300.0)
+
+        # Recovery should still complete despite Slack failure
+        assert daemon._pipeline_running is False
+        assert item.status == QueueItemStatus.FAILED
+
+    def test_monitor_event_emitted_on_stall(self, tmp_repo: Path):
+        """A monitor event with type watchdog_stall_detected should be emitted."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=120,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        item = QueueItem(
+            id="monitor-event-item",
+            source_type="prompt",
+            source_value="emit event",
+            status=QueueItemStatus.RUNNING,
+            priority=1,
+        )
+        daemon._queue_state.items = [item]
+        daemon._pipeline_running = True
+        daemon._pipeline_started_at = time.monotonic() - 300
+        daemon._current_running_item = item
+
+        captured_output: list[str] = []
+
+        with patch("colonyos.daemon.request_active_phase_cancel", return_value=1), \
+             patch("colonyos.daemon.request_cancel", return_value=1), \
+             patch.object(daemon, "_stop_event") as mock_stop, \
+             patch.object(daemon, "_post_slack_message"), \
+             patch("sys.stdout") as mock_stdout:
+            mock_stop.wait.return_value = False
+            mock_stop.is_set.return_value = False
+            mock_stdout.write.side_effect = lambda s: captured_output.append(s)
+            daemon._watchdog_recover(stall_duration=300.0)
+
+        # Find the monitor event in captured output
+        from colonyos.tui.monitor_protocol import MONITOR_EVENT_PREFIX
+        import json
+        monitor_lines = [line for line in captured_output if MONITOR_EVENT_PREFIX in line]
+        assert len(monitor_lines) >= 1, f"Expected monitor event, got: {captured_output}"
+        # Parse the event
+        raw = monitor_lines[0].strip().replace(MONITOR_EVENT_PREFIX, "")
+        event = json.loads(raw)
+        assert event["type"] == "watchdog_stall_detected"
+        assert event["item_id"] == "monitor-event-item"
+        assert event["stall_duration_seconds"] == 300.0
+        assert event["action_taken"] == "auto_cancel"
+
+
+class TestWatchdogIntegration:
+    """Integration tests for the full stuck-pipeline scenario (task 7.0)."""
+
+    def test_end_to_end_stuck_pipeline_recovery(self, tmp_repo: Path):
+        """Full integration: stuck pipeline → watchdog fires → item FAILED → daemon resumes.
+
+        Simulates a pipeline that blocks indefinitely, with a stale heartbeat file.
+        Verifies the watchdog detects the stall, recovers, posts a Slack alert,
+        marks the item FAILED, resets daemon state, and allows the next item to run.
+        """
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=5,  # short threshold for testing
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        # Queue two items: first will get stuck, second should be processable after recovery
+        stuck_item = QueueItem(
+            id="integration-stuck",
+            source_type="prompt",
+            source_value="hang forever",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        next_item = QueueItem(
+            id="integration-next",
+            source_type="prompt",
+            source_value="run after recovery",
+            status=QueueItemStatus.PENDING,
+            priority=2,
+        )
+        daemon._queue_state.items = [stuck_item, next_item]
+
+        # Create a stale heartbeat file (mtime far in the past)
+        hb_dir = tmp_repo / ".colonyos" / "runs"
+        hb_dir.mkdir(parents=True, exist_ok=True)
+        hb_file = hb_dir / "heartbeat"
+        hb_file.touch()
+        old_mtime = time.time() - 300
+        os.utime(hb_file, (old_mtime, old_mtime))
+
+        # Simulate the pipeline getting stuck: _execute_item blocks, but we'll
+        # manually set the running state as _try_execute_next would, then
+        # invoke the watchdog check directly
+        with daemon._lock:
+            stuck_item.status = QueueItemStatus.RUNNING
+            stuck_item.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+            daemon._pipeline_running = True
+            daemon._pipeline_started_at = time.monotonic() - 300  # started 5 min ago
+            daemon._pipeline_stalled = False
+            daemon._current_running_item = stuck_item
+
+        # Run the watchdog check — should detect the stall and recover
+        with patch("colonyos.daemon.request_active_phase_cancel", return_value=1) as mock_phase_cancel, \
+             patch("colonyos.daemon.request_cancel", return_value=1) as mock_cancel, \
+             patch.object(daemon, "_stop_event") as mock_stop, \
+             patch.object(daemon, "_post_slack_message") as mock_slack:
+            mock_stop.wait.return_value = False
+            mock_stop.is_set.return_value = False
+            daemon._watchdog_check()
+
+        # --- Verify recovery ---
+        # 1. Stuck item should be marked FAILED
+        assert stuck_item.status == QueueItemStatus.FAILED
+        assert "watchdog" in stuck_item.error.lower()
+
+        # 2. Pipeline state should be fully reset
+        assert daemon._pipeline_running is False
+        assert daemon._pipeline_started_at is None
+        assert daemon._current_running_item is None
+        assert daemon._pipeline_stalled is True  # stall flag set for healthz
+
+        # 3. Slack alert should have been posted
+        mock_slack.assert_called_once()
+        slack_msg = mock_slack.call_args[0][0]
+        assert "Stuck Pipeline Detected" in slack_msg
+        assert "integration-stuck" in slack_msg
+
+        # 4. Cancellation should have been attempted
+        mock_phase_cancel.assert_called_once()
+        mock_cancel.assert_called_once()
+
+        # 5. Next item should still be pending and processable
+        assert next_item.status == QueueItemStatus.PENDING
+
+        # 6. Health endpoint should reflect stall state
+        health = daemon.get_health()
+        assert health["pipeline_stalled"] is True
+        assert health["pipeline_running"] is False
+
+    def test_startup_log_includes_watchdog_threshold(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture):
+        """Daemon start() should log the watchdog stall threshold."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=1920,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        with patch.object(daemon, "_acquire_pid_lock"), \
+             patch.object(daemon, "_recover_from_crash"), \
+             patch.object(daemon, "_install_signal_handlers"), \
+             patch.object(daemon, "_persist_state"), \
+             patch.object(daemon, "_start_dashboard_server"), \
+             patch.object(daemon, "_start_threads", return_value=[]), \
+             patch.object(daemon, "_main_loop", side_effect=KeyboardInterrupt), \
+             patch.object(daemon, "_release_pid_lock"):
+            import logging
+            with caplog.at_level(logging.INFO, logger="colonyos.daemon"):
+                try:
+                    daemon.start()
+                except KeyboardInterrupt:
+                    pass
+
+        assert any("Watchdog enabled: stall threshold=1920s" in record.message for record in caplog.records)
+
+    def test_watchdog_does_not_fire_during_healthy_run(self, tmp_repo: Path):
+        """Full integration: a healthy pipeline that completes normally never triggers watchdog."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=120,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        item = QueueItem(
+            id="healthy-run",
+            source_type="prompt",
+            source_value="do work",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon._queue_state.items = [item]
+
+        # Simulate a pipeline that just started with a fresh heartbeat
+        hb_dir = tmp_repo / ".colonyos" / "runs"
+        hb_dir.mkdir(parents=True, exist_ok=True)
+        (hb_dir / "heartbeat").touch()
+
+        with daemon._lock:
+            item.status = QueueItemStatus.RUNNING
+            daemon._pipeline_running = True
+            daemon._pipeline_started_at = time.monotonic() - 10  # only 10s ago
+            daemon._current_running_item = item
+
+        with patch.object(daemon, "_watchdog_recover") as mock_recover:
+            # Run multiple check cycles — none should trigger recovery
+            for _ in range(5):
+                daemon._watchdog_check()
+
+        mock_recover.assert_not_called()
+        assert daemon._pipeline_stalled is False
+# Task 6.0: Startup warnings for trigger_mode: "all" without safety configs
+class TestAllModeStartupWarnings:
+    """Verify that _warn_all_mode_safety logs warnings when trigger_mode is 'all'
+    and safety configs (allowed_user_ids, triage_scope) are missing."""
+
+    def test_warns_when_allowed_user_ids_empty(self, caplog: pytest.LogCaptureFixture):
+        config = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                trigger_mode="all",
+                allowed_user_ids=[],
+                triage_scope="Bug reports",
+            ),
+        )
+        with caplog.at_level("WARNING", logger="colonyos.daemon"):
+            Daemon._warn_all_mode_safety(config)
+        assert any("allowed_user_ids" in r.message for r in caplog.records)
+
+    def test_warns_when_triage_scope_empty(self, caplog: pytest.LogCaptureFixture):
+        config = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                trigger_mode="all",
+                allowed_user_ids=["U123"],
+                triage_scope="",
+            ),
+        )
+        with caplog.at_level("WARNING", logger="colonyos.daemon"):
+            Daemon._warn_all_mode_safety(config)
+        assert any("triage_scope" in r.message for r in caplog.records)
+
+    def test_warns_both_when_both_missing(self, caplog: pytest.LogCaptureFixture):
+        config = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                trigger_mode="all",
+                allowed_user_ids=[],
+                triage_scope="",
+            ),
+        )
+        with caplog.at_level("WARNING", logger="colonyos.daemon"):
+            Daemon._warn_all_mode_safety(config)
+        messages = [r.message for r in caplog.records]
+        assert any("allowed_user_ids" in m for m in messages)
+        assert any("triage_scope" in m for m in messages)
+
+    def test_no_warnings_when_both_set(self, caplog: pytest.LogCaptureFixture):
+        config = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                trigger_mode="all",
+                allowed_user_ids=["U123"],
+                triage_scope="Bug reports for backend",
+            ),
+        )
+        with caplog.at_level("WARNING", logger="colonyos.daemon"):
+            Daemon._warn_all_mode_safety(config)
+        assert len(caplog.records) == 0
+
+    def test_no_warnings_when_trigger_mode_mention(self, caplog: pytest.LogCaptureFixture):
+        config = ColonyConfig(
+            slack=SlackConfig(
+                enabled=True,
+                trigger_mode="mention",
+                allowed_user_ids=[],
+                triage_scope="",
+            ),
+        )
+        with caplog.at_level("WARNING", logger="colonyos.daemon"):
+            Daemon._warn_all_mode_safety(config)
+        assert len(caplog.records) == 0

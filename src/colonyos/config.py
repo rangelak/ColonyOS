@@ -117,6 +117,7 @@ DEFAULTS = {
         "allow_all_control_users": False,
         "auto_recover_dirty_worktree": True,
         "pipeline_timeout_seconds": 7200,
+        "watchdog_stall_seconds": 1920,
         "dashboard_enabled": True,
         "dashboard_port": 8741,
         "dashboard_write_enabled": False,
@@ -314,6 +315,7 @@ class DaemonConfig:
     allow_all_control_users: bool = False
     auto_recover_dirty_worktree: bool = True
     pipeline_timeout_seconds: int = 7200
+    watchdog_stall_seconds: int = 1920
     dashboard_enabled: bool = True
     dashboard_port: int = 8741
     dashboard_write_enabled: bool = False
@@ -394,7 +396,7 @@ def _parse_project(raw: dict) -> ProjectInfo | None:
     )
 
 
-_VALID_TRIGGER_MODES: frozenset[str] = frozenset({"mention", "reaction", "slash_command"})
+_VALID_TRIGGER_MODES: frozenset[str] = frozenset({"mention", "reaction", "slash_command", "all"})
 
 
 def _parse_slack_config(raw: dict) -> SlackConfig:
@@ -896,6 +898,14 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
             f"daemon.pipeline_timeout_seconds must be >= 60, got {pipeline_timeout}"
         )
 
+    watchdog_stall = _int("watchdog_stall_seconds")
+    if watchdog_stall < 120:
+        logger.warning(
+            "daemon.watchdog_stall_seconds=%d is below minimum 120; clamping to 120",
+            watchdog_stall,
+        )
+        watchdog_stall = 120
+
     return DaemonConfig(
         daily_budget_usd=daily_budget_usd,
         github_poll_interval_seconds=poll_interval,
@@ -918,6 +928,7 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
             raw.get("auto_recover_dirty_worktree", d["auto_recover_dirty_worktree"])
         ),
         pipeline_timeout_seconds=pipeline_timeout,
+        watchdog_stall_seconds=watchdog_stall,
         dashboard_enabled=bool(raw.get("dashboard_enabled", True)),
         dashboard_port=int(raw.get("dashboard_port", 8741)),
         dashboard_write_enabled=bool(raw.get("dashboard_write_enabled", False)),
@@ -1303,6 +1314,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         or config.daemon.allow_all_control_users
         or config.daemon.auto_recover_dirty_worktree != daemon_defaults["auto_recover_dirty_worktree"]
         or config.daemon.pipeline_timeout_seconds != daemon_defaults["pipeline_timeout_seconds"]
+        or config.daemon.watchdog_stall_seconds != daemon_defaults["watchdog_stall_seconds"]
         or config.daemon.dashboard_enabled != daemon_defaults.get("dashboard_enabled", True)
         or config.daemon.dashboard_port != daemon_defaults.get("dashboard_port", 8741)
         or config.daemon.dashboard_write_enabled != daemon_defaults.get("dashboard_write_enabled", False)
@@ -1326,6 +1338,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             "allow_all_control_users": config.daemon.allow_all_control_users,
             "auto_recover_dirty_worktree": config.daemon.auto_recover_dirty_worktree,
             "pipeline_timeout_seconds": config.daemon.pipeline_timeout_seconds,
+            "watchdog_stall_seconds": config.daemon.watchdog_stall_seconds,
             "dashboard_enabled": config.daemon.dashboard_enabled,
             "dashboard_port": config.daemon.dashboard_port,
             "dashboard_write_enabled": config.daemon.dashboard_write_enabled,

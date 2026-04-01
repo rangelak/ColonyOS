@@ -25,11 +25,13 @@ from colonyos.slack import (
     check_rate_limit,
     extract_base_branch,
     extract_prompt_from_mention,
+    extract_prompt_text,
     find_parent_queue_item,
     format_fix_acknowledgment,
     format_fix_error,
     format_fix_round_limit,
     format_slack_as_prompt,
+    has_bot_mention,
     increment_hourly_count,
     post_message,
     post_triage_acknowledgment,
@@ -82,6 +84,8 @@ class SlackQueueEngine:
     def register(self, bolt_app: Any) -> None:
         self._ensure_triage_worker()
         bolt_app.event("app_mention")(self._handle_event)
+        if self.config.slack.trigger_mode == "all":
+            bolt_app.event("message")(self._handle_event)
         if self.config.slack.trigger_mode not in ("reaction", "all"):
             bolt_app.event("reaction_added")(lambda event, client: None)
             return
@@ -176,7 +180,7 @@ class SlackQueueEngine:
         ts = event.get("ts", "")
         user = event.get("user", "unknown")
         raw_text = event.get("text", "")
-        prompt_text = extract_prompt_from_mention(raw_text, self.bot_user_id)
+        prompt_text = extract_prompt_text(raw_text, self.bot_user_id)
         if not prompt_text.strip():
             return
 
@@ -208,10 +212,13 @@ class SlackQueueEngine:
             logger.info("[DRY RUN] Would trigger pipeline for Slack prompt: %s", prompt_text[:120])
             return
 
-        try:
-            react_to_message(client, channel, ts, "eyes")
-        except Exception:
-            logger.debug("Failed to add :eyes: reaction", exc_info=True)
+        is_passive = not has_bot_mention(raw_text, self.bot_user_id)
+
+        if not is_passive:
+            try:
+                react_to_message(client, channel, ts, "eyes")
+            except Exception:
+                logger.debug("Failed to add :eyes: reaction", exc_info=True)
 
         self._ensure_triage_worker()
         try:
@@ -221,20 +228,22 @@ class SlackQueueEngine:
                 "ts": ts,
                 "user": user,
                 "prompt_text": prompt_text,
+                "is_passive": is_passive,
             })
         except queue_module.Full:
             with self.state_lock:
                 self._release_pending_message(channel, ts)
             logger.warning("Slack triage queue full, rejecting %s:%s", channel, ts)
-            try:
-                post_message(
-                    client,
-                    channel,
-                    ":warning: Triage backlog is full right now. Try again in a minute.",
-                    thread_ts=ts,
-                )
-            except Exception:
-                logger.debug("Failed to post triage backlog message", exc_info=True)
+            if not is_passive:
+                try:
+                    post_message(
+                        client,
+                        channel,
+                        ":warning: Triage backlog is full right now. Try again in a minute.",
+                        thread_ts=ts,
+                    )
+                except Exception:
+                    logger.debug("Failed to post triage backlog message", exc_info=True)
 
     def _triage_and_enqueue(
         self,
@@ -244,6 +253,7 @@ class SlackQueueEngine:
         ts: str,
         user: str,
         prompt_text: str,
+        is_passive: bool = False,
     ) -> None:
         if self.shutdown_event.is_set():
             return
@@ -330,6 +340,12 @@ class SlackQueueEngine:
                 self.watch_state.mark_processed(channel, ts, "triage-skip")
                 self.persist_watch_state()
             return
+
+        if is_passive:
+            try:
+                react_to_message(client, channel, ts, "eyes")
+            except Exception:
+                logger.debug("Failed to add :eyes: reaction after triage", exc_info=True)
 
         base_branch = triage_result.base_branch or extract_base_branch(prompt_text)
         formatted_prompt = format_slack_as_prompt(prompt_text, channel, user)

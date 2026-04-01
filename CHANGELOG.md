@@ -1,5 +1,48 @@
 # Changelog
 
+## 20260401_173000 — Stuck Daemon Detection and Auto-Recovery
+
+Adds an in-process watchdog thread that detects when a pipeline has stalled (no heartbeat progress beyond a configurable threshold) and automatically recovers: canceling the stuck pipeline, marking the item as FAILED, alerting operators via Slack, and resuming the main loop. Also enriches `/healthz` with pipeline duration and stall status, adds `started_at` to `QueueItem`, and bumps the schema to v5.
+
+**Created:**
+- `tests/test_daemon.py` — Comprehensive test suite for watchdog thread, stall detection, and auto-recovery
+- `tests/test_models.py` — Tests for `QueueItem.started_at` field and schema v5 migration
+
+**Modified:**
+- `src/colonyos/daemon.py` — Watchdog thread, stall detection, auto-recovery, Slack alerts, enhanced `/healthz` endpoint, monitor events
+- `src/colonyos/config.py` — Added `watchdog_stall_seconds` config field to `DaemonConfig`
+- `src/colonyos/models.py` — Added `started_at` field to `QueueItem`, bumped `SCHEMA_VERSION` to 5
+- `tests/test_config.py` — Tests for `watchdog_stall_seconds` configuration
+- `tests/test_daemon_models.py` — Updated for schema v5
+
+**PRD:** `cOS_prds/20260401_135527_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260401_135527_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+## 20260401_153000 — Listen to All Channel Messages (trigger_mode: "all")
+
+Adds passive channel listening so ColonyOS can process every message in configured channels, not just @mentions. When `trigger_mode` is set to `"all"`, the bot binds Slack `message` events alongside `app_mention`, extracts prompts from non-mention messages, skips the 👀 reaction for passive messages (only reacting after triage confirms actionability), and leverages existing dedup infrastructure for dual-event delivery. Startup warnings guide operators to configure `allowed_user_ids` and `triage_scope` for safe passive mode usage.
+
+**Modified:**
+- `src/colonyos/config.py` — Added `"all"` to `_VALID_TRIGGER_MODES`
+- `src/colonyos/slack_queue.py` — Bound `message` event handler in `register()`, updated `_handle_event` for passive message prompt extraction and conditional 👀 reaction
+- `src/colonyos/slack.py` — Added `extract_prompt_from_channel_message()` for non-mention messages
+- `src/colonyos/daemon.py` — Added startup warnings for `trigger_mode: "all"` without safety configs
+- `tests/test_slack_queue.py` — Comprehensive tests for all-mode flow, dedup verification, passive message handling
+- `tests/test_slack.py` — Tests for channel message prompt extraction
+- `tests/test_daemon.py` — Tests for startup warnings
+
+**PRD:** `cOS_prds/20260401_131917_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260401_131917_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+## 20260401_133000 — Fix Learn Phase 100% Failure Rate
+
+Fixes a prompt-tool constraint mismatch that caused the learn phase to fail on every pipeline run. The `learn.md` instruction template now explicitly states which tools (Read, Glob, Grep) are available, provides concrete Glob patterns for file discovery, and includes negative constraints against disallowed tools (Bash, Agent, etc.). Adds regression tests to prevent future misalignment.
+
+**Modified:**
+- `src/colonyos/instructions/learn.md` — Added "Available Tools" section, concrete Glob patterns, negative tool constraints
+- `tests/test_orchestrator.py` — Added `test_learn_prompt_contains_tool_constraint_language` and `test_learn_prompt_contains_glob_pattern_for_reviews` regression tests
+
+**PRD:** `cOS_prds/20260401_130207_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260401_130207_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260401_130000 — Daily Slack Thread Consolidation
 
 Consolidates all pipeline lifecycle messages (queue arrivals, phase updates, completions, heartbeats) into a single daily Slack thread that rotates at a configurable hour, reducing channel noise by ~90%. Critical alerts (auto-pause, circuit breaker) remain top-level. Includes overnight summary generation, daemon restart recovery via persisted thread state, and a `per_item` config toggle to preserve legacy behavior.

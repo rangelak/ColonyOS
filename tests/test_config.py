@@ -1555,6 +1555,52 @@ class TestPipelineTimeoutConfig:
         assert loaded.daemon.pipeline_timeout_seconds == 3600
 
 
+class TestWatchdogStallSecondsConfig:
+    """Tests for daemon.watchdog_stall_seconds config field."""
+
+    def test_default_value(self) -> None:
+        assert DEFAULTS["daemon"]["watchdog_stall_seconds"] == 1920
+        assert DaemonConfig().watchdog_stall_seconds == 1920
+
+    def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"watchdog_stall_seconds": 3600}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.watchdog_stall_seconds == 3600
+
+    def test_minimum_floor_clamps_to_120(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"watchdog_stall_seconds": 30}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.watchdog_stall_seconds == 120
+
+    def test_exactly_120_is_accepted(self, tmp_repo: Path) -> None:
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"daemon": {"watchdog_stall_seconds": 120}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.daemon.watchdog_stall_seconds == 120
+
+    def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
+        original = ColonyConfig(
+            daemon=DaemonConfig(watchdog_stall_seconds=2400),
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert loaded.daemon.watchdog_stall_seconds == 2400
+
+
 class TestDashboardWriteEnabledConfig:
     """Tests for daemon.dashboard_write_enabled config field."""
 

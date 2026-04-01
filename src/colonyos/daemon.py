@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Literal
 
+from colonyos.agent import request_active_phase_cancel
 from colonyos.cancellation import cancellation_scope, request_cancel
 from colonyos.config import ColonyConfig, load_config
 from colonyos.daemon_state import (
@@ -340,6 +341,10 @@ class Daemon:
         self._state = load_daemon_state(repo_root)
         self._queue_state = self._load_or_create_queue()
         self._pipeline_running = False
+        self._pipeline_started_at: float | None = None
+        self._pipeline_stalled: bool = False
+        self._current_running_item: QueueItem | None = None
+        self._watchdog_thread: threading.Thread | None = None
 
         # Shutdown coordination
         self._stop_event = threading.Event()
@@ -400,6 +405,11 @@ class Daemon:
 
                 # Start embedded dashboard server
                 self._start_dashboard_server()
+
+                logger.info(
+                    "Watchdog enabled: stall threshold=%ds",
+                    self.daemon_config.watchdog_stall_seconds,
+                )
 
                 # Start background threads
                 threads = self._start_threads()
@@ -712,7 +722,13 @@ class Daemon:
             if item.status != QueueItemStatus.PENDING:
                 return False
             item.status = QueueItemStatus.RUNNING
+            item.started_at = datetime.now(timezone.utc).isoformat()
             self._pipeline_running = True
+            self._pipeline_started_at = time.monotonic()
+            # Reset stall flag — it stays True after recovery until the next
+            # pipeline run so /healthz can report the stall that just happened.
+            self._pipeline_stalled = False
+            self._current_running_item = item
             self._persist_queue()
 
         # Execute outside the lock
@@ -739,6 +755,8 @@ class Daemon:
                     )
                 self._state.record_spend(log.total_cost_usd)
                 self._pipeline_running = False
+                self._pipeline_started_at = None
+                self._current_running_item = None
                 self._persist_state()
                 self._persist_queue()
                 logger.info(
@@ -760,6 +778,8 @@ class Daemon:
                 item.status = QueueItemStatus.FAILED
                 item.error = "Run interrupted by user (Ctrl+C)"
                 self._pipeline_running = False
+                self._pipeline_started_at = None
+                self._current_running_item = None
                 self._persist_state()
                 self._persist_queue()
             self._cleanup_notification_lock(item.id)
@@ -836,6 +856,8 @@ class Daemon:
                             )
                             cb_cooldown_slack = (failures, activation_n, cb_expiry)
                 self._pipeline_running = False
+                self._pipeline_started_at = None
+                self._current_running_item = None
                 self._persist_state()
                 self._persist_queue()
             if systemic_slack is not None:
@@ -1688,7 +1710,152 @@ class Daemon:
             t.start()
             threads.append(t)
 
+        # Watchdog thread (always enabled)
+        self._start_watchdog_thread()
+        if self._watchdog_thread is not None:
+            threads.append(self._watchdog_thread)
+
         return threads
+
+    def _start_watchdog_thread(self) -> None:
+        """Start the watchdog thread that detects stuck pipelines."""
+        t = threading.Thread(
+            target=self._watchdog_loop,
+            name="daemon-watchdog",
+            daemon=True,
+        )
+        t.start()
+        self._watchdog_thread = t
+
+    def _watchdog_loop(self) -> None:
+        """Main watchdog loop — wakes every 30s to check for stalled pipelines."""
+        while not self._stop_event.is_set():
+            try:
+                self._watchdog_check()
+            except Exception:
+                logger.exception("Watchdog check failed")
+            self._stop_event.wait(30)
+
+    def _watchdog_check(self) -> None:
+        """Single watchdog check cycle. Detects stalls and triggers recovery."""
+        if not self._pipeline_running:
+            return
+
+        stall_seconds = self.daemon_config.watchdog_stall_seconds
+
+        # Check 1: Has the pipeline been running longer than the threshold?
+        pipeline_started = self._pipeline_started_at
+        if pipeline_started is None:
+            return
+        elapsed = time.monotonic() - pipeline_started
+        if elapsed < stall_seconds:
+            return
+
+        # Check 2: Is the heartbeat file stale?
+        heartbeat_path = self.repo_root / ".colonyos" / "runs" / "heartbeat"
+        try:
+            hb_mtime = heartbeat_path.stat().st_mtime
+            time_since_heartbeat = time.time() - hb_mtime
+        except FileNotFoundError:
+            # No heartbeat file = no progress signal at all
+            time_since_heartbeat = elapsed
+
+        if time_since_heartbeat < stall_seconds:
+            return
+
+        # Both conditions met: pipeline is stalled
+        self._pipeline_stalled = True
+        logger.warning(
+            "Watchdog: pipeline stalled for %.0fs (threshold=%ds, heartbeat_age=%.0fs)",
+            elapsed,
+            stall_seconds,
+            time_since_heartbeat,
+        )
+        self._watchdog_recover(stall_duration=elapsed)
+
+    def _watchdog_recover(self, stall_duration: float) -> None:
+        """Recover from a stalled pipeline: cancel, wait, force-reset, mark FAILED."""
+        item = self._current_running_item
+
+        # Step 0: Emit monitor event for TUI consumption
+        try:
+            event_payload = {
+                "type": "watchdog_stall_detected",
+                "item_id": item.id if item is not None else None,
+                "stall_duration_seconds": stall_duration,
+                "action_taken": "auto_cancel",
+            }
+            sys.stdout.write(encode_monitor_event(event_payload) + "\n")
+            sys.stdout.flush()
+        except Exception:
+            logger.exception("Watchdog: failed to emit monitor event")
+
+        # Step 0.5: Post Slack alert (wrapped in try/except to avoid hanging the watchdog)
+        try:
+            if item is not None:
+                duration_min = stall_duration / 60
+                alert_msg = (
+                    f"⚠️ *Stuck Pipeline Detected*\n"
+                    f"Item {item.id} ({item.source_type}) running for {duration_min:.0f}m. "
+                    f"No progress for {stall_duration:.0f}s. Auto-recovery initiated."
+                )
+            else:
+                alert_msg = (
+                    f"⚠️ *Stuck Pipeline Detected*\n"
+                    f"No progress for {stall_duration:.0f}s. Auto-recovery initiated."
+                )
+            self._post_slack_message(alert_msg)
+        except Exception:
+            logger.exception("Watchdog: failed to post Slack alert")
+
+        # Step 1: Request graceful phase cancellation
+        logger.warning("Watchdog: requesting active phase cancel")
+        try:
+            request_active_phase_cancel(
+                f"watchdog: no progress for {stall_duration:.0f}s"
+            )
+        except Exception:
+            logger.exception("Watchdog: request_active_phase_cancel failed")
+
+        # Step 2: Grace period — wait 30s for cooperative cancellation
+        self._stop_event.wait(30)
+
+        # Step 3: If still stuck, force cancel
+        if self._pipeline_running:
+            logger.warning("Watchdog: pipeline still running after grace period, forcing cancel")
+            try:
+                request_cancel(
+                    f"watchdog: forced fallback cancellation after grace period ({stall_duration:.0f}s stall)"
+                )
+            except Exception:
+                logger.exception("Watchdog: request_cancel fallback failed")
+
+        # Step 4: Force-reset state under lock
+        with self._lock:
+            self._pipeline_running = False
+            self._pipeline_started_at = None
+            self._current_running_item = None
+            if item is not None:
+                item.status = QueueItemStatus.FAILED
+                item.error = f"watchdog: no progress for {stall_duration:.0f}s"
+            self._persist_queue()
+    @staticmethod
+    def _warn_all_mode_safety(config: ColonyConfig) -> None:
+        """Log warnings when trigger_mode is 'all' without safety configs."""
+        if config.slack.trigger_mode != "all":
+            return
+        if not config.slack.allowed_user_ids:
+            logger.warning(
+                "trigger_mode is 'all' but allowed_user_ids is empty — "
+                "any user in the channel can trigger the bot. "
+                "Consider restricting allowed_user_ids."
+            )
+        if not config.slack.triage_scope:
+            logger.warning(
+                "trigger_mode is 'all' but triage_scope is empty — "
+                "triage may struggle to filter irrelevant messages. "
+                "Consider setting triage_scope to guide the triage LLM."
+            )
 
     def _slack_listener_thread(self) -> None:
         """Run Slack Socket Mode listener."""
@@ -1742,6 +1909,7 @@ class Daemon:
                 agent_lock=self._agent_lock,
             )
             logger.info("Slack listener thread started")
+            self._warn_all_mode_safety(self.config)
             self._register_daemon_commands(slack_app)
             slack_engine.register(slack_app)
             _persist_watch_state()
@@ -2259,6 +2427,15 @@ class Daemon:
                 if i.status == QueueItemStatus.PENDING
             )
 
+            # Pipeline duration and stall info
+            running_item = self._current_running_item
+            pipeline_started_at_iso: str | None = None
+            pipeline_duration: float | None = None
+            if running_item is not None and running_item.started_at is not None:
+                pipeline_started_at_iso = running_item.started_at
+            if self._pipeline_started_at is not None:
+                pipeline_duration = time.monotonic() - self._pipeline_started_at
+
             return {
                 "status": status,
                 "heartbeat_age_seconds": hb_age,
@@ -2268,6 +2445,9 @@ class Daemon:
                 "circuit_breaker_active": cb_active,
                 "paused": self._state.paused,
                 "pipeline_running": self._pipeline_running,
+                "pipeline_started_at": pipeline_started_at_iso,
+                "pipeline_duration_seconds": pipeline_duration,
+                "pipeline_stalled": self._pipeline_stalled,
                 "total_items_today": self._state.total_items_today,
                 "consecutive_failures": self._state.consecutive_failures,
             }
