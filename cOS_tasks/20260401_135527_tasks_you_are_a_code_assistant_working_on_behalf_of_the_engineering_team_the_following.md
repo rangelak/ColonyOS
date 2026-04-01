@@ -67,14 +67,14 @@
   - [x] 5.2 In `_watchdog_recover()`, call `self._post_slack_message()` with a formatted alert: `"⚠️ *Stuck Pipeline Detected*\nItem {item.id} ({source_type}) running for {duration}. No progress for {stall}s. Auto-recovery initiated."`. Wrap in a try/except with a 10-second timeout.
   - [x] 5.3 Emit a structured monitor event via `encode_monitor_event()` with event type `"watchdog_stall_detected"`, including `item_id`, `stall_duration_seconds`, and `action_taken: "auto_cancel"`.
 
-- [ ] 6.0 Enhance `/healthz` endpoint with pipeline duration and stall status (depends on 3.0)
+- [x] 6.0 Enhance `/healthz` endpoint with pipeline duration and stall status (depends on 3.0)
   depends_on: [3.0]
-  - [ ] 6.1 Write tests in `tests/test_daemon.py`:
+  - [x] 6.1 Write tests in `tests/test_daemon.py`:
     - Test `get_health()` returns `pipeline_started_at: None` and `pipeline_duration_seconds: None` when no pipeline is running.
     - Test `get_health()` returns correct `pipeline_started_at` ISO timestamp and `pipeline_duration_seconds` when a pipeline is running.
     - Test `get_health()` returns `pipeline_stalled: True` when watchdog has detected a stall.
-  - [ ] 6.2 Add `self._pipeline_stalled: bool = False` to `Daemon.__init__()`. Set to `True` in watchdog recovery, reset to `False` when a new pipeline starts.
-  - [ ] 6.3 Update `get_health()` (daemon.py:2062) to include:
+  - [x] 6.2 Add `self._pipeline_stalled: bool = False` to `Daemon.__init__()`. Set to `True` in watchdog recovery, reset to `False` when a new pipeline starts.
+  - [x] 6.3 Update `get_health()` (daemon.py:2062) to include:
     - `"pipeline_started_at"`: ISO timestamp from current running item's `started_at`, or `None`.
     - `"pipeline_duration_seconds"`: `time.monotonic() - self._pipeline_started_at` if pipeline is running, else `None`.
     - `"pipeline_stalled"`: `self._pipeline_stalled`.

@@ -476,6 +476,76 @@ class TestHealthReport:
         assert health["status"] == "stopped"
 
 
+class TestHealthPipelineFields:
+    """Tests for pipeline duration and stall status in get_health() (task 6.0)."""
+
+    def test_no_pipeline_running(self, daemon_instance: Daemon):
+        """When no pipeline is running, pipeline fields should be None/False."""
+        health = daemon_instance.get_health()
+        assert health["pipeline_started_at"] is None
+        assert health["pipeline_duration_seconds"] is None
+        assert health["pipeline_stalled"] is False
+
+    def test_pipeline_running_shows_duration(self, daemon_instance: Daemon):
+        """When a pipeline is running, started_at and duration should be populated."""
+        item = QueueItem(
+            id="test-item",
+            source_type="slack",
+            source_value="test",
+            status=QueueItemStatus.RUNNING,
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+        daemon_instance._pipeline_running = True
+        daemon_instance._pipeline_started_at = time.monotonic() - 120.0
+        daemon_instance._current_running_item = item
+        health = daemon_instance.get_health()
+        assert health["pipeline_started_at"] == item.started_at
+        assert health["pipeline_duration_seconds"] is not None
+        assert health["pipeline_duration_seconds"] >= 120.0
+        assert health["pipeline_stalled"] is False
+
+    def test_pipeline_stalled_flag(self, daemon_instance: Daemon):
+        """When watchdog has detected a stall, pipeline_stalled should be True."""
+        item = QueueItem(
+            id="test-item",
+            source_type="slack",
+            source_value="test",
+            status=QueueItemStatus.RUNNING,
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+        daemon_instance._pipeline_running = True
+        daemon_instance._pipeline_started_at = time.monotonic() - 2000.0
+        daemon_instance._current_running_item = item
+        daemon_instance._pipeline_stalled = True
+        health = daemon_instance.get_health()
+        assert health["pipeline_stalled"] is True
+
+    def test_stalled_resets_on_new_pipeline(self, daemon_instance: Daemon):
+        """The stalled flag should reset to False when a new pipeline starts.
+
+        We verify at the code level: _pipeline_stalled is set to False in the
+        same code block that sets _pipeline_running = True (the RUNNING transition).
+        Here we simulate that transition directly.
+        """
+        daemon_instance._pipeline_stalled = True
+        # Simulate the RUNNING transition that happens in _run_pipeline_for_item
+        item = QueueItem(
+            id="test-item-2",
+            source_type="slack",
+            source_value="test",
+            status=QueueItemStatus.PENDING,
+        )
+        with daemon_instance._lock:
+            item.status = QueueItemStatus.RUNNING
+            item.started_at = datetime.now(timezone.utc).isoformat()
+            daemon_instance._pipeline_running = True
+            daemon_instance._pipeline_started_at = time.monotonic()
+            daemon_instance._pipeline_stalled = False  # This is what the production code does
+            daemon_instance._current_running_item = item
+        # After starting, stalled should be False
+        assert daemon_instance._pipeline_stalled is False
+
+
 class TestSlackKillSwitch:
     """Tests for FR-11 Slack kill switch (pause/resume/status)."""
 

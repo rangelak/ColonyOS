@@ -341,6 +341,7 @@ class Daemon:
         self._queue_state = self._load_or_create_queue()
         self._pipeline_running = False
         self._pipeline_started_at: float | None = None
+        self._pipeline_stalled: bool = False
         self._current_running_item: QueueItem | None = None
         self._watchdog_thread: threading.Thread | None = None
 
@@ -713,6 +714,7 @@ class Daemon:
             item.started_at = datetime.now(timezone.utc).isoformat()
             self._pipeline_running = True
             self._pipeline_started_at = time.monotonic()
+            self._pipeline_stalled = False
             self._current_running_item = item
             self._persist_queue()
 
@@ -1745,6 +1747,7 @@ class Daemon:
             return
 
         # Both conditions met: pipeline is stalled
+        self._pipeline_stalled = True
         logger.warning(
             "Watchdog: pipeline stalled for %.0fs (threshold=%ds, heartbeat_age=%.0fs)",
             elapsed,
@@ -2231,6 +2234,15 @@ class Daemon:
                 if i.status == QueueItemStatus.PENDING
             )
 
+            # Pipeline duration and stall info
+            running_item = self._current_running_item
+            pipeline_started_at_iso: str | None = None
+            pipeline_duration: float | None = None
+            if running_item is not None and running_item.started_at is not None:
+                pipeline_started_at_iso = running_item.started_at
+            if self._pipeline_started_at is not None:
+                pipeline_duration = time.monotonic() - self._pipeline_started_at
+
             return {
                 "status": status,
                 "heartbeat_age_seconds": hb_age,
@@ -2240,6 +2252,9 @@ class Daemon:
                 "circuit_breaker_active": cb_active,
                 "paused": self._state.paused,
                 "pipeline_running": self._pipeline_running,
+                "pipeline_started_at": pipeline_started_at_iso,
+                "pipeline_duration_seconds": pipeline_duration,
+                "pipeline_stalled": self._pipeline_stalled,
                 "total_items_today": self._state.total_items_today,
                 "consecutive_failures": self._state.consecutive_failures,
             }
