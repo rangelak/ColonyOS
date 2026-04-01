@@ -34,12 +34,12 @@
   - [x] 3.2 Update `_compute_next_phase()` mapping (orchestrator.py line 3019): change `"decision": "deliver"` to `"decision": "verify"`, add `"verify": "deliver"`
   - [x] 3.3 Update `_SKIP_MAP` (orchestrator.py line 3030): change `"decision"` entry to skip `{"plan", "implement", "review"}`, add `"verify"` entry to skip `{"plan", "implement", "review", "verify"}`
 
-- [ ] 4.0 Implement verify-fix loop in main pipeline
+- [x] 4.0 Implement verify-fix loop in main pipeline
   depends_on: [1.0, 2.0, 3.0]
-  - [ ] 4.1 Write tests in `tests/test_verify_phase.py` for: (a) verify passes → proceeds to deliver, (b) verify fails → fix runs → re-verify passes → proceeds to deliver, (c) verify fails → fix exhausts retries → run marked FAILED and delivery blocked, (d) budget guard prevents loop when budget exhausted, (e) verify skipped when `config.phases.verify` is `False`, (f) heartbeat is touched before verify
-  - [ ] 4.2 Add `_build_verify_prompt()` helper to orchestrator — loads `verify.md` instruction, builds user prompt with branch name and change summary
-  - [ ] 4.3 Add `_build_verify_fix_prompt()` helper to orchestrator — loads `verify_fix.md` instruction, builds user prompt with test failure output
-  - [ ] 4.4 Insert the verify-fix loop in `_run_pipeline()` between Learn (line 4900) and Deliver (line 4902):
+  - [x] 4.1 Write tests in `tests/test_verify_phase.py` for: (a) verify passes → proceeds to deliver, (b) verify fails → fix runs → re-verify passes → proceeds to deliver, (c) verify fails → fix exhausts retries → run marked FAILED and delivery blocked, (d) budget guard prevents loop when budget exhausted, (e) verify skipped when `config.phases.verify` is `False`, (f) heartbeat is touched before verify
+  - [x] 4.2 Add `_build_verify_prompt()` helper to orchestrator — loads `verify.md` instruction, builds user prompt with branch name and change summary
+  - [x] 4.3 Add `_build_verify_fix_prompt()` helper to orchestrator — loads `verify_fix.md` instruction, builds user prompt with test failure output
+  - [x] 4.4 Insert the verify-fix loop in `_run_pipeline()` between Learn (line 4900) and Deliver (line 4902):
     - Touch heartbeat
     - Check `config.phases.verify` — skip if False
     - Display phase header via UI or `_log()`
@@ -51,7 +51,7 @@
       - Re-run verify agent
       - If tests pass, break loop and proceed to deliver
     - If loop exhausts, call `_fail_run_log()` and return
-  - [ ] 4.5 Run full test suite to confirm no regressions
+  - [x] 4.5 Run full test suite to confirm no regressions
 
 - [x] 5.0 Add verify-fix phase to safety-critical phases list
   depends_on: [1.0]
