@@ -339,6 +339,7 @@ class Daemon:
         self._state = load_daemon_state(repo_root)
         self._queue_state = self._load_or_create_queue()
         self._pipeline_running = False
+        self._pipeline_started_at: float | None = None
 
         # Shutdown coordination
         self._stop_event = threading.Event()
@@ -708,6 +709,7 @@ class Daemon:
             item.status = QueueItemStatus.RUNNING
             item.started_at = datetime.now(timezone.utc).isoformat()
             self._pipeline_running = True
+            self._pipeline_started_at = time.monotonic()
             self._persist_queue()
 
         # Execute outside the lock
@@ -734,6 +736,7 @@ class Daemon:
                     )
                 self._state.record_spend(log.total_cost_usd)
                 self._pipeline_running = False
+                self._pipeline_started_at = None
                 self._persist_state()
                 self._persist_queue()
                 logger.info(
@@ -755,6 +758,7 @@ class Daemon:
                 item.status = QueueItemStatus.FAILED
                 item.error = "Run interrupted by user (Ctrl+C)"
                 self._pipeline_running = False
+                self._pipeline_started_at = None
                 self._persist_state()
                 self._persist_queue()
             self._cleanup_notification_lock(item.id)
@@ -831,6 +835,7 @@ class Daemon:
                             )
                             cb_cooldown_slack = (failures, activation_n, cb_expiry)
                 self._pipeline_running = False
+                self._pipeline_started_at = None
                 self._persist_state()
                 self._persist_queue()
             if systemic_slack is not None:

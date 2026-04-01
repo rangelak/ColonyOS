@@ -27,12 +27,12 @@
   - [x] 2.2 Add `watchdog_stall_seconds: int = 1920` to `DaemonConfig` in `src/colonyos/config.py` (after `pipeline_timeout_seconds`, line ~309).
   - [x] 2.3 Add validation in config loading: if `watchdog_stall_seconds < 120`, log a warning and clamp to 120.
 
-- [ ] 3.0 Add `_pipeline_started_at` tracking to daemon (depends on 1.0 for `started_at`)
+- [x] 3.0 Add `_pipeline_started_at` tracking to daemon (depends on 1.0 for `started_at`)
   depends_on: [1.0]
-  - [ ] 3.1 Write tests in `tests/test_daemon.py`: assert `_pipeline_started_at` is `None` when no pipeline is running, assert it is set to a monotonic timestamp when a pipeline starts, assert it is reset to `None` when a pipeline completes or fails.
-  - [ ] 3.2 Add `self._pipeline_started_at: float | None = None` to `Daemon.__init__()` (line ~341, alongside `_pipeline_running`).
-  - [ ] 3.3 Set `self._pipeline_started_at = time.monotonic()` at the same point `_pipeline_running = True` is set (daemon.py:709, inside the `with self._lock:` block).
-  - [ ] 3.4 Reset `self._pipeline_started_at = None` at every point `_pipeline_running = False` is set (daemon.py:735 in success path, daemon.py:756+ in failure/exception paths). Audit all code paths that set `_pipeline_running = False` to ensure `_pipeline_started_at` is also reset.
+  - [x] 3.1 Write tests in `tests/test_daemon.py`: assert `_pipeline_started_at` is `None` when no pipeline is running, assert it is set to a monotonic timestamp when a pipeline starts, assert it is reset to `None` when a pipeline completes or fails.
+  - [x] 3.2 Add `self._pipeline_started_at: float | None = None` to `Daemon.__init__()` (line ~341, alongside `_pipeline_running`).
+  - [x] 3.3 Set `self._pipeline_started_at = time.monotonic()` at the same point `_pipeline_running = True` is set (daemon.py:709, inside the `with self._lock:` block).
+  - [x] 3.4 Reset `self._pipeline_started_at = None` at every point `_pipeline_running = False` is set (daemon.py:735 in success path, daemon.py:756+ in failure/exception paths). Audit all code paths that set `_pipeline_running = False` to ensure `_pipeline_started_at` is also reset.
 
 - [ ] 4.0 Implement watchdog thread with stall detection and auto-recovery (core feature)
   depends_on: [2.0, 3.0]

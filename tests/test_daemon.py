@@ -1703,3 +1703,115 @@ class TestPRSync:
         mock_sync.assert_called_once()
         call_kwargs = mock_sync.call_args[1]
         assert call_kwargs["write_enabled"] is True
+
+
+class TestPipelineStartedAtTracking:
+    """Tests for _pipeline_started_at monotonic timestamp tracking (task 3.0)."""
+
+    def test_pipeline_started_at_is_none_initially(self, daemon_instance: Daemon):
+        """_pipeline_started_at should be None when no pipeline is running."""
+        assert daemon_instance._pipeline_started_at is None
+
+    def test_pipeline_started_at_set_when_pipeline_starts(self, daemon_instance: Daemon):
+        """_pipeline_started_at should be set to a monotonic timestamp when a pipeline starts."""
+        daemon_instance.dry_run = False
+        item = QueueItem(
+            id="item-start",
+            source_type="prompt",
+            source_value="do stuff",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+
+        before = time.monotonic()
+
+        fake_log = RunLog(
+            run_id="run-1",
+            prompt="do stuff",
+            status=RunStatus.COMPLETED,
+            total_cost_usd=0.01,
+        )
+
+        captured_started_at: list[float | None] = []
+
+        original_execute = daemon_instance._execute_item
+
+        def spy_execute(i: QueueItem) -> RunLog:
+            captured_started_at.append(daemon_instance._pipeline_started_at)
+            return fake_log
+
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch.object(daemon_instance, "_execute_item", side_effect=spy_execute):
+            daemon_instance._try_execute_next()
+
+        after = time.monotonic()
+
+        # During execution, _pipeline_started_at should have been set
+        assert len(captured_started_at) == 1
+        assert captured_started_at[0] is not None
+        assert before <= captured_started_at[0] <= after
+
+    def test_pipeline_started_at_reset_on_success(self, daemon_instance: Daemon):
+        """_pipeline_started_at should be reset to None after successful pipeline completion."""
+        daemon_instance.dry_run = False
+        item = QueueItem(
+            id="item-ok",
+            source_type="prompt",
+            source_value="go",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+
+        fake_log = RunLog(
+            run_id="run-ok",
+            prompt="go",
+            status=RunStatus.COMPLETED,
+            total_cost_usd=0.01,
+        )
+
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch.object(daemon_instance, "_execute_item", return_value=fake_log):
+            daemon_instance._try_execute_next()
+
+        assert daemon_instance._pipeline_started_at is None
+
+    def test_pipeline_started_at_reset_on_failure(self, daemon_instance: Daemon):
+        """_pipeline_started_at should be reset to None after pipeline failure (exception)."""
+        daemon_instance.dry_run = False
+        item = QueueItem(
+            id="item-fail",
+            source_type="prompt",
+            source_value="crash",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch.object(daemon_instance, "_execute_item", side_effect=RuntimeError("boom")):
+            daemon_instance._try_execute_next()
+
+        assert daemon_instance._pipeline_started_at is None
+        assert daemon_instance._pipeline_running is False
+
+    def test_pipeline_started_at_reset_on_keyboard_interrupt(self, daemon_instance: Daemon):
+        """_pipeline_started_at should be reset to None after KeyboardInterrupt."""
+        daemon_instance.dry_run = False
+        item = QueueItem(
+            id="item-int",
+            source_type="prompt",
+            source_value="stop",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        daemon_instance._queue_state.items = [item]
+
+        with patch.object(daemon_instance, "_preexec_worktree_state", return_value=("clean", "")), \
+             patch.object(daemon_instance, "_execute_item", side_effect=KeyboardInterrupt):
+            with pytest.raises(KeyboardInterrupt):
+                daemon_instance._try_execute_next()
+
+        assert daemon_instance._pipeline_started_at is None
+        assert daemon_instance._pipeline_running is False
