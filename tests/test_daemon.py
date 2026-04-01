@@ -3546,3 +3546,174 @@ class TestMaintenanceBudgetTracking:
         d._state.daily_maintenance_spend_usd = 10.0
         d._state.maintenance_reset_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         assert d._check_maintenance_budget() is True
+
+    def test_ci_fix_item_increments_maintenance_spend(self, tmp_repo: Path) -> None:
+        """FR-5: daily_maintenance_spend_usd is incremented when a ci-fix item completes."""
+        d = self._make_daemon(tmp_repo, maintenance_budget_usd=20.0)
+        d._state.daily_maintenance_spend_usd = 0.0
+        d._state.maintenance_reset_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        item = QueueItem(
+            id="ci-fix-99",
+            source_type="ci-fix",
+            source_value="99",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        d._queue_state.items.append(item)
+
+        log = RunLog(
+            run_id="run-ci",
+            prompt="fix ci",
+            status=RunStatus.COMPLETED,
+            total_cost_usd=2.5,
+        )
+        with patch.object(d, "_execute_item", return_value=log), \
+             patch.object(d, "_cleanup_notification_lock"), \
+             patch.object(d, "_preexec_worktree_state", return_value=("clean", "")):
+            d._try_execute_next()
+
+        assert d._state.daily_maintenance_spend_usd == 2.5
+
+
+class TestCircuitBreakerNoResetOnRollback:
+    """Circuit breaker must not reset failure counter when HEAD == last_good_commit."""
+
+    def _make_daemon(self, tmp_repo: Path, **daemon_kwargs) -> Daemon:
+        cfg = ColonyConfig(daemon=DaemonConfig(daily_budget_usd=50.0, **daemon_kwargs))
+        return Daemon(tmp_repo, cfg, dry_run=True)
+
+    @patch("colonyos.daemon.read_last_good_commit", return_value="abc123")
+    @patch("colonyos.daemon.record_last_good_commit")
+    def test_failure_counter_not_reset_when_head_equals_last_good(
+        self, mock_record, mock_read, tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, self_update=True)
+        d._startup_time = time.time() - 61
+        d._good_commit_recorded = False
+        d._state.self_update_consecutive_failures = 1
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="abc123\n", stderr=""
+            )
+            d._maybe_record_uptime_good_commit()
+
+        # Counter should NOT be reset because HEAD == last_good_commit
+        assert d._state.self_update_consecutive_failures == 1
+        assert d._good_commit_recorded is True
+
+    @patch("colonyos.daemon.read_last_good_commit", return_value="old_sha")
+    @patch("colonyos.daemon.record_last_good_commit")
+    def test_failure_counter_resets_when_head_differs_from_last_good(
+        self, mock_record, mock_read, tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, self_update=True)
+        d._startup_time = time.time() - 61
+        d._good_commit_recorded = False
+        d._state.self_update_consecutive_failures = 1
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="new_sha\n", stderr=""
+            )
+            d._maybe_record_uptime_good_commit()
+
+        assert d._state.self_update_consecutive_failures == 0
+        assert d._good_commit_recorded is True
+
+    @patch("colonyos.daemon.read_last_good_commit", return_value=None)
+    @patch("colonyos.daemon.record_last_good_commit")
+    def test_failure_counter_resets_when_no_previous_good_commit(
+        self, mock_record, mock_read, tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, self_update=True)
+        d._startup_time = time.time() - 61
+        d._good_commit_recorded = False
+        d._state.self_update_consecutive_failures = 1
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="any_sha\n", stderr=""
+            )
+            d._maybe_record_uptime_good_commit()
+
+        assert d._state.self_update_consecutive_failures == 0
+
+
+class TestMaintenanceSkippedOnFailedRestore:
+    """Maintenance cycle must not run when branch restore fails."""
+
+    def _make_daemon(self, tmp_repo: Path, **daemon_kwargs) -> Daemon:
+        cfg = ColonyConfig(daemon=DaemonConfig(daily_budget_usd=50.0, **daemon_kwargs))
+        return Daemon(tmp_repo, cfg, dry_run=True)
+
+    def test_maintenance_skipped_when_restore_raises(self, tmp_repo: Path) -> None:
+        d = self._make_daemon(tmp_repo)
+        item = QueueItem(
+            id="item-restore-fail",
+            source_type="prompt",
+            source_value="test",
+            status=QueueItemStatus.PENDING,
+            priority=1,
+        )
+        d._queue_state.items.append(item)
+
+        log = RunLog(
+            run_id="run-rf",
+            prompt="test",
+            status=RunStatus.COMPLETED,
+            total_cost_usd=0.1,
+        )
+
+        with patch("colonyos.cli.run_pipeline_for_queue_item", return_value=log), \
+             patch("subprocess.run") as mock_subproc, \
+             patch("colonyos.recovery.restore_to_branch", side_effect=RuntimeError("restore failed")), \
+             patch.object(d, "_run_maintenance_cycle") as mock_maint:
+            # Simulate being on a branch
+            mock_subproc.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="feature-branch\n", stderr=""
+            )
+            d._run_pipeline_for_item(item)
+
+        mock_maint.assert_not_called()
+
+
+class TestBranchSyncCooldown:
+    """Branch sync Slack posting must respect cooldown period."""
+
+    def _make_daemon(self, tmp_repo: Path, **daemon_kwargs) -> Daemon:
+        cfg = ColonyConfig(daemon=DaemonConfig(daily_budget_usd=50.0, **daemon_kwargs))
+        return Daemon(tmp_repo, cfg, dry_run=True)
+
+    @patch("colonyos.daemon.build_ci_fix_queue_items", return_value=[])
+    @patch("colonyos.daemon.find_branches_with_failing_ci", return_value=[])
+    @patch("colonyos.daemon.format_branch_sync_report", return_value="report text")
+    @patch("colonyos.daemon.scan_diverged_branches", return_value=[MagicMock()])
+    @patch("colonyos.daemon.pull_and_check_update", return_value=(False, "a", "a"))
+    def test_slack_not_posted_within_cooldown(
+        self, mock_pull, mock_scan, mock_report, mock_ci, mock_build,
+        tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, branch_sync_enabled=True)
+        # Set last post time to recent (within cooldown)
+        d._last_branch_sync_post = time.time() - 100  # 100s ago, cooldown is 3600s
+        with patch.object(d, "_post_slack_message") as mock_slack:
+            d._run_maintenance_cycle()
+        mock_slack.assert_not_called()
+
+    @patch("colonyos.daemon.build_ci_fix_queue_items", return_value=[])
+    @patch("colonyos.daemon.find_branches_with_failing_ci", return_value=[])
+    @patch("colonyos.daemon.format_branch_sync_report", return_value="report text")
+    @patch("colonyos.daemon.scan_diverged_branches", return_value=[MagicMock()])
+    @patch("colonyos.daemon.pull_and_check_update", return_value=(False, "a", "a"))
+    def test_slack_posted_after_cooldown_expires(
+        self, mock_pull, mock_scan, mock_report, mock_ci, mock_build,
+        tmp_repo: Path,
+    ) -> None:
+        d = self._make_daemon(tmp_repo, branch_sync_enabled=True)
+        # Set last post time to long ago (past cooldown)
+        d._last_branch_sync_post = time.time() - 4000  # 4000s ago, cooldown is 3600s
+        with patch.object(d, "_post_slack_message") as mock_slack:
+            d._run_maintenance_cycle()
+        mock_slack.assert_called_once_with("report text")

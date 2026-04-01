@@ -391,6 +391,7 @@ class Daemon:
         # Maintenance cycle (task 5.0)
         self._startup_time: float = time.time()
         self._good_commit_recorded: bool = False
+        self._last_branch_sync_post: float = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -773,6 +774,9 @@ class Daemon:
                         else "Pipeline failed"
                     )
                 self._state.record_spend(log.total_cost_usd)
+                # Track CI-fix spend against maintenance budget (FR-5)
+                if item.source_type == "ci-fix":
+                    self._state.daily_maintenance_spend_usd += log.total_cost_usd
                 self._pipeline_running = False
                 self._pipeline_started_at = None
                 self._current_running_item = None
@@ -1693,10 +1697,7 @@ class Daemon:
                     raise
         finally:
             watchdog.cancel()
-            # Restore the branch the daemon was on before the pipeline run.
-            # The orchestrator's safety commit (in _run_pipeline finally)
-            # should have already committed any dirty state, but
-            # restore_to_branch handles leftover dirt as a fallback.
+            restored_ok = False
             if branch_before:
                 try:
                     from colonyos.recovery import restore_to_branch
@@ -1704,19 +1705,28 @@ class Daemon:
                     restored = restore_to_branch(self.repo_root, branch_before)
                     if restored:
                         logger.info("Post-pipeline: %s", restored)
+                    restored_ok = True
                 except Exception:
                     logger.warning(
                         "Failed to restore to %s after pipeline run",
                         branch_before,
                         exc_info=True,
                     )
+            else:
+                restored_ok = True  # No branch to restore — assume on main
             # Run maintenance cycle between queue items (task 5.4)
-            try:
-                self._run_maintenance_cycle()
-            except Exception:
+            # Only safe when we're confirmed back on the expected branch.
+            if restored_ok:
+                try:
+                    self._run_maintenance_cycle()
+                except Exception:
+                    logger.warning(
+                        "Maintenance cycle failed (non-fatal)",
+                        exc_info=True,
+                    )
+            else:
                 logger.warning(
-                    "Maintenance cycle failed (non-fatal)",
-                    exc_info=True,
+                    "Skipping maintenance cycle — branch restore failed"
                 )
 
     # ------------------------------------------------------------------
@@ -2427,12 +2437,14 @@ class Daemon:
             else:
                 logger.error("Self-update install failed, continuing with old code")
 
-        # 2. Branch sync scan
+        # 2. Branch sync scan (with 1-hour cooldown on Slack posts)
+        _BRANCH_SYNC_COOLDOWN = 3600
         if self.daemon_config.branch_sync_enabled:
             branches = scan_diverged_branches(self.repo_root)
             report = format_branch_sync_report(branches)
-            if report:
+            if report and (time.time() - self._last_branch_sync_post >= _BRANCH_SYNC_COOLDOWN):
                 self._post_slack_message(report)
+                self._last_branch_sync_post = time.time()
 
         # 3. CI-fix enqueueing (gated on maintenance budget)
         if self._check_maintenance_budget():
@@ -2539,8 +2551,13 @@ class Daemon:
             )
             if result.returncode == 0:
                 sha = result.stdout.strip()
+                # Only reset failure counter if running a genuinely new version
+                # (not a rollback to last_good_commit). This prevents the
+                # circuit breaker from resetting between rollback cycles.
+                previous_good = read_last_good_commit(self.repo_root)
                 record_last_good_commit(self.repo_root, sha)
-                self._state.self_update_consecutive_failures = 0
+                if previous_good is None or sha != previous_good:
+                    self._state.self_update_consecutive_failures = 0
                 self._persist_state()
                 self._good_commit_recorded = True
                 logger.info("Recorded good commit after uptime: %s", sha[:10])

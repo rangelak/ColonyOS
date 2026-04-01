@@ -214,7 +214,7 @@ def should_rollback(repo_root: Path, startup_time: float) -> bool:
 # Branch sync scan (FR-3)
 # ---------------------------------------------------------------------------
 
-_GH_TIMEOUT = 10
+_GH_TIMEOUT = 30
 
 
 @dataclass(frozen=True)
