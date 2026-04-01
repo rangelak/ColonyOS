@@ -592,7 +592,8 @@ class TestEnsureOnMain:
             args=[], returncode=0, stdout="", stderr=""
         )
         _ensure_on_main(tmp_path)  # should not raise
-        assert mock_run.call_count == 2
+        # 1 checkout + 3 pull_branch internals (upstream check, branch name, pull)
+        assert mock_run.call_count == 4
 
     @patch("colonyos.cli.subprocess.run", side_effect=OSError("no git"))
     def test_checkout_oserror_raises(self, mock_run, tmp_path: Path) -> None:
