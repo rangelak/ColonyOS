@@ -4651,7 +4651,7 @@ def _launch_daemon_tui(
             transcript = self.query_one(TranscriptView)
             transcript.append_daemon_monitor_banner()
             transcript.append_notice(
-                "Daemon monitor mode. Ctrl+C requests shutdown."
+                "Daemon monitor mode. Press q to quit. Ctrl+C requests shutdown."
             )
             self._start_run("daemon-monitor")
 
@@ -4663,13 +4663,21 @@ def _launch_daemon_tui(
 
     process_ref: dict[str, subprocess.Popen[str]] = {}
     process_lock = threading.Lock()
+    shutdown_requested = threading.Event()
 
     def _emit_monitor_notice(text: str) -> None:
         queue = getattr(getattr(app_instance, "event_queue", None), "sync_q", None)
         if queue is not None:
             queue.put(NoticeMsg(text=text))
 
-    def _terminate_daemon_process(*, reason: str, force: bool = False) -> None:
+    def _terminate_daemon_process(
+        *,
+        reason: str,
+        force: bool = False,
+        mark_shutdown: bool = False,
+    ) -> None:
+        if mark_shutdown:
+            shutdown_requested.set()
         with process_lock:
             process = process_ref.get("instance")
         if process is None or process.poll() is not None:
@@ -4712,45 +4720,74 @@ def _launch_daemon_tui(
             command.append("--verbose")
         if dry_run:
             command.append("--dry-run")
+        restart_attempt = 0
+        while not shutdown_requested.is_set():
+            process = subprocess.Popen(
+                command,
+                cwd=repo_root,
+                env=daemon_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                start_new_session=True,
+            )
+            with process_lock:
+                process_ref["instance"] = process
+            queue.put(NoticeMsg(text=f"Launching daemon subprocess: {' '.join(command)}"))
 
-        process = subprocess.Popen(
-            command,
-            cwd=repo_root,
-            env=daemon_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            start_new_session=True,
-        )
-        with process_lock:
-            process_ref["instance"] = process
-        queue.put(NoticeMsg(text=f"Launching daemon subprocess: {' '.join(command)}"))
+            def _pump_output() -> None:
+                stream = process.stdout
+                if stream is None:
+                    return
+                for line in stream:
+                    text = line.rstrip()
+                    if text:
+                        msg = _parse_daemon_tui_output_line(text)
+                        if msg is not None:
+                            queue.put(msg)
 
-        def _pump_output() -> None:
-            stream = process.stdout
-            if stream is None:
-                return
-            for line in stream:
-                text = line.rstrip()
-                if text:
-                    msg = _parse_daemon_tui_output_line(text)
-                    if msg is not None:
-                        queue.put(msg)
+            pump_thread = threading.Thread(
+                target=_pump_output,
+                name="daemon-tui-output",
+                daemon=True,
+            )
+            pump_thread.start()
 
-        pump_thread = threading.Thread(
-            target=_pump_output,
-            name="daemon-tui-output",
-            daemon=True,
-        )
-        pump_thread.start()
+            return_code = process.wait()
+            pump_thread.join(timeout=2)
+            with process_lock:
+                if process_ref.get("instance") is process:
+                    process_ref.pop("instance", None)
+            queue.put(NoticeMsg(text=f"Daemon exited with code {return_code}"))
+            if shutdown_requested.is_set() or return_code == 0:
+                break
 
-        return_code = process.wait()
-        pump_thread.join(timeout=2)
-        queue.put(NoticeMsg(text=f"Daemon exited with code {return_code}"))
+            restart_attempt += 1
+            backoff_seconds = min(30, 2 ** min(restart_attempt - 1, 4))
+            queue.put(
+                NoticeMsg(
+                    text=(
+                        f"Daemon exited unexpectedly; restarting in {backoff_seconds}s "
+                        f"(attempt {restart_attempt})."
+                    )
+                )
+            )
+            logger.warning(
+                "Daemon monitor restarting daemon subprocess after exit code %s "
+                "(attempt=%d, backoff=%ds)",
+                return_code,
+                restart_attempt,
+                backoff_seconds,
+            )
+            if shutdown_requested.wait(backoff_seconds):
+                break
 
     def _cancel_callback() -> None:
-        _terminate_daemon_process(reason="Shutdown requested from TUI")
+        _terminate_daemon_process(
+            reason="Shutdown requested from TUI",
+            mark_shutdown=True,
+        )
 
     app_instance = _DaemonApp(
         run_callback=_run_callback,
@@ -4767,12 +4804,16 @@ def _launch_daemon_tui(
         try:
             app_instance.call_from_thread(app_instance.action_cancel_run)
         except Exception:
-            _terminate_daemon_process(reason="SIGINT received before TUI was ready")
+            _terminate_daemon_process(
+                reason="SIGINT received before TUI was ready",
+                mark_shutdown=True,
+            )
 
     def _terminate_handler(signum, frame) -> None:  # noqa: ANN001
         _terminate_daemon_process(
             reason=f"Parent received {signal.Signals(signum).name}",
             force=False,
+            mark_shutdown=True,
         )
         raise SystemExit(128 + signum)
 
@@ -4783,7 +4824,10 @@ def _launch_daemon_tui(
     try:
         app_instance.run()
     finally:
-        _terminate_daemon_process(reason="TUI exited while daemon subprocess was still running")
+        _terminate_daemon_process(
+            reason="TUI exited while daemon subprocess was still running",
+            mark_shutdown=True,
+        )
         signal.signal(signal.SIGINT, previous_sigint)
         signal.signal(signal.SIGTERM, previous_sigterm)
         if previous_sighup is not None and hasattr(signal, "SIGHUP"):

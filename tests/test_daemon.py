@@ -2757,6 +2757,40 @@ class TestWatchdogThread:
 
         mock_recover.assert_not_called()
 
+    def test_no_false_positive_when_active_phase_is_still_running(self, tmp_repo: Path):
+        """A long active phase should not be treated as stalled just because the coarse heartbeat is old."""
+        config = ColonyConfig(daemon=DaemonConfig(
+            daily_budget_usd=50.0,
+            watchdog_stall_seconds=120,
+        ))
+        daemon = Daemon(tmp_repo, config, dry_run=True)
+
+        item = QueueItem(
+            id="healthy-long-phase",
+            source_type="prompt",
+            source_value="still making progress",
+            status=QueueItemStatus.RUNNING,
+            priority=1,
+        )
+        daemon._queue_state.items = [item]
+        daemon._pipeline_running = True
+        daemon._pipeline_started_at = time.monotonic() - 300
+        daemon._current_running_item = item
+
+        hb_dir = tmp_repo / ".colonyos" / "runs"
+        hb_dir.mkdir(parents=True, exist_ok=True)
+        hb_file = hb_dir / "heartbeat"
+        hb_file.touch()
+        old_mtime = time.time() - 300
+        os.utime(hb_file, (old_mtime, old_mtime))
+
+        with patch("colonyos.daemon.active_phase_controller_count", return_value=1), \
+             patch.object(daemon, "_watchdog_recover") as mock_recover:
+            daemon._watchdog_check()
+
+        mock_recover.assert_not_called()
+        assert daemon._pipeline_stalled is False
+
     def test_watchdog_inactive_when_no_pipeline(self, tmp_repo: Path, config: ColonyConfig):
         """Watchdog should do nothing when no pipeline is running."""
         daemon = Daemon(tmp_repo, config, dry_run=True)

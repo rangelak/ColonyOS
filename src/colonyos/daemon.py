@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Literal
 
-from colonyos.agent import request_active_phase_cancel
+from colonyos.agent import active_phase_controller_count, request_active_phase_cancel
 from colonyos.cancellation import cancellation_scope, request_cancel
 from colonyos.config import ColonyConfig, load_config
 from colonyos.daemon_state import (
@@ -1763,13 +1763,27 @@ class Daemon:
         if time_since_heartbeat < stall_seconds:
             return
 
+        active_phases = active_phase_controller_count()
+        if active_phases > 0:
+            logger.info(
+                "Watchdog: suppressing stall recovery for active pipeline "
+                "(elapsed=%.0fs, threshold=%ds, heartbeat_age=%.0fs, active_phases=%d)",
+                elapsed,
+                stall_seconds,
+                time_since_heartbeat,
+                active_phases,
+            )
+            return
+
         # Both conditions met: pipeline is stalled
         self._pipeline_stalled = True
         logger.warning(
-            "Watchdog: pipeline stalled for %.0fs (threshold=%ds, heartbeat_age=%.0fs)",
+            "Watchdog: pipeline stalled for %.0fs "
+            "(threshold=%ds, heartbeat_age=%.0fs, active_phases=%d)",
             elapsed,
             stall_seconds,
             time_since_heartbeat,
+            active_phases,
         )
         self._watchdog_recover(stall_duration=elapsed)
 

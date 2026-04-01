@@ -69,6 +69,7 @@ class AssistantApp(App):
 
     BINDINGS = [
         Binding("ctrl+c", "cancel_run", "Cancel current run", show=False),
+        Binding("q", "quit_app", "Quit", show=False),
         Binding("ctrl+l", "clear_transcript", "Clear transcript", show=False),
         Binding("escape", "focus_composer", "Focus composer", show=False),
         Binding("end", "scroll_to_end", "Scroll to bottom", show=False),
@@ -312,6 +313,15 @@ class AssistantApp(App):
         transcript.append_notice("Run cancelled by user (press Ctrl+C again within 2s to exit TUI)")
         self._run_active = False
         self._auto_loop_active = False
+
+    def action_quit_app(self) -> None:
+        """Exit the TUI and stop any active daemon/run first."""
+        self._stop_event.set()
+        request_cancel("Exiting ColonyOS TUI")
+        if self._cancel_callback is not None:
+            self._cancel_callback()
+        self.workers.cancel_all()
+        self.exit()
 
     def action_clear_transcript(self) -> None:
         """Clear all entries from the transcript."""

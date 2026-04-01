@@ -899,6 +899,54 @@ class TestDaemonCommand:
         assert any(isinstance(msg, PhaseCompleteMsg) for msg in messages)
         assert any(isinstance(msg, TextBlockMsg) for msg in messages)
 
+    def test_launch_daemon_tui_restarts_after_unexpected_exit(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        messages: list[object] = []
+
+        class FakeApp:
+            def __init__(self, **kwargs):
+                self.run_callback = kwargs["run_callback"]
+                self.cancel_callback = kwargs["cancel_callback"]
+                self.event_queue = SimpleNamespace(
+                    sync_q=SimpleNamespace(put=messages.append),
+                )
+
+            def run(self):
+                self.run_callback("daemon-monitor")
+
+        first_proc = MagicMock()
+        first_proc.stdout = iter(["daemon crashed once\n"])
+        first_proc.wait.return_value = 1
+        first_proc.pid = 12345
+        first_proc.poll.return_value = 1
+
+        second_proc = MagicMock()
+        second_proc.stdout = iter(["daemon restarted cleanly\n"])
+        second_proc.wait.return_value = 0
+        second_proc.pid = 12346
+        second_proc.poll.return_value = 0
+
+        with patch("colonyos.tui.app.AssistantApp", FakeApp), \
+             patch("colonyos.tui.log_writer.TranscriptLogWriter"), \
+             patch("colonyos.cli.subprocess.Popen", side_effect=[first_proc, second_proc]) as mock_popen, \
+             patch("colonyos.cli.signal.getsignal", return_value=signal.SIG_DFL), \
+             patch("colonyos.cli.signal.signal"):
+            _launch_daemon_tui(
+                tmp_path,
+                config,
+                max_budget=None,
+                unlimited_budget=False,
+                max_hours=None,
+                allow_all_control_users=False,
+                verbose=False,
+                dry_run=False,
+            )
+
+        assert mock_popen.call_count == 2
+        notices = [msg.text for msg in messages if isinstance(msg, NoticeMsg)]
+        assert any("Daemon exited with code 1" in text for text in notices)
+        assert any("restarting in 1s" in text.lower() for text in notices)
+
 
 class TestQueuePipelineExecution:
     def test_slack_queue_item_uses_raw_prompt_for_branch_override(self, tmp_path: Path):
@@ -994,7 +1042,7 @@ class TestQueuePipelineExecution:
                 dry_run=False,
             )
 
-        mock_killpg.assert_called_with(12345, signal.SIGTERM)
+        mock_killpg.assert_not_called()
 
     def test_launch_daemon_tui_ignores_kill_errors_during_shutdown(self, tmp_path: Path):
         config = _make_config(tmp_path)

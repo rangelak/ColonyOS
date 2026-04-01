@@ -207,6 +207,12 @@ def request_active_phase_cancel(reason: str = "Cancelled by user") -> int:
     return len(controllers)
 
 
+def active_phase_controller_count() -> int:
+    """Return the number of currently registered sync phase controllers."""
+    with _ACTIVE_PHASE_CONTROLLERS_LOCK:
+        return len(_ACTIVE_PHASE_CONTROLLERS)
+
+
 def _register_active_phase_controller(controller: _SyncRunController) -> None:
     with _ACTIVE_PHASE_CONTROLLERS_LOCK:
         _ACTIVE_PHASE_CONTROLLERS.add(controller)

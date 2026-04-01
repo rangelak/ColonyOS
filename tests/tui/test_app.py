@@ -554,6 +554,22 @@ class TestCancelRunBehavior:
             with pytest.raises(SystemExit):
                 app.action_cancel_run()  # second press within 2s
 
+    def test_quit_action_stops_workers_and_exits(self) -> None:
+        """`q` should provide an explicit exit path from the TUI."""
+        cancel_calls: list[str] = []
+        app = AssistantApp(cancel_callback=lambda: cancel_calls.append("cancelled"))
+
+        with patch("colonyos.tui.app.request_cancel") as mock_request_cancel, \
+             patch.object(app.workers, "cancel_all") as mock_cancel_all, \
+             patch.object(app, "exit") as mock_exit:
+            app.action_quit_app()
+
+        assert app._stop_event.is_set()
+        assert cancel_calls == ["cancelled"]
+        mock_request_cancel.assert_called_once_with("Exiting ColonyOS TUI")
+        mock_cancel_all.assert_called_once()
+        mock_exit.assert_called_once()
+
 
 class TestExportTranscriptPermissions:
     """Verify transcript export file permissions."""
