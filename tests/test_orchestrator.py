@@ -3973,3 +3973,159 @@ class TestRetryConfigWiring:
         # Run completed successfully — recovery was never needed
         assert log.status == RunStatus.COMPLETED
         assert len(log.recovery_events) == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 3.0 — Auto-pull at orchestrator entry points
+# ---------------------------------------------------------------------------
+
+
+class TestPreflightCheckPull:
+    """_preflight_check() should pull the current branch instead of fetch+warn."""
+
+    def _make_config(self) -> "ColonyConfig":
+        return ColonyConfig(
+            project=ProjectInfo(name="t", description="t", stack="python"),
+        )
+
+    @patch("colonyos.orchestrator.pull_branch", return_value=(True, None))
+    @patch("colonyos.orchestrator._get_head_sha", return_value="abc123")
+    @patch("colonyos.orchestrator.check_open_pr", return_value=(None, None))
+    @patch("colonyos.orchestrator.validate_branch_exists", return_value=(False, ""))
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_current_branch", return_value="main")
+    def test_pull_success_clears_behind_count(
+        self, _br, _clean, _exists, _pr, _sha, mock_pull,
+    ) -> None:
+        from colonyos.orchestrator import _preflight_check
+
+        result = _preflight_check(Path("/tmp/r"), "feat", self._make_config())
+        mock_pull.assert_called_once_with(Path("/tmp/r"))
+        assert result.main_behind_count == 0
+        assert not result.warnings
+
+    @patch("colonyos.orchestrator.pull_branch", return_value=(False, "network error"))
+    @patch("colonyos.orchestrator._get_head_sha", return_value="abc123")
+    @patch("colonyos.orchestrator.check_open_pr", return_value=(None, None))
+    @patch("colonyos.orchestrator.validate_branch_exists", return_value=(False, ""))
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_current_branch", return_value="main")
+    def test_pull_failure_adds_warning(
+        self, _br, _clean, _exists, _pr, _sha, mock_pull,
+    ) -> None:
+        from colonyos.orchestrator import _preflight_check
+
+        result = _preflight_check(Path("/tmp/r"), "feat", self._make_config())
+        mock_pull.assert_called_once()
+        assert any("Failed to pull" in w for w in result.warnings)
+
+    @patch("colonyos.orchestrator.pull_branch")
+    @patch("colonyos.orchestrator._get_head_sha", return_value="abc123")
+    @patch("colonyos.orchestrator.check_open_pr", return_value=(None, None))
+    @patch("colonyos.orchestrator.validate_branch_exists", return_value=(False, ""))
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_current_branch", return_value="main")
+    def test_offline_skips_pull(
+        self, _br, _clean, _exists, _pr, _sha, mock_pull,
+    ) -> None:
+        from colonyos.orchestrator import _preflight_check
+
+        result = _preflight_check(
+            Path("/tmp/r"), "feat", self._make_config(), offline=True,
+        )
+        mock_pull.assert_not_called()
+        assert result.main_behind_count is None
+
+    @patch("colonyos.orchestrator.pull_branch", return_value=(False, None))
+    @patch("colonyos.orchestrator._get_head_sha", return_value="abc123")
+    @patch("colonyos.orchestrator.check_open_pr", return_value=(None, None))
+    @patch("colonyos.orchestrator.validate_branch_exists", return_value=(False, ""))
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_current_branch", return_value="main")
+    def test_no_upstream_no_warning(
+        self, _br, _clean, _exists, _pr, _sha, mock_pull,
+    ) -> None:
+        """When pull_branch returns (False, None) — no upstream — no warning added."""
+        from colonyos.orchestrator import _preflight_check
+
+        result = _preflight_check(Path("/tmp/r"), "feat", self._make_config())
+        mock_pull.assert_called_once()
+        assert not result.warnings
+
+
+class TestBaseBranchCheckoutPull:
+    """Base-branch checkout in run() should pull after checkout."""
+
+    @staticmethod
+    def _init_repo_with_main(tmp_path: Path) -> None:
+        """Create a git repo with a 'main' branch."""
+        import subprocess as sp
+        sp.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True)
+        sp.run(
+            ["git", "commit", "--allow-empty", "-m", "init"],
+            cwd=tmp_path, capture_output=True,
+            env={**__import__("os").environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+        )
+
+    def test_base_branch_pull_fails_raises_preflight_error(self, tmp_path: Path) -> None:
+        """When pull fails after base-branch checkout, PreflightError is raised."""
+        from colonyos.orchestrator import run as run_orchestrator
+        from colonyos.models import PreflightError as PFE
+
+        config = ColonyConfig(
+            project=ProjectInfo(name="test", description="test", stack="python"),
+        )
+
+        self._init_repo_with_main(tmp_path)
+
+        with patch("colonyos.orchestrator.pull_branch", return_value=(False, "timeout")) as mock_pull:
+            with pytest.raises(PFE, match="Failed to pull latest"):
+                run_orchestrator(
+                    "test prompt",
+                    repo_root=tmp_path,
+                    config=config,
+                    base_branch="main",
+                )
+            mock_pull.assert_called_once()
+
+    def test_base_branch_pull_skipped_when_offline(self) -> None:
+        """Verify that the base-branch checkout code gates pull behind 'not offline'."""
+        import inspect
+        from colonyos.orchestrator import run as run_fn
+
+        source = inspect.getsource(run_fn)
+        # The pull_branch call in the base-branch section must be inside
+        # an `if not offline` guard.
+        assert "if not offline:" in source
+        assert "pull_branch(repo_root)" in source
+
+    def test_base_branch_pull_succeeds_does_not_raise(self) -> None:
+        """When pull succeeds (True, None), no PreflightError about pull is raised.
+
+        Verified via source inspection: the raise only fires when
+        ``not pull_ok and pull_err is not None``.
+        """
+        import inspect
+        from colonyos.orchestrator import run as run_fn
+
+        source = inspect.getsource(run_fn)
+        # pull_branch is called and its result is checked
+        assert "pull_ok, pull_err = pull_branch(repo_root)" in source
+        # Only raises when pull_ok is False AND pull_err is not None
+        assert "if not pull_ok and pull_err is not None:" in source
+
+
+class TestThreadFixNoPull:
+    """Thread-fix checkout must NOT pull — SHA integrity check must remain intact."""
+
+    def test_thread_fix_does_not_call_pull_branch(self) -> None:
+        """Verify that run_thread_fix source code does not call pull_branch."""
+        import inspect
+        from colonyos.orchestrator import run_thread_fix
+
+        source = inspect.getsource(run_thread_fix)
+        assert "pull_branch" not in source, (
+            "run_thread_fix must NOT call pull_branch — "
+            "pulling would break the HEAD SHA integrity check"
+        )

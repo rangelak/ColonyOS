@@ -39,19 +39,19 @@
     - On pull failure, log warning via `_LOGGER.warning()`
     - Include pull status in return description (e.g., "Restored to main (was on feature-x), pulled latest" or "Restored to main (was on feature-x), pull failed: ...")
 
-- [ ] 3.0 Add pull to orchestrator base-branch checkout and preflight (orchestrator entry points)
+- [x] 3.0 Add pull to orchestrator base-branch checkout and preflight (orchestrator entry points)
   depends_on: [1.0]
-  - [ ] 3.1 Write tests for orchestrator pull behavior in `tests/test_orchestrator.py`:
+  - [x] 3.1 Write tests for orchestrator pull behavior in `tests/test_orchestrator.py`:
     - Base-branch checkout: pull succeeds → pipeline continues
     - Base-branch checkout: pull fails → `PreflightError` raised
     - Base-branch checkout: `offline=True` → pull skipped
     - Preflight: pull replaces fetch+warn for main; failure adds warning (not error)
     - Preflight: `offline=True` → pull skipped entirely
     - Thread-fix checkout: verify NO pull is added (regression test)
-  - [ ] 3.2 Modify base-branch checkout in `run()` (~line 4210-4222):
+  - [x] 3.2 Modify base-branch checkout in `run()` (~line 4210-4222):
     - After successful `git checkout base_branch`, add `pull_branch()` call gated by `if not offline`
     - On pull failure, raise `PreflightError` with clear message
-  - [ ] 3.3 Modify `_preflight_check()` (~line 396-428):
+  - [x] 3.3 Modify `_preflight_check()` (~line 396-428):
     - Replace the fetch + count-behind + warn pattern with: `pull_branch()` call
     - On pull failure, append warning to `warnings` list (preserve existing behavior)
     - On pull success, skip the behind-count check (pull already resolved it)

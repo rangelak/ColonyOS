@@ -235,8 +235,9 @@ class TestPreflightCheck:
         with pytest.raises(click.ClickException, match="PR #42"):
             _preflight_check(tmp_path, "colonyos/test-feature", config)
 
+    @patch("colonyos.orchestrator.pull_branch", return_value=(False, "network error"))
     @patch("colonyos.orchestrator.subprocess.run")
-    def test_main_behind_warns(self, mock_run, tmp_path: Path) -> None:
+    def test_main_behind_warns(self, mock_run, mock_pull, tmp_path: Path) -> None:
         from colonyos.orchestrator import _preflight_check
         from colonyos.config import ColonyConfig
 
@@ -247,17 +248,13 @@ class TestPreflightCheck:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
             if cmd[1] == "branch":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-            if cmd[1] == "fetch":
-                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-            if cmd[1] == "rev-list":
-                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="5\n", stderr="")
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         mock_run.side_effect = side_effect
         config = ColonyConfig()
         result = _preflight_check(tmp_path, "colonyos/test-feature", config)
-        assert result.main_behind_count == 5
-        assert any("behind" in w for w in result.warnings)
+        mock_pull.assert_called_once_with(tmp_path)
+        assert any("Failed to pull" in w for w in result.warnings)
 
     @patch("colonyos.orchestrator.subprocess.run")
     def test_offline_skips_network(self, mock_run, tmp_path: Path) -> None:
@@ -337,33 +334,27 @@ class TestPreflightCheck:
         assert result.is_clean is False
         assert result.branch_exists is True
 
+    @patch("colonyos.orchestrator.pull_branch", return_value=(False, "git pull --ff-only timed out after 30s on main"))
     @patch("colonyos.orchestrator.subprocess.run")
-    def test_fetch_timeout_degrades_gracefully(self, mock_run, tmp_path: Path) -> None:
+    def test_fetch_timeout_degrades_gracefully(self, mock_run, mock_pull, tmp_path: Path) -> None:
         from colonyos.orchestrator import _preflight_check
         from colonyos.config import ColonyConfig
 
-        calls_made = []
-
         def side_effect(cmd, **kwargs):
-            calls_made.append(cmd[1])
             if cmd[1] == "rev-parse":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="main\n", stderr="")
             if cmd[1] == "status":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
             if cmd[1] == "branch":
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-            if cmd[1] == "fetch":
-                raise subprocess.TimeoutExpired(cmd="git", timeout=5)
-            if cmd[1] == "rev-list":
-                raise AssertionError("rev-list should not be called when fetch fails")
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         mock_run.side_effect = side_effect
         config = ColonyConfig()
         result = _preflight_check(tmp_path, "colonyos/test-feature", config)
         assert result.action_taken == "proceed"
-        assert any("Failed to fetch" in w for w in result.warnings)
-        assert "rev-list" not in calls_made
+        assert any("Failed to pull" in w for w in result.warnings)
+        mock_pull.assert_called_once()
 
     @patch("colonyos.orchestrator.subprocess.run")
     def test_dirty_tree_raises_preflight_error(self, mock_run, tmp_path: Path) -> None:
