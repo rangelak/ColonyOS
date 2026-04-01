@@ -485,7 +485,6 @@ class TestRunPhaseResume:
         assert result.success is True
         assert result.session_id == "sess-abc123"
 
-
 class TestCancellation:
     def test_controller_cancel_ignores_closed_loop_race(self) -> None:
         controller = _SyncRunController(label="test")
@@ -568,8 +567,6 @@ class TestCancellation:
 
         cancel_thread.join(timeout=1)
         assert sorted(cancellations) == ["prompt 0", "prompt 1"]
-
-
 class TestIsTransientError:
     """Tests for _is_transient_error() helper (FR-1, FR-2)."""
 
