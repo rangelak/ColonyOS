@@ -21,11 +21,11 @@
   - [x] 1.2 Add `started_at: str | None = None` field to `QueueItem` in `src/colonyos/models.py` (after `added_at`, line ~440). Bump `SCHEMA_VERSION` from 4 to 5.
   - [x] 1.3 Set `started_at` in daemon.py at the `RUNNING` transition (line 708, inside the existing `with self._lock:` block): `item.started_at = datetime.now(timezone.utc).isoformat()`.
 
-- [ ] 2.0 Add `watchdog_stall_seconds` config field (foundation — no dependencies)
+- [x] 2.0 Add `watchdog_stall_seconds` config field (foundation — no dependencies)
   depends_on: []
-  - [ ] 2.1 Write tests in `tests/test_config.py`: assert `DaemonConfig` has `watchdog_stall_seconds` defaulting to 1920, assert loading from YAML with custom value works, assert minimum floor of 120 is enforced (values below 120 are clamped to 120).
-  - [ ] 2.2 Add `watchdog_stall_seconds: int = 1920` to `DaemonConfig` in `src/colonyos/config.py` (after `pipeline_timeout_seconds`, line ~309).
-  - [ ] 2.3 Add validation in config loading: if `watchdog_stall_seconds < 120`, log a warning and clamp to 120.
+  - [x] 2.1 Write tests in `tests/test_config.py`: assert `DaemonConfig` has `watchdog_stall_seconds` defaulting to 1920, assert loading from YAML with custom value works, assert minimum floor of 120 is enforced (values below 120 are clamped to 120).
+  - [x] 2.2 Add `watchdog_stall_seconds: int = 1920` to `DaemonConfig` in `src/colonyos/config.py` (after `pipeline_timeout_seconds`, line ~309).
+  - [x] 2.3 Add validation in config loading: if `watchdog_stall_seconds < 120`, log a warning and clamp to 120.
 
 - [ ] 3.0 Add `_pipeline_started_at` tracking to daemon (depends on 1.0 for `started_at`)
   depends_on: [1.0]
