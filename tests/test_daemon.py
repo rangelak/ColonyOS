@@ -1703,3 +1703,158 @@ class TestPRSync:
         mock_sync.assert_called_once()
         call_kwargs = mock_sync.call_args[1]
         assert call_kwargs["write_enabled"] is True
+
+
+class TestDailyThreadLifecycle:
+    """Tests for _ensure_daily_thread(), _should_rotate_daily_thread(), and rotation in _tick."""
+
+    def test_creates_new_thread_when_none_exists(self, daemon_instance: Daemon):
+        """_ensure_daily_thread creates a new daily thread when state has no thread_ts."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True, "ts": "1111.2222"}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            result = daemon_instance._ensure_daily_thread()
+
+        assert result is not None
+        client, channel, thread_ts = result
+        assert thread_ts == "1111.2222"
+        assert channel == "C123"
+        # State should be persisted
+        assert daemon_instance._state.daily_thread_ts == "1111.2222"
+        assert daemon_instance._state.daily_thread_date is not None
+        assert daemon_instance._state.daily_thread_channel == "C123"
+
+    def test_reuses_existing_thread_when_date_matches(self, daemon_instance: Daemon):
+        """_ensure_daily_thread returns cached thread when date matches today."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("UTC")
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+        daemon_instance._state.daily_thread_ts = "9999.0000"
+        daemon_instance._state.daily_thread_date = today_str
+        daemon_instance._state.daily_thread_channel = "C123"
+
+        mock_client = MagicMock()
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            result = daemon_instance._ensure_daily_thread()
+
+        assert result is not None
+        _, _, thread_ts = result
+        assert thread_ts == "9999.0000"
+        # Should NOT have posted a new message
+        mock_client.chat_postMessage.assert_not_called()
+
+    def test_rotates_thread_when_date_is_stale(self, daemon_instance: Daemon):
+        """_ensure_daily_thread creates new thread if persisted date is yesterday."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+
+        daemon_instance._state.daily_thread_ts = "old.thread"
+        daemon_instance._state.daily_thread_date = "2020-01-01"
+        daemon_instance._state.daily_thread_channel = "C123"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True, "ts": "new.thread"}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            result = daemon_instance._ensure_daily_thread()
+
+        assert result is not None
+        _, _, thread_ts = result
+        assert thread_ts == "new.thread"
+        assert daemon_instance._state.daily_thread_ts == "new.thread"
+
+    def test_recovers_from_persisted_state_on_restart(self, tmp_repo: Path, config: ColonyConfig):
+        """On restart, daemon picks up daily_thread_ts from persisted state."""
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("UTC")
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+
+        state = DaemonState(
+            daily_thread_ts="persisted.ts",
+            daily_thread_date=today_str,
+            daily_thread_channel="C123",
+        )
+        save_daemon_state(tmp_repo, state)
+
+        d = Daemon(tmp_repo, config, dry_run=True)
+        d.config.slack.notification_mode = "daily"
+        d.config.slack.channels = ["C123"]
+
+        mock_client = MagicMock()
+        with patch.object(d, "_get_notification_client", return_value=mock_client):
+            result = d._ensure_daily_thread()
+
+        assert result is not None
+        _, _, thread_ts = result
+        assert thread_ts == "persisted.ts"
+        mock_client.chat_postMessage.assert_not_called()
+
+    def test_returns_none_in_per_item_mode(self, daemon_instance: Daemon):
+        """_ensure_daily_thread returns None when notification_mode is per_item."""
+        daemon_instance.config.slack.notification_mode = "per_item"
+        result = daemon_instance._ensure_daily_thread()
+        assert result is None
+
+    def test_returns_none_when_no_client(self, daemon_instance: Daemon):
+        """_ensure_daily_thread returns None when no Slack client available."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=None):
+            result = daemon_instance._ensure_daily_thread()
+        assert result is None
+
+    def test_returns_none_when_no_channels(self, daemon_instance: Daemon):
+        """_ensure_daily_thread returns None when no channels configured."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = []
+
+        result = daemon_instance._ensure_daily_thread()
+        assert result is None
+
+    def test_should_rotate_false_same_day(self, daemon_instance: Daemon):
+        """_should_rotate_daily_thread returns False when date matches."""
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("UTC")
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+        daemon_instance._state.daily_thread_date = today_str
+        assert daemon_instance._should_rotate_daily_thread() is False
+
+    def test_should_rotate_true_stale_date(self, daemon_instance: Daemon):
+        """_should_rotate_daily_thread returns True when date is old."""
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_date = "2020-01-01"
+        assert daemon_instance._should_rotate_daily_thread() is True
+
+    def test_should_rotate_true_no_thread(self, daemon_instance: Daemon):
+        """_should_rotate_daily_thread returns True when no thread exists."""
+        daemon_instance.config.slack.daily_thread_timezone = "UTC"
+        daemon_instance._state.daily_thread_date = None
+        assert daemon_instance._should_rotate_daily_thread() is True
+
+    def test_rotation_in_tick(self, daemon_instance: Daemon):
+        """_tick triggers daily thread rotation when mode is daily and rotation is due."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_date = "2020-01-01"
+
+        with patch.object(daemon_instance, "_try_execute_next", return_value=False), \
+             patch.object(daemon_instance, "_poll_github_issues"), \
+             patch.object(daemon_instance, "_post_heartbeat"), \
+             patch.object(daemon_instance, "_post_daily_digest_if_due"), \
+             patch.object(daemon_instance, "_poll_pr_outcomes"), \
+             patch.object(daemon_instance, "_ensure_daily_thread", return_value=None) as mock_ensure:
+            daemon_instance._tick()
+
+        mock_ensure.assert_called_once()

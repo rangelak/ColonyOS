@@ -31,12 +31,12 @@
   - [x] 3.1 Write tests in `tests/test_slack.py` for `format_daily_summary()`: test with completed items (PR links, cost), failed items (error one-liner, cost), empty periods, mixed results, and cost/queue depth display
   - [x] 3.2 Implement `format_daily_summary(completed_items: list[QueueItem], failed_items: list[QueueItem], total_cost: float, queue_depth: int, period_label: str) -> str` in `src/colonyos/slack.py`. Use the structured template format from the PRD (emoji headers, bulleted items with summary/PR/cost, spend + queue depth footer)
 
-- [ ] 4.0 Implement daily thread lifecycle in daemon
+- [x] 4.0 Implement daily thread lifecycle in daemon
   depends_on: [1.0, 2.0, 3.0]
-  - [ ] 4.1 Write tests in `tests/test_daemon.py` for: (a) `_ensure_daily_thread()` creates a new thread when none exists, (b) reuses existing thread when date matches, (c) rotates thread at configured hour boundary, (d) recovers thread_ts from persisted DaemonState on restart, (e) creates new thread if persisted date is stale
-  - [ ] 4.2 Implement `_ensure_daily_thread() -> tuple[Any, str, str] | None` in daemon.py: check if `self._state.daily_thread_date` matches today (in configured timezone), return cached `(client, channel, daily_thread_ts)` if so; otherwise create new daily thread with `format_daily_summary()` of items since last rotation, persist `daily_thread_ts`/`daily_thread_date`/`daily_thread_channel` to state
-  - [ ] 4.3 Add `_should_rotate_daily_thread() -> bool` helper that checks current time against `daily_thread_hour` in the configured timezone using `zoneinfo.ZoneInfo`
-  - [ ] 4.4 Add daily thread rotation check to the daemon's main loop (alongside existing heartbeat and digest checks). When rotation is due, create new daily thread with summary of the closing period
+  - [x] 4.1 Write tests in `tests/test_daemon.py` for: (a) `_ensure_daily_thread()` creates a new thread when none exists, (b) reuses existing thread when date matches, (c) rotates thread at configured hour boundary, (d) recovers thread_ts from persisted DaemonState on restart, (e) creates new thread if persisted date is stale
+  - [x] 4.2 Implement `_ensure_daily_thread() -> tuple[Any, str, str] | None` in daemon.py: check if `self._state.daily_thread_date` matches today (in configured timezone), return cached `(client, channel, daily_thread_ts)` if so; otherwise create new daily thread with `format_daily_summary()` of items since last rotation, persist `daily_thread_ts`/`daily_thread_date`/`daily_thread_channel` to state
+  - [x] 4.3 Add `_should_rotate_daily_thread() -> bool` helper that checks current time against `daily_thread_hour` in the configured timezone using `zoneinfo.ZoneInfo`
+  - [x] 4.4 Add daily thread rotation check to the daemon's main loop (alongside existing heartbeat and digest checks). When rotation is due, create new daily thread with summary of the closing period
 
 - [ ] 5.0 Route notification messages through daily thread
   depends_on: [4.0]

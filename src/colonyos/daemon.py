@@ -580,6 +580,10 @@ class Daemon:
             self._last_heartbeat_time = now
         self._post_daily_digest_if_due()
 
+        # 5.5 Daily thread rotation (create/rotate daily thread if due)
+        if self.config.slack.notification_mode == "daily" and self._should_rotate_daily_thread():
+            self._ensure_daily_thread()
+
         # 6. PR outcome polling
         outcome_interval = self.daemon_config.outcome_poll_interval_minutes * 60
         if now - self._last_outcome_poll_time >= outcome_interval:
@@ -1854,6 +1858,92 @@ class Daemon:
                 item.notification_thread_ts = thread_ts
                 self._persist_queue()
             return client, channel, thread_ts
+
+    def _should_rotate_daily_thread(self) -> bool:
+        """Return True if the daily thread should be rotated (new day in configured tz)."""
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(self.config.slack.daily_thread_timezone)
+        today_str = datetime.now(tz).strftime("%Y-%m-%d")
+        return self._state.daily_thread_date != today_str
+
+    def _ensure_daily_thread(self) -> tuple[Any, str, str] | None:
+        """Ensure a daily thread exists for today, creating one if needed.
+
+        Returns ``(client, channel, daily_thread_ts)`` or ``None`` if daily
+        mode is disabled or Slack is unavailable.
+
+        In ``per_item`` notification mode this always returns ``None``.
+        When the persisted daily thread date matches today (in the configured
+        timezone), the cached thread is returned without posting a new message.
+        Otherwise a new daily thread is created with a summary opening post.
+        """
+        if self.config.slack.notification_mode != "daily":
+            return None
+
+        channel = self._default_notification_channel()
+        if not channel:
+            return None
+
+        client = self._get_notification_client()
+        if client is None:
+            return None
+
+        # Check if existing thread is still valid for today
+        if not self._should_rotate_daily_thread() and self._state.daily_thread_ts:
+            return client, self._state.daily_thread_channel or channel, self._state.daily_thread_ts
+
+        # Need to create a new daily thread
+        from zoneinfo import ZoneInfo
+
+        from colonyos.slack import format_daily_summary, post_message
+
+        tz = ZoneInfo(self.config.slack.daily_thread_timezone)
+        now = datetime.now(tz)
+        period_label = now.strftime("%B %-d, %Y")
+
+        # Gather completed and failed items for the summary
+        completed = [
+            item for item in self._queue_state.items
+            if item.status == QueueItemStatus.COMPLETED
+        ]
+        failed = [
+            item for item in self._queue_state.items
+            if item.status == QueueItemStatus.FAILED
+        ]
+        pending_count = sum(
+            1 for item in self._queue_state.items
+            if item.status == QueueItemStatus.PENDING
+        )
+        total_cost = sum(item.cost_usd for item in completed + failed)
+
+        summary_text = format_daily_summary(
+            completed_items=completed,
+            failed_items=failed,
+            total_cost=total_cost,
+            queue_depth=pending_count,
+            period_label=period_label,
+        )
+
+        try:
+            response = post_message(client, channel, summary_text)
+        except Exception:
+            logger.debug("Failed to create daily thread", exc_info=True)
+            return None
+
+        thread_ts = response.get("ts")
+        if not thread_ts:
+            return None
+
+        # Persist the new daily thread info
+        with self._lock:
+            self._state.daily_thread_ts = thread_ts
+            self._state.daily_thread_date = now.strftime("%Y-%m-%d")
+            self._state.daily_thread_channel = channel
+            self._persist_state()
+
+        logger.info("Created daily thread %s for %s in %s", thread_ts, now.strftime("%Y-%m-%d"), channel)
+        return client, channel, thread_ts
 
     def _format_phase_breakdown(self, log: Any) -> list[str]:
         from colonyos.slack import format_phase_breakdown_line
