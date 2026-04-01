@@ -500,7 +500,6 @@ pr_sync:
 - A Slack notification is sent with the list of conflicting files.
 - A PR comment is posted detailing the conflict.
 - The `sync_failures` counter is incremented. After `max_sync_failures` consecutive failures, the PR is skipped until manually resolved.
-
 ### Retry on transient API errors
 
 ```yaml
