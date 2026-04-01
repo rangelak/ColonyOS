@@ -23,10 +23,10 @@
   - [x] 1.5 Wire `VerifyConfig` into the main `Config` dataclass (add `verify: VerifyConfig` field and parse it in config loading)
   - [x] 1.6 Run tests to confirm config changes work
 
-- [ ] 2.0 Create instruction templates for verify and verify-fix agents
+- [x] 2.0 Create instruction templates for verify and verify-fix agents
   depends_on: []
-  - [ ] 2.1 Create `src/colonyos/instructions/verify.md` — read-only verify agent instructions: run the project's full test suite, report pass/fail with failing test details, do NOT modify code. Based on `thread_fix_verify.md` but with richer context (branch name, change summary)
-  - [ ] 2.2 Create `src/colonyos/instructions/verify_fix.md` — write-enabled fix agent instructions: receive test failure output, diagnose root cause, fix the code (not the tests unless genuinely wrong), run tests again to confirm fix
+  - [x] 2.1 Create `src/colonyos/instructions/verify.md` — read-only verify agent instructions: run the project's full test suite, report pass/fail with failing test details, do NOT modify code. Based on `thread_fix_verify.md` but with richer context (branch name, change summary)
+  - [x] 2.2 Create `src/colonyos/instructions/verify_fix.md` — write-enabled fix agent instructions: receive test failure output, diagnose root cause, fix the code (not the tests unless genuinely wrong), run tests again to confirm fix
 
 - [ ] 3.0 Update resume and skip logic for verify phase
   depends_on: [1.0]
