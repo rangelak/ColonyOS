@@ -21,6 +21,8 @@ from colonyos.slack import (
     create_slack_app,
     extract_base_branch,
     extract_prompt_from_mention,
+    extract_prompt_text,
+    has_bot_mention,
     extract_raw_from_formatted_prompt,
     format_phase_breakdown_line,
     format_acknowledgment,
@@ -102,6 +104,18 @@ class TestSlackConfigParsing:
         assert config.slack.channels == []
         assert config.slack.trigger_mode == "mention"
         assert config.slack.max_runs_per_hour == 3
+
+    def test_trigger_mode_all_accepted(self, tmp_repo: Path) -> None:
+        import yaml
+
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"slack": {"trigger_mode": "all"}}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.slack.trigger_mode == "all"
 
     def test_invalid_trigger_mode_raises(self, tmp_repo: Path) -> None:
         import yaml
@@ -219,6 +233,52 @@ class TestExtractPromptFromMention:
     def test_empty_after_mention(self) -> None:
         result = extract_prompt_from_mention("<@U12345>", "U12345")
         assert result == ""
+
+
+class TestHasBotMention:
+    def test_returns_true_when_mention_present(self) -> None:
+        assert has_bot_mention("<@UBOT> fix the bug", "UBOT") is True
+
+    def test_returns_false_when_no_mention(self) -> None:
+        assert has_bot_mention("fix the bug", "UBOT") is False
+
+    def test_returns_false_for_different_bot(self) -> None:
+        assert has_bot_mention("<@UOTHER> fix the bug", "UBOT") is False
+
+
+class TestExtractPromptText:
+    """Tests for extract_prompt_text (task 2.1): handles both mention and passive messages."""
+
+    def test_mention_message_strips_prefix(self) -> None:
+        """Given a message with <@BOT_ID> prefix, extract_prompt_from_mention behavior is preserved."""
+        result = extract_prompt_text("<@UBOT> fix the login bug", "UBOT")
+        assert result == "fix the login bug"
+
+    def test_non_mention_message_uses_full_text(self) -> None:
+        """Given a message without <@BOT_ID> prefix, the full text is used as the prompt."""
+        result = extract_prompt_text("fix the flaky login test", "UBOT")
+        assert result == "fix the flaky login test"
+
+    def test_non_mention_message_strips_whitespace(self) -> None:
+        result = extract_prompt_text("  fix the bug  ", "UBOT")
+        assert result == "fix the bug"
+
+    def test_mention_with_extra_whitespace(self) -> None:
+        result = extract_prompt_text("<@UBOT>   fix the bug", "UBOT")
+        assert result == "fix the bug"
+
+    def test_empty_message(self) -> None:
+        result = extract_prompt_text("", "UBOT")
+        assert result == ""
+
+    def test_only_mention_returns_empty(self) -> None:
+        result = extract_prompt_text("<@UBOT>", "UBOT")
+        assert result == ""
+
+    def test_mention_of_different_bot_uses_full_text(self) -> None:
+        """A mention of a different bot should be treated as a passive message."""
+        result = extract_prompt_text("<@UOTHER> fix the bug", "UBOT")
+        assert result == "<@UOTHER> fix the bug"
 
 
 class TestFormatSlackAsPrompt:

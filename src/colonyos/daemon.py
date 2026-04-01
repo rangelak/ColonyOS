@@ -1678,6 +1678,24 @@ class Daemon:
 
         return threads
 
+    @staticmethod
+    def _warn_all_mode_safety(config: ColonyConfig) -> None:
+        """Log warnings when trigger_mode is 'all' without safety configs."""
+        if config.slack.trigger_mode != "all":
+            return
+        if not config.slack.allowed_user_ids:
+            logger.warning(
+                "trigger_mode is 'all' but allowed_user_ids is empty — "
+                "any user in the channel can trigger the bot. "
+                "Consider restricting allowed_user_ids."
+            )
+        if not config.slack.triage_scope:
+            logger.warning(
+                "trigger_mode is 'all' but triage_scope is empty — "
+                "triage may struggle to filter irrelevant messages. "
+                "Consider setting triage_scope to guide the triage LLM."
+            )
+
     def _slack_listener_thread(self) -> None:
         """Run Slack Socket Mode listener."""
         try:
@@ -1730,6 +1748,7 @@ class Daemon:
                 agent_lock=self._agent_lock,
             )
             logger.info("Slack listener thread started")
+            self._warn_all_mode_safety(self.config)
             self._register_daemon_commands(slack_app)
             slack_engine.register(slack_app)
             _persist_watch_state()

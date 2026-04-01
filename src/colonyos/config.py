@@ -387,7 +387,7 @@ def _parse_project(raw: dict) -> ProjectInfo | None:
     )
 
 
-_VALID_TRIGGER_MODES: frozenset[str] = frozenset({"mention", "reaction", "slash_command"})
+_VALID_TRIGGER_MODES: frozenset[str] = frozenset({"mention", "reaction", "slash_command", "all"})
 
 
 def _parse_slack_config(raw: dict) -> SlackConfig:
