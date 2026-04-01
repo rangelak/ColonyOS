@@ -1090,6 +1090,13 @@ def _run_sequential_implement(
         if not task_succeeded and task_id not in failed:
             # Safety net: if loop exited without marking task
             failed.add(task_id)
+            task_results.setdefault(task_id, {
+                "status": "FAILED",
+                "error": "task did not complete (safety net)",
+                "cost_usd": 0.0,
+                "duration_ms": 0,
+                "description": task_desc,
+            })
             overall_success = False
 
     # Build merged PhaseResult

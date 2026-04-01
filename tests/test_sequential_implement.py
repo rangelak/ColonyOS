@@ -989,12 +989,6 @@ class TestGitReturnCodeChecking:
 # ---------------------------------------------------------------------------
 
 
-class TestCleanWorkingTree:
-    """Unit tests for ``_clean_working_tree()``."""
-
-    # Tests moved below; see TestTaskRetryLoop
-
-
 class TestTaskRetryLoop:
     """Tests for the task-level retry loop in _run_sequential_implement (Task 4.0)."""
 
