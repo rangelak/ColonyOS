@@ -28,11 +28,11 @@
   - [x] 2.1 Create `src/colonyos/instructions/verify.md` — read-only verify agent instructions: run the project's full test suite, report pass/fail with failing test details, do NOT modify code. Based on `thread_fix_verify.md` but with richer context (branch name, change summary)
   - [x] 2.2 Create `src/colonyos/instructions/verify_fix.md` — write-enabled fix agent instructions: receive test failure output, diagnose root cause, fix the code (not the tests unless genuinely wrong), run tests again to confirm fix
 
-- [ ] 3.0 Update resume and skip logic for verify phase
+- [x] 3.0 Update resume and skip logic for verify phase
   depends_on: [1.0]
-  - [ ] 3.1 Write tests in `tests/test_orchestrator.py` for: `_compute_next_phase("decision")` returns `"verify"`, `_compute_next_phase("verify")` returns `"deliver"`, and `_SKIP_MAP["verify"]` skips plan/implement/review
-  - [ ] 3.2 Update `_compute_next_phase()` mapping (orchestrator.py line 3019): change `"decision": "deliver"` to `"decision": "verify"`, add `"verify": "deliver"`
-  - [ ] 3.3 Update `_SKIP_MAP` (orchestrator.py line 3030): change `"decision"` entry to skip `{"plan", "implement", "review"}`, add `"verify"` entry to skip `{"plan", "implement", "review", "verify"}`
+  - [x] 3.1 Write tests in `tests/test_orchestrator.py` for: `_compute_next_phase("decision")` returns `"verify"`, `_compute_next_phase("verify")` returns `"deliver"`, and `_SKIP_MAP["verify"]` skips plan/implement/review
+  - [x] 3.2 Update `_compute_next_phase()` mapping (orchestrator.py line 3019): change `"decision": "deliver"` to `"decision": "verify"`, add `"verify": "deliver"`
+  - [x] 3.3 Update `_SKIP_MAP` (orchestrator.py line 3030): change `"decision"` entry to skip `{"plan", "implement", "review"}`, add `"verify"` entry to skip `{"plan", "implement", "review", "verify"}`
 
 - [ ] 4.0 Implement verify-fix loop in main pipeline
   depends_on: [1.0, 2.0, 3.0]

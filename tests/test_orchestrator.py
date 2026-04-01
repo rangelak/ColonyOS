@@ -1199,11 +1199,22 @@ class TestComputeNextPhase:
     def test_fix_to_review(self):
         assert _compute_next_phase("fix") == "review"
 
-    def test_decision_to_deliver(self):
-        assert _compute_next_phase("decision") == "deliver"
+    def test_decision_to_verify(self):
+        assert _compute_next_phase("decision") == "verify"
+
+    def test_verify_to_deliver(self):
+        assert _compute_next_phase("verify") == "deliver"
 
     def test_unknown_returns_none(self):
         assert _compute_next_phase("unknown") is None
+
+
+class TestSkipMap:
+    def test_decision_skips_plan_implement_review(self):
+        assert _SKIP_MAP["decision"] == {"plan", "implement", "review"}
+
+    def test_verify_skips_plan_implement_review_verify(self):
+        assert _SKIP_MAP["verify"] == {"plan", "implement", "review", "verify"}
 
 
 class TestResumeFromRun:

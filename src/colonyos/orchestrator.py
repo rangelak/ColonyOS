@@ -3021,7 +3021,8 @@ def _compute_next_phase(last_successful_phase: str | None) -> str | None:
         "implement": "review",
         "review": "review",
         "fix": "review",
-        "decision": "deliver",
+        "decision": "verify",
+        "verify": "deliver",
     }
     return mapping.get(last_successful_phase)
 
@@ -3033,6 +3034,7 @@ _SKIP_MAP: dict[str, set[str]] = {
     "review": {"plan", "implement"},
     "fix": {"plan", "implement"},
     "decision": {"plan", "implement", "review"},
+    "verify": {"plan", "implement", "review", "verify"},
 }
 
 
