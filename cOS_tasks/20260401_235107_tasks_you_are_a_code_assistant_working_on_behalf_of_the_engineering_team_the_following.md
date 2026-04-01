@@ -57,13 +57,13 @@
     - On pull success, skip the behind-count check (pull already resolved it)
     - Gate behind `if not offline` (already in an offline guard)
 
-- [ ] 4.0 Refactor `_ensure_on_main()` in `cli.py` to use shared helper (consistency)
+- [x] 4.0 Refactor `_ensure_on_main()` in `cli.py` to use shared helper (consistency)
   depends_on: [1.0]
-  - [ ] 4.1 Write tests for refactored `_ensure_on_main()` in `tests/test_cli.py`:
+  - [x] 4.1 Write tests for refactored `_ensure_on_main()` in `tests/test_cli.py`:
     - Verify it calls `pull_branch()` from recovery module
     - Verify offline mode skips the pull (new behavior — currently missing)
     - Verify existing warn-on-failure behavior is preserved
-  - [ ] 4.2 Refactor `_ensure_on_main()` to:
+  - [x] 4.2 Refactor `_ensure_on_main()` to:
     - Import and call `pull_branch()` instead of raw `subprocess.run(["git", "pull", "--ff-only"])`
     - Accept optional `offline: bool = False` parameter; skip pull when True
     - Thread `offline` flag from daemon loop config into `_run_single_iteration()` → `_ensure_on_main()`
