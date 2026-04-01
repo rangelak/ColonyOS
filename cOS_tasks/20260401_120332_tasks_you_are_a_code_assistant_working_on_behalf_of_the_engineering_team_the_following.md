@@ -38,13 +38,13 @@
   - [x] 4.3 Add `_should_rotate_daily_thread() -> bool` helper that checks current time against `daily_thread_hour` in the configured timezone using `zoneinfo.ZoneInfo`
   - [x] 4.4 Add daily thread rotation check to the daemon's main loop (alongside existing heartbeat and digest checks). When rotation is due, create new daily thread with summary of the closing period
 
-- [ ] 5.0 Route notification messages through daily thread
+- [x] 5.0 Route notification messages through daily thread
   depends_on: [4.0]
-  - [ ] 5.1 Write tests for: (a) `_post_slack_message` routes to daily thread in daily mode, (b) `_post_slack_message` with `critical=True` always posts top-level, (c) `_ensure_notification_thread` posts intro as reply to daily thread in daily mode, (d) `_ensure_notification_thread` unchanged in per_item mode, (e) heartbeat posts to daily thread, (f) daily digest posts to daily thread
-  - [ ] 5.2 Add `critical: bool = False` parameter to `_post_slack_message()`. When `notification_mode == "daily"` and `critical is False` and `self._state.daily_thread_ts` is set, post to the daily thread via `thread_ts`. Otherwise post to main channel (existing behavior)
-  - [ ] 5.3 Mark critical callers: add `critical=True` to calls in `_post_auto_pause_same_error_alert` (line 2182), `_post_circuit_breaker_escalation_pause_alert` (line 2209), `_post_circuit_breaker_cooldown_notice` (line 2196), and `_pause_for_pre_execution_blocker` (line 2242)
-  - [ ] 5.4 Modify `_ensure_notification_thread()`: when `notification_mode == "daily"`, call `_ensure_daily_thread()` to get the daily thread, then post the per-item intro as a reply to the daily thread. Use the reply's `ts` as `item.notification_thread_ts` so phase updates still nest correctly under the per-item sub-reply
-  - [ ] 5.5 Modify `_post_heartbeat()` and `_post_daily_digest_if_due()` to use `_post_slack_message()` (they already do — just verify they route correctly through the daily thread in daily mode)
+  - [x] 5.1 Write tests for: (a) `_post_slack_message` routes to daily thread in daily mode, (b) `_post_slack_message` with `critical=True` always posts top-level, (c) `_ensure_notification_thread` posts intro as reply to daily thread in daily mode, (d) `_ensure_notification_thread` unchanged in per_item mode, (e) heartbeat posts to daily thread, (f) daily digest posts to daily thread
+  - [x] 5.2 Add `critical: bool = False` parameter to `_post_slack_message()`. When `notification_mode == "daily"` and `critical is False` and `self._state.daily_thread_ts` is set, post to the daily thread via `thread_ts`. Otherwise post to main channel (existing behavior)
+  - [x] 5.3 Mark critical callers: add `critical=True` to calls in `_post_auto_pause_same_error_alert` (line 2182), `_post_circuit_breaker_escalation_pause_alert` (line 2209), `_post_circuit_breaker_cooldown_notice` (line 2196), and `_pause_for_pre_execution_blocker` (line 2242)
+  - [x] 5.4 Modify `_ensure_notification_thread()`: when `notification_mode == "daily"`, call `_ensure_daily_thread()` to get the daily thread, then post the per-item intro as a reply to the daily thread. Use the reply's `ts` as `item.notification_thread_ts` so phase updates still nest correctly under the per-item sub-reply
+  - [x] 5.5 Modify `_post_heartbeat()` and `_post_daily_digest_if_due()` to use `_post_slack_message()` (they already do — just verify they route correctly through the daily thread in daily mode)
 
 - [ ] 6.0 Implement overnight summary generation
   depends_on: [4.0]

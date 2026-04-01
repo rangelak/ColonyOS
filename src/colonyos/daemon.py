@@ -1776,25 +1776,33 @@ class Daemon:
     # Slack helpers & kill switch (FR-11)
     # ------------------------------------------------------------------
 
-    def _post_slack_message(self, text: str) -> None:
+    def _post_slack_message(self, text: str, *, critical: bool = False) -> None:
         """Post a message to the first configured Slack channel.
 
-        Uses ``slack_sdk.WebClient`` directly to avoid circular dependencies.
         Errors are logged and swallowed so Slack failures never block the daemon.
+
+        When ``notification_mode == "daily"`` and ``critical`` is False and a
+        daily thread exists, the message is posted as a reply to the daily
+        thread.  Critical alerts and per-item mode always post top-level.
         """
         try:
-            token = os.environ.get("COLONYOS_SLACK_BOT_TOKEN")
-            if not token:
-                logger.debug("No COLONYOS_SLACK_BOT_TOKEN set, skipping Slack message")
+            client = self._get_notification_client()
+            channel = self._default_notification_channel()
+            if client is None or not channel:
+                logger.debug("No Slack client or channel available, skipping Slack message")
                 return
-            channels = self.config.slack.channels
-            if not channels:
-                logger.debug("No Slack channels configured, skipping Slack message")
-                return
-            from slack_sdk import WebClient  # imported inline to avoid hard dep
 
-            client = WebClient(token=token)
-            client.chat_postMessage(channel=channels[0], text=text)
+            kwargs: dict[str, Any] = {"channel": channel, "text": text}
+
+            # In daily mode with a daily thread, route non-critical messages there
+            if (
+                not critical
+                and self.config.slack.notification_mode == "daily"
+                and self._state.daily_thread_ts
+            ):
+                kwargs["thread_ts"] = self._state.daily_thread_ts
+
+            client.chat_postMessage(**kwargs)
         except Exception:
             logger.exception("Failed to post Slack message")
 
@@ -1844,7 +1852,19 @@ class Daemon:
             try:
                 from colonyos.slack import post_message
 
-                response = post_message(client, channel, intro_text)
+                # In daily mode, post the per-item intro as a reply to the daily thread
+                if self.config.slack.notification_mode == "daily":
+                    daily = self._ensure_daily_thread()
+                    if daily is not None:
+                        daily_client, daily_channel, daily_thread_ts = daily
+                        response = post_message(
+                            daily_client, daily_channel, intro_text,
+                            thread_ts=daily_thread_ts,
+                        )
+                    else:
+                        response = post_message(client, channel, intro_text)
+                else:
+                    response = post_message(client, channel, intro_text)
             except Exception:
                 logger.debug("Failed to create notification thread", exc_info=True)
                 return None
@@ -2273,7 +2293,8 @@ class Daemon:
             f":rotating_light: *Daemon auto-paused (same error)*\n"
             f"{failures} consecutive failures with the same error: `{error_code}`\n"
             f"The daemon will not process any more items until manually resumed.\n"
-            "Send `resume` in this channel to unpause."
+            "Send `resume` in this channel to unpause.",
+            critical=True,
         )
 
     def _post_circuit_breaker_cooldown_notice(
@@ -2287,7 +2308,8 @@ class Daemon:
             f":electric_plug: *Circuit breaker cooldown*\n"
             f"After {consecutive_failures} consecutive failures, activation "
             f"#{activation_count}. Cooldown until `{cooldown_until_iso}` (ISO UTC). "
-            f"Execution resumes automatically after that unless the daemon is paused."
+            f"Execution resumes automatically after that unless the daemon is paused.",
+            critical=True,
         )
 
     def _post_circuit_breaker_escalation_pause_alert(
@@ -2301,7 +2323,8 @@ class Daemon:
             f"Breaker activation #{activation_count} without an intervening success "
             f"(last trip after {consecutive_failures} consecutive failures). "
             f"This is not the same-error systemic case.\n"
-            "Send `resume` in this channel to unpause."
+            "Send `resume` in this channel to unpause.",
+            critical=True,
         )
 
     def _pause_for_pre_execution_blocker(self, item: QueueItem, reason: str) -> None:
@@ -2334,7 +2357,8 @@ class Daemon:
             f"{reason}\n"
             f"Pending item: `{item.id}`\n"
             f"Incident summary: `{incident_path}`\n"
-            "Fix the repo state, then send `resume` in Slack."
+            "Fix the repo state, then send `resume` in Slack.",
+            critical=True,
         )
 
     def _failure_summary(self, exc: Exception) -> str:

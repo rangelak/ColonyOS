@@ -1858,3 +1858,177 @@ class TestDailyThreadLifecycle:
             daemon_instance._tick()
 
         mock_ensure.assert_called_once()
+
+
+class TestDailyThreadRouting:
+    """Tests for task 5.0: routing notification messages through daily thread."""
+
+    def test_post_slack_message_routes_to_daily_thread_in_daily_mode(
+        self, daemon_instance: Daemon
+    ):
+        """_post_slack_message routes to daily thread when mode is daily."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_ts = "daily.thread.ts"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            daemon_instance._post_slack_message("hello")
+
+        mock_client.chat_postMessage.assert_called_once()
+        call_kwargs = mock_client.chat_postMessage.call_args[1]
+        assert call_kwargs["thread_ts"] == "daily.thread.ts"
+        assert call_kwargs["channel"] == "C123"
+
+    def test_post_slack_message_critical_always_top_level(
+        self, daemon_instance: Daemon
+    ):
+        """_post_slack_message with critical=True always posts top-level even in daily mode."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_ts = "daily.thread.ts"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            daemon_instance._post_slack_message("ALERT!", critical=True)
+
+        mock_client.chat_postMessage.assert_called_once()
+        call_kwargs = mock_client.chat_postMessage.call_args[1]
+        assert "thread_ts" not in call_kwargs
+
+    def test_post_slack_message_per_item_mode_always_top_level(
+        self, daemon_instance: Daemon
+    ):
+        """_post_slack_message in per_item mode always posts top-level (no thread_ts)."""
+        daemon_instance.config.slack.notification_mode = "per_item"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_ts = "daily.thread.ts"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            daemon_instance._post_slack_message("hello")
+
+        mock_client.chat_postMessage.assert_called_once()
+        call_kwargs = mock_client.chat_postMessage.call_args[1]
+        assert "thread_ts" not in call_kwargs
+
+    def test_post_slack_message_no_daily_thread_ts_posts_top_level(
+        self, daemon_instance: Daemon
+    ):
+        """_post_slack_message in daily mode without daily_thread_ts posts top-level."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_ts = None
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            daemon_instance._post_slack_message("hello")
+
+        mock_client.chat_postMessage.assert_called_once()
+        call_kwargs = mock_client.chat_postMessage.call_args[1]
+        assert "thread_ts" not in call_kwargs
+
+    def test_ensure_notification_thread_daily_mode_posts_to_daily_thread(
+        self, daemon_instance: Daemon
+    ):
+        """_ensure_notification_thread in daily mode posts intro as reply to daily thread."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+
+        item = QueueItem(
+            id="item-1",
+            source_type="issue",
+            source_value="test",
+            status=QueueItemStatus.PENDING,
+        )
+
+        mock_client = MagicMock()
+        daily_result = (mock_client, "C123", "daily.thread.ts")
+        reply_response = {"ok": True, "ts": "reply.ts"}
+
+        with patch.object(daemon_instance, "_ensure_daily_thread", return_value=daily_result), \
+             patch("colonyos.slack.post_message", return_value=reply_response) as mock_post:
+            result = daemon_instance._ensure_notification_thread(item, "intro text")
+
+        assert result is not None
+        _, _, thread_ts = result
+        assert thread_ts == "reply.ts"
+        assert item.notification_thread_ts == "reply.ts"
+        # The intro should have been posted as a reply to the daily thread
+        mock_post.assert_called_once_with(
+            mock_client, "C123", "intro text", thread_ts="daily.thread.ts"
+        )
+
+    def test_ensure_notification_thread_per_item_mode_unchanged(
+        self, daemon_instance: Daemon
+    ):
+        """_ensure_notification_thread in per_item mode posts top-level (original behavior)."""
+        daemon_instance.config.slack.notification_mode = "per_item"
+        daemon_instance.config.slack.channels = ["C123"]
+
+        item = QueueItem(
+            id="item-2",
+            source_type="issue",
+            source_value="test",
+            status=QueueItemStatus.PENDING,
+        )
+
+        mock_client = MagicMock()
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client), \
+             patch("colonyos.slack.post_message", return_value={"ts": "top-level.ts"}) as mock_post:
+            result = daemon_instance._ensure_notification_thread(item, "intro text")
+
+        assert result is not None
+        _, _, thread_ts = result
+        assert thread_ts == "top-level.ts"
+        # Should post without thread_ts (top-level)
+        mock_post.assert_called_once_with(mock_client, "C123", "intro text")
+
+    def test_heartbeat_routes_through_daily_thread(
+        self, daemon_instance: Daemon
+    ):
+        """_post_heartbeat routes through daily thread in daily mode."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_ts = "daily.thread.ts"
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            daemon_instance._post_heartbeat()
+
+        # Heartbeat calls _post_slack_message, which should route to daily thread
+        mock_client.chat_postMessage.assert_called_once()
+        call_kwargs = mock_client.chat_postMessage.call_args[1]
+        assert call_kwargs["thread_ts"] == "daily.thread.ts"
+
+    def test_daily_digest_routes_through_daily_thread(
+        self, daemon_instance: Daemon
+    ):
+        """_post_daily_digest_if_due routes through daily thread in daily mode."""
+        daemon_instance.config.slack.notification_mode = "daily"
+        daemon_instance.config.slack.channels = ["C123"]
+        daemon_instance._state.daily_thread_ts = "daily.thread.ts"
+        daemon_instance._last_digest_date = None
+
+        # Force digest to be due by setting digest hour in the past
+        daemon_instance.daemon_config.digest_hour_utc = 0
+
+        mock_client = MagicMock()
+        mock_client.chat_postMessage.return_value = {"ok": True}
+
+        with patch.object(daemon_instance, "_get_notification_client", return_value=mock_client):
+            daemon_instance._post_daily_digest_if_due()
+
+        # Should have posted via _post_slack_message which routes to daily thread
+        if mock_client.chat_postMessage.called:
+            call_kwargs = mock_client.chat_postMessage.call_args[1]
+            assert call_kwargs.get("thread_ts") == "daily.thread.ts"
