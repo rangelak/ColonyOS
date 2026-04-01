@@ -1316,3 +1316,67 @@ def test_all_mode_passive_and_mention_both_processed_correctly(tmp_path: Path) -
     # (e) Both messages marked as processed
     assert engine.watch_state.is_processed("C1", "701.0")
     assert engine.watch_state.is_processed("C1", "702.0")
+
+
+# ---------------------------------------------------------------------------
+# Triage queue full: passive messages must not leak warning
+# ---------------------------------------------------------------------------
+
+
+def test_triage_queue_full_passive_message_no_warning(tmp_path: Path) -> None:
+    """When the triage queue is full for a passive message, no warning is posted.
+
+    Posting a warning would reveal the bot was passively listening to a message
+    the user never directed at it — a privacy/UX leak.
+    """
+    import queue as queue_module
+
+    engine = _make_engine_with_trigger_mode(tmp_path, "all")
+    # Use a queue of size 0 so put_nowait always raises Full
+    engine._triage_queue = queue_module.Queue(maxsize=1)
+    engine._triage_queue.put({"placeholder": True})  # fill it
+
+    client = MagicMock()
+    event = {
+        "channel": "C1",
+        "ts": "300.0",
+        "user": "U1",
+        "text": "just chatting casually",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message"), \
+         patch("colonyos.slack_queue.post_message") as mock_post:
+        engine._handle_event(event, client)
+
+    mock_post.assert_not_called()
+
+
+def test_triage_queue_full_mention_posts_warning(tmp_path: Path) -> None:
+    """When the triage queue is full for a @mention, the warning IS posted."""
+    import queue as queue_module
+
+    engine = _make_engine_with_trigger_mode(tmp_path, "all")
+    engine._triage_queue = queue_module.Queue(maxsize=1)
+    engine._triage_queue.put({"placeholder": True})  # fill it
+
+    client = MagicMock()
+    event = {
+        "channel": "C1",
+        "ts": "301.0",
+        "user": "U1",
+        "text": "<@UBOT> fix the flaky test",
+    }
+
+    with patch("colonyos.slack_queue.should_process_message", return_value=True), \
+         patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
+         patch.object(engine, "_ensure_triage_worker"), \
+         patch("colonyos.slack_queue.react_to_message"), \
+         patch("colonyos.slack_queue.post_message") as mock_post:
+        engine._handle_event(event, client)
+
+    mock_post.assert_called_once()
+    call_args = mock_post.call_args
+    assert "Triage backlog is full" in call_args[0][2]

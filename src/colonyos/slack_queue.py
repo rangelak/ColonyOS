@@ -234,15 +234,16 @@ class SlackQueueEngine:
             with self.state_lock:
                 self._release_pending_message(channel, ts)
             logger.warning("Slack triage queue full, rejecting %s:%s", channel, ts)
-            try:
-                post_message(
-                    client,
-                    channel,
-                    ":warning: Triage backlog is full right now. Try again in a minute.",
-                    thread_ts=ts,
-                )
-            except Exception:
-                logger.debug("Failed to post triage backlog message", exc_info=True)
+            if not is_passive:
+                try:
+                    post_message(
+                        client,
+                        channel,
+                        ":warning: Triage backlog is full right now. Try again in a minute.",
+                        thread_ts=ts,
+                    )
+                except Exception:
+                    logger.debug("Failed to post triage backlog message", exc_info=True)
 
     def _triage_and_enqueue(
         self,
