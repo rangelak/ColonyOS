@@ -1063,7 +1063,7 @@ class Daemon:
                 with self._lock:
                     self._queue_state.items.append(item)
                     self._persist_queue()
-                    self._post_queue_enqueued(item)
+                self._post_queue_enqueued(item)
 
                 logger.info(
                     "Enqueued GitHub issue #%d (P%d): %s",
@@ -1190,7 +1190,7 @@ class Daemon:
                 with self._lock:
                     self._queue_state.items.append(item)
                     self._persist_queue()
-                    self._post_queue_enqueued(item)
+                self._post_queue_enqueued(item)
                 logger.info("CEO proposed work enqueued (P%d): %s", item.priority, proposal_prompt[:120])
             else:
                 logger.info("CEO idle-fill produced no actionable proposal")
@@ -1246,9 +1246,15 @@ class Daemon:
             if enqueued:
                 with self._lock:
                     self._persist_queue()
-                    for item in self._queue_state.items:
-                        if item.source_type == "cleanup" and item.status == QueueItemStatus.PENDING and not item.notification_thread_ts:
-                            self._post_queue_enqueued(item)
+                    items_to_notify = [
+                        item
+                        for item in self._queue_state.items
+                        if item.source_type == "cleanup"
+                        and item.status == QueueItemStatus.PENDING
+                        and not item.notification_thread_ts
+                    ]
+                for item in items_to_notify:
+                    self._post_queue_enqueued(item)
                 logger.info("Enqueued %d cleanup items", enqueued)
 
         except Exception:
@@ -1840,16 +1846,19 @@ class Daemon:
             self._notification_thread_locks.pop(item_id, None)
 
     def _ensure_notification_thread(self, item: QueueItem, intro_text: str) -> tuple[Any, str, str] | None:
-        client = self._get_notification_client()
         channel = item.notification_channel or self._default_notification_channel()
-        if client is None or not channel:
-            return None
         if item.notification_thread_ts:
+            client = self._get_notification_client()
+            if client is None or not channel:
+                return None
             return client, channel, item.notification_thread_ts
         item_lock = self._notification_thread_lock_for(item.id)
         with item_lock:
             with self._lock:
                 if item.notification_thread_ts:
+                    client = self._get_notification_client()
+                    if client is None or not channel:
+                        return None
                     return client, channel, item.notification_thread_ts
             try:
                 from colonyos.slack import post_message
@@ -1858,14 +1867,20 @@ class Daemon:
                 if self.config.slack.notification_mode == "daily":
                     daily = self._ensure_daily_thread()
                     if daily is not None:
-                        daily_client, daily_channel, daily_thread_ts = daily
+                        client, channel, daily_thread_ts = daily
                         response = post_message(
-                            daily_client, daily_channel, intro_text,
+                            client, channel, intro_text,
                             thread_ts=daily_thread_ts,
                         )
                     else:
+                        client = self._get_notification_client()
+                        if client is None or not channel:
+                            return None
                         response = post_message(client, channel, intro_text)
                 else:
+                    client = self._get_notification_client()
+                    if client is None or not channel:
+                        return None
                     response = post_message(client, channel, intro_text)
             except Exception:
                 logger.debug("Failed to create notification thread", exc_info=True)
