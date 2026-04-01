@@ -154,6 +154,44 @@ class TestDaemonState:
         state.touch_heartbeat()
         assert state.last_heartbeat is not None
 
+    def test_daily_thread_fields_default_none(self):
+        state = DaemonState()
+        assert state.daily_thread_ts is None
+        assert state.daily_thread_date is None
+        assert state.daily_thread_channel is None
+
+    def test_daily_thread_fields_roundtrip(self):
+        state = DaemonState(
+            daily_thread_ts="1711929600.123456",
+            daily_thread_date="2026-04-01",
+            daily_thread_channel="C01ABCDEF",
+        )
+        d = state.to_dict()
+        assert d["daily_thread_ts"] == "1711929600.123456"
+        assert d["daily_thread_date"] == "2026-04-01"
+        assert d["daily_thread_channel"] == "C01ABCDEF"
+        restored = DaemonState.from_dict(d)
+        assert restored.daily_thread_ts == "1711929600.123456"
+        assert restored.daily_thread_date == "2026-04-01"
+        assert restored.daily_thread_channel == "C01ABCDEF"
+
+    def test_daily_thread_fields_missing_from_old_state(self):
+        state = DaemonState.from_dict({"daily_spend_usd": 5.0})
+        assert state.daily_thread_ts is None
+        assert state.daily_thread_date is None
+        assert state.daily_thread_channel is None
+
+    def test_daily_thread_fields_none_values_roundtrip(self):
+        state = DaemonState()
+        d = state.to_dict()
+        assert d["daily_thread_ts"] is None
+        assert d["daily_thread_date"] is None
+        assert d["daily_thread_channel"] is None
+        restored = DaemonState.from_dict(d)
+        assert restored.daily_thread_ts is None
+        assert restored.daily_thread_date is None
+        assert restored.daily_thread_channel is None
+
 
 class TestAtomicWriteJson:
     def test_writes_valid_json(self, tmp_path: Path):

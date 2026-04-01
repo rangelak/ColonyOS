@@ -20,11 +20,11 @@
   - [x] 1.3 Update `_parse_slack_config()` in `config.py` to read the new fields from the config dict, including timezone validation (try `ZoneInfo(tz_string)`, fall back to `"UTC"` with a warning on invalid input)
   - [x] 1.4 Update `DEFAULTS` dict in `config.py` to include the new fields under the `slack` key
 
-- [ ] 2.0 Extend DaemonState with daily thread persistence
+- [x] 2.0 Extend DaemonState with daily thread persistence
   depends_on: []
-  - [ ] 2.1 Write tests in `tests/test_daemon_state.py` for `DaemonState` serialization round-trip with new fields: `daily_thread_ts` (str | None), `daily_thread_date` (str | None), `daily_thread_channel` (str | None)
-  - [ ] 2.2 Add `daily_thread_ts: str | None = None`, `daily_thread_date: str | None = None`, `daily_thread_channel: str | None = None` fields to `DaemonState` dataclass
-  - [ ] 2.3 Update `DaemonState.to_dict()` and `DaemonState.from_dict()` to include the new fields
+  - [x] 2.1 Write tests in `tests/test_daemon_state.py` for `DaemonState` serialization round-trip with new fields: `daily_thread_ts` (str | None), `daily_thread_date` (str | None), `daily_thread_channel` (str | None)
+  - [x] 2.2 Add `daily_thread_ts: str | None = None`, `daily_thread_date: str | None = None`, `daily_thread_channel: str | None = None` fields to `DaemonState` dataclass
+  - [x] 2.3 Update `DaemonState.to_dict()` and `DaemonState.from_dict()` to include the new fields
 
 - [ ] 3.0 Create daily summary formatting function
   depends_on: []
