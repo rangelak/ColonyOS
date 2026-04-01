@@ -330,6 +330,35 @@ def _get_head_sha(repo_root: Path) -> str:
         return ""
 
 
+def _clean_working_tree(repo_root: Path) -> None:
+    """Discard uncommitted changes and untracked files in *repo_root*.
+
+    Runs ``git checkout -- .`` followed by ``git clean -fd`` so that a failed
+    task's partial changes don't poison a retry attempt.  Logs a warning on
+    failure but does **not** raise — the retry should still proceed even if
+    cleanup is imperfect.
+    """
+    for cmd in (
+        ["git", "checkout", "--", "."],
+        ["git", "clean", "-fd"],
+    ):
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=repo_root,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "git cleanup command %s failed (rc=%d): %s",
+                    cmd, result.returncode, result.stderr.strip(),
+                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("git cleanup command %s raised: %s", cmd, exc)
+
+
 def _preflight_check(
     repo_root: Path,
     branch_name: str,

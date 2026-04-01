@@ -979,3 +979,90 @@ class TestGitReturnCodeChecking:
         staged_files = add_call[0][0][3:]  # after ["git", "add", "--"]
         assert "new_file.py" in staged_files
         assert "bad.py" not in staged_files
+
+
+# ---------------------------------------------------------------------------
+# Task 3.0 — _clean_working_tree() helper
+# ---------------------------------------------------------------------------
+
+
+class TestCleanWorkingTree:
+    """Unit tests for ``_clean_working_tree()``."""
+
+    def test_calls_checkout_and_clean(self, tmp_path: Path) -> None:
+        """Should invoke ``git checkout -- .`` then ``git clean -fd``."""
+        from colonyos.orchestrator import _clean_working_tree
+
+        with patch("colonyos.orchestrator.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            _clean_working_tree(tmp_path)
+
+        assert mock_run.call_count == 2
+        first_call = mock_run.call_args_list[0]
+        second_call = mock_run.call_args_list[1]
+        assert first_call[0][0] == ["git", "checkout", "--", "."]
+        assert first_call[1]["cwd"] == tmp_path
+        assert second_call[0][0] == ["git", "clean", "-fd"]
+        assert second_call[1]["cwd"] == tmp_path
+
+    def test_subprocess_error_logs_warning_no_raise(self, tmp_path: Path) -> None:
+        """On OSError the helper should log a warning, not raise."""
+        from colonyos.orchestrator import _clean_working_tree
+
+        with patch("colonyos.orchestrator.subprocess.run", side_effect=OSError("nope")):
+            with patch("colonyos.orchestrator.logger") as mock_logger:
+                # Should NOT raise
+                _clean_working_tree(tmp_path)
+                assert mock_logger.warning.call_count >= 1
+
+    def test_nonzero_returncode_logs_warning_no_raise(self, tmp_path: Path) -> None:
+        """A non-zero exit code should log a warning, not raise."""
+        from colonyos.orchestrator import _clean_working_tree
+
+        failing = MagicMock(returncode=1, stderr="error msg")
+        with patch("colonyos.orchestrator.subprocess.run", return_value=failing):
+            with patch("colonyos.orchestrator.logger") as mock_logger:
+                _clean_working_tree(tmp_path)
+                assert mock_logger.warning.call_count >= 1
+
+    def test_timeout_logs_warning_no_raise(self, tmp_path: Path) -> None:
+        """A subprocess timeout should log a warning, not raise."""
+        import subprocess as _sp
+        from colonyos.orchestrator import _clean_working_tree
+
+        with patch(
+            "colonyos.orchestrator.subprocess.run",
+            side_effect=_sp.TimeoutExpired(cmd="git", timeout=30),
+        ):
+            with patch("colonyos.orchestrator.logger") as mock_logger:
+                _clean_working_tree(tmp_path)
+                assert mock_logger.warning.call_count >= 1
+
+    def test_scoped_to_repo_root(self, tmp_path: Path) -> None:
+        """Both commands must pass *repo_root* as ``cwd``."""
+        from colonyos.orchestrator import _clean_working_tree
+
+        custom_root = tmp_path / "my_repo"
+        custom_root.mkdir()
+        with patch("colonyos.orchestrator.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            _clean_working_tree(custom_root)
+
+        for call in mock_run.call_args_list:
+            assert call[1]["cwd"] == custom_root
+
+    def test_second_command_runs_even_if_first_fails(self, tmp_path: Path) -> None:
+        """``git clean -fd`` should still run even if ``git checkout`` fails."""
+        from colonyos.orchestrator import _clean_working_tree
+
+        fail_then_ok = [
+            OSError("checkout failed"),
+            MagicMock(returncode=0, stderr=""),
+        ]
+        with patch(
+            "colonyos.orchestrator.subprocess.run",
+            side_effect=fail_then_ok,
+        ):
+            with patch("colonyos.orchestrator.logger"):
+                _clean_working_tree(tmp_path)
+        # If we get here without error, both commands were attempted

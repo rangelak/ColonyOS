@@ -24,10 +24,10 @@
   - [x] 2.1 Write tests verifying `_build_single_task_implement_prompt()` includes a `## Previous Attempt Failed` section when `previous_error` is provided, and omits it when `None`. Test that the error string is truncated to `incident_char_cap`.
   - [x] 2.2 Add optional `previous_error: str | None = None` parameter to `_build_single_task_implement_prompt()` in `src/colonyos/orchestrator.py` (line 646). When provided, append a delimited error section to the user prompt, truncated to `config.recovery.incident_char_cap`.
 
-- [ ] 3.0 Add `_clean_working_tree()` helper
+- [x] 3.0 Add `_clean_working_tree()` helper
   depends_on: []
-  - [ ] 3.1 Write tests for `_clean_working_tree()`: verify it calls `git checkout -- .` and `git clean -fd`, verify it handles subprocess errors gracefully (logs warning, does not raise), verify it is scoped to the provided `repo_root`.
-  - [ ] 3.2 Implement `_clean_working_tree(repo_root: Path)` in `src/colonyos/orchestrator.py` as a module-level helper. Use `subprocess.run()` with the same patterns as existing git helpers in the file (e.g., the git operations around lines 918–976). Log a warning on failure but do not raise — the retry should still proceed even if cleanup is imperfect.
+  - [x] 3.1 Write tests for `_clean_working_tree()`: verify it calls `git checkout -- .` and `git clean -fd`, verify it handles subprocess errors gracefully (logs warning, does not raise), verify it is scoped to the provided `repo_root`.
+  - [x] 3.2 Implement `_clean_working_tree(repo_root: Path)` in `src/colonyos/orchestrator.py` as a module-level helper. Use `subprocess.run()` with the same patterns as existing git helpers in the file (e.g., the git operations around lines 918–976). Log a warning on failure but do not raise — the retry should still proceed even if cleanup is imperfect.
 
 - [ ] 4.0 Implement task retry loop in `_run_sequential_implement()`
   depends_on: [1.0, 2.0, 3.0]
