@@ -538,3 +538,40 @@ class TestRunHooksAtBlockingField:
         runner = HookRunner(config)
         result = _run_hooks_at(runner, "pre_plan", context)
         assert result is not _HOOK_FAILURE_SENTINEL
+
+    def test_sentinel_is_typed_class(self) -> None:
+        """_HOOK_FAILURE_SENTINEL uses a typed class, not a bare object()."""
+        from colonyos.orchestrator import _HOOK_FAILURE_SENTINEL, _HookFailureSentinel
+
+        assert isinstance(_HOOK_FAILURE_SENTINEL, _HookFailureSentinel)
+        assert repr(_HOOK_FAILURE_SENTINEL) == "<_HookFailureSentinel>"
+
+
+class TestEnvScrubDebugLogging:
+    """Verify that scrubbed non-exact env keys are logged at DEBUG level."""
+
+    def test_scrubbed_substring_key_logged(self, context: HookContext, caplog) -> None:
+        import logging
+
+        os.environ["MY_SECRET_VAR"] = "s3cr3t"
+        try:
+            with caplog.at_level(logging.DEBUG, logger="colonyos.hooks"):
+                env = _build_hook_env(context)
+            assert "MY_SECRET_VAR" not in env
+            assert any("MY_SECRET_VAR" in r.message for r in caplog.records)
+        finally:
+            os.environ.pop("MY_SECRET_VAR", None)
+
+    def test_exact_scrub_not_debug_logged(self, context: HookContext, caplog) -> None:
+        """Exact-match scrubs (e.g. ANTHROPIC_API_KEY) don't hit the substring path."""
+        import logging
+
+        os.environ["ANTHROPIC_API_KEY"] = "sk-test"
+        try:
+            with caplog.at_level(logging.DEBUG, logger="colonyos.hooks"):
+                env = _build_hook_env(context)
+            assert "ANTHROPIC_API_KEY" not in env
+            # Exact match is handled before the substring path, so no debug log
+            assert not any("ANTHROPIC_API_KEY" in r.message for r in caplog.records)
+        finally:
+            os.environ.pop("ANTHROPIC_API_KEY", None)

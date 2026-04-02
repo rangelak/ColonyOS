@@ -54,7 +54,10 @@ def _should_scrub_key(key: str) -> bool:
     if key in _SAFE_ENV_EXACT:
         return False
     upper = key.upper()
-    return any(sub in upper for sub in _SCRUBBED_ENV_SUBSTRINGS)
+    if any(sub in upper for sub in _SCRUBBED_ENV_SUBSTRINGS):
+        logger.debug("Scrubbing env var %r (matched substring pattern)", key)
+        return True
+    return False
 
 
 @dataclass(frozen=True)

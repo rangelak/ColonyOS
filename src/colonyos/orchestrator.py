@@ -2241,14 +2241,27 @@ def _drain_injected_context(
     )
 
 
-_HOOK_FAILURE_SENTINEL = object()
+class _HookFailureSentinel:
+    """Typed sentinel indicating a blocking hook failure.
+
+    Using a dedicated class instead of a bare ``object()`` gives
+    ``_run_hooks_at`` a meaningful return type annotation.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<_HookFailureSentinel>"
+
+
+_HOOK_FAILURE_SENTINEL = _HookFailureSentinel()
 
 
 def _run_hooks_at(
     hook_runner: HookRunner | None,
     event: str,
     context: HookContext,
-) -> str | None | object:
+) -> str | None | _HookFailureSentinel:
     """Execute hooks for *event* and return any injected output text.
 
     Returns:
@@ -4393,6 +4406,9 @@ def _run_pipeline(
         # Accumulated hook injection text that will be appended to the next phase prompt.
         _hook_injected_text: list[str] = []
 
+        # Maximum aggregate size for hook injection text (prevents prompt bloat).
+        _MAX_HOOK_INJECTION_BYTES = 32768  # 32KB aggregate cap
+
         def _hooks_at(event: str, *, status: str = "running") -> bool:
             """Run hooks for *event*; return False on blocking failure (caller should halt)."""
             if hook_runner is None:
@@ -4406,14 +4422,9 @@ def _run_pipeline(
             )
             result = _run_hooks_at(hook_runner, event, ctx)
             if result is _HOOK_FAILURE_SENTINEL:
-                failure_ctx = HookContext(
-                    run_id=log.run_id,
-                    phase=event,
-                    branch=branch_name,
-                    repo_root=repo_root,
-                    status="failed",
-                )
-                hook_runner.run_on_failure(failure_ctx)
+                # Don't call run_on_failure() here — _fail_pipeline() is the
+                # single owner of failure-hook dispatch.  Calling it in both
+                # places causes on_failure hooks to fire twice.
                 return False
             if isinstance(result, str):
                 # Enforce aggregate cap on injected text to prevent prompt bloat
@@ -4428,9 +4439,6 @@ def _run_pipeline(
                         event,
                     )
             return True
-
-        # Maximum aggregate size for hook injection text (prevents prompt bloat).
-        _MAX_HOOK_INJECTION_BYTES = 32768  # 32KB aggregate cap
 
         def _drain_hook_output() -> str:
             """Consume and format accumulated hook injection text."""

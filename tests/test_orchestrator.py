@@ -4057,7 +4057,9 @@ class TestHookWiring:
             log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.FAILED
-        mock_on_failure.assert_called()
+        # on_failure must fire exactly once — _fail_pipeline() is the single owner;
+        # _hooks_at() must NOT dispatch its own run_on_failure() call.
+        mock_on_failure.assert_called_once()
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
@@ -4093,7 +4095,8 @@ class TestHookWiring:
             log = run("Add feature", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.FAILED
-        mock_on_failure.assert_called()
+        # on_failure must fire exactly once — _fail_pipeline() is the single owner.
+        mock_on_failure.assert_called_once()
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
