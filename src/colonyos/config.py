@@ -18,6 +18,16 @@ RUNS_DIR = "runs"
 
 VALID_MODELS: frozenset[str] = frozenset({"opus", "sonnet", "haiku"})
 
+VALID_HOOK_EVENTS: frozenset[str] = frozenset({
+    "pre_plan", "post_plan",
+    "pre_implement", "post_implement",
+    "pre_review", "post_review",
+    "pre_deliver", "post_deliver",
+    "on_failure",
+})
+
+MAX_HOOK_TIMEOUT_SECONDS: int = 600
+
 # Phases that serve as safety gates and should not be downgraded to
 # lightweight models without explicit awareness of the trade-off.
 # Uses Phase enum values so that renaming an enum member causes an AttributeError
@@ -258,6 +268,16 @@ class RecoveryConfig:
 
 
 @dataclass
+class HookConfig:
+    """Configuration for a single pipeline lifecycle hook."""
+
+    command: str = ""
+    blocking: bool = True
+    inject_output: bool = False
+    timeout_seconds: int = 30
+
+
+@dataclass
 class SweepConfig:
     max_tasks: int = 5
     max_files_per_task: int = 5
@@ -354,6 +374,7 @@ class ColonyConfig:
     retry: RetryConfig = field(default_factory=RetryConfig)
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     daemon: DaemonConfig = field(default_factory=DaemonConfig)
+    hooks: dict[str, list[HookConfig]] = field(default_factory=dict)
     ceo_profiles: list[Persona] = field(default_factory=list)
     max_log_files: int = 50
 
@@ -936,6 +957,63 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
     )
 
 
+def _parse_hooks_config(raw: dict) -> dict[str, list[HookConfig]]:
+    """Parse the ``hooks`` section from config.yaml.
+
+    Returns a mapping from event name to list of HookConfig objects.
+    Invalid event names raise ``ValueError``; entries with empty/missing
+    ``command`` are silently skipped with a warning.
+    """
+    if not raw:
+        return {}
+
+    hooks: dict[str, list[HookConfig]] = {}
+    for event_name, hook_list in raw.items():
+        if event_name not in VALID_HOOK_EVENTS:
+            raise ValueError(
+                f"Invalid hook event '{event_name}'. "
+                f"Valid events: {sorted(VALID_HOOK_EVENTS)}"
+            )
+        if not isinstance(hook_list, list):
+            hook_list = [hook_list]
+
+        parsed: list[HookConfig] = []
+        for entry in hook_list:
+            if not isinstance(entry, dict):
+                logger.warning("Skipping non-dict hook entry for event '%s'", event_name)
+                continue
+            command = entry.get("command", "")
+            if not command:
+                logger.warning(
+                    "Skipping hook entry with empty command for event '%s'",
+                    event_name,
+                )
+                continue
+            timeout = int(entry.get("timeout_seconds", 30))
+            if timeout > MAX_HOOK_TIMEOUT_SECONDS:
+                logger.warning(
+                    "Hook timeout %ds exceeds maximum %ds for event '%s'; clamping",
+                    timeout,
+                    MAX_HOOK_TIMEOUT_SECONDS,
+                    event_name,
+                )
+                timeout = MAX_HOOK_TIMEOUT_SECONDS
+            if timeout < 1:
+                timeout = 1
+            parsed.append(
+                HookConfig(
+                    command=str(command),
+                    blocking=bool(entry.get("blocking", True)),
+                    inject_output=bool(entry.get("inject_output", False)),
+                    timeout_seconds=timeout,
+                )
+            )
+        if parsed:
+            hooks[event_name] = parsed
+
+    return hooks
+
+
 def _parse_sweep_config(raw: dict) -> SweepConfig:
     """Parse the ``sweep`` section from config.yaml."""
     if not raw:
@@ -1058,6 +1136,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         retry=_parse_retry_config(raw.get("retry", {})),
         recovery=_parse_recovery_config(raw.get("recovery", {})),
         daemon=_parse_daemon_config(raw.get("daemon", {})),
+        hooks=_parse_hooks_config(raw.get("hooks", {})),
         ceo_profiles=_parse_personas(raw.get("ceo_profiles", [])),
         max_log_files=int(raw.get("max_log_files", 50)),
     )
@@ -1349,6 +1428,20 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
             },
         }
         data["daemon"] = daemon_data
+
+    if config.hooks:
+        hooks_data: dict[str, list[dict[str, Any]]] = {}
+        for event_name, hook_list in config.hooks.items():
+            hooks_data[event_name] = [
+                {
+                    "command": h.command,
+                    "blocking": h.blocking,
+                    "inject_output": h.inject_output,
+                    "timeout_seconds": h.timeout_seconds,
+                }
+                for h in hook_list
+            ]
+        data["hooks"] = hooks_data
 
     if not config.directions_auto_update:
         data["directions_auto_update"] = False
