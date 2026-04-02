@@ -34,17 +34,17 @@ This is the 7th attempt at this refactoring. Previous 6 attempts failed because 
   - [x] 1.7 Verify `from colonyos.daemon import Daemon, DaemonError` works (matches `cli.py` usage)
   - [x] 1.8 Commit: "refactor(daemon): convert to package, extract standalone UI classes"
 
-- [ ] 2.0 Extract watchdog methods into `_WatchdogMixin`
+- [x] 2.0 Extract watchdog methods into `_WatchdogMixin`
   depends_on: [1.0]
-  - [ ] 2.1 Create `src/colonyos/daemon/_watchdog.py` with a `_WatchdogMixin` class containing these methods moved verbatim from `__init__.py`:
+  - [x] 2.1 Create `src/colonyos/daemon/_watchdog.py` with a `_WatchdogMixin` class containing these methods moved verbatim from `__init__.py`:
     - `_start_watchdog_thread` (line ~1720)
     - `_watchdog_loop` (line ~1730)
     - `_watchdog_check` (line ~1739)
     - `_watchdog_recover` (line ~1790)
     The mixin class needs these imports: `logging`, `sys`, `time`, `threading`, `typing.Any`, `from colonyos.agent import active_phase_controller_count, request_active_phase_cancel`, `from colonyos.cancellation import request_cancel`, `from colonyos.models import QueueItemStatus`, `from colonyos.tui.monitor_protocol import encode_monitor_event`
-  - [ ] 2.2 In `daemon/__init__.py`: (a) add `from colonyos.daemon._watchdog import _WatchdogMixin`, (b) change `class Daemon:` to `class Daemon(_WatchdogMixin):`, (c) remove the 4 watchdog method bodies (keep only in mixin)
-  - [ ] 2.3 Run `python -m pytest tests/test_daemon.py -x -q` — all tests must pass
-  - [ ] 2.4 Commit: "refactor(daemon): extract watchdog methods into _WatchdogMixin"
+  - [x] 2.2 In `daemon/__init__.py`: (a) add `from colonyos.daemon._watchdog import _WatchdogMixin`, (b) change `class Daemon:` to `class Daemon(_WatchdogMixin):`, (c) remove the 4 watchdog method bodies (keep only in mixin)
+  - [x] 2.3 Run `python -m pytest tests/test_daemon.py -x -q` — all tests must pass
+  - [x] 2.4 Commit: "refactor(daemon): extract watchdog methods into _WatchdogMixin"
 
 - [ ] 3.0 Extract resilience/recovery methods into `_ResilienceMixin`
   depends_on: [2.0]
