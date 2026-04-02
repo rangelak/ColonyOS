@@ -3948,3 +3948,45 @@ class TestFixCompletionReactions:
 
         # Should not raise
         self._simulate_fix_completion_reactions(client, "C1", "ts1", RunStatus.COMPLETED)
+
+
+class TestEnsureOnMain:
+    """Tests for _ensure_on_main() refactored to use pull_branch()."""
+
+    def test_calls_pull_branch_after_checkout(self, tmp_path):
+        """_ensure_on_main calls pull_branch() from recovery module."""
+        from colonyos.cli import _ensure_on_main
+
+        checkout_result = MagicMock(returncode=0, stderr="")
+        with patch("colonyos.cli.subprocess.run", return_value=checkout_result), \
+             patch("colonyos.cli.pull_branch", return_value=(True, None)) as mock_pull:
+            _ensure_on_main(tmp_path)
+
+        mock_pull.assert_called_once_with(tmp_path)
+
+    def test_offline_skips_pull(self, tmp_path):
+        """When offline=True, pull_branch() is not called."""
+        from colonyos.cli import _ensure_on_main
+
+        checkout_result = MagicMock(returncode=0, stderr="")
+        with patch("colonyos.cli.subprocess.run", return_value=checkout_result), \
+             patch("colonyos.cli.pull_branch", return_value=(True, None)) as mock_pull:
+            _ensure_on_main(tmp_path, offline=True)
+
+        mock_pull.assert_not_called()
+
+    def test_pull_failure_warns_does_not_raise(self, tmp_path):
+        """Pull failure emits a warning but does not raise."""
+        from colonyos.cli import _ensure_on_main
+
+        checkout_result = MagicMock(returncode=0, stderr="")
+        with patch("colonyos.cli.subprocess.run", return_value=checkout_result), \
+             patch("colonyos.cli.pull_branch", return_value=(False, "network error")), \
+             patch("colonyos.cli.click.echo") as mock_echo:
+            # Should not raise
+            _ensure_on_main(tmp_path)
+
+        # Should have warned about the failure
+        mock_echo.assert_called()
+        warning_text = mock_echo.call_args[0][0]
+        assert "network error" in warning_text
