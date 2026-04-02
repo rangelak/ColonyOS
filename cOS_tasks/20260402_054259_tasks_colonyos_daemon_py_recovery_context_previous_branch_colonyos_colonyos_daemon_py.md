@@ -46,9 +46,9 @@ This is the 7th attempt at this refactoring. Previous 6 attempts failed because 
   - [x] 2.3 Run `python -m pytest tests/test_daemon.py -x -q` — all tests must pass
   - [x] 2.4 Commit: "refactor(daemon): extract watchdog methods into _WatchdogMixin"
 
-- [ ] 3.0 Extract resilience/recovery methods into `_ResilienceMixin`
+- [x] 3.0 Extract resilience/recovery methods into `_ResilienceMixin`
   depends_on: [2.0]
-  - [ ] 3.1 Create `src/colonyos/daemon/_resilience.py` with a `_ResilienceMixin` class containing these methods moved verbatim from `__init__.py`:
+  - [x] 3.1 Create `src/colonyos/daemon/_resilience.py` with a `_ResilienceMixin` class containing these methods moved verbatim from `__init__.py`:
     - `_recover_from_crash` (line ~1392)
     - `_preexec_worktree_state` (line ~1443)
     - `_recover_dirty_worktree_preemptive` (line ~1460)
@@ -58,9 +58,9 @@ This is the 7th attempt at this refactoring. Previous 6 attempts failed because 
     - `_recover_dirty_worktree_and_retry` (line ~1541)
     The mixin class needs these imports: `logging`, `subprocess`, `typing.Any`, `from pathlib import Path`, `from colonyos.models import PreflightError, QueueItem, QueueItemStatus`
     Note: Methods use lazy imports (`from colonyos.recovery import ...`, `from colonyos.orchestrator import ...`) — keep those as-is inside the method bodies
-  - [ ] 3.2 In `daemon/__init__.py`: (a) add `from colonyos.daemon._resilience import _ResilienceMixin`, (b) change `class Daemon(_WatchdogMixin):` to `class Daemon(_WatchdogMixin, _ResilienceMixin):`, (c) remove the 7 resilience method bodies
-  - [ ] 3.3 Run `python -m pytest tests/test_daemon.py -x -q` — all tests must pass
-  - [ ] 3.4 Commit: "refactor(daemon): extract recovery methods into _ResilienceMixin"
+  - [x] 3.2 In `daemon/__init__.py`: (a) add `from colonyos.daemon._resilience import _ResilienceMixin`, (b) change `class Daemon(_WatchdogMixin):` to `class Daemon(_WatchdogMixin, _ResilienceMixin):`, (c) remove the 7 resilience method bodies
+  - [x] 3.3 Run `python -m pytest tests/test_daemon.py -x -q` — all tests must pass
+  - [x] 3.4 Commit: "refactor(daemon): extract recovery methods into _ResilienceMixin"
 
 - [ ] 4.0 Extract helper/formatting methods into `_HelpersMixin`
   depends_on: [3.0]
