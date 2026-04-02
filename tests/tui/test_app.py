@@ -662,3 +662,147 @@ class TestLogWriterIntegration:
             await pilot.pause()
         # After context exit, writer should be closed
         assert writer._closed
+
+
+class TestScrollIntegration:
+    """Integration tests for scroll behavior across the full app (task 5.2)."""
+
+    @pytest.mark.asyncio
+    async def test_scroll_position_preserved_when_auto_scroll_off(self) -> None:
+        """Pushing messages via the queue should not change scroll_y when _auto_scroll is False."""
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            transcript = app.query_one(TranscriptView)
+            # Add enough content to make the transcript scrollable
+            for i in range(50):
+                app.event_queue.sync_q.put(TextBlockMsg(text=f"Line {i}"))
+            await pilot.pause()
+            await asyncio.sleep(0.2)
+            await pilot.pause()
+
+            # Disable auto-scroll (simulating user scroll-up)
+            transcript._auto_scroll = False
+            saved_scroll_y = transcript.scroll_y
+
+            # Push more messages while auto-scroll is off
+            for i in range(10):
+                app.event_queue.sync_q.put(TextBlockMsg(text=f"New line {i}"))
+            await pilot.pause()
+            await asyncio.sleep(0.2)
+            await pilot.pause()
+
+            # Scroll position should not have changed
+            assert transcript.scroll_y == saved_scroll_y
+            # Unread lines should have accumulated
+            assert transcript._unread_lines > 0
+
+    @pytest.mark.asyncio
+    async def test_end_key_reengages_auto_scroll(self) -> None:
+        """Pressing End should re-enable auto-scroll and clear unread counter."""
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            transcript = app.query_one(TranscriptView)
+            # Add content and disable auto-scroll
+            for i in range(30):
+                app.event_queue.sync_q.put(TextBlockMsg(text=f"Line {i}"))
+            await pilot.pause()
+            await asyncio.sleep(0.2)
+            await pilot.pause()
+
+            transcript._auto_scroll = False
+            transcript._unread_lines = 5
+
+            # Trigger the End key action
+            app.action_scroll_to_end()
+            await pilot.pause()
+
+            assert transcript._auto_scroll is True
+            assert transcript._unread_lines == 0
+
+    @pytest.mark.asyncio
+    async def test_auto_scroll_follows_new_content_by_default(self) -> None:
+        """With auto-scroll on (default), new content should scroll the view."""
+        app = AssistantApp()
+        async with app.run_test() as pilot:
+            transcript = app.query_one(TranscriptView)
+            assert transcript._auto_scroll is True
+
+            # Push enough content to overflow the viewport
+            for i in range(50):
+                app.event_queue.sync_q.put(TextBlockMsg(text=f"Line {i}"))
+            await pilot.pause()
+            await asyncio.sleep(0.2)
+            await pilot.pause()
+
+            # Should still be auto-scrolling
+            assert transcript._auto_scroll is True
+            # Unread should be zero (we're following)
+            assert transcript._unread_lines == 0
+
+
+class TestMonitorModeIntegration:
+    """Integration tests for monitor_mode=True (task 5.3)."""
+
+    @pytest.mark.asyncio
+    async def test_monitor_mode_single_scrollbar(self) -> None:
+        """Monitor mode should have Screen overflow hidden (no second scrollbar)."""
+        app = AssistantApp(monitor_mode=True)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert screen.styles.overflow_x == "hidden"
+            assert screen.styles.overflow_y == "hidden"
+
+    @pytest.mark.asyncio
+    async def test_monitor_mode_no_composer_or_hintbar(self) -> None:
+        """Monitor mode should not have Composer or HintBar widgets."""
+        app = AssistantApp(monitor_mode=True)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert list(app.query(Composer)) == []
+            assert list(app.query(HintBar)) == []
+
+    @pytest.mark.asyncio
+    async def test_monitor_mode_has_transcript(self) -> None:
+        """Monitor mode should still have a TranscriptView."""
+        app = AssistantApp(monitor_mode=True)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            transcript = app.query_one(TranscriptView)
+            assert transcript is not None
+
+    @pytest.mark.asyncio
+    async def test_monitor_mode_transcript_has_correct_css(self) -> None:
+        """Monitor mode transcript should have the correct CSS properties applied."""
+        app = AssistantApp(monitor_mode=True)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            transcript = app.query_one(TranscriptView)
+            # CSS selector fix: scrollbar-size and padding should be applied
+            assert transcript.styles.scrollbar_size_horizontal == 1
+            assert transcript.styles.scrollbar_size_vertical == 1
+            assert transcript.styles.padding.right == 2
+            assert transcript.styles.padding.left == 2
+
+    @pytest.mark.asyncio
+    async def test_monitor_mode_receives_queue_messages(self) -> None:
+        """Monitor mode should still receive and render queue messages."""
+        app = AssistantApp(monitor_mode=True)
+        async with app.run_test() as pilot:
+            transcript = app.query_one(TranscriptView)
+            app.event_queue.sync_q.put(TextBlockMsg(text="daemon output"))
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+            assert len(transcript.lines) > 0
+
+    @pytest.mark.asyncio
+    async def test_monitor_mode_auto_scroll_disabled_on_richlog(self) -> None:
+        """Monitor mode transcript should have RichLog auto_scroll=False (custom logic controls it)."""
+        app = AssistantApp(monitor_mode=True)
+        async with app.run_test() as pilot:
+            transcript = app.query_one(TranscriptView)
+            # RichLog's built-in auto_scroll is disabled
+            assert transcript.auto_scroll is False
+            # But our custom auto_scroll is active
+            assert transcript._auto_scroll is True

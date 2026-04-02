@@ -53,6 +53,7 @@ from colonyos.recovery import (
     create_branch,
     incident_slug,
     preserve_and_reset_worktree,
+    pull_branch,
     recovery_dir_path,
     write_incident_summary,
 )
@@ -330,6 +331,35 @@ def _get_head_sha(repo_root: Path) -> str:
         return ""
 
 
+def _clean_working_tree(repo_root: Path) -> None:
+    """Discard uncommitted changes and untracked files in *repo_root*.
+
+    Runs ``git checkout -- .`` followed by ``git clean -fd`` so that a failed
+    task's partial changes don't poison a retry attempt.  Logs a warning on
+    failure but does **not** raise — the retry should still proceed even if
+    cleanup is imperfect.
+    """
+    for cmd in (
+        ["git", "checkout", "--", "."],
+        ["git", "clean", "-fd"],
+    ):
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=repo_root,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "git cleanup command %s failed (rc=%d): %s",
+                    cmd, result.returncode, result.stderr.strip(),
+                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("git cleanup command %s raised: %s", cmd, exc)
+
+
 def _preflight_check(
     repo_root: Path,
     branch_name: str,
@@ -393,39 +423,15 @@ def _preflight_check(
             details={"branch_name": branch_name},
         )
 
-    # Check if main is behind origin/main
+    # Pull latest for the current branch instead of just fetching and warning.
     main_behind_count: int | None = None
-    fetch_succeeded = False
     if not offline:
-        try:
-            subprocess.run(
-                ["git", "fetch", "origin", "main"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                cwd=repo_root,
-            )
-            fetch_succeeded = True
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            warnings.append(f"Failed to fetch origin/main: {exc}")
-
-        if fetch_succeeded:
-            try:
-                result = subprocess.run(
-                    ["git", "rev-list", "--count", "main..origin/main"],
-                    capture_output=True,
-                    text=True,
-                    cwd=repo_root,
-                )
-                if result.returncode == 0 and result.stdout.strip().isdigit():
-                    main_behind_count = int(result.stdout.strip())
-                    if main_behind_count > 0:
-                        warnings.append(
-                            f"Local main is {main_behind_count} commit(s) behind origin/main. "
-                            "Consider running: git pull"
-                        )
-            except OSError:
-                pass
+        pull_ok, pull_err = pull_branch(repo_root)
+        if not pull_ok and pull_err is not None:
+            warnings.append(f"Failed to pull latest: {pull_err}")
+        if pull_ok:
+            # Pull succeeded — local branch is up-to-date, no behind count.
+            main_behind_count = 0
 
     action = "proceed"
     if force and (not is_clean or branch_exists):
@@ -652,6 +658,7 @@ def _build_single_task_implement_prompt(
     branch_name: str,
     completed_tasks: list[str],
     repo_root: Path | None = None,
+    previous_error: str | None = None,
 ) -> tuple[str, str]:
     """Build system and user prompts scoped to a single task in sequential mode.
 
@@ -699,6 +706,16 @@ def _build_single_task_implement_prompt(
         f"Work on branch `{branch_name}`.\n\n"
         f"Focus exclusively on task {task_id}. Do not implement other tasks."
     )
+
+    if previous_error is not None:
+        truncated_error = previous_error[:config.recovery.incident_char_cap]
+        user += (
+            "\n\n## Previous Attempt Failed\n\n"
+            "The previous attempt to implement this task failed with the "
+            "following error. Fix the issue and try again.\n\n"
+            f"```\n{truncated_error}\n```"
+        )
+
     return system, user
 
 
@@ -850,149 +867,214 @@ def _run_sequential_implement(
             continue
 
         _log(f"Running task {task_id}: {task_desc}")
-        t0 = time.monotonic()
 
-        system, user = _build_single_task_implement_prompt(
-            config,
-            task_id=task_id,
-            task_description=task_desc,
-            prd_path=prd_rel,
-            task_path=task_rel,
-            branch_name=branch_name,
-            completed_tasks=[
-                f"{tid}: {task_descriptions.get(tid, tid)}" for tid in task_order if tid in completed
-            ],
-            repo_root=repo_root,
-        )
+        max_attempts = 1 + config.recovery.max_task_retries
+        previous_error: str | None = None
+        task_succeeded = False
 
-        # Inject repo map, semantic memory, and external context (Slack/GitHub)
-        system = _inject_repo_map(system, repo_map_text)
-        system = _inject_memory_block(system, memory_store, "implement", user, config)
-        user += _drain_injected_context(user_injection_provider)
+        for attempt in range(max_attempts):
+            t0 = time.monotonic()
 
-        ui = _make_ui()
-        if ui is not None:
-            safe_desc = sanitize_for_slack(sanitize_untrusted_content(task_desc))
-            short_desc = safe_desc[:_SLACK_TASK_DESC_MAX]
-            if len(safe_desc) > _SLACK_TASK_DESC_MAX:
-                short_desc = safe_desc[:_SLACK_TASK_DESC_MAX - 3] + "..."
-            ui.phase_header(
-                f"Implement [{task_id}] {short_desc}",
-                per_task_budget,
-                config.get_model(Phase.IMPLEMENT),
-                branch_name,
+            system, user = _build_single_task_implement_prompt(
+                config,
+                task_id=task_id,
+                task_description=task_desc,
+                prd_path=prd_rel,
+                task_path=task_rel,
+                branch_name=branch_name,
+                completed_tasks=[
+                    f"{tid}: {task_descriptions.get(tid, tid)}" for tid in task_order if tid in completed
+                ],
+                repo_root=repo_root,
+                previous_error=previous_error,
             )
 
-        try:
-            result = run_phase_sync(
-                Phase.IMPLEMENT,
-                user,
-                cwd=repo_root,
-                system_prompt=system,
-                model=config.get_model(Phase.IMPLEMENT),
-                budget_usd=per_task_budget,
-                ui=ui,
-                retry_config=config.retry,
-                timeout_seconds=config.budget.phase_timeout_seconds,
-            )
-        except Exception as exc:
-            _log(f"Task {task_id} raised exception: {exc}")
-            failed.add(task_id)
+            # Inject repo map, semantic memory, and external context (Slack/GitHub)
+            system = _inject_repo_map(system, repo_map_text)
+            system = _inject_memory_block(system, memory_store, "implement", user, config)
+            user += _drain_injected_context(user_injection_provider)
+
+            ui = _make_ui()
+            if ui is not None:
+                safe_desc_ui = sanitize_for_slack(sanitize_untrusted_content(task_desc))
+                short_desc = safe_desc_ui[:_SLACK_TASK_DESC_MAX]
+                if len(safe_desc_ui) > _SLACK_TASK_DESC_MAX:
+                    short_desc = safe_desc_ui[:_SLACK_TASK_DESC_MAX - 3] + "..."
+                retry_label = f" (retry {attempt})" if attempt > 0 else ""
+                ui.phase_header(
+                    f"Implement [{task_id}] {short_desc}{retry_label}",
+                    per_task_budget,
+                    config.get_model(Phase.IMPLEMENT),
+                    branch_name,
+                )
+
+            try:
+                result = run_phase_sync(
+                    Phase.IMPLEMENT,
+                    user,
+                    cwd=repo_root,
+                    system_prompt=system,
+                    model=config.get_model(Phase.IMPLEMENT),
+                    budget_usd=per_task_budget,
+                    ui=ui,
+                    retry_config=config.retry,
+                    timeout_seconds=config.budget.phase_timeout_seconds,
+                )
+            except Exception as exc:
+                _log(f"Task {task_id} raised exception: {exc}")
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                total_duration_ms += elapsed_ms
+                error_str = str(exc)
+
+                if attempt < config.recovery.max_task_retries:
+                    _clean_working_tree(repo_root)
+                    _record_recovery_event(
+                        log,
+                        kind="task_retry",
+                        details={
+                            "task_id": task_id,
+                            "attempt": attempt + 1,
+                            "error": error_str,
+                            "success": False,
+                        },
+                    )
+                    _log(
+                        f"Task {task_id} retry {attempt + 1}/{config.recovery.max_task_retries} "
+                        f"after exception"
+                    )
+                    previous_error = error_str
+                    continue
+
+                failed.add(task_id)
+                task_results[task_id] = {
+                    "status": "FAILED",
+                    "error": error_str,
+                    "description": task_desc,
+                    "duration_ms": elapsed_ms,
+                }
+                overall_success = False
+                break
+
             elapsed_ms = int((time.monotonic() - t0) * 1000)
-            task_results[task_id] = {
-                "status": "FAILED",
-                "error": str(exc),
-                "description": task_desc,
-                "duration_ms": elapsed_ms,
-            }
-            overall_success = False
-            continue
+            task_cost = result.cost_usd or 0.0
+            total_cost += task_cost
+            total_duration_ms += elapsed_ms
 
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        task_cost = result.cost_usd or 0.0
-        total_cost += task_cost
-        total_duration_ms += elapsed_ms
-
-        if result.success:
-            # Selective staging: get changed files, filter out secrets
-            diff_result = subprocess.run(
-                ["git", "diff", "--name-only"],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            untracked_result = subprocess.run(
-                ["git", "ls-files", "--others", "--exclude-standard"],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if diff_result.returncode != 0:
-                _log(f"Task {task_id}: git diff failed (rc={diff_result.returncode}): {diff_result.stderr.strip()}")
-            if untracked_result.returncode != 0:
-                _log(f"Task {task_id}: git ls-files failed (rc={untracked_result.returncode}): {untracked_result.stderr.strip()}")
-            changed_files = [
-                f.strip()
-                for f in (
-                    (diff_result.stdout.splitlines() if diff_result.returncode == 0 else [])
-                    + (untracked_result.stdout.splitlines() if untracked_result.returncode == 0 else [])
-                )
-                if f.strip()
-            ]
-            # Filter out sensitive files
-            safe_files = [f for f in changed_files if not _is_secret_like_path(f)]
-            secret_files = [f for f in changed_files if _is_secret_like_path(f)]
-            if secret_files:
-                _log(
-                    f"Task {task_id}: skipping {len(secret_files)} "
-                    f"sensitive file(s) from staging: {secret_files}"
-                )
-
-            # Audit trail: log what files this task modified
-            if safe_files:
-                _log(f"Task {task_id} modified {len(safe_files)} file(s): {safe_files}")
-
-            if safe_files:
-                subprocess.run(
-                    ["git", "add", "--"] + safe_files,
+            if result.success:
+                # Selective staging: get changed files, filter out secrets
+                diff_result = subprocess.run(
+                    ["git", "diff", "--name-only"],
                     cwd=repo_root,
                     capture_output=True,
+                    text=True,
                     timeout=30,
                 )
-            safe_desc = sanitize_untrusted_content(task_desc)
-            commit_result = subprocess.run(
-                ["git", "commit", "-m", f"Implement task {task_id}: {safe_desc}"],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if commit_result.returncode == 0:
-                _log(f"Task {task_id} completed and committed")
-            else:
-                # Nothing to commit is fine (agent may have already committed)
-                _log(f"Task {task_id} completed (no new changes to commit)")
+                untracked_result = subprocess.run(
+                    ["git", "ls-files", "--others", "--exclude-standard"],
+                    cwd=repo_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if diff_result.returncode != 0:
+                    _log(f"Task {task_id}: git diff failed (rc={diff_result.returncode}): {diff_result.stderr.strip()}")
+                if untracked_result.returncode != 0:
+                    _log(f"Task {task_id}: git ls-files failed (rc={untracked_result.returncode}): {untracked_result.stderr.strip()}")
+                changed_files = [
+                    f.strip()
+                    for f in (
+                        (diff_result.stdout.splitlines() if diff_result.returncode == 0 else [])
+                        + (untracked_result.stdout.splitlines() if untracked_result.returncode == 0 else [])
+                    )
+                    if f.strip()
+                ]
+                # Filter out sensitive files
+                safe_files = [f for f in changed_files if not _is_secret_like_path(f)]
+                secret_files = [f for f in changed_files if _is_secret_like_path(f)]
+                if secret_files:
+                    _log(
+                        f"Task {task_id}: skipping {len(secret_files)} "
+                        f"sensitive file(s) from staging: {secret_files}"
+                    )
 
-            completed.add(task_id)
-            task_results[task_id] = {
-                "status": "COMPLETED",
-                "cost_usd": task_cost,
-                "duration_ms": elapsed_ms,
-                "description": task_desc,
-            }
-        else:
+                # Audit trail: log what files this task modified
+                if safe_files:
+                    _log(f"Task {task_id} modified {len(safe_files)} file(s): {safe_files}")
+
+                if safe_files:
+                    subprocess.run(
+                        ["git", "add", "--"] + safe_files,
+                        cwd=repo_root,
+                        capture_output=True,
+                        timeout=30,
+                    )
+                safe_desc = sanitize_untrusted_content(task_desc)
+                commit_result = subprocess.run(
+                    ["git", "commit", "-m", f"Implement task {task_id}: {safe_desc}"],
+                    cwd=repo_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if commit_result.returncode == 0:
+                    _log(f"Task {task_id} completed and committed")
+                else:
+                    # Nothing to commit is fine (agent may have already committed)
+                    _log(f"Task {task_id} completed (no new changes to commit)")
+
+                completed.add(task_id)
+                task_results[task_id] = {
+                    "status": "COMPLETED",
+                    "cost_usd": task_cost,
+                    "duration_ms": elapsed_ms,
+                    "description": task_desc,
+                }
+                task_succeeded = True
+                break
+            else:
+                # Task failed — retry if attempts remain
+                if attempt < config.recovery.max_task_retries:
+                    _clean_working_tree(repo_root)
+                    _record_recovery_event(
+                        log,
+                        kind="task_retry",
+                        details={
+                            "task_id": task_id,
+                            "attempt": attempt + 1,
+                            "error": result.error or "unknown",
+                            "success": False,
+                        },
+                    )
+                    _log(
+                        f"Task {task_id} retry {attempt + 1}/{config.recovery.max_task_retries} "
+                        f"after failure: {result.error}"
+                    )
+                    previous_error = result.error or "unknown"
+                    continue
+
+                # All retries exhausted
+                failed.add(task_id)
+                task_results[task_id] = {
+                    "status": "FAILED",
+                    "error": result.error or "unknown",
+                    "cost_usd": task_cost,
+                    "duration_ms": elapsed_ms,
+                    "description": task_desc,
+                }
+                overall_success = False
+                _log(f"Task {task_id} failed: {result.error}")
+
+        if not task_succeeded and task_id not in failed:
+            # Safety net: if loop exited without marking task
             failed.add(task_id)
-            task_results[task_id] = {
+            task_results.setdefault(task_id, {
                 "status": "FAILED",
-                "error": result.error or "unknown",
-                "cost_usd": task_cost,
-                "duration_ms": elapsed_ms,
+                "error": "task did not complete (safety net)",
+                "cost_usd": 0.0,
+                "duration_ms": 0,
                 "description": task_desc,
-            }
+            })
             overall_success = False
-            _log(f"Task {task_id} failed: {result.error}")
 
     # Build merged PhaseResult
     artifacts = {
@@ -1697,6 +1779,45 @@ def _extract_verdict(result_text: str) -> str:
     return match.group(1).upper() if match else "UNKNOWN"
 
 
+def _verify_detected_failures(verify_output: str) -> bool:
+    """Return True if the verify agent output indicates test failures.
+
+    Parses the structured ``VERIFY_RESULT: PASS/FAIL`` sentinel emitted by the
+    verify agent.  Falls back to regex-based heuristics when the sentinel is
+    missing (e.g. older instruction templates or non-standard runners).
+
+    Defaults to False (tests passed) when the output is ambiguous or empty.
+    """
+    if not verify_output:
+        return False
+
+    # --- Primary: structured sentinel (matches ``VERIFY_RESULT: PASS`` / ``FAIL``) ---
+    sentinel_match = re.search(r"VERIFY_RESULT:\s*(PASS|FAIL)", verify_output, re.IGNORECASE)
+    if sentinel_match:
+        return sentinel_match.group(1).upper() == "FAIL"
+
+    # --- Fallback: regex heuristics for common test-runner output ---
+    # Match non-zero failure/error counts (e.g. "3 failed", "1 error") but NOT
+    # "0 failed" or "0 errors", which caused false-positives in the previous
+    # substring-matching implementation.
+    nonzero_fail = re.search(r"\b[1-9]\d*\s+(?:failed|failures?|errors?)\b", verify_output, re.IGNORECASE)
+    if nonzero_fail:
+        return True
+
+    # Explicit zero-failure lines → tests passed
+    zero_fail = re.search(r"\b0\s+(?:failed|failures?|errors?)\b", verify_output, re.IGNORECASE)
+    if zero_fail:
+        return False
+
+    # Check for explicit pass statements
+    lower = verify_output.lower()
+    if "all tests passed" in lower or "all tests pass" in lower:
+        return False
+
+    # No recognisable signal — assume tests passed (safe default)
+    return False
+
+
 def _build_fix_prompt(
     config: ColonyConfig,
     prd_path: str,
@@ -1752,6 +1873,50 @@ def _build_ci_fix_prompt(
     user = (
         f"Fix the CI failures on branch `{branch_name}`. "
         f"This is attempt {fix_attempt} of {max_retries}."
+    )
+    return system, user
+
+
+def _build_verify_prompt(
+    config: ColonyConfig,
+    branch_name: str,
+    change_summary: str = "",
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the verify (test-run) phase."""
+    verify_template = _load_instruction("verify.md")
+
+    system = _format_base(config) + "\n\n" + verify_template.format(
+        branch_name=branch_name,
+        change_summary=change_summary or "No summary available.",
+    )
+
+    user = (
+        f"Run the full test suite for this project on branch `{branch_name}`. "
+        f"Report whether all tests pass or list the failures."
+    )
+    return system, user
+
+
+def _build_verify_fix_prompt(
+    config: ColonyConfig,
+    branch_name: str,
+    test_failure_output: str,
+    fix_attempt: int,
+    max_fix_attempts: int,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt for the verify-fix phase."""
+    fix_template = _load_instruction("verify_fix.md")
+
+    system = _format_base(config) + "\n\n" + fix_template.format(
+        branch_name=branch_name,
+        test_failure_output=test_failure_output,
+        fix_attempt=fix_attempt,
+        max_fix_attempts=max_fix_attempts,
+    )
+
+    user = (
+        f"Fix the test failures on branch `{branch_name}`. "
+        f"This is fix attempt {fix_attempt} of {max_fix_attempts}."
     )
     return system, user
 
@@ -3021,7 +3186,9 @@ def _compute_next_phase(last_successful_phase: str | None) -> str | None:
         "implement": "review",
         "review": "review",
         "fix": "review",
-        "decision": "deliver",
+        "decision": "verify",
+        "learn": "verify",
+        "verify": "deliver",
     }
     return mapping.get(last_successful_phase)
 
@@ -3033,6 +3200,8 @@ _SKIP_MAP: dict[str, set[str]] = {
     "review": {"plan", "implement"},
     "fix": {"plan", "implement"},
     "decision": {"plan", "implement", "review"},
+    "learn": {"plan", "implement", "review"},
+    "verify": {"plan", "implement", "review", "verify"},
 }
 
 
@@ -4221,6 +4390,16 @@ def run(
                     f"Timeout checking out base branch '{base_branch}'"
                 )
 
+            # Pull latest after checking out the base branch so the
+            # feature branch starts from up-to-date remote state.
+            if not offline:
+                pull_ok, pull_err = pull_branch(repo_root)
+                if not pull_ok and pull_err is not None:
+                    raise PreflightError(
+                        f"Failed to pull latest for base branch "
+                        f"'{base_branch}': {pull_err}"
+                    )
+
         # --- Pre-flight git state check ---
         preflight = _preflight_check(
             repo_root, branch_name, config, offline=offline, force=force,
@@ -4898,6 +5077,128 @@ def _run_pipeline(
 
         # --- Learn Phase ---
         _run_learn_phase(config, repo_root, log, prompt, _make_ui, memory_store=memory_store)
+
+        # --- Verify Phase (pre-delivery test suite) ---
+        _touch_heartbeat(repo_root)
+        if "verify" in skip_phases:
+            _log("Skipping verify phase (already completed in previous run)")
+        elif config.phases.verify:
+            verify_ui = _make_ui()
+            if verify_ui is not None:
+                verify_ui.phase_header(
+                    "Verify (tests)",
+                    config.budget.per_phase,
+                    config.get_model(Phase.VERIFY),
+                )
+            else:
+                _log("=== Verify Phase (tests) ===")
+
+            verify_tools = ["Read", "Bash", "Glob", "Grep"]
+            verify_passed = False
+
+            # Loop runs max_fix_attempts + 1 iterations: the first is the initial
+            # verify check, and the remaining max_fix_attempts iterations each
+            # run a fix followed by a re-verify.
+            for attempt in range(config.verify.max_fix_attempts + 1):
+                # Budget guard (same pattern as review loop)
+                cost_so_far = sum(
+                    p.cost_usd for p in log.phases if p.cost_usd is not None
+                )
+                remaining = config.budget.per_run - cost_so_far
+                if remaining < config.budget.per_phase:
+                    _log(
+                        f"Verify loop: budget exhausted "
+                        f"({remaining:.2f} remaining). Blocking delivery."
+                    )
+                    break
+
+                # Run verify agent (read-only)
+                verify_system, verify_user = _build_verify_prompt(
+                    config, branch_name,
+                )
+                verify_result = run_phase_sync(
+                    Phase.VERIFY,
+                    verify_user,
+                    cwd=repo_root,
+                    system_prompt=verify_system,
+                    model=config.get_model(Phase.VERIFY),
+                    budget_usd=config.budget.per_phase,
+                    allowed_tools=verify_tools,
+                    ui=verify_ui if attempt == 0 else _make_ui(),
+                    retry_config=config.retry,
+                    timeout_seconds=config.budget.phase_timeout_seconds,
+                )
+                _append_phase(verify_result)
+                _capture_phase_memory(memory_store, verify_result, log.run_id, config)
+
+                # Determine if tests passed by checking the output
+                verify_output = verify_result.artifacts.get("result", "")
+                tests_failed = _verify_detected_failures(verify_output)
+
+                if not tests_failed:
+                    _log("  Verify: all tests passed")
+                    verify_passed = True
+                    break
+
+                _log(f"  Verify: test failures detected (attempt {attempt + 1}/{config.verify.max_fix_attempts + 1})")
+
+                # If we've used all fix attempts, don't try to fix again
+                if attempt >= config.verify.max_fix_attempts:
+                    break
+
+                # Budget guard before fix
+                cost_so_far = sum(
+                    p.cost_usd for p in log.phases if p.cost_usd is not None
+                )
+                remaining = config.budget.per_run - cost_so_far
+                if remaining < config.budget.per_phase:
+                    _log(
+                        f"Verify loop: budget exhausted before fix "
+                        f"({remaining:.2f} remaining). Blocking delivery."
+                    )
+                    break
+
+                # Run fix agent (full tools)
+                fix_system, fix_user = _build_verify_fix_prompt(
+                    config,
+                    branch_name,
+                    verify_output,
+                    fix_attempt=attempt + 1,
+                    max_fix_attempts=config.verify.max_fix_attempts,
+                )
+                fix_ui = _make_ui()
+                if fix_ui is not None:
+                    fix_ui.phase_header(
+                        f"Verify Fix (attempt {attempt + 1})",
+                        config.budget.per_phase,
+                        config.get_model(Phase.FIX),
+                    )
+                else:
+                    _log(f"  Running verify-fix agent (attempt {attempt + 1})...")
+                fix_result = run_phase_sync(
+                    Phase.FIX,
+                    fix_user,
+                    cwd=repo_root,
+                    system_prompt=fix_system,
+                    model=config.get_model(Phase.FIX),
+                    budget_usd=config.budget.per_phase,
+                    ui=fix_ui,
+                    retry_config=config.retry,
+                    timeout_seconds=config.budget.phase_timeout_seconds,
+                )
+                _append_phase(fix_result)
+                _capture_phase_memory(memory_store, fix_result, log.run_id, config)
+
+                if not fix_result.success:
+                    _log(f"  Verify-fix agent failed: {fix_result.error}")
+                    break
+
+            if not verify_passed:
+                _fail_run_log(
+                    repo_root, log,
+                    "Verify phase: tests still failing after all fix attempts. Delivery blocked.",
+                )
+                return log
 
         # --- Deliver Phase ---
         _touch_heartbeat(repo_root)

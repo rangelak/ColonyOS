@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
@@ -1529,7 +1529,22 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
         if self._state.daily_thread_date >= today_str:
             return False
 
-        # Date has changed — only rotate once we've reached the configured hour
+        try:
+            last_thread_date = date.fromisoformat(self._state.daily_thread_date)
+        except ValueError:
+            logger.warning(
+                "Invalid persisted daily thread date %r; rotating immediately",
+                self._state.daily_thread_date,
+            )
+            return True
+
+        today = now.date()
+        days_stale = (today - last_thread_date).days
+        if days_stale > 1:
+            return True
+
+        # For the immediately previous day, wait until the configured hour
+        # before rotating so the overnight thread remains stable.
         return now.hour >= self.config.slack.daily_thread_hour
 
     def _create_daily_summary(self) -> str:
