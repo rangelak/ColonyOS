@@ -18,6 +18,25 @@ Adds automatic `git pull --ff-only` at all pipeline entry points so that every n
 
 **PRD:** `cOS_prds/20260401_235107_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
 **Tasks:** `cOS_tasks/20260401_235107_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+## 20260401_235900 — Pre-Delivery Test Verification Phase
+
+Adds a Verify phase to the main pipeline between Learn and Deliver that runs the project's full test suite before opening a PR. If tests fail, a verify-fix loop (up to 2 attempts) auto-repairs the code; if failures persist, delivery is hard-blocked. This ensures no PR is opened with known test failures.
+
+**Created:**
+- `src/colonyos/instructions/verify.md` — Read-only test runner instruction template
+- `src/colonyos/instructions/verify_fix.md` — Write-enabled fix agent instruction template
+- `tests/test_verify_phase.py` — Comprehensive tests for the verify-fix loop
+- `tests/test_verify_instructions.py` — Tests for instruction template content
+
+**Modified:**
+- `src/colonyos/config.py` — Added `VerifyConfig` dataclass, `verify: bool` to `PhasesConfig`, safety-critical phase registration
+- `src/colonyos/orchestrator.py` — Verify phase insertion in `_run_pipeline()`, verify-fix loop, budget guards, resume/skip support
+- `tests/test_config.py` — Tests for `VerifyConfig` and `PhasesConfig.verify`
+- `tests/test_orchestrator.py` — Tests for verify phase resume mapping
+- `tests/test_ceo.py` — Updated phase count assertions
+
+**PRD:** `cOS_prds/20260401_224904_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260401_224904_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
 
 ## 20260401_173000 — Stuck Daemon Detection and Auto-Recovery
 

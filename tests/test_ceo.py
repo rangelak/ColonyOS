@@ -295,6 +295,7 @@ class TestCeoIntegration:
         deliver_result = PhaseResult(phase=Phase.DELIVER, success=True, cost_usd=0.01, duration_ms=100, session_id="s", artifacts={"result": "done"})
 
         learn_result = PhaseResult(phase=Phase.LEARN, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": ""})
+        verify_result = PhaseResult(phase=Phase.VERIFY, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "All tests passed"})
 
         mock_run.side_effect = [
             ceo_result,  # CEO phase (run_ceo)
@@ -302,6 +303,7 @@ class TestCeoIntegration:
             impl_result,
             decision_result,
             learn_result,
+            verify_result,
             deliver_result,
         ]
         mock_parallel.return_value = [approve_result]
