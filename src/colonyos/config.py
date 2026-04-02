@@ -35,13 +35,14 @@ DEFAULTS = {
         "max_total_usd": 500.0,
         "phase_timeout_seconds": 1800,
     },
-    "phases": {"plan": True, "implement": True, "review": True, "deliver": True},
+    "phases": {"plan": True, "implement": True, "review": True, "deliver": True, "verify": True},
     "branch_prefix": "colonyos/",
     "prds_dir": "cOS_prds",
     "tasks_dir": "cOS_tasks",
     "reviews_dir": "cOS_reviews",
     "proposals_dir": "cOS_proposals",
     "max_fix_iterations": 2,
+    "verify": {"max_fix_attempts": 2},
     "learnings": {"enabled": True, "max_entries": 100},
     "ci_fix": {
         "enabled": False,
@@ -150,6 +151,14 @@ class PhasesConfig:
     implement: bool = True
     review: bool = True
     deliver: bool = True
+    verify: bool = True
+
+
+@dataclass
+class VerifyConfig:
+    """Configuration for the pre-delivery test verification phase."""
+
+    max_fix_attempts: int = 2
 
 
 @dataclass
@@ -354,6 +363,7 @@ class ColonyConfig:
     repo_map: RepoMapConfig = field(default_factory=RepoMapConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
+    verify: VerifyConfig = field(default_factory=VerifyConfig)
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     daemon: DaemonConfig = field(default_factory=DaemonConfig)
     ceo_profiles: list[Persona] = field(default_factory=list)
@@ -489,6 +499,18 @@ def _parse_slack_config(raw: dict) -> SlackConfig:
         daily_thread_hour=daily_thread_hour,
         daily_thread_timezone=daily_thread_timezone,
     )
+
+
+def _parse_verify_config(raw: dict) -> VerifyConfig:
+    """Parse the ``verify`` section from config.yaml."""
+    if not raw:
+        return VerifyConfig()
+    max_fix_attempts = int(raw.get("max_fix_attempts", DEFAULTS["verify"]["max_fix_attempts"]))
+    if max_fix_attempts < 1:
+        raise ValueError(
+            f"verify.max_fix_attempts must be positive, got {max_fix_attempts}"
+        )
+    return VerifyConfig(max_fix_attempts=max_fix_attempts)
 
 
 def _parse_ci_fix_config(raw: dict) -> CIFixConfig:
@@ -1038,6 +1060,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
             implement=bool(phases_raw.get("implement", True)),
             review=bool(phases_raw.get("review", True)),
             deliver=bool(phases_raw.get("deliver", True)),
+            verify=bool(phases_raw.get("verify", True)),
         ),
         branch_prefix=raw.get("branch_prefix", DEFAULTS["branch_prefix"]),
         prds_dir=raw.get("prds_dir", DEFAULTS["prds_dir"]),
@@ -1064,6 +1087,7 @@ def load_config(repo_root: Path) -> ColonyConfig:
         repo_map=_parse_repo_map_config(raw.get("repo_map", {})),
         memory=_parse_memory_config(raw.get("memory", {})),
         retry=_parse_retry_config(raw.get("retry", {})),
+        verify=_parse_verify_config(raw.get("verify", {})),
         recovery=_parse_recovery_config(raw.get("recovery", {})),
         daemon=_parse_daemon_config(raw.get("daemon", {})),
         ceo_profiles=_parse_personas(raw.get("ceo_profiles", [])),
@@ -1110,6 +1134,7 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         "implement": config.phases.implement,
         "review": config.phases.review,
         "deliver": config.phases.deliver,
+        "verify": config.phases.verify,
     }
     data["branch_prefix"] = config.branch_prefix
     data["prds_dir"] = config.prds_dir
@@ -1119,6 +1144,13 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
 
     data["max_fix_iterations"] = config.max_fix_iterations
     data["auto_approve"] = config.auto_approve
+
+    verify_defaults = DEFAULTS["verify"]
+    if config.verify.max_fix_attempts != verify_defaults["max_fix_attempts"]:
+        data["verify"] = {
+            "max_fix_attempts": config.verify.max_fix_attempts,
+        }
+
     data["learnings"] = {
         "enabled": config.learnings.enabled,
         "max_entries": config.learnings.max_entries,
