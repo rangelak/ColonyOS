@@ -62,9 +62,9 @@ This is the 7th attempt at this refactoring. Previous 6 attempts failed because 
   - [x] 3.3 Run `python -m pytest tests/test_daemon.py -x -q` — all tests must pass
   - [x] 3.4 Commit: "refactor(daemon): extract recovery methods into _ResilienceMixin"
 
-- [ ] 4.0 Extract helper/formatting methods into `_HelpersMixin`
+- [x] 4.0 Extract helper/formatting methods into `_HelpersMixin`
   depends_on: [3.0]
-  - [ ] 4.1 Create `src/colonyos/daemon/_helpers.py` with a `_HelpersMixin` class containing these methods moved verbatim from `__init__.py`:
+  - [x] 4.1 Create `src/colonyos/daemon/_helpers.py` with a `_HelpersMixin` class containing these methods moved verbatim from `__init__.py`:
     - `_failure_summary` (line ~2618)
     - `_failure_guidance` (line ~2623)
     - `_format_item_error` (line ~2651)
@@ -77,9 +77,9 @@ This is the 7th attempt at this refactoring. Previous 6 attempts failed because 
     - `_warn_all_mode_safety` (line ~1857, @staticmethod)
     These are pure-ish functions that read `self.*` state but don't mutate it (except `_record_runtime_incident` which writes files). They have no call dependencies on other Daemon methods being extracted in the same step.
     Imports needed: `logging`, `from pathlib import Path`, `from datetime import datetime, timezone`, `typing.Any`
-  - [ ] 4.2 In `daemon/__init__.py`: (a) add `from colonyos.daemon._helpers import _HelpersMixin`, (b) add `_HelpersMixin` to `Daemon`'s inheritance, (c) remove the helper method bodies
-  - [ ] 4.3 Run `python -m pytest tests/test_daemon.py -x -q` — all tests must pass
-  - [ ] 4.4 Commit: "refactor(daemon): extract helper/formatting methods into _HelpersMixin"
+  - [x] 4.2 In `daemon/__init__.py`: (a) add `from colonyos.daemon._helpers import _HelpersMixin`, (b) add `_HelpersMixin` to `Daemon`'s inheritance, (c) remove the helper method bodies
+  - [x] 4.3 Run `python -m pytest tests/test_daemon.py -x -q` — all tests must pass
+  - [x] 4.4 Commit: "refactor(daemon): extract helper/formatting methods into _HelpersMixin"
 
 - [ ] 5.0 Final verification and cleanup
   depends_on: [4.0]
