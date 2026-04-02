@@ -521,6 +521,7 @@ class TestRun:
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            PhaseResult(phase=Phase.VERIFY, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "All tests passed"}),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -528,7 +529,7 @@ class TestRun:
         log = run("Add tests", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
-        assert mock_run.call_count == 5
+        assert mock_run.call_count == 6
         assert mock_parallel.call_count == 1
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
@@ -545,6 +546,7 @@ class TestRun:
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -565,14 +567,15 @@ class TestRun:
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
 
         log = run("Add tests", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
-        assert len(log.phases) == 4
-        assert mock_run.call_count == 4
+        assert len(log.phases) == 5
+        assert mock_run.call_count == 5
         phase_types = [p.phase for p in log.phases]
         assert Phase.REVIEW not in phase_types
 
@@ -591,13 +594,14 @@ class TestRun:
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
 
         log = run("Add tests", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
-        assert mock_run.call_count == 4
+        assert mock_run.call_count == 5
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
@@ -608,6 +612,7 @@ class TestRun:
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -629,6 +634,7 @@ class TestRun:
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -662,6 +668,7 @@ class TestRun:
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result(), _approve_review_result()]
@@ -716,6 +723,7 @@ class TestRun:
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -738,6 +746,7 @@ class TestRun:
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -838,6 +847,7 @@ class TestFixLoop:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.side_effect = [
@@ -917,6 +927,7 @@ class TestFixLoop:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.side_effect = [
@@ -942,6 +953,7 @@ class TestFixLoop:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "No clear verdict here."}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -980,6 +992,7 @@ class TestFixLoop:
     def test_budget_exhaustion_stops_review_loop(self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig):
         """Review loop stops when remaining per-run budget is insufficient."""
         config.budget = BudgetConfig(per_phase=1.0, per_run=2.5)
+        config.phases.verify = False
         save_config(tmp_git_repo, config)
         mock_run.side_effect = [
             PhaseResult(phase=Phase.PLAN, success=True, cost_usd=1.0,
@@ -1012,6 +1025,7 @@ class TestFixLoop:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -1200,11 +1214,22 @@ class TestComputeNextPhase:
     def test_fix_to_review(self):
         assert _compute_next_phase("fix") == "review"
 
-    def test_decision_to_deliver(self):
-        assert _compute_next_phase("decision") == "deliver"
+    def test_decision_to_verify(self):
+        assert _compute_next_phase("decision") == "verify"
+
+    def test_verify_to_deliver(self):
+        assert _compute_next_phase("verify") == "deliver"
 
     def test_unknown_returns_none(self):
         assert _compute_next_phase("unknown") is None
+
+
+class TestSkipMap:
+    def test_decision_skips_plan_implement_review(self):
+        assert _SKIP_MAP["decision"] == {"plan", "implement", "review"}
+
+    def test_verify_skips_plan_implement_review_verify(self):
+        assert _SKIP_MAP["verify"] == {"plan", "implement", "review", "verify"}
 
 
 class TestResumeFromRun:
@@ -1230,6 +1255,7 @@ class TestResumeFromRun:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -1276,6 +1302,7 @@ class TestResumeFromRun:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -1295,8 +1322,8 @@ class TestResumeFromRun:
 
         assert log.status == RunStatus.COMPLETED
         # Plan mock should NOT have been called for plan or implement
-        # mock_run calls: decision + learn + deliver = 3
-        assert mock_run.call_count == 3
+        # mock_run calls: decision + learn + verify + deliver = 4
+        assert mock_run.call_count == 4
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
@@ -1321,6 +1348,7 @@ class TestResumeFromRun:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -1363,6 +1391,7 @@ class TestResumeFromRun:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -1412,6 +1441,7 @@ class TestResumeFromRun:
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
 
@@ -1429,7 +1459,7 @@ class TestResumeFromRun:
         )
 
         assert log.status == RunStatus.COMPLETED
-        assert mock_run.call_count == 2  # Learn + deliver
+        assert mock_run.call_count == 3  # Learn + verify + deliver
         assert mock_parallel.call_count == 0  # No reviews
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
@@ -1446,6 +1476,7 @@ class TestResumeFromRun:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -1785,6 +1816,7 @@ class TestLearnPhaseWiring:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -1824,6 +1856,7 @@ class TestLearnPhaseWiring:
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -1849,6 +1882,7 @@ class TestLearnPhaseWiring:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             PhaseResult(phase=Phase.LEARN, success=False, error="Budget exceeded"),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_run.side_effect = learn_side_effect
@@ -1873,6 +1907,7 @@ class TestLearnPhaseWiring:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             RuntimeError("Agent crashed"),  # learn phase raises
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
 
@@ -1906,6 +1941,7 @@ class TestLearnPhaseWiring:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -1929,6 +1965,7 @@ class TestLearnPhaseWiring:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -2180,6 +2217,7 @@ class TestPerPhaseModelRouting:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -2223,6 +2261,7 @@ class TestPerPhaseModelRouting:
                         duration_ms=50, session_id="s",
                         artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -3695,6 +3734,7 @@ class TestAutomaticRecovery:
             PhaseResult(phase=Phase.AUTO_RECOVERY, success=True, artifacts={"result": "fixed"}),
             _fake_phase_result(Phase.IMPLEMENT),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
         ]
 
         log = run("Fix the broken branch", repo_root=tmp_git_repo, config=config)
@@ -3744,6 +3784,7 @@ class TestAutomaticRecovery:
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
         ]
 
         log = run("Rescue this run", repo_root=tmp_git_repo, config=config)
@@ -3840,6 +3881,7 @@ class TestRetryConfigWiring:
                 artifacts={"result": "VERDICT: GO"},
             ),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -3872,6 +3914,7 @@ class TestRetryConfigWiring:
                 artifacts={"result": "VERDICT: GO"},
             ),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -3915,6 +3958,7 @@ class TestRetryConfigWiring:
                 artifacts={"result": "VERDICT: GO"},
             ),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -3965,6 +4009,7 @@ class TestRetryConfigWiring:
                 artifacts={"result": "VERDICT: GO"},
             ),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -4004,6 +4049,7 @@ class TestHookWiring:
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -4127,6 +4173,7 @@ class TestHookWiring:
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -4155,6 +4202,7 @@ class TestHookWiring:
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
             _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
         mock_parallel.return_value = [_approve_review_result()]
@@ -4162,4 +4210,159 @@ class TestHookWiring:
         log = run("Add tests", repo_root=tmp_git_repo, config=config)
 
         assert log.status == RunStatus.COMPLETED
-        assert mock_run.call_count == 5
+        assert mock_run.call_count == 6
+
+# ---------------------------------------------------------------------------
+# Task 3.0 — Auto-pull at orchestrator entry points
+# ---------------------------------------------------------------------------
+
+
+class TestPreflightCheckPull:
+    """_preflight_check() should pull the current branch instead of fetch+warn."""
+
+    def _make_config(self) -> "ColonyConfig":
+        return ColonyConfig(
+            project=ProjectInfo(name="t", description="t", stack="python"),
+        )
+
+    @patch("colonyos.orchestrator.pull_branch", return_value=(True, None))
+    @patch("colonyos.orchestrator._get_head_sha", return_value="abc123")
+    @patch("colonyos.orchestrator.check_open_pr", return_value=(None, None))
+    @patch("colonyos.orchestrator.validate_branch_exists", return_value=(False, ""))
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_current_branch", return_value="main")
+    def test_pull_success_clears_behind_count(
+        self, _br, _clean, _exists, _pr, _sha, mock_pull,
+    ) -> None:
+        from colonyos.orchestrator import _preflight_check
+
+        result = _preflight_check(Path("/tmp/r"), "feat", self._make_config())
+        mock_pull.assert_called_once_with(Path("/tmp/r"))
+        assert result.main_behind_count == 0
+        assert not result.warnings
+
+    @patch("colonyos.orchestrator.pull_branch", return_value=(False, "network error"))
+    @patch("colonyos.orchestrator._get_head_sha", return_value="abc123")
+    @patch("colonyos.orchestrator.check_open_pr", return_value=(None, None))
+    @patch("colonyos.orchestrator.validate_branch_exists", return_value=(False, ""))
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_current_branch", return_value="main")
+    def test_pull_failure_adds_warning(
+        self, _br, _clean, _exists, _pr, _sha, mock_pull,
+    ) -> None:
+        from colonyos.orchestrator import _preflight_check
+
+        result = _preflight_check(Path("/tmp/r"), "feat", self._make_config())
+        mock_pull.assert_called_once()
+        assert any("Failed to pull" in w for w in result.warnings)
+
+    @patch("colonyos.orchestrator.pull_branch")
+    @patch("colonyos.orchestrator._get_head_sha", return_value="abc123")
+    @patch("colonyos.orchestrator.check_open_pr", return_value=(None, None))
+    @patch("colonyos.orchestrator.validate_branch_exists", return_value=(False, ""))
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_current_branch", return_value="main")
+    def test_offline_skips_pull(
+        self, _br, _clean, _exists, _pr, _sha, mock_pull,
+    ) -> None:
+        from colonyos.orchestrator import _preflight_check
+
+        result = _preflight_check(
+            Path("/tmp/r"), "feat", self._make_config(), offline=True,
+        )
+        mock_pull.assert_not_called()
+        assert result.main_behind_count is None
+
+    @patch("colonyos.orchestrator.pull_branch", return_value=(False, None))
+    @patch("colonyos.orchestrator._get_head_sha", return_value="abc123")
+    @patch("colonyos.orchestrator.check_open_pr", return_value=(None, None))
+    @patch("colonyos.orchestrator.validate_branch_exists", return_value=(False, ""))
+    @patch("colonyos.orchestrator._check_working_tree_clean", return_value=(True, ""))
+    @patch("colonyos.orchestrator._get_current_branch", return_value="main")
+    def test_no_upstream_no_warning(
+        self, _br, _clean, _exists, _pr, _sha, mock_pull,
+    ) -> None:
+        """When pull_branch returns (False, None) — no upstream — no warning added."""
+        from colonyos.orchestrator import _preflight_check
+
+        result = _preflight_check(Path("/tmp/r"), "feat", self._make_config())
+        mock_pull.assert_called_once()
+        assert not result.warnings
+
+
+class TestBaseBranchCheckoutPull:
+    """Base-branch checkout in run() should pull after checkout."""
+
+    @staticmethod
+    def _init_repo_with_main(tmp_path: Path) -> None:
+        """Create a git repo with a 'main' branch."""
+        import subprocess as sp
+        sp.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True)
+        sp.run(
+            ["git", "commit", "--allow-empty", "-m", "init"],
+            cwd=tmp_path, capture_output=True,
+            env={**__import__("os").environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+        )
+
+    def test_base_branch_pull_fails_raises_preflight_error(self, tmp_path: Path) -> None:
+        """When pull fails after base-branch checkout, PreflightError is raised."""
+        from colonyos.orchestrator import run as run_orchestrator
+        from colonyos.models import PreflightError as PFE
+
+        config = ColonyConfig(
+            project=ProjectInfo(name="test", description="test", stack="python"),
+        )
+
+        self._init_repo_with_main(tmp_path)
+
+        with patch("colonyos.orchestrator.pull_branch", return_value=(False, "timeout")) as mock_pull:
+            with pytest.raises(PFE, match="Failed to pull latest"):
+                run_orchestrator(
+                    "test prompt",
+                    repo_root=tmp_path,
+                    config=config,
+                    base_branch="main",
+                )
+            mock_pull.assert_called_once()
+
+    def test_base_branch_pull_skipped_when_offline(self) -> None:
+        """Verify that the base-branch checkout code gates pull behind 'not offline'."""
+        import inspect
+        from colonyos.orchestrator import run as run_fn
+
+        source = inspect.getsource(run_fn)
+        # The pull_branch call in the base-branch section must be inside
+        # an `if not offline` guard.
+        assert "if not offline:" in source
+        assert "pull_branch(repo_root)" in source
+
+    def test_base_branch_pull_succeeds_does_not_raise(self) -> None:
+        """When pull succeeds (True, None), no PreflightError about pull is raised.
+
+        Verified via source inspection: the raise only fires when
+        ``not pull_ok and pull_err is not None``.
+        """
+        import inspect
+        from colonyos.orchestrator import run as run_fn
+
+        source = inspect.getsource(run_fn)
+        # pull_branch is called and its result is checked
+        assert "pull_ok, pull_err = pull_branch(repo_root)" in source
+        # Only raises when pull_ok is False AND pull_err is not None
+        assert "if not pull_ok and pull_err is not None:" in source
+
+
+class TestThreadFixNoPull:
+    """Thread-fix checkout must NOT pull — SHA integrity check must remain intact."""
+
+    def test_thread_fix_does_not_call_pull_branch(self) -> None:
+        """Verify that run_thread_fix source code does not call pull_branch."""
+        import inspect
+        from colonyos.orchestrator import run_thread_fix
+
+        source = inspect.getsource(run_thread_fix)
+        assert "pull_branch" not in source, (
+            "run_thread_fix must NOT call pull_branch — "
+            "pulling would break the HEAD SHA integrity check"
+        )

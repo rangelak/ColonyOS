@@ -64,6 +64,7 @@ from colonyos.queue_runtime import (
     select_next_pending_item,
     sorted_pending_items,
 )
+from colonyos.recovery import pull_branch
 from colonyos.runtime_lock import RepoRuntimeGuard, RuntimeBusyError
 
 logger = logging.getLogger(__name__)
@@ -1937,7 +1938,7 @@ def _compute_elapsed_hours(
     return (now - original_start).total_seconds() / 3600.0
 
 
-def _ensure_on_main(repo_root: Path) -> None:
+def _ensure_on_main(repo_root: Path, *, offline: bool = False) -> None:
     """Ensure the working tree is on main with latest changes (for auto mode)."""
     try:
         result = subprocess.run(
@@ -1955,21 +1956,12 @@ def _ensure_on_main(repo_root: Path) -> None:
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise click.ClickException(f"Failed to checkout main: {exc}")
 
-    try:
-        result = subprocess.run(
-            ["git", "pull", "--ff-only"],
-            capture_output=True,
-            text=True,
-            cwd=repo_root,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            click.echo(
-                f"Warning: git pull --ff-only failed: {result.stderr.strip()}",
-                err=True,
-            )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        click.echo(f"Warning: Failed to pull latest main: {exc}", err=True)
+    if offline:
+        return
+
+    success, error = pull_branch(repo_root)
+    if not success and error:
+        click.echo(f"Warning: git pull --ff-only failed: {error}", err=True)
 
 
 def _run_single_iteration(
@@ -1996,7 +1988,7 @@ def _run_single_iteration(
     from colonyos.ui import NullUI, PhaseUI
 
     _touch_heartbeat(repo_root)
-    _ensure_on_main(repo_root)
+    _ensure_on_main(repo_root, offline=offline)
 
     if not quiet:
         dirs_content = load_directions(repo_root)

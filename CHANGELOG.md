@@ -21,6 +21,74 @@ Adds a `hooks` configuration section to `.colonyos/config.yaml` that lets users 
 **PRD:** `cOS_prds/20260402_071300_prd_add_a_hooks_configuration_section_to_colonyos_config_yaml_that_lets_users_define.md`
 **Tasks:** `cOS_tasks/20260402_071300_tasks_add_a_hooks_configuration_section_to_colonyos_config_yaml_that_lets_users_define.md`
 
+## 20260402_030000 — Task-Level Retry for Auto-Recovery
+
+Adds a task-level retry loop to `_run_sequential_implement()` that retries individual failed tasks with error context injected into the prompt, before falling through to the existing phase-level and nuke recovery cascade. This avoids re-executing already-committed successful tasks when only one task fails.
+
+**Modified:**
+- `src/colonyos/config.py` — Added `max_task_retries` field to `RecoveryConfig` with validation
+- `src/colonyos/orchestrator.py` — Added `_clean_working_tree()` helper, `previous_error` parameter to prompt builder, task-level retry loop with recovery event logging
+- `tests/test_config.py` — Tests for `max_task_retries` configuration and validation
+- `tests/test_sequential_implement.py` — Comprehensive unit tests for retry loop mechanics, git cleanup, error injection, dependent unblocking, and recovery event logging
+
+**PRD:** `cOS_prds/20260402_022155_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260402_022155_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
+## 20260402_015000 — Fix TUI Double Scrollbar, Auto-Scroll, and Text Selection
+
+Fixes three usability bugs in the daemon monitor and main TUI: eliminates the double scrollbar caused by a dead CSS selector and Screen-level overflow, implements smart auto-scroll that preserves the user's scroll position with a 3-line re-engagement threshold, adds a "new content below" indicator when scrolled up, and surfaces Shift+drag text selection hints.
+
+**Modified:**
+- `src/colonyos/tui/styles.py` — Fixed dead CSS selector `TranscriptView RichLog` → `TranscriptView`, added `overflow: hidden` to Screen
+- `src/colonyos/tui/widgets/transcript.py` — Disabled base `auto_scroll`, added scroll threshold re-engagement, unread lines indicator, fixed `_programmatic_scroll` timing
+- `src/colonyos/tui/widgets/hint_bar.py` — Added Shift+drag selection hint
+
+**Created:**
+- `tests/tui/test_transcript.py` — Tests for scroll behavior, unread counter, auto-scroll threshold
+- `tests/tui/test_app.py` — Integration tests for scroll behavior and monitor mode
+
+**PRD:** `cOS_prds/20260402_012507_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260402_012507_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
+## 20260402_004500 — Auto-Pull Latest on Branch Switch
+
+Adds automatic `git pull --ff-only` at all pipeline entry points so that every new run starts from the latest remote state, eliminating stale-base merge conflicts and wasted CI minutes. A shared `pull_branch()` helper in `recovery.py` is used consistently across `restore_to_branch()`, orchestrator base-branch checkout, preflight checks, and `_ensure_on_main()`. Offline mode and thread-fix paths are correctly excluded.
+
+**Modified:**
+- `src/colonyos/recovery.py` — Added `pull_branch()` helper; integrated into `restore_to_branch()`
+- `src/colonyos/orchestrator.py` — Auto-pull at base-branch checkout and preflight check
+- `src/colonyos/cli.py` — Refactored `_ensure_on_main()` to use shared `pull_branch()` helper
+
+**Tests:**
+- `tests/test_recovery.py` — Tests for `pull_branch()` and `restore_to_branch()` pull integration
+- `tests/test_orchestrator.py` — Tests for base-branch and preflight pull behavior
+- `tests/test_cli.py` — Tests for refactored `_ensure_on_main()`
+- `tests/test_pull_branch_integration.py` — End-to-end integration tests
+- `tests/test_preflight.py` — Updated preflight tests
+
+**PRD:** `cOS_prds/20260401_235107_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260401_235107_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
+## 20260401_235900 — Pre-Delivery Test Verification Phase
+
+Adds a Verify phase to the main pipeline between Learn and Deliver that runs the project's full test suite before opening a PR. If tests fail, a verify-fix loop (up to 2 attempts) auto-repairs the code; if failures persist, delivery is hard-blocked. This ensures no PR is opened with known test failures.
+
+**Created:**
+- `src/colonyos/instructions/verify.md` — Read-only test runner instruction template
+- `src/colonyos/instructions/verify_fix.md` — Write-enabled fix agent instruction template
+- `tests/test_verify_phase.py` — Comprehensive tests for the verify-fix loop
+- `tests/test_verify_instructions.py` — Tests for instruction template content
+
+**Modified:**
+- `src/colonyos/config.py` — Added `VerifyConfig` dataclass, `verify: bool` to `PhasesConfig`, safety-critical phase registration
+- `src/colonyos/orchestrator.py` — Verify phase insertion in `_run_pipeline()`, verify-fix loop, budget guards, resume/skip support
+- `tests/test_config.py` — Tests for `VerifyConfig` and `PhasesConfig.verify`
+- `tests/test_orchestrator.py` — Tests for verify phase resume mapping
+- `tests/test_ceo.py` — Updated phase count assertions
+
+**PRD:** `cOS_prds/20260401_224904_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260401_224904_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260401_173000 — Stuck Daemon Detection and Auto-Recovery
 
 Adds an in-process watchdog thread that detects when a pipeline has stalled (no heartbeat progress beyond a configurable threshold) and automatically recovers: canceling the stuck pipeline, marking the item as FAILED, alerting operators via Slack, and resuming the main loop. Also enriches `/healthz` with pipeline duration and stall status, adds `started_at` to `QueueItem`, and bumps the schema to v5.

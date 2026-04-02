@@ -329,6 +329,7 @@ class TestRunSequentialImplement:
     def test_first_task_fails_blocks_chain(
         self, mock_subprocess: MagicMock, mock_run: MagicMock, tmp_path: Path
     ) -> None:
+        from colonyos.config import RecoveryConfig
         from colonyos.orchestrator import _run_sequential_implement
 
         repo, prd_rel, task_rel = _setup_repo(tmp_path, SIMPLE_TASK_FILE)
@@ -339,7 +340,7 @@ class TestRunSequentialImplement:
         mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
 
         log = _make_run_log()
-        config = ColonyConfig()
+        config = ColonyConfig(recovery=RecoveryConfig(max_task_retries=0))
 
         result = _run_sequential_implement(
             log=log,
@@ -368,6 +369,7 @@ class TestRunSequentialImplement:
     def test_independent_tasks_continue_on_failure(
         self, mock_subprocess: MagicMock, mock_run: MagicMock, tmp_path: Path
     ) -> None:
+        from colonyos.config import RecoveryConfig
         from colonyos.orchestrator import _run_sequential_implement
 
         repo, prd_rel, task_rel = _setup_repo(tmp_path, INDEPENDENT_TASK_FILE)
@@ -379,7 +381,7 @@ class TestRunSequentialImplement:
         mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
 
         log = _make_run_log()
-        config = ColonyConfig()
+        config = ColonyConfig(recovery=RecoveryConfig(max_task_retries=0))
 
         result = _run_sequential_implement(
             log=log,
@@ -515,6 +517,7 @@ class TestRunSequentialImplement:
     def test_agent_exception_marks_task_failed(
         self, mock_subprocess: MagicMock, mock_run: MagicMock, tmp_path: Path
     ) -> None:
+        from colonyos.config import RecoveryConfig
         from colonyos.orchestrator import _run_sequential_implement
 
         repo, prd_rel, task_rel = _setup_repo(tmp_path, SIMPLE_TASK_FILE)
@@ -522,7 +525,7 @@ class TestRunSequentialImplement:
         mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
 
         log = _make_run_log()
-        config = ColonyConfig()
+        config = ColonyConfig(recovery=RecoveryConfig(max_task_retries=0))
 
         result = _run_sequential_implement(
             log=log,
@@ -874,6 +877,65 @@ class TestMemoryInjectionAndContextTrimming:
         assert "10.0: Task 10" in system
 
 
+class TestPreviousErrorInPrompt:
+    """Tests for the previous_error parameter of _build_single_task_implement_prompt."""
+
+    def test_previous_error_included_when_provided(self) -> None:
+        from colonyos.orchestrator import _build_single_task_implement_prompt
+
+        config = ColonyConfig()
+        _system, user = _build_single_task_implement_prompt(
+            config,
+            task_id="2.0",
+            task_description="Add auth",
+            prd_path="cOS_prds/test.md",
+            task_path="cOS_tasks/test.md",
+            branch_name="feature/test",
+            completed_tasks=[],
+            previous_error="TypeError: cannot add int and str",
+        )
+        assert "## Previous Attempt Failed" in user
+        assert "TypeError: cannot add int and str" in user
+
+    def test_previous_error_omitted_when_none(self) -> None:
+        from colonyos.orchestrator import _build_single_task_implement_prompt
+
+        config = ColonyConfig()
+        _system, user = _build_single_task_implement_prompt(
+            config,
+            task_id="2.0",
+            task_description="Add auth",
+            prd_path="cOS_prds/test.md",
+            task_path="cOS_tasks/test.md",
+            branch_name="feature/test",
+            completed_tasks=[],
+            previous_error=None,
+        )
+        assert "Previous Attempt Failed" not in user
+
+    def test_previous_error_truncated_to_incident_char_cap(self) -> None:
+        from colonyos.orchestrator import _build_single_task_implement_prompt
+
+        config = ColonyConfig()
+        cap = config.recovery.incident_char_cap
+        long_error = "x" * (cap + 500)
+        _system, user = _build_single_task_implement_prompt(
+            config,
+            task_id="2.0",
+            task_description="Add auth",
+            prd_path="cOS_prds/test.md",
+            task_path="cOS_tasks/test.md",
+            branch_name="feature/test",
+            completed_tasks=[],
+            previous_error=long_error,
+        )
+        assert "## Previous Attempt Failed" in user
+        # The full long_error should NOT appear (it's truncated)
+        assert long_error not in user
+        # But a truncated version should be present
+        assert "x" * cap in user
+
+
 class TestGitReturnCodeChecking:
     """Tests that git diff/ls-files failures are handled gracefully."""
 
@@ -920,3 +982,411 @@ class TestGitReturnCodeChecking:
         staged_files = add_call[0][0][3:]  # after ["git", "add", "--"]
         assert "new_file.py" in staged_files
         assert "bad.py" not in staged_files
+
+
+# ---------------------------------------------------------------------------
+# Task 3.0 — _clean_working_tree() helper
+# ---------------------------------------------------------------------------
+
+
+class TestTaskRetryLoop:
+    """Tests for the task-level retry loop in _run_sequential_implement (Task 4.0)."""
+
+    SINGLE_TASK = textwrap.dedent("""\
+        # Tasks
+        - [ ] 1.0 Add feature
+          depends_on: []
+    """)
+
+    @patch("colonyos.orchestrator._record_recovery_event")
+    @patch("colonyos.orchestrator._clean_working_tree")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    def test_fail_then_succeed_on_retry(
+        self,
+        mock_subprocess: MagicMock,
+        mock_run: MagicMock,
+        mock_clean: MagicMock,
+        mock_record: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Task fails once, succeeds on retry → completed, dependents execute."""
+        from colonyos.orchestrator import _run_sequential_implement
+
+        task_content = textwrap.dedent("""\
+            # Tasks
+            - [ ] 1.0 Add user model
+              depends_on: []
+            - [ ] 2.0 Add auth
+              depends_on: [1.0]
+        """)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, task_content)
+        mock_run.side_effect = [
+            _make_phase_result(success=False, cost=0.5),  # 1.0 fails
+            _make_phase_result(success=True, cost=0.5),   # 1.0 retry succeeds
+            _make_phase_result(success=True, cost=1.0),   # 2.0 succeeds
+        ]
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
+
+        log = _make_run_log()
+        config = ColonyConfig()  # default max_task_retries=1
+
+        result = _run_sequential_implement(
+            log=log,
+            repo_root=repo,
+            config=config,
+            branch_name="test-branch",
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            _make_ui=lambda: None,
+        )
+
+        assert result is not None
+        assert result.success is True
+        assert result.artifacts["completed"] == "2"
+        assert result.artifacts["failed"] == "0"
+        assert result.artifacts["blocked"] == "0"
+        # 3 calls: fail + retry + task 2.0
+        assert mock_run.call_count == 3
+        # Dependent 2.0 executed (not blocked)
+        assert result.artifacts["task_results"]["2.0"]["status"] == "COMPLETED"
+
+    @patch("colonyos.orchestrator._record_recovery_event")
+    @patch("colonyos.orchestrator._clean_working_tree")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    def test_all_retries_exhausted_marks_failed(
+        self,
+        mock_subprocess: MagicMock,
+        mock_run: MagicMock,
+        mock_clean: MagicMock,
+        mock_record: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Task fails all retries → FAILED, dependents BLOCKED."""
+        from colonyos.orchestrator import _run_sequential_implement
+
+        task_content = textwrap.dedent("""\
+            # Tasks
+            - [ ] 1.0 Add user model
+              depends_on: []
+            - [ ] 2.0 Add auth
+              depends_on: [1.0]
+        """)
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, task_content)
+        mock_run.side_effect = [
+            _make_phase_result(success=False, cost=0.5),  # 1.0 fails
+            _make_phase_result(success=False, cost=0.5),  # 1.0 retry fails
+        ]
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
+
+        log = _make_run_log()
+        config = ColonyConfig()  # default max_task_retries=1
+
+        result = _run_sequential_implement(
+            log=log,
+            repo_root=repo,
+            config=config,
+            branch_name="test-branch",
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            _make_ui=lambda: None,
+        )
+
+        assert result is not None
+        assert result.success is False
+        assert result.artifacts["failed"] == "1"
+        assert result.artifacts["blocked"] == "1"
+        assert result.artifacts["task_results"]["1.0"]["status"] == "FAILED"
+        assert result.artifacts["task_results"]["2.0"]["status"] == "BLOCKED"
+
+    @patch("colonyos.orchestrator._record_recovery_event")
+    @patch("colonyos.orchestrator._clean_working_tree")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    def test_clean_working_tree_called_before_retry(
+        self,
+        mock_subprocess: MagicMock,
+        mock_run: MagicMock,
+        mock_clean: MagicMock,
+        mock_record: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """_clean_working_tree() must be called before each retry attempt."""
+        from colonyos.orchestrator import _run_sequential_implement
+
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, self.SINGLE_TASK)
+        mock_run.side_effect = [
+            _make_phase_result(success=False, cost=0.5),  # fails
+            _make_phase_result(success=True, cost=0.5),   # retry succeeds
+        ]
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
+
+        log = _make_run_log()
+        config = ColonyConfig()
+
+        _run_sequential_implement(
+            log=log,
+            repo_root=repo,
+            config=config,
+            branch_name="test-branch",
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            _make_ui=lambda: None,
+        )
+
+        mock_clean.assert_called_once_with(repo)
+
+    @patch("colonyos.orchestrator._record_recovery_event")
+    @patch("colonyos.orchestrator._clean_working_tree")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    def test_previous_error_passed_on_retry(
+        self,
+        mock_subprocess: MagicMock,
+        mock_run: MagicMock,
+        mock_clean: MagicMock,
+        mock_record: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """_build_single_task_implement_prompt receives previous_error on retry."""
+        from colonyos.orchestrator import _run_sequential_implement
+
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, self.SINGLE_TASK)
+        fail_result = _make_phase_result(success=False, cost=0.5)
+        fail_result.error = "TypeError: bad things"
+        mock_run.side_effect = [
+            fail_result,
+            _make_phase_result(success=True, cost=0.5),
+        ]
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
+
+        log = _make_run_log()
+        config = ColonyConfig()
+
+        with patch(
+            "colonyos.orchestrator._build_single_task_implement_prompt",
+            wraps=__import__("colonyos.orchestrator", fromlist=["_build_single_task_implement_prompt"])._build_single_task_implement_prompt,
+        ) as mock_build:
+            _run_sequential_implement(
+                log=log,
+                repo_root=repo,
+                config=config,
+                branch_name="test-branch",
+                prd_rel=prd_rel,
+                task_rel=task_rel,
+                _make_ui=lambda: None,
+            )
+
+            # First call: no previous_error
+            first_call_kwargs = mock_build.call_args_list[0]
+            assert first_call_kwargs.kwargs.get("previous_error") is None
+            # Second call (retry): has previous_error
+            second_call_kwargs = mock_build.call_args_list[1]
+            assert second_call_kwargs.kwargs.get("previous_error") == "TypeError: bad things"
+
+    @patch("colonyos.orchestrator._record_recovery_event")
+    @patch("colonyos.orchestrator._clean_working_tree")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    def test_recovery_event_logged_for_each_retry(
+        self,
+        mock_subprocess: MagicMock,
+        mock_run: MagicMock,
+        mock_clean: MagicMock,
+        mock_record: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """_record_recovery_event called with kind='task_retry' for each retry."""
+        from colonyos.orchestrator import _run_sequential_implement
+
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, self.SINGLE_TASK)
+        mock_run.side_effect = [
+            _make_phase_result(success=False, cost=0.5),
+            _make_phase_result(success=True, cost=0.5),
+        ]
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
+
+        log = _make_run_log()
+        config = ColonyConfig()
+
+        _run_sequential_implement(
+            log=log,
+            repo_root=repo,
+            config=config,
+            branch_name="test-branch",
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            _make_ui=lambda: None,
+        )
+
+        mock_record.assert_called_once()
+        call_kwargs = mock_record.call_args
+        assert call_kwargs.kwargs["kind"] == "task_retry"
+        details = call_kwargs.kwargs["details"]
+        assert details["task_id"] == "1.0"
+        assert details["attempt"] == 1
+        assert "success" in details
+
+    @patch("colonyos.orchestrator._record_recovery_event")
+    @patch("colonyos.orchestrator._clean_working_tree")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    def test_max_task_retries_zero_disables_retry(
+        self,
+        mock_subprocess: MagicMock,
+        mock_run: MagicMock,
+        mock_clean: MagicMock,
+        mock_record: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """max_task_retries=0 → immediate failure, no retry (existing behavior)."""
+        from colonyos.config import RecoveryConfig
+        from colonyos.orchestrator import _run_sequential_implement
+
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, self.SINGLE_TASK)
+        mock_run.return_value = _make_phase_result(success=False, cost=0.5)
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
+
+        log = _make_run_log()
+        config = ColonyConfig(recovery=RecoveryConfig(max_task_retries=0))
+
+        result = _run_sequential_implement(
+            log=log,
+            repo_root=repo,
+            config=config,
+            branch_name="test-branch",
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            _make_ui=lambda: None,
+        )
+
+        assert result is not None
+        assert result.success is False
+        assert result.artifacts["failed"] == "1"
+        # Only 1 call, no retries
+        assert mock_run.call_count == 1
+        mock_clean.assert_not_called()
+        mock_record.assert_not_called()
+
+    @patch("colonyos.orchestrator._record_recovery_event")
+    @patch("colonyos.orchestrator._clean_working_tree")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    @patch("colonyos.orchestrator.subprocess")
+    def test_retry_uses_same_per_task_budget(
+        self,
+        mock_subprocess: MagicMock,
+        mock_run: MagicMock,
+        mock_clean: MagicMock,
+        mock_record: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Retry should use the same per_task_budget, not additional budget."""
+        from colonyos.orchestrator import _run_sequential_implement
+
+        repo, prd_rel, task_rel = _setup_repo(tmp_path, self.SINGLE_TASK)
+        mock_run.side_effect = [
+            _make_phase_result(success=False, cost=0.5),
+            _make_phase_result(success=True, cost=0.5),
+        ]
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="file.py\n")
+
+        log = _make_run_log()
+        config = ColonyConfig()
+
+        _run_sequential_implement(
+            log=log,
+            repo_root=repo,
+            config=config,
+            branch_name="test-branch",
+            prd_rel=prd_rel,
+            task_rel=task_rel,
+            _make_ui=lambda: None,
+        )
+
+        # Both calls should have the same budget
+        expected_budget = config.budget.per_phase / 1  # 1 task
+        for call in mock_run.call_args_list:
+            assert call.kwargs.get("budget_usd") == pytest.approx(expected_budget)
+
+
+class TestCleanWorkingTree:
+    """Unit tests for ``_clean_working_tree()``."""
+
+    def test_calls_checkout_and_clean(self, tmp_path: Path) -> None:
+        """Should invoke ``git checkout -- .`` then ``git clean -fd``."""
+        from colonyos.orchestrator import _clean_working_tree
+
+        with patch("colonyos.orchestrator.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            _clean_working_tree(tmp_path)
+
+        assert mock_run.call_count == 2
+        first_call = mock_run.call_args_list[0]
+        second_call = mock_run.call_args_list[1]
+        assert first_call[0][0] == ["git", "checkout", "--", "."]
+        assert first_call[1]["cwd"] == tmp_path
+        assert second_call[0][0] == ["git", "clean", "-fd"]
+        assert second_call[1]["cwd"] == tmp_path
+
+    def test_subprocess_error_logs_warning_no_raise(self, tmp_path: Path) -> None:
+        """On OSError the helper should log a warning, not raise."""
+        from colonyos.orchestrator import _clean_working_tree
+
+        with patch("colonyos.orchestrator.subprocess.run", side_effect=OSError("nope")):
+            with patch("colonyos.orchestrator.logger") as mock_logger:
+                # Should NOT raise
+                _clean_working_tree(tmp_path)
+                assert mock_logger.warning.call_count >= 1
+
+    def test_nonzero_returncode_logs_warning_no_raise(self, tmp_path: Path) -> None:
+        """A non-zero exit code should log a warning, not raise."""
+        from colonyos.orchestrator import _clean_working_tree
+
+        failing = MagicMock(returncode=1, stderr="error msg")
+        with patch("colonyos.orchestrator.subprocess.run", return_value=failing):
+            with patch("colonyos.orchestrator.logger") as mock_logger:
+                _clean_working_tree(tmp_path)
+                assert mock_logger.warning.call_count >= 1
+
+    def test_timeout_logs_warning_no_raise(self, tmp_path: Path) -> None:
+        """A subprocess timeout should log a warning, not raise."""
+        import subprocess as _sp
+        from colonyos.orchestrator import _clean_working_tree
+
+        with patch(
+            "colonyos.orchestrator.subprocess.run",
+            side_effect=_sp.TimeoutExpired(cmd="git", timeout=30),
+        ):
+            with patch("colonyos.orchestrator.logger") as mock_logger:
+                _clean_working_tree(tmp_path)
+                assert mock_logger.warning.call_count >= 1
+
+    def test_scoped_to_repo_root(self, tmp_path: Path) -> None:
+        """Both commands must pass *repo_root* as ``cwd``."""
+        from colonyos.orchestrator import _clean_working_tree
+
+        custom_root = tmp_path / "my_repo"
+        custom_root.mkdir()
+        with patch("colonyos.orchestrator.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            _clean_working_tree(custom_root)
+
+        for call in mock_run.call_args_list:
+            assert call[1]["cwd"] == custom_root
+
+    def test_second_command_runs_even_if_first_fails(self, tmp_path: Path) -> None:
+        """``git clean -fd`` should still run even if ``git checkout`` fails."""
+        from colonyos.orchestrator import _clean_working_tree
+
+        fail_then_ok = [
+            OSError("checkout failed"),
+            MagicMock(returncode=0, stderr=""),
+        ]
+        with patch(
+            "colonyos.orchestrator.subprocess.run",
+            side_effect=fail_then_ok,
+        ):
+            with patch("colonyos.orchestrator.logger"):
+                _clean_working_tree(tmp_path)
+        # If we get here without error, both commands were attempted

@@ -147,3 +147,30 @@ _Date: 2026-04-02 | Feature: add_a_hooks_configuration_section_to_colonyos_confi
 - **[security]** API endpoints serving content need server-side sanitization even when client-side escaping exists; single-layer defense is fragile.
 - **[code-quality]** Substring/prefix ID resolution without a minimum-length threshold matches too broadly on 1-2 character inputs.
 - **[architecture]** Functions returning `str | list[str]` unions requiring `isinstance` discrimination are fragile; use typed result dataclasses.
+
+## Run: run-20260402_022155-d1ec4c42a0
+_Date: 2026-04-02 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
+
+- **[security]** GitHub Actions pinned by commit SHA, not mutable tag, prevent supply chain attacks via tag rewriting.
+- **[architecture]** Pre-flight validation steps should be ordered cheapest-first (local checks before remote API calls) to fail fast.
+- **[security]** Aggregate char caps on external inputs (e.g., CI logs fed to LLMs) are needed to prevent prompt bloat attacks.
+- **[code-quality]** Polling intervals should stop when the monitored resource reaches a terminal state to avoid unnecessary load.
+- **[security]** SPA catch-all file-serving routes must validate resolved paths stay within the static asset root directory.
+
+## Run: run-20260402_012507-47a62348e1
+_Date: 2026-04-02 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
+
+- **[architecture]** Pre-flight validation chains should order checks cheapest-first (e.g., local auth before network calls) to fail fast efficiently.
+- **[code-quality]** Run state must be persisted to disk before entering retry/fix loops so completed phase results survive mid-loop crashes.
+- **[security]** Auth token comparison must use constant-time functions (e.g., `secrets.compare_digest`) to prevent timing side-channel attacks.
+- **[security]** Write/mutate API capabilities should be gated behind an explicit opt-in flag (env var or config), not enabled by default.
+- **[code-quality]** Tail-biased log truncation preserves error context better than head-biased for CI/build logs where failures appear last.
+
+## Run: run-20260401_235107-7d1db511f2
+_Date: 2026-04-02 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
+
+- **[architecture]** Public functions must validate own inputs (e.g., path traversal), not assume callers pre-validated; enforce at API boundary.
+- **[code-quality]** Functions returning untagged unions (`str | list[str]`) for branching are fragile; use dedicated result dataclasses.
+- **[architecture]** Read-only polling endpoints re-reading all files from disk per request need a TTL cache layer under frequent polling.
+- **[code-quality]** `--json` CLI output should serialize the computed view model, not raw persisted data, to match terminal UI fields.
+- **[security]** SPA catch-all routes serving static files must validate resolved paths stay within the dist directory via containment check.
