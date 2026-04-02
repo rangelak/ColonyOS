@@ -1,5 +1,22 @@
 # Changelog
 
+## 20260402_071500 — Refactor daemon.py into daemon/ Package
+
+Converts the 2,655-line `daemon.py` monolith into a `daemon/` package using mixins, reducing the main file to ~1,960 lines while preserving all existing test mock targets and backward-compatible imports.
+
+**Created:**
+- `src/colonyos/daemon/__init__.py` — Main Daemon class with mixin inheritance
+- `src/colonyos/daemon/_ui.py` — Extracted `DaemonError`, `_CombinedUI`, `_DaemonMonitorEventUI`
+- `src/colonyos/daemon/_watchdog.py` — `_WatchdogMixin` for watchdog thread and stall detection
+- `src/colonyos/daemon/_resilience.py` — `_ResilienceMixin` for crash recovery and dirty worktree handling
+- `src/colonyos/daemon/_helpers.py` — `_HelpersMixin` for formatting and helper methods
+
+**Modified:**
+- `src/colonyos/daemon.py` — Replaced by `daemon/` package (deleted)
+
+**PRD:** `cOS_prds/20260402_054259_prd_colonyos_daemon_py_recovery_context_previous_branch_colonyos_colonyos_daemon_py.md`
+**Tasks:** `cOS_tasks/20260402_054259_tasks_colonyos_daemon_py_recovery_context_previous_branch_colonyos_colonyos_daemon_py.md`
+
 ## 20260401_173000 — Stuck Daemon Detection and Auto-Recovery
 
 Adds an in-process watchdog thread that detects when a pipeline has stalled (no heartbeat progress beyond a configurable threshold) and automatically recovers: canceling the stuck pipeline, marking the item as FAILED, alerting operators via Slack, and resuming the main loop. Also enriches `/healthz` with pipeline duration and stall status, adds `started_at` to `QueueItem`, and bumps the schema to v5.
