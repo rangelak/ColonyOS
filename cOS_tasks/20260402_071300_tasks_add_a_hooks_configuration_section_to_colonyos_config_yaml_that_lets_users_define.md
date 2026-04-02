@@ -132,16 +132,16 @@
     - Use Click styling for pass/fail indication
     - Return sys.exit(1) if any blocking hook failed
 
-- [ ] 6.0 Edge case tests and validation
+- [x] 6.0 Edge case tests and validation
   depends_on: [4.0, 5.0]
-  - [ ] 6.1 Run full existing test suite to confirm zero regressions in hooks-related tests (run `python3 -m pytest tests/test_hooks.py tests/test_config.py tests/test_orchestrator.py tests/test_sanitize.py tests/test_cli.py -q`)
-  - [ ] 6.2 Add edge case tests in `tests/test_hooks.py`:
+  - [x] 6.1 Run full existing test suite to confirm zero regressions in hooks-related tests (run `python3 -m pytest tests/test_hooks.py tests/test_config.py tests/test_orchestrator.py tests/test_sanitize.py tests/test_cli.py -q`)
+  - [x] 6.2 Add edge case tests in `tests/test_hooks.py`:
     - Test hook command with shell pipes (e.g., `echo hello | tr a-z A-Z`)
     - Test hook command that produces non-UTF8 output (use `printf '\\x80\\xff'`)
     - Test hook command that writes to stderr only
     - Test multiple inject_output hooks — outputs concatenated in order
     - Test hook with timeout_seconds=1 and a command that takes 2s (use `sleep 2`)
-  - [ ] 6.3 Add a config→runner smoke test in `tests/test_hooks.py`:
+  - [x] 6.3 Add a config→runner smoke test in `tests/test_hooks.py`:
     - Create a temp directory with a config.yaml containing hooks for multiple events
     - Load config via `load_config()`, create HookRunner, run hooks for each event
     - Verify results match expectations (no orchestrator involved)
