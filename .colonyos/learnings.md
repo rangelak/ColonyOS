@@ -140,6 +140,15 @@ _Date: 2026-04-01 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[code-quality]** LLM agent instruction templates should prohibit suppression annotations (`# type: ignore`, `# noqa`) as valid fixes.
 - **[architecture]** Aggregation modules that dynamically enumerate categories from data avoid code changes when new variants are added.
 
+## Run: run-20260402_022155-d1ec4c42a0
+_Date: 2026-04-02 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
+
+- **[security]** GitHub Actions pinned by commit SHA, not mutable tag, prevent supply chain attacks via tag rewriting.
+- **[architecture]** Pre-flight validation steps should be ordered cheapest-first (local checks before remote API calls) to fail fast.
+- **[security]** Aggregate char caps on external inputs (e.g., CI logs fed to LLMs) are needed to prevent prompt bloat attacks.
+- **[code-quality]** Polling intervals should stop when the monitored resource reaches a terminal state to avoid unnecessary load.
+- **[security]** SPA catch-all file-serving routes must validate resolved paths stay within the static asset root directory.
+
 ## Run: run-20260402_012507-47a62348e1
 _Date: 2026-04-02 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
 
