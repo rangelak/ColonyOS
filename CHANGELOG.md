@@ -13,6 +13,22 @@ Adds a task-level retry loop to `_run_sequential_implement()` that retries indiv
 **PRD:** `cOS_prds/20260402_022155_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
 **Tasks:** `cOS_tasks/20260402_022155_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
 
+## 20260402_015000 — Fix TUI Double Scrollbar, Auto-Scroll, and Text Selection
+
+Fixes three usability bugs in the daemon monitor and main TUI: eliminates the double scrollbar caused by a dead CSS selector and Screen-level overflow, implements smart auto-scroll that preserves the user's scroll position with a 3-line re-engagement threshold, adds a "new content below" indicator when scrolled up, and surfaces Shift+drag text selection hints.
+
+**Modified:**
+- `src/colonyos/tui/styles.py` — Fixed dead CSS selector `TranscriptView RichLog` → `TranscriptView`, added `overflow: hidden` to Screen
+- `src/colonyos/tui/widgets/transcript.py` — Disabled base `auto_scroll`, added scroll threshold re-engagement, unread lines indicator, fixed `_programmatic_scroll` timing
+- `src/colonyos/tui/widgets/hint_bar.py` — Added Shift+drag selection hint
+
+**Created:**
+- `tests/tui/test_transcript.py` — Tests for scroll behavior, unread counter, auto-scroll threshold
+- `tests/tui/test_app.py` — Integration tests for scroll behavior and monitor mode
+
+**PRD:** `cOS_prds/20260402_012507_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260402_012507_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260402_004500 — Auto-Pull Latest on Branch Switch
 
 Adds automatic `git pull --ff-only` at all pipeline entry points so that every new run starts from the latest remote state, eliminating stale-base merge conflicts and wasted CI minutes. A shared `pull_branch()` helper in `recovery.py` is used consistently across `restore_to_branch()`, orchestrator base-branch checkout, preflight checks, and `_ensure_on_main()`. Offline mode and thread-fix paths are correctly excluded.

@@ -40,29 +40,65 @@ class TranscriptView(RichLog):
     # Layout CSS is defined in APP_CSS (styles.py) — no DEFAULT_CSS needed.
 
     def __init__(self, **kwargs: object) -> None:
-        # RichLog constructor args
-        super().__init__(highlight=False, markup=True, wrap=True, **kwargs)
+        # Disable RichLog's built-in auto_scroll so our custom _auto_scroll
+        # is the sole scroll controller (FR-2.1).
+        super().__init__(highlight=False, markup=True, wrap=True, auto_scroll=False, **kwargs)
         self._auto_scroll = True
         self._programmatic_scroll: bool = False
+        self._pending_programmatic_clear: bool = False
+        self._unread_lines: int = 0
 
     # -- scroll tracking -----------------------------------------------------
 
+    # Number of lines from the bottom within which auto-scroll re-engages.
+    _SCROLL_REENGAGE_THRESHOLD = 3
+
     def on_scroll_y(self) -> None:
         """Track whether the user has scrolled away from the bottom."""
+        # Clear the programmatic-scroll flag asynchronously: the flag was
+        # set before scroll_end() but on_scroll_y fires on the next event-
+        # loop tick, so we clear it here instead of synchronously (FR-2.3).
+        if self._pending_programmatic_clear:
+            self._programmatic_scroll = False
+            self._pending_programmatic_clear = False
+            return
         if self._programmatic_scroll:
             return
         max_scroll = self.virtual_size.height - self.size.height
         if max_scroll <= 0:
             self._auto_scroll = True
+            self._unread_lines = 0
         else:
-            self._auto_scroll = self.scroll_y >= max_scroll
+            # Re-engage auto-scroll when within a small threshold of the
+            # bottom so users don't have to hit the exact last pixel (FR-2.2).
+            near_bottom = self.scroll_y >= max_scroll - self._SCROLL_REENGAGE_THRESHOLD
+            self._auto_scroll = near_bottom
+            if near_bottom:
+                self._unread_lines = 0
 
     def _scroll_to_end(self) -> None:
-        """Scroll to the bottom if auto-scroll is active."""
+        """Scroll to the bottom if auto-scroll is active.
+
+        When auto-scroll is disabled (user scrolled up), increments the
+        unread-lines counter and shows a one-time notification when new
+        unread content first appears (FR-3).
+        """
         if self._auto_scroll:
             self._programmatic_scroll = True
             self.scroll_end(animate=False)
-            self._programmatic_scroll = False
+            # Don't clear _programmatic_scroll synchronously — scroll_end
+            # posts an async message.  Set a pending flag so on_scroll_y
+            # clears it on the next tick (FR-2.3).
+            self._pending_programmatic_clear = True
+        else:
+            was_zero = self._unread_lines == 0
+            self._unread_lines += 1
+            if was_zero:
+                self.notify(
+                    "\u2193 New lines below \u2014 press End to resume",
+                    severity="information",
+                    timeout=5,
+                )
 
     # -- public API ----------------------------------------------------------
 
@@ -224,7 +260,7 @@ class TranscriptView(RichLog):
             justify="center",
         )
         shortcuts = Text(
-            "Shift+Enter / Ctrl+J newline   Ctrl+C cancel   Ctrl+L clear",
+            "Shift+Enter / Ctrl+J newline   Ctrl+C cancel   Ctrl+L clear   Shift+drag select",
             style=COLOR_DIM,
             justify="center",
         )
@@ -246,7 +282,7 @@ class TranscriptView(RichLog):
         self.write(Text())
         summary = Text("Monitoring the autonomous daemon and its active work.", style=COLOR_DIM, justify="center")
         shortcuts = Text(
-            "Ctrl+C stop daemon   Ctrl+L clear transcript   Ctrl+S export",
+            "Ctrl+C stop daemon   Ctrl+L clear transcript   Ctrl+S export   Shift+drag select",
             style=COLOR_DIM,
             justify="center",
         )
@@ -273,8 +309,9 @@ class TranscriptView(RichLog):
         return "\n".join(strip.text for strip in self.lines)
 
     def re_enable_auto_scroll(self) -> None:
-        """Re-enable auto-scroll and jump to the bottom."""
+        """Re-enable auto-scroll, clear unread counter, and jump to the bottom."""
         self._auto_scroll = True
+        self._unread_lines = 0
         self._scroll_to_end()
 
     def clear_transcript(self) -> None:

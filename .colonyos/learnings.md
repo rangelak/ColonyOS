@@ -149,6 +149,15 @@ _Date: 2026-04-02 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[code-quality]** Polling intervals should stop when the monitored resource reaches a terminal state to avoid unnecessary load.
 - **[security]** SPA catch-all file-serving routes must validate resolved paths stay within the static asset root directory.
 
+## Run: run-20260402_012507-47a62348e1
+_Date: 2026-04-02 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
+
+- **[architecture]** Pre-flight validation chains should order checks cheapest-first (e.g., local auth before network calls) to fail fast efficiently.
+- **[code-quality]** Run state must be persisted to disk before entering retry/fix loops so completed phase results survive mid-loop crashes.
+- **[security]** Auth token comparison must use constant-time functions (e.g., `secrets.compare_digest`) to prevent timing side-channel attacks.
+- **[security]** Write/mutate API capabilities should be gated behind an explicit opt-in flag (env var or config), not enabled by default.
+- **[code-quality]** Tail-biased log truncation preserves error context better than head-biased for CI/build logs where failures appear last.
+
 ## Run: run-20260401_235107-7d1db511f2
 _Date: 2026-04-02 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
 

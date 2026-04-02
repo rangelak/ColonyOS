@@ -127,6 +127,8 @@ async def test_hint_bar_renders_keybinding_text():
         assert "Ctrl+C cancel" in rendered
         assert "Ctrl+J newline" in rendered
         assert "Ctrl+L clear" in rendered
+        assert "Shift+drag" in rendered
+        assert "select" in rendered
 
 
 @pytest.mark.asyncio
