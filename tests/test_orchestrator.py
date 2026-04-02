@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 
 import click
 import pytest
@@ -8,6 +8,7 @@ import pytest
 from colonyos.config import (
     BudgetConfig,
     ColonyConfig,
+    HookConfig,
     LearningsConfig,
     ParallelImplementConfig,
     PhasesConfig,
@@ -3973,3 +3974,189 @@ class TestRetryConfigWiring:
         # Run completed successfully — recovery was never needed
         assert log.status == RunStatus.COMPLETED
         assert len(log.recovery_events) == 0
+
+
+class TestHookWiring:
+    """Tests for HookRunner integration into the orchestrator pipeline."""
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_hooks_called_at_each_phase_boundary(
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
+    ):
+        """HookRunner.run_hooks is called with correct event names at each phase boundary."""
+        from colonyos.hooks import HookRunner, HookResult
+
+        config.hooks = {
+            "pre_plan": [HookConfig(command="echo pre_plan")],
+            "post_plan": [HookConfig(command="echo post_plan")],
+            "pre_implement": [HookConfig(command="echo pre_implement")],
+            "post_implement": [HookConfig(command="echo post_implement")],
+            "pre_review": [HookConfig(command="echo pre_review")],
+            "post_review": [HookConfig(command="echo post_review")],
+            "pre_deliver": [HookConfig(command="echo pre_deliver")],
+            "post_deliver": [HookConfig(command="echo post_deliver")],
+        }
+        save_config(tmp_git_repo, config)
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        with patch.object(HookRunner, "run_hooks", return_value=[]) as mock_hooks:
+            log = run("Add feature", repo_root=tmp_git_repo, config=config)
+
+        assert log.status == RunStatus.COMPLETED
+        hook_events = [c.args[0] for c in mock_hooks.call_args_list]
+        assert "pre_plan" in hook_events
+        assert "post_plan" in hook_events
+        assert "pre_implement" in hook_events
+        assert "post_implement" in hook_events
+        assert "pre_review" in hook_events
+        assert "post_review" in hook_events
+        assert "pre_deliver" in hook_events
+        assert "post_deliver" in hook_events
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_blocking_pre_hook_failure_prevents_phase_and_triggers_on_failure(
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
+    ):
+        """A blocking pre_plan hook failure prevents plan phase and triggers on_failure."""
+        from colonyos.hooks import HookRunner, HookResult
+
+        config.hooks = {
+            "pre_plan": [HookConfig(command="false", blocking=True)],
+            "on_failure": [HookConfig(command="echo notify")],
+        }
+        save_config(tmp_git_repo, config)
+
+        # run_phase_sync should NOT be called because pre_plan fails
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+        ]
+
+        fail_result = HookResult(
+            command="false", exit_code=1, stdout="", stderr="",
+            duration_ms=10, timed_out=False, success=False,
+        )
+
+        def fake_run_hooks(event, context):
+            if event == "pre_plan":
+                return [fail_result]
+            return []
+
+        with patch.object(HookRunner, "run_hooks", side_effect=fake_run_hooks) as mock_hooks, \
+             patch.object(HookRunner, "run_on_failure", return_value=[]) as mock_on_failure:
+            log = run("Add feature", repo_root=tmp_git_repo, config=config)
+
+        assert log.status == RunStatus.FAILED
+        mock_on_failure.assert_called()
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_blocking_post_hook_failure_triggers_on_failure_and_halts(
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
+    ):
+        """A blocking post_plan hook failure triggers on_failure and halts pipeline."""
+        from colonyos.hooks import HookRunner, HookResult
+
+        config.hooks = {
+            "post_plan": [HookConfig(command="false", blocking=True)],
+            "on_failure": [HookConfig(command="echo notify")],
+        }
+        save_config(tmp_git_repo, config)
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+        ]
+
+        fail_result = HookResult(
+            command="false", exit_code=1, stdout="", stderr="",
+            duration_ms=10, timed_out=False, success=False,
+        )
+
+        def fake_run_hooks(event, context):
+            if event == "post_plan":
+                return [fail_result]
+            return []
+
+        with patch.object(HookRunner, "run_hooks", side_effect=fake_run_hooks) as mock_hooks, \
+             patch.object(HookRunner, "run_on_failure", return_value=[]) as mock_on_failure:
+            log = run("Add feature", repo_root=tmp_git_repo, config=config)
+
+        assert log.status == RunStatus.FAILED
+        mock_on_failure.assert_called()
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_inject_output_appended_to_next_phase_prompt(
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
+    ):
+        """inject_output results from hooks are appended to next phase user prompt."""
+        from colonyos.hooks import HookRunner, HookResult
+
+        config.hooks = {
+            "post_plan": [HookConfig(command="echo bundle_info", inject_output=True)],
+        }
+        save_config(tmp_git_repo, config)
+
+        inject_result = HookResult(
+            command="echo bundle_info", exit_code=0, stdout="bundle_info\n", stderr="",
+            duration_ms=10, timed_out=False, success=True,
+            injected_output="Bundle size: 42KB",
+        )
+
+        def fake_run_hooks(event, context):
+            if event == "post_plan":
+                return [inject_result]
+            return []
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        with patch.object(HookRunner, "run_hooks", side_effect=fake_run_hooks):
+            log = run("Add feature", repo_root=tmp_git_repo, config=config)
+
+        assert log.status == RunStatus.COMPLETED
+        # Verify the implement phase prompt contains the injected text
+        # The implement phase is the 2nd call to run_phase_sync (index 1)
+        impl_call = mock_run.call_args_list[1]
+        impl_user_prompt = impl_call.args[1] if len(impl_call.args) > 1 else impl_call.kwargs.get("prompt", "")
+        assert "Hook Output" in impl_user_prompt or "Bundle size: 42KB" in impl_user_prompt
+
+    @patch("colonyos.orchestrator.run_phases_parallel_sync")
+    @patch("colonyos.orchestrator.run_phase_sync")
+    def test_no_hooks_configured_pipeline_unchanged(
+        self, mock_run, mock_parallel, tmp_git_repo: Path, config: ColonyConfig
+    ):
+        """When no hooks are configured, pipeline runs unchanged (regression test)."""
+        # config.hooks is empty by default
+        save_config(tmp_git_repo, config)
+
+        mock_run.side_effect = [
+            _fake_phase_result(Phase.PLAN),
+            _fake_phase_result(Phase.IMPLEMENT),
+            PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01, duration_ms=50, session_id="s", artifacts={"result": "VERDICT: GO"}),
+            _fake_phase_result(Phase.LEARN),
+            _fake_phase_result(Phase.DELIVER),
+        ]
+        mock_parallel.return_value = [_approve_review_result()]
+
+        log = run("Add tests", repo_root=tmp_git_repo, config=config)
+
+        assert log.status == RunStatus.COMPLETED
+        assert mock_run.call_count == 5

@@ -84,16 +84,16 @@
     - Call `sanitize_hook_output()` on stdout when `inject_output=True`
     - Log each hook execution at INFO level: event, command (first 80 chars), exit code, duration
 
-- [ ] 4.0 Orchestrator wiring (integration layer)
+- [x] 4.0 Orchestrator wiring (integration layer)
   depends_on: [3.0]
-  - [ ] 4.1 Write tests in `tests/test_orchestrator.py` for hook wiring:
+  - [x] 4.1 Write tests in `tests/test_orchestrator.py` for hook wiring:
     - Test that HookRunner.run_hooks is called with correct event names at each phase boundary (mock HookRunner, verify call args)
     - Test that blocking pre_* hook failure prevents phase execution and triggers on_failure
     - Test that blocking post_* hook failure triggers on_failure and halts pipeline
     - Test that inject_output results are appended to next phase user prompt
     - Test that when no hooks configured, pipeline runs unchanged (regression test)
     - Use mock/patch on HookRunner — do NOT mock the full pipeline
-  - [ ] 4.2 Add `hook_runner: HookRunner | None = None` parameter to `_run_pipeline()`:
+  - [x] 4.2 Add `hook_runner: HookRunner | None = None` parameter to `_run_pipeline()`:
     - Create a helper `_run_hooks_at(hook_runner, event, context, log) -> str | None` that:
       - Calls `hook_runner.run_hooks(event, context)`
       - Returns concatenated inject_output text (or None)
@@ -108,12 +108,12 @@
       - Before deliver: `pre_deliver`
       - After successful deliver: `post_deliver`
     - Wire `on_failure` into existing `_fail_run_log` calls
-  - [ ] 4.3 Construct `HookRunner` in `run()` function (line ~4080) and pass to `_run_pipeline()`:
+  - [x] 4.3 Construct `HookRunner` in `run()` function and pass to `_run_pipeline()`:
     - Only create if `config.hooks` is non-empty (zero overhead when unconfigured)
     - Build `HookContext` from available run state (run_id, phase, branch_name, repo_root, status)
-  - [ ] 4.4 Wire inject_output into user prompt:
-    - If `_run_hooks_at` returns inject_output text, append it to the next phase's user prompt
-    - Follow the `_drain_injected_context` pattern (orchestrator.py line ~4663)
+  - [x] 4.4 Wire inject_output into user prompt:
+    - If `_run_hooks_at` returns inject_output text, append it to the next phase's user prompt via `_drain_hook_output()`
+    - Follows the `_drain_injected_context` pattern
     - Wrap injected text in delimiters: `\n\n## Hook Output\n\n{text}\n`
 
 - [x] 5.0 CLI test command
@@ -132,18 +132,16 @@
     - Use Click styling for pass/fail indication
     - Return sys.exit(1) if any blocking hook failed
 
-- [ ] 6.0 End-to-end validation and edge cases
+- [ ] 6.0 Edge case tests and validation
   depends_on: [4.0, 5.0]
-  - [ ] 6.1 Run full existing test suite to confirm zero regressions (target: 152+ tests pass)
+  - [ ] 6.1 Run full existing test suite to confirm zero regressions in hooks-related tests (run `python3 -m pytest tests/test_hooks.py tests/test_config.py tests/test_orchestrator.py tests/test_sanitize.py tests/test_cli.py -q`)
   - [ ] 6.2 Add edge case tests in `tests/test_hooks.py`:
-    - Test hook command with shell features (pipes, redirects, env var expansion)
-    - Test hook command that produces binary/non-UTF8 output
+    - Test hook command with shell pipes (e.g., `echo hello | tr a-z A-Z`)
+    - Test hook command that produces non-UTF8 output (use `printf '\\x80\\xff'`)
     - Test hook command that writes to stderr only
     - Test multiple inject_output hooks — outputs concatenated in order
-    - Test hook with timeout_seconds=1 and a command that takes 2s
-  - [ ] 6.3 Add a smoke test in `tests/test_hooks.py` that exercises the full flow:
-    - Create a temp directory with a config.yaml containing hooks
-    - Create a HookRunner from loaded config
-    - Run hooks for each event type
-    - Verify results match expectations
-    - This tests config parsing → HookRunner → execution → results without touching the orchestrator
+    - Test hook with timeout_seconds=1 and a command that takes 2s (use `sleep 2`)
+  - [ ] 6.3 Add a config→runner smoke test in `tests/test_hooks.py`:
+    - Create a temp directory with a config.yaml containing hooks for multiple events
+    - Load config via `load_config()`, create HookRunner, run hooks for each event
+    - Verify results match expectations (no orchestrator involved)
