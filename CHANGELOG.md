@@ -1,5 +1,22 @@
 # Changelog
 
+## 20260402_071500 — Refactor daemon.py into daemon/ Package
+
+Converts the 2,655-line `daemon.py` monolith into a `daemon/` package using mixins, reducing the main file to ~1,960 lines while preserving all existing test mock targets and backward-compatible imports.
+
+**Created:**
+- `src/colonyos/daemon/__init__.py` — Main Daemon class with mixin inheritance
+- `src/colonyos/daemon/_ui.py` — Extracted `DaemonError`, `_CombinedUI`, `_DaemonMonitorEventUI`
+- `src/colonyos/daemon/_watchdog.py` — `_WatchdogMixin` for watchdog thread and stall detection
+- `src/colonyos/daemon/_resilience.py` — `_ResilienceMixin` for crash recovery and dirty worktree handling
+- `src/colonyos/daemon/_helpers.py` — `_HelpersMixin` for formatting and helper methods
+
+**Modified:**
+- `src/colonyos/daemon.py` — Replaced by `daemon/` package (deleted)
+
+**PRD:** `cOS_prds/20260402_054259_prd_colonyos_daemon_py_recovery_context_previous_branch_colonyos_colonyos_daemon_py.md`
+**Tasks:** `cOS_tasks/20260402_054259_tasks_colonyos_daemon_py_recovery_context_previous_branch_colonyos_colonyos_daemon_py.md`
+
 ## 20260402_030000 — Task-Level Retry for Auto-Recovery
 
 Adds a task-level retry loop to `_run_sequential_implement()` that retries individual failed tasks with error context injected into the prompt, before falling through to the existing phase-level and nuke recovery cascade. This avoids re-executing already-committed successful tasks when only one task fails.

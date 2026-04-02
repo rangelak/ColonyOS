@@ -140,6 +140,15 @@ _Date: 2026-04-01 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[code-quality]** LLM agent instruction templates should prohibit suppression annotations (`# type: ignore`, `# noqa`) as valid fixes.
 - **[architecture]** Aggregation modules that dynamically enumerate categories from data avoid code changes when new variants are added.
 
+## Run: run-20260402_054259-44703b6686
+_Date: 2026-04-02 | Feature: colonyos_daemon_py_recovery_context_previous_branch_colonyos_
+
+- **[architecture]** Signal handlers must persist in-progress state transitions before exiting to enable crash recovery on restart.
+- **[architecture]** Pre-flight validation chains should order checks by cost (cheapest first) to fail fast before expensive ops.
+- **[code-quality]** Regex-based verdict parsing of LLM prose is fragile and cross-cutting; centralize in one module to limit drift.
+- **[testing]** Factory functions accepting injectable timestamps/clocks enable deterministic testing of time-dependent paths.
+- **[security]** Aggregate caps on concatenated untrusted input (beyond per-item limits) are needed to prevent prompt bloat attacks.
+
 ## Run: run-20260402_022155-d1ec4c42a0
 _Date: 2026-04-02 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_engineerin_
 
