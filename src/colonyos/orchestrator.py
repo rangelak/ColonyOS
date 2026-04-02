@@ -4,6 +4,7 @@ import inspect
 import json
 import logging
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -2300,9 +2301,7 @@ def _format_hook_injection(text: str, nonce: str | None = None) -> str:
     Uses a nonce-tagged delimiter to prevent hook output from spoofing
     the delimiter boundary (FR-2.7).
     """
-    import secrets as _secrets
-
-    tag = nonce or _secrets.token_hex(8)
+    tag = nonce or secrets.token_hex(8)
     return (
         f"\n\n<hook_output nonce=\"{tag}\">\n"
         f"{text}\n"

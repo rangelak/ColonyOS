@@ -31,7 +31,6 @@ _SCRUBBED_ENV_SUBSTRINGS: tuple[str, ...] = (
     "SECRET",
     "_TOKEN",
     "_KEY",
-    "API_KEY",
     "PASSWORD",
     "CREDENTIAL",
 )

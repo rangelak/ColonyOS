@@ -5229,7 +5229,12 @@ def hooks_test(event_name: str | None, run_all: bool) -> None:
 
 
 def _is_hook_blocking(config: ColonyConfig, event: str, command: str) -> bool:
-    """Check if a hook command is configured as blocking for the given event."""
+    """Check if a hook command is configured as blocking for the given event.
+
+    Note: matches by exact command string, so two hooks with identical commands
+    on the same event will resolve to the first match.  This is acceptable for
+    the diagnostic ``hooks test`` CLI but should not be used for pipeline logic.
+    """
     for hook in config.hooks.get(event, []):
         if hook.command == command:
             return hook.blocking
