@@ -128,6 +128,11 @@ DEFAULTS = {
             "interval_minutes": 60,
             "max_sync_failures": 3,
         },
+        "self_update": False,
+        "self_update_command": "uv pip install .",
+        "maintenance_budget_usd": 20.0,
+        "max_ci_fix_items": 2,
+        "branch_sync_enabled": True,
     },
 }
 
@@ -331,6 +336,11 @@ class DaemonConfig:
     dashboard_port: int = 8741
     dashboard_write_enabled: bool = False
     pr_sync: PRSyncConfig = field(default_factory=PRSyncConfig)
+    self_update: bool = False
+    self_update_command: str = "uv pip install ."
+    maintenance_budget_usd: float = 20.0
+    max_ci_fix_items: int = 2
+    branch_sync_enabled: bool = True
 
 
 @dataclass
@@ -936,6 +946,17 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
         )
         watchdog_stall = 120
 
+    maintenance_budget = float(
+        raw.get("maintenance_budget_usd", d["maintenance_budget_usd"])
+    )
+    if maintenance_budget <= 0:
+        raise ValueError(
+            f"daemon.maintenance_budget_usd must be positive, got {maintenance_budget}"
+        )
+
+    max_ci_fix = _int("max_ci_fix_items")
+    _require_positive("max_ci_fix_items", max_ci_fix)
+
     return DaemonConfig(
         daily_budget_usd=daily_budget_usd,
         github_poll_interval_seconds=poll_interval,
@@ -963,6 +984,15 @@ def _parse_daemon_config(raw: dict) -> DaemonConfig:
         dashboard_port=int(raw.get("dashboard_port", 8741)),
         dashboard_write_enabled=bool(raw.get("dashboard_write_enabled", False)),
         pr_sync=_parse_pr_sync_config(raw.get("pr_sync", {})),
+        self_update=bool(raw.get("self_update", d["self_update"])),
+        self_update_command=str(
+            raw.get("self_update_command", d["self_update_command"])
+        ),
+        maintenance_budget_usd=maintenance_budget,
+        max_ci_fix_items=max_ci_fix,
+        branch_sync_enabled=bool(
+            raw.get("branch_sync_enabled", d["branch_sync_enabled"])
+        ),
     )
 
 
@@ -1363,6 +1393,11 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
         or config.daemon.pr_sync.enabled != daemon_defaults["pr_sync"]["enabled"]
         or config.daemon.pr_sync.interval_minutes != daemon_defaults["pr_sync"]["interval_minutes"]
         or config.daemon.pr_sync.max_sync_failures != daemon_defaults["pr_sync"]["max_sync_failures"]
+        or config.daemon.self_update != daemon_defaults["self_update"]
+        or config.daemon.self_update_command != daemon_defaults["self_update_command"]
+        or config.daemon.maintenance_budget_usd != daemon_defaults["maintenance_budget_usd"]
+        or config.daemon.max_ci_fix_items != daemon_defaults["max_ci_fix_items"]
+        or config.daemon.branch_sync_enabled != daemon_defaults["branch_sync_enabled"]
     ):
         daemon_data: dict[str, Any] = {
             "daily_budget_usd": config.daemon.daily_budget_usd,
@@ -1389,6 +1424,11 @@ def save_config(repo_root: Path, config: ColonyConfig) -> Path:
                 "interval_minutes": config.daemon.pr_sync.interval_minutes,
                 "max_sync_failures": config.daemon.pr_sync.max_sync_failures,
             },
+            "self_update": config.daemon.self_update,
+            "self_update_command": config.daemon.self_update_command,
+            "maintenance_budget_usd": config.daemon.maintenance_budget_usd,
+            "max_ci_fix_items": config.daemon.max_ci_fix_items,
+            "branch_sync_enabled": config.daemon.branch_sync_enabled,
         }
         data["daemon"] = daemon_data
 

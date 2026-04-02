@@ -259,3 +259,62 @@ class TestLoadSaveDaemonState:
         state = load_daemon_state(tmp_repo)
         assert state.daily_spend_usd == 0.0
         assert state.consecutive_failures == 0
+
+
+class TestDaemonStateMaintenanceFields:
+    """Tests for self-update tracking fields in DaemonState (task 1.4)."""
+
+    def test_default_maintenance_fields(self):
+        state = DaemonState()
+        assert state.last_good_commit is None
+        assert state.self_update_consecutive_failures == 0
+        assert state.daily_maintenance_spend_usd == 0.0
+        assert state.maintenance_reset_date is None
+
+    def test_maintenance_fields_roundtrip(self):
+        state = DaemonState(
+            last_good_commit="abc123def456",
+            self_update_consecutive_failures=2,
+            daily_maintenance_spend_usd=15.5,
+            maintenance_reset_date="2026-04-01",
+        )
+        d = state.to_dict()
+        assert d["last_good_commit"] == "abc123def456"
+        assert d["self_update_consecutive_failures"] == 2
+        assert d["daily_maintenance_spend_usd"] == 15.5
+        assert d["maintenance_reset_date"] == "2026-04-01"
+        restored = DaemonState.from_dict(d)
+        assert restored.last_good_commit == "abc123def456"
+        assert restored.self_update_consecutive_failures == 2
+        assert restored.daily_maintenance_spend_usd == 15.5
+        assert restored.maintenance_reset_date == "2026-04-01"
+
+    def test_maintenance_fields_missing_from_old_state(self):
+        state = DaemonState.from_dict({"daily_spend_usd": 5.0})
+        assert state.last_good_commit is None
+        assert state.self_update_consecutive_failures == 0
+        assert state.daily_maintenance_spend_usd == 0.0
+        assert state.maintenance_reset_date is None
+
+    def test_maintenance_fields_none_values_roundtrip(self):
+        state = DaemonState()
+        d = state.to_dict()
+        assert d["last_good_commit"] is None
+        assert d["maintenance_reset_date"] is None
+        restored = DaemonState.from_dict(d)
+        assert restored.last_good_commit is None
+        assert restored.maintenance_reset_date is None
+
+    def test_save_load_with_maintenance_fields(self, tmp_repo: Path):
+        state = DaemonState(
+            last_good_commit="deadbeef",
+            self_update_consecutive_failures=1,
+            daily_maintenance_spend_usd=8.25,
+            maintenance_reset_date="2026-04-02",
+        )
+        save_daemon_state(tmp_repo, state)
+        loaded = load_daemon_state(tmp_repo)
+        assert loaded.last_good_commit == "deadbeef"
+        assert loaded.self_update_consecutive_failures == 1
+        assert loaded.daily_maintenance_spend_usd == 8.25
+        assert loaded.maintenance_reset_date == "2026-04-02"

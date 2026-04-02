@@ -26,6 +26,17 @@ from typing import Any
 from colonyos.agent import active_phase_controller_count, request_active_phase_cancel
 from colonyos.cancellation import cancellation_scope, request_cancel
 from colonyos.config import ColonyConfig, load_config
+from colonyos.maintenance import (
+    build_ci_fix_queue_items,
+    find_branches_with_failing_ci,
+    format_branch_sync_report,
+    pull_and_check_update,
+    read_last_good_commit,
+    record_last_good_commit,
+    run_self_update,
+    scan_diverged_branches,
+    should_rollback,
+)
 from colonyos.daemon_state import (
     DaemonState,
     atomic_write_json,
@@ -160,6 +171,11 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
         # Systemic failure tracking — recent error codes for pattern detection
         self._recent_failure_codes: list[str] = []
 
+        # Maintenance cycle (task 5.0)
+        self._startup_time: float = time.time()
+        self._good_commit_recorded: bool = False
+        self._last_branch_sync_post: float = 0.0
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -176,6 +192,7 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
         with cancellation_scope(lambda _reason: self.stop()):
             try:
                 self._recover_from_crash()
+                self._check_startup_rollback()
                 self._install_signal_handlers()
                 self._state.daemon_started_at = datetime.now(timezone.utc).isoformat()
                 self._persist_state()
@@ -328,6 +345,9 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
         """Single iteration of the main scheduling loop."""
         now = time.monotonic()
         executed_item = False
+
+        # 0. Record good commit after uptime threshold (task 5.7)
+        self._maybe_record_uptime_good_commit()
 
         # 1. Try to execute next queue item
         if not self._pipeline_running:
@@ -537,6 +557,9 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
                         else "Pipeline failed"
                     )
                 self._state.record_spend(log.total_cost_usd)
+                # Track CI-fix spend against maintenance budget (FR-5)
+                if item.source_type == "ci-fix":
+                    self._state.daily_maintenance_spend_usd += log.total_cost_usd
                 self._pipeline_running = False
                 self._pipeline_started_at = None
                 self._current_running_item = None
@@ -1261,10 +1284,7 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
                     raise
         finally:
             watchdog.cancel()
-            # Restore the branch the daemon was on before the pipeline run.
-            # The orchestrator's safety commit (in _run_pipeline finally)
-            # should have already committed any dirty state, but
-            # restore_to_branch handles leftover dirt as a fallback.
+            restored_ok = False
             if branch_before:
                 try:
                     from colonyos.recovery import restore_to_branch
@@ -1272,12 +1292,29 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
                     restored = restore_to_branch(self.repo_root, branch_before)
                     if restored:
                         logger.info("Post-pipeline: %s", restored)
+                    restored_ok = True
                 except Exception:
                     logger.warning(
                         "Failed to restore to %s after pipeline run",
                         branch_before,
                         exc_info=True,
                     )
+            else:
+                restored_ok = True  # No branch to restore — assume on main
+            # Run maintenance cycle between queue items (task 5.4)
+            # Only safe when we're confirmed back on the expected branch.
+            if restored_ok:
+                try:
+                    self._run_maintenance_cycle()
+                except Exception:
+                    logger.warning(
+                        "Maintenance cycle failed (non-fatal)",
+                        exc_info=True,
+                    )
+            else:
+                logger.warning(
+                    "Skipping maintenance cycle — branch restore failed"
+                )
 
     # ------------------------------------------------------------------
     # Background threads
@@ -1812,6 +1849,188 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
         if self._runtime_guard is not None:
             self._runtime_guard.release()
             self._runtime_guard = None
+
+    # ------------------------------------------------------------------
+    # Maintenance cycle (task 5.0)
+    # ------------------------------------------------------------------
+
+    _UPTIME_GOOD_COMMIT_SECONDS = 60
+
+    def _run_maintenance_cycle(self) -> None:
+        """Run the inter-queue maintenance cycle.
+
+        Sequence: (1) pull & check for self-update, (2) branch sync scan,
+        (3) CI-fix enqueueing.  Called from ``_run_pipeline_for_item``
+        finally block after ``restore_to_branch()`` returns to main.
+        """
+        # 1. Pull latest and check for code changes
+        changed, old_sha, new_sha = pull_and_check_update(self.repo_root)
+
+        if changed and self.daemon_config.self_update:
+            logger.info(
+                "Self-update: code changed %s → %s, running install",
+                old_sha[:10] if old_sha else "?",
+                new_sha[:10] if new_sha else "?",
+            )
+            # Record the pre-update SHA so we can roll back on crash
+            if old_sha:
+                record_last_good_commit(self.repo_root, old_sha)
+
+            if run_self_update(self.repo_root, self.daemon_config.self_update_command):
+                # Persist all state before exec-replacing
+                self._persist_state()
+                self._persist_queue()
+                logger.info("Self-update installed, restarting via os.execv")
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            else:
+                logger.error("Self-update install failed, continuing with old code")
+
+        # 2. Branch sync scan (with 1-hour cooldown on Slack posts)
+        _BRANCH_SYNC_COOLDOWN = 3600
+        if self.daemon_config.branch_sync_enabled:
+            branches = scan_diverged_branches(self.repo_root)
+            report = format_branch_sync_report(branches)
+            if report and (time.time() - self._last_branch_sync_post >= _BRANCH_SYNC_COOLDOWN):
+                self._post_slack_message(report)
+                self._last_branch_sync_post = time.time()
+
+        # 3. CI-fix enqueueing (gated on maintenance budget)
+        if self._check_maintenance_budget():
+            candidates = find_branches_with_failing_ci(self.repo_root)
+            items = build_ci_fix_queue_items(
+                candidates,
+                max_items=self.daemon_config.max_ci_fix_items,
+                existing_queue=list(self._queue_state.items),
+            )
+            with self._lock:
+                for item in items:
+                    self._queue_state.items.append(item)
+                if items:
+                    self._persist_queue()
+                    logger.info("Enqueued %d CI-fix item(s)", len(items))
+
+    def _check_startup_rollback(self) -> None:
+        """Check if the daemon should roll back after a failed self-update.
+
+        Called once on startup, before entering the main loop.
+        If ``should_rollback()`` returns True and self-update is enabled,
+        attempt to roll back to the last-good commit.  After 2 consecutive
+        rollback failures, disable self-update and alert via Slack.
+        """
+        if not self.daemon_config.self_update:
+            return
+
+        if not should_rollback(self.repo_root, self._startup_time):
+            return
+
+        # Circuit breaker: 2+ consecutive failures → disable and alert
+        if self._state.self_update_consecutive_failures >= 2:
+            logger.error(
+                "Self-update circuit breaker tripped (%d consecutive failures). "
+                "Disabling self-update.",
+                self._state.self_update_consecutive_failures,
+            )
+            self._post_slack_message(
+                ":rotating_light: *Self-update circuit breaker tripped* — "
+                f"{self._state.self_update_consecutive_failures} consecutive rollback "
+                "failures. Self-update has been disabled. Manual intervention required.",
+                critical=True,
+            )
+            return
+
+        # Increment failure count and attempt rollback
+        self._state.self_update_consecutive_failures += 1
+        self._persist_state()
+
+        last_good = read_last_good_commit(self.repo_root)
+        if not last_good:
+            logger.warning("Rollback needed but no last_good_commit found")
+            return
+
+        logger.warning("Rolling back to last good commit: %s", last_good[:10])
+        self._post_slack_message(
+            f":warning: Self-update rollback — reverting to `{last_good[:10]}` "
+            f"(failure #{self._state.self_update_consecutive_failures})",
+            critical=True,
+        )
+
+        # Checkout the last good commit and reinstall
+        try:
+            subprocess.run(
+                ["git", "checkout", last_good],
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True,
+            )
+        except Exception:
+            logger.error("Failed to checkout last good commit %s", last_good[:10], exc_info=True)
+            return
+
+        if run_self_update(self.repo_root, self.daemon_config.self_update_command):
+            self._persist_state()
+            self._persist_queue()
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        else:
+            logger.error("Failed to reinstall from last good commit %s", last_good[:10])
+
+    def _maybe_record_uptime_good_commit(self) -> None:
+        """Record current SHA as last-good after surviving the uptime threshold.
+
+        Called from ``_tick()``.  Once recorded, this method is a no-op
+        for the rest of the daemon's lifetime.  Also resets the
+        consecutive failure counter on successful uptime.
+        """
+        if not self.daemon_config.self_update:
+            return
+        if self._good_commit_recorded:
+            return
+        if time.time() - self._startup_time < self._UPTIME_GOOD_COMMIT_SECONDS:
+            return
+
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                sha = result.stdout.strip()
+                # Only reset failure counter if running a genuinely new version
+                # (not a rollback to last_good_commit). This prevents the
+                # circuit breaker from resetting between rollback cycles.
+                previous_good = read_last_good_commit(self.repo_root)
+                record_last_good_commit(self.repo_root, sha)
+                if previous_good is None or sha != previous_good:
+                    self._state.self_update_consecutive_failures = 0
+                self._persist_state()
+                self._good_commit_recorded = True
+                logger.info("Recorded good commit after uptime: %s", sha[:10])
+        except Exception:
+            logger.debug("Failed to record good commit", exc_info=True)
+
+    def _check_maintenance_budget(self) -> bool:
+        """Return True if CI-fix operations are within the maintenance budget.
+
+        Resets the maintenance spend counter if the date has rolled over.
+        """
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._state.maintenance_reset_date != today:
+            self._state.daily_maintenance_spend_usd = 0.0
+            self._state.maintenance_reset_date = today
+
+        budget = self.daemon_config.maintenance_budget_usd
+        if self._state.daily_maintenance_spend_usd >= budget:
+            logger.info(
+                "Maintenance budget exhausted ($%.2f/$%.2f), skipping CI-fix",
+                self._state.daily_maintenance_spend_usd,
+                budget,
+            )
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # State helpers

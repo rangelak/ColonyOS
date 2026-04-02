@@ -11,6 +11,7 @@ build/
 .colonyos/queue.json
 .colonyos/memory.db
 .colonyos/daemon_state.json
+.colonyos/last_good_commit
 .colonyos/runtime.lock
 .colonyos/runtime_processes.json
 .colonyos/logs/

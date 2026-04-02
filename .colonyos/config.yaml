@@ -102,3 +102,6 @@ router:
 daemon:
   daily_budget_usd: 500.0
   allow_all_control_users: true
+  self_update: true
+  maintenance_budget_usd: 20.0
+  branch_sync_enabled: true

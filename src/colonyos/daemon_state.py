@@ -43,6 +43,10 @@ class DaemonState:
     daily_thread_ts: str | None = None
     daily_thread_date: str | None = None
     daily_thread_channel: str | None = None
+    last_good_commit: str | None = None
+    self_update_consecutive_failures: int = 0
+    daily_maintenance_spend_usd: float = 0.0
+    maintenance_reset_date: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,6 +62,10 @@ class DaemonState:
             "daily_thread_ts": self.daily_thread_ts,
             "daily_thread_date": self.daily_thread_date,
             "daily_thread_channel": self.daily_thread_channel,
+            "last_good_commit": self.last_good_commit,
+            "self_update_consecutive_failures": self.self_update_consecutive_failures,
+            "daily_maintenance_spend_usd": self.daily_maintenance_spend_usd,
+            "maintenance_reset_date": self.maintenance_reset_date,
         }
 
     @classmethod
@@ -81,6 +89,14 @@ class DaemonState:
             daily_thread_ts=data.get("daily_thread_ts"),
             daily_thread_date=data.get("daily_thread_date"),
             daily_thread_channel=data.get("daily_thread_channel"),
+            last_good_commit=data.get("last_good_commit"),
+            self_update_consecutive_failures=int(
+                data.get("self_update_consecutive_failures", 0)
+            ),
+            daily_maintenance_spend_usd=float(
+                data.get("daily_maintenance_spend_usd", 0.0)
+            ),
+            maintenance_reset_date=data.get("maintenance_reset_date"),
         )
 
     def check_daily_budget(self, cap: float | None) -> tuple[bool, float | None]:
