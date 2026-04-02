@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import TextArea
@@ -31,7 +33,7 @@ class ComposerApp(App):
 async def test_composer_mounts_with_text_area():
     """Composer should contain a TextArea widget."""
     async with ComposerApp().run_test() as pilot:
-        app = pilot.app
+        app = cast(ComposerApp, pilot.app)
         composer = app.query_one(Composer)
         ta = composer.query_one(TextArea)
         assert ta is not None
@@ -41,7 +43,7 @@ async def test_composer_mounts_with_text_area():
 async def test_composer_enter_submits_and_clears():
     """Enter key should submit text and clear the TextArea."""
     async with ComposerApp().run_test() as pilot:
-        app = pilot.app
+        app = cast(ComposerApp, pilot.app)
         ta = app.query_one(TextArea)
         # Type some text
         ta.insert("hello world")
@@ -61,7 +63,7 @@ async def test_composer_enter_submits_and_clears():
 async def test_composer_empty_submit_does_nothing():
     """Enter on empty composer should not emit a Submitted message."""
     async with ComposerApp().run_test() as pilot:
-        app = pilot.app
+        app = cast(ComposerApp, pilot.app)
         await pilot.press("enter")
         await pilot.pause()
         assert app.submitted_texts == []
@@ -71,7 +73,7 @@ async def test_composer_empty_submit_does_nothing():
 async def test_composer_shift_enter_inserts_newline():
     """Shift+Enter should insert a newline instead of submitting."""
     async with ComposerApp().run_test() as pilot:
-        app = pilot.app
+        app = cast(ComposerApp, pilot.app)
         ta = app.query_one(TextArea)
         ta.insert("line1")
         await pilot.pause()
@@ -89,7 +91,7 @@ async def test_composer_shift_enter_inserts_newline():
 async def test_composer_submitted_message_carries_text():
     """Submitted message should carry the stripped text."""
     async with ComposerApp().run_test() as pilot:
-        app = pilot.app
+        app = cast(ComposerApp, pilot.app)
         ta = app.query_one(TextArea)
         ta.insert("  spaced text  ")
         await pilot.pause()
@@ -104,7 +106,7 @@ async def test_composer_submitted_message_carries_text():
 async def test_composer_restore_text_restores_draft():
     """Composer should be able to restore a cleared draft."""
     async with ComposerApp().run_test() as pilot:
-        app = pilot.app
+        app = cast(ComposerApp, pilot.app)
         composer = app.query_one(Composer)
         composer.restore_text("retry this prompt")
         await pilot.pause()
@@ -118,7 +120,7 @@ async def test_composer_restore_text_restores_draft():
 async def test_hint_bar_renders_keybinding_text():
     """HintBar should display the keybinding hints."""
     async with ComposerApp().run_test() as pilot:
-        app = pilot.app
+        app = cast(ComposerApp, pilot.app)
         hint = app.query_one(HintBar)
         # In Textual 8.x, use render() to get the renderable
         rendered = str(hint.render())
@@ -135,7 +137,7 @@ async def test_hint_bar_renders_keybinding_text():
 async def test_composer_ctrl_j_inserts_newline():
     """Ctrl+J should always insert a newline fallback."""
     async with ComposerApp().run_test() as pilot:
-        app = pilot.app
+        app = cast(ComposerApp, pilot.app)
         ta = app.query_one(TextArea)
         ta.insert("line1")
         await pilot.pause()
@@ -151,7 +153,7 @@ async def test_composer_ctrl_j_inserts_newline():
 async def test_composer_height_grows_with_content():
     """Composer height should increase as lines are added."""
     async with ComposerApp().run_test() as pilot:
-        app = pilot.app
+        app = cast(ComposerApp, pilot.app)
         ta = app.query_one(TextArea)
 
         # Insert multiple lines
@@ -171,7 +173,7 @@ async def test_composer_height_grows_with_content():
 async def test_composer_height_caps_at_max():
     """Composer height should not exceed MAX_HEIGHT."""
     async with ComposerApp().run_test() as pilot:
-        app = pilot.app
+        app = cast(ComposerApp, pilot.app)
         ta = app.query_one(TextArea)
 
         # Insert many lines
@@ -191,7 +193,7 @@ async def test_composer_height_caps_at_max():
 async def test_composer_initial_height_reserves_border_row():
     """Composer should start one row taller than the inner TextArea."""
     async with ComposerApp().run_test() as pilot:
-        app = pilot.app
+        app = cast(ComposerApp, pilot.app)
         composer = app.query_one(Composer)
         ta = app.query_one(TextArea)
         await pilot.pause()

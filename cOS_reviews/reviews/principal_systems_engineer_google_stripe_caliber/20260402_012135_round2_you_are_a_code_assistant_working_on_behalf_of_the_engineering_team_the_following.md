@@ -11,7 +11,7 @@ Here's my assessment as Principal Systems Engineer:
 The implementation correctly treats maintenance as a **sequential, non-fatal pipeline** between queue items — exactly right for a single-pipeline daemon. Three independent safety nets protect against the most dangerous failure modes:
 
 1. **Circuit breaker** (2 consecutive failures → disable self-update + Slack alert) prevents crash loops
-2. **Budget cap** with daily reset prevents CI-fix spend runaway  
+2. **Budget cap** with daily reset prevents CI-fix spend runaway
 3. **Branch-restore guard** (`restored_ok` flag) prevents running git operations on the wrong branch
 
 Error boundaries are comprehensive — every subprocess call has explicit timeouts (30s git, 120s install), every function catches its exceptions, and the maintenance cycle itself is wrapped in try/except. At 3am, any single component can fail without taking down the daemon.

@@ -1,8 +1,6 @@
 """Tests for write API endpoints (PUT config, POST runs, GET artifacts)."""
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -212,12 +210,11 @@ class TestPostRuns:
         from colonyos.server import create_app
         app, token2 = create_app(tmp_repo)
         from starlette.testclient import TestClient
-        client2 = TestClient(app)
+        TestClient(app)
         # We need a fresh app; the semaphore is per-app instance.
         # Instead, patch the thread so the first run's semaphore stays held.
         import threading
         hold_semaphore = threading.Event()
-        original_thread_init = threading.Thread.__init__
 
         def blocking_run(*args, **kwargs):
             hold_semaphore.wait(timeout=5)

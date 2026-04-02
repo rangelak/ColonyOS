@@ -1,7 +1,7 @@
 # Principal Systems Engineer Review — Task-Level Retry
 
-**Branch**: `colonyos/recovery-b69f562da7`  
-**PRD**: `cOS_prds/20260402_022155_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`  
+**Branch**: `colonyos/recovery-b69f562da7`
+**PRD**: `cOS_prds/20260402_022155_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
 **Round**: 1
 
 ## Checklist

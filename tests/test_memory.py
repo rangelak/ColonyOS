@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -22,7 +22,7 @@ def tmp_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def store(tmp_repo: Path) -> MemoryStore:
+def store(tmp_repo: Path) -> Iterator[MemoryStore]:
     s = MemoryStore(tmp_repo)
     yield s
     s.close()

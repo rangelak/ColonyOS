@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+from typing import Any, cast
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from colonyos.ui import _format_duration
+from colonyos.ui import _format_duration  # pyright: ignore[reportPrivateUsage]
 
 # ---------------------------------------------------------------------------
 # Data models (dataclasses for computed aggregates)
@@ -158,8 +159,22 @@ class StatsResult:
 # Data layer: loading, filtering, computation
 # ---------------------------------------------------------------------------
 
+# Run logs are JSON objects with heterogeneous nested structures.
+RunLog = dict[str, Any]
 
-def load_run_logs(runs_dir: Path) -> list[dict]:
+
+def _phase_dicts(run: RunLog) -> list[dict[str, Any]]:
+    raw = run.get("phases")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in cast(list[Any], raw):
+        if isinstance(item, dict):
+            out.append(cast(dict[str, Any], item))
+    return out
+
+
+def load_run_logs(runs_dir: Path) -> list[RunLog]:
     """Load all run-*.json files from the runs directory.
 
     Skips loop_state_*.json files and corrupted JSON files (with a
@@ -168,7 +183,7 @@ def load_run_logs(runs_dir: Path) -> list[dict]:
     if not runs_dir.exists():
         return []
 
-    results: list[dict] = []
+    results: list[RunLog] = []
     for f in runs_dir.glob("run-*.json"):
         if f.name.startswith("loop_state_"):
             continue
@@ -183,17 +198,17 @@ def load_run_logs(runs_dir: Path) -> list[dict]:
 
 
 def filter_runs(
-    runs: list[dict],
+    runs: list[RunLog],
     last: int | None = None,
     phase: str | None = None,
-) -> list[dict]:
+) -> list[RunLog]:
     """Apply --last N slicing. Phase filtering is handled at compute time."""
     if last is not None and last > 0:
         return runs[:last]
     return runs
 
 
-def compute_run_summary(runs: list[dict]) -> RunSummary:
+def compute_run_summary(runs: list[RunLog]) -> RunSummary:
     """FR-1: Compute aggregate run statistics."""
     if not runs:
         return RunSummary()
@@ -215,19 +230,19 @@ def compute_run_summary(runs: list[dict]) -> RunSummary:
     )
 
 
-def compute_cost_breakdown(runs: list[dict]) -> list[PhaseCostRow]:
+def compute_cost_breakdown(runs: list[RunLog]) -> list[PhaseCostRow]:
     """FR-2: Per-phase cost breakdown."""
     phase_costs: dict[str, list[float]] = {}
 
     for run in runs:
-        for phase_entry in run.get("phases", []):
+        for phase_entry in _phase_dicts(run):
             phase_name = phase_entry.get("phase", "")
             cost = phase_entry.get("cost_usd")
             if cost is not None:
                 phase_costs.setdefault(phase_name, []).append(cost)
 
     total_cost = sum(c for costs in phase_costs.values() for c in costs)
-    rows = []
+    rows: list[PhaseCostRow] = []
     for phase_name, costs in sorted(phase_costs.items()):
         total = sum(costs)
         rows.append(
@@ -241,19 +256,19 @@ def compute_cost_breakdown(runs: list[dict]) -> list[PhaseCostRow]:
     return rows
 
 
-def compute_failure_hotspots(runs: list[dict]) -> list[PhaseFailureRow]:
+def compute_failure_hotspots(runs: list[RunLog]) -> list[PhaseFailureRow]:
     """FR-3: Per-phase failure rates, sorted by failure rate descending."""
     phase_stats: dict[str, dict[str, int]] = {}
 
     for run in runs:
-        for phase_entry in run.get("phases", []):
+        for phase_entry in _phase_dicts(run):
             phase_name = phase_entry.get("phase", "")
             stats = phase_stats.setdefault(phase_name, {"executions": 0, "failures": 0})
             stats["executions"] += 1
             if not phase_entry.get("success", True):
                 stats["failures"] += 1
 
-    rows = []
+    rows: list[PhaseFailureRow] = []
     for phase_name, stats in phase_stats.items():
         execs = stats["executions"]
         fails = stats["failures"]
@@ -269,7 +284,7 @@ def compute_failure_hotspots(runs: list[dict]) -> list[PhaseFailureRow]:
     return rows
 
 
-def compute_review_loop_stats(runs: list[dict]) -> ReviewLoopStats:
+def compute_review_loop_stats(runs: list[RunLog]) -> ReviewLoopStats:
     """FR-4: Review loop efficiency metrics.
 
     A "review round" is a contiguous block of review phases. The round ends
@@ -282,8 +297,8 @@ def compute_review_loop_stats(runs: list[dict]) -> ReviewLoopStats:
     runs_with_reviews = 0
 
     for run in runs:
-        phases = run.get("phases", [])
-        phase_names = [p.get("phase", "") for p in phases]
+        phases = _phase_dicts(run)
+        phase_names = [str(p.get("phase", "")) for p in phases]
 
         has_review = any(p == "review" for p in phase_names)
         if not has_review:
@@ -317,29 +332,29 @@ def compute_review_loop_stats(runs: list[dict]) -> ReviewLoopStats:
     )
 
 
-def compute_duration_stats(runs: list[dict]) -> list[DurationRow]:
+def compute_duration_stats(runs: list[RunLog]) -> list[DurationRow]:
     """FR-5: Average duration per phase and overall."""
     phase_durations: dict[str, list[int]] = {}
 
     for run in runs:
-        for phase_entry in run.get("phases", []):
+        for phase_entry in _phase_dicts(run):
             phase_name = phase_entry.get("phase", "")
             duration = phase_entry.get("duration_ms", 0)
             phase_durations.setdefault(phase_name, []).append(duration)
 
-    rows = []
+    rows: list[DurationRow] = []
     for phase_name in sorted(phase_durations.keys()):
         durations = phase_durations[phase_name]
         avg = sum(durations) // len(durations) if durations else 0
         rows.append(DurationRow(label=phase_name, avg_duration_ms=avg))
 
     # Overall average run duration
-    run_durations = []
+    run_durations: list[int] = []
     for run in runs:
         started = run.get("started_at")
         finished = run.get("finished_at")
         if started and finished:
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             try:
                 start_dt = datetime.fromisoformat(started)
@@ -357,7 +372,7 @@ def compute_duration_stats(runs: list[dict]) -> list[DurationRow]:
     return rows
 
 
-def compute_recent_trend(runs: list[dict], count: int = 10) -> list[RecentRunEntry]:
+def compute_recent_trend(runs: list[RunLog], count: int = 10) -> list[RecentRunEntry]:
     """FR-6: Recent trend timeline entries."""
     recent = runs[:count]
     return [
@@ -370,11 +385,11 @@ def compute_recent_trend(runs: list[dict], count: int = 10) -> list[RecentRunEnt
     ]
 
 
-def compute_phase_detail(runs: list[dict], phase_name: str) -> list[PhaseDetailRow]:
+def compute_phase_detail(runs: list[RunLog], phase_name: str) -> list[PhaseDetailRow]:
     """Per-run detail for a specific phase (--phase filter)."""
-    rows = []
+    rows: list[PhaseDetailRow] = []
     for run in runs:
-        for phase_entry in run.get("phases", []):
+        for phase_entry in _phase_dicts(run):
             if phase_entry.get("phase", "") == phase_name:
                 rows.append(
                     PhaseDetailRow(
@@ -387,12 +402,12 @@ def compute_phase_detail(runs: list[dict], phase_name: str) -> list[PhaseDetailR
     return rows
 
 
-def compute_model_usage(runs: list[dict]) -> list[ModelUsageRow]:
+def compute_model_usage(runs: list[RunLog]) -> list[ModelUsageRow]:
     """Compute per-model usage statistics from run logs."""
     model_data: dict[str, dict[str, float | int]] = {}
 
     for run in runs:
-        for phase_entry in run.get("phases", []):
+        for phase_entry in _phase_dicts(run):
             model = phase_entry.get("model")
             if model is None:
                 model = "<legacy>"
@@ -402,7 +417,7 @@ def compute_model_usage(runs: list[dict]) -> list[ModelUsageRow]:
             if cost is not None:
                 stats["total_cost"] += cost
 
-    rows = []
+    rows: list[ModelUsageRow] = []
     for model_name in sorted(model_data.keys()):
         stats = model_data[model_name]
         invocations = int(stats["invocations"])
@@ -418,13 +433,13 @@ def compute_model_usage(runs: list[dict]) -> list[ModelUsageRow]:
     return rows
 
 
-def compute_parallelism_stats(runs: list[dict]) -> list[ParallelismStatsRow]:
+def compute_parallelism_stats(runs: list[RunLog]) -> list[ParallelismStatsRow]:
     """Compute parallelism efficiency statistics from run logs (Task 9.0).
 
     Returns one row per run, showing wall time, agent time, and parallelism ratio.
     Sequential runs (without parallel metadata) show 1.0x parallelism.
     """
-    rows = []
+    rows: list[ParallelismStatsRow] = []
     for run in runs:
         run_id = run.get("run_id", "")
         parallel_tasks = run.get("parallel_tasks") or 0
@@ -476,7 +491,7 @@ def compute_delivery_outcomes(repo_root: Path) -> DeliveryOutcomeStats:
 
 
 def compute_stats(
-    runs: list[dict],
+    runs: list[RunLog],
     phase_filter: str | None = None,
     repo_root: Path | None = None,
 ) -> StatsResult:
@@ -598,7 +613,7 @@ def render_recent_trend(console: Console, entries: list[RecentRunEntry]) -> None
     """FR-6: Render recent trend as a compact timeline."""
     if not entries:
         return
-    parts = []
+    parts: list[str] = []
     for entry in entries:
         symbol = "✓" if entry.status == "completed" else "✗"
         style = "green" if entry.status == "completed" else "red"

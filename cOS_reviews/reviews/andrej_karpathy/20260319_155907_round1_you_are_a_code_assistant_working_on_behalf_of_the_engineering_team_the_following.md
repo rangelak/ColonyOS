@@ -60,7 +60,7 @@ I've reviewed the full diff on branch `colonyos/you_are_a_code_assistant_working
 
 Test coverage is solid:
 - 13 test cases for `should_process_thread_fix()` covering all edge cases
-- Thread-fix model serialization roundtrip tests  
+- Thread-fix model serialization roundtrip tests
 - Config validation tests for `max_fix_rounds_per_thread`
 - Orchestrator tests for branch-not-found, PR-merged, checkout-failure, and success paths
 - Comprehensive `strip_slack_links()` tests including the integration test with `sanitize_slack_content()`

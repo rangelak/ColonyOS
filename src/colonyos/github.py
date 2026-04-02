@@ -28,19 +28,14 @@ import json
 import logging
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import click
+from colonyos.sanitize import sanitize_untrusted_content as _sanitize_untrusted_content
 
 logger = logging.getLogger(__name__)
-
-# Import shared sanitization utilities — single source of truth for the
-# XML tag regex used across GitHub and Slack integrations.
-from colonyos.sanitize import XML_TAG_RE as _XML_TAG_RE  # noqa: F401
-from colonyos.sanitize import sanitize_untrusted_content as _sanitize_untrusted_content  # noqa: F401
 
 
 # Matches full GitHub issue URLs like https://github.com/owner/repo/issues/42
@@ -305,7 +300,7 @@ def fetch_open_prs(
     Non-blocking — all errors are caught and logged, returning an empty
     list on failure.  Mirrors :func:`fetch_open_issues` in style.
     """
-    if not isinstance(limit, int) or limit < 1 or limit > 100:
+    if limit < 1 or limit > 100:
         raise ValueError(f"limit must be an integer between 1 and 100, got {limit!r}")
     try:
         result = subprocess.run(
@@ -337,14 +332,28 @@ def fetch_open_prs(
         logger.warning("gh pr list returned non-array JSON")
         return []
 
+    items_list = cast(list[Any], items)
     prs: list[GitHubPR] = []
-    for item in items:
-        labels = [lbl.get("name", "") for lbl in item.get("labels", [])]
+    for raw in items_list:
+        if not isinstance(raw, dict):
+            continue
+        item: dict[str, Any] = cast(dict[str, Any], raw)
+        labels_raw = item.get("labels", [])
+        if not isinstance(labels_raw, list):
+            labels_raw = []
+        labels_raw_any = cast(list[Any], labels_raw)
+        labels: list[str] = []
+        for lbl_any in labels_raw_any:
+            if isinstance(lbl_any, dict):
+                lbl = cast(dict[str, Any], lbl_any)
+                labels.append(str(lbl.get("name", "")))
+            else:
+                labels.append("")
         prs.append(GitHubPR(
-            number=item.get("number", 0),
-            title=item.get("title", ""),
-            branch=item.get("headRefName", ""),
-            url=item.get("url", ""),
+            number=int(item.get("number", 0)),
+            title=str(item.get("title", "")),
+            branch=str(item.get("headRefName", "")),
+            url=str(item.get("url", "")),
             labels=labels,
         ))
     return prs
@@ -401,7 +410,7 @@ def fetch_open_issues(
     This is **non-blocking** — all errors are caught and logged, returning
     an empty list on failure.
     """
-    if not isinstance(limit, int) or limit < 1 or limit > 100:
+    if limit < 1 or limit > 100:
         raise ValueError(f"limit must be an integer between 1 and 100, got {limit!r}")
     try:
         result = subprocess.run(
@@ -429,16 +438,32 @@ def fetch_open_issues(
         logger.warning("Failed to parse gh issue list output")
         return []
 
+    if not isinstance(items, list):
+        logger.warning("gh issue list returned non-array JSON")
+        return []
+
+    items_list = cast(list[Any], items)
     issues: list[GitHubIssue] = []
-    for item in items:
-        labels = [lbl.get("name", "") for lbl in item.get("labels", [])]
+    for raw in items_list:
+        if not isinstance(raw, dict):
+            continue
+        item: dict[str, Any] = cast(dict[str, Any], raw)
+        labels_raw = item.get("labels", [])
+        if not isinstance(labels_raw, list):
+            labels_raw = []
+        labels_raw_any = cast(list[Any], labels_raw)
+        labels: list[str] = []
+        for lbl_any in labels_raw_any:
+            if isinstance(lbl_any, dict):
+                lbl = cast(dict[str, Any], lbl_any)
+                labels.append(str(lbl.get("name", "")))
+            else:
+                labels.append("")
         issues.append(GitHubIssue(
-            number=item.get("number", 0),
-            title=item.get("title", ""),
+            number=int(item.get("number", 0)),
+            title=str(item.get("title", "")),
             body="",
             labels=labels,
-            state=item.get("state", "open").lower(),
+            state=str(item.get("state", "open")).lower(),
         ))
     return issues
-
-

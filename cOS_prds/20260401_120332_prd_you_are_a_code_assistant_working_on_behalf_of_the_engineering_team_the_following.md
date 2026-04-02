@@ -68,7 +68,7 @@ This preserves the existing `SlackUI` and `FanoutSlackUI` machinery — they ope
   ├── Create new daily thread with overnight summary
   ├── Store daily_thread_ts + daily_thread_date in DaemonState
   └── Persist state
-  
+
 Throughout the day:
   ├── _ensure_notification_thread() → posts intro as reply to daily_thread_ts
   ├── Per-item phase updates → post to item.notification_thread_ts (sub-thread)

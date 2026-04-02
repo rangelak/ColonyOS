@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import subprocess
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -21,7 +21,7 @@ def tmp_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def store(tmp_repo: Path) -> OutcomeStore:
+def store(tmp_repo: Path) -> Iterator[OutcomeStore]:
     s = OutcomeStore(tmp_repo)
     yield s
     s.close()
@@ -208,7 +208,7 @@ class TestPRSync:
         _seed_pr(store, pr_number=42, branch="colonyos/feat-x", merge_state_status="BEHIND")
         mock_sync.return_value = True  # success
 
-        result = sync_stale_prs(
+        sync_stale_prs(
             repo_root=tmp_repo,
             config=config,
             queue_state_items=[],

@@ -1,6 +1,7 @@
 """Tests to verify GitHub Actions workflow YAML files are valid and complete."""
 
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -9,6 +10,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 class TestCIWorkflow:
     """Verify .github/workflows/ci.yml structure."""
+
+    workflow: Any = None
 
     def setup_method(self):
         ci_path = REPO_ROOT / ".github" / "workflows" / "ci.yml"
@@ -121,6 +124,8 @@ class TestCIWorkflow:
 
 class TestReleaseWorkflow:
     """Verify .github/workflows/release.yml structure."""
+
+    workflow: Any = None
 
     def setup_method(self):
         release_path = REPO_ROOT / ".github" / "workflows" / "release.yml"
@@ -366,6 +371,9 @@ class TestReleaseWorkflow:
 
 class TestHomebrewFormula:
     """Verify Formula/colonyos.rb structure."""
+
+    formula_path: Any = None
+    content: Any = None
 
     def setup_method(self):
         self.formula_path = REPO_ROOT / "Formula" / "colonyos.rb"

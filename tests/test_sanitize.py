@@ -310,7 +310,6 @@ class TestSanitizeForSlack:
 
     def test_audit_log_on_neutralization(self) -> None:
         """sanitize_for_slack should log at DEBUG when content is neutralized."""
-        import logging
         with unittest.mock.patch("colonyos.sanitize.logger") as mock_logger:
             sanitize_for_slack("*bold* @here injection")
             mock_logger.debug.assert_called()

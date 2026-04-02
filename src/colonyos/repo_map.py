@@ -143,7 +143,7 @@ def get_tracked_files(repo_root: Path, config: RepoMapConfig) -> list[str]:
         files = [f for f in files if not _matches_any(f, config.exclude_patterns)]
 
     # Cap at max_files (FR-11)
-    if config.max_files is not None and len(files) > config.max_files:
+    if len(files) > config.max_files:
         logger.warning(
             "Repository has %d tracked files, capping at %d. "
             "Consider adjusting repo_map.max_files or repo_map.include_patterns.",
@@ -219,7 +219,7 @@ def extract_python_symbols(file_path: Path) -> FileSymbols:
 
 def _extract_class(node: ast.ClassDef) -> Symbol:
     """Extract a class definition including its methods."""
-    bases = []
+    bases: list[str] = []
     for base in node.bases:
         bases.append(_format_expr(base))
 

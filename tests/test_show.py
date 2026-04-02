@@ -12,8 +12,6 @@ from rich.console import Console
 from colonyos.show import (
     PhaseTimelineEntry,
     ReviewSummary,
-    RunHeader,
-    ShowResult,
     collapse_phase_timeline,
     compute_review_summary,
     compute_run_header,
@@ -40,7 +38,7 @@ def _make_run(
     status: str = "completed",
     total_cost_usd: float = 5.0,
     started_at: str = "2026-03-17T12:00:00+00:00",
-    finished_at: str = "2026-03-17T12:10:00+00:00",
+    finished_at: str | None = "2026-03-17T12:10:00+00:00",
     prompt: str = "Add a new feature",
     branch_name: str | None = "colonyos/feature",
     prd_rel: str | None = "cOS_prds/prd.md",

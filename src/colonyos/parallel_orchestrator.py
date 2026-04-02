@@ -19,9 +19,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Protocol
 
-from colonyos.config import ColonyConfig, ParallelImplementConfig
+from colonyos.config import ColonyConfig
 from colonyos.dag import TaskDAG, parse_task_file, CircularDependencyError
-from colonyos.models import Phase, PhaseResult, TaskStatus
+from colonyos.models import PhaseResult, TaskStatus
 from colonyos.parallel_preflight import check_parallel_preflight
 from colonyos.worktree import WorktreeManager, WorktreeError
 
@@ -694,7 +694,7 @@ class ParallelOrchestrator:
                 f"Conflict resolution exception for task {task_id}: {e}"
             )
 
-    def get_summary(self) -> dict:
+    def get_summary(self) -> dict[str, object]:
         """Get summary of parallel run results."""
         # Calculate total actual cost from all tasks
         total_actual_cost = sum(

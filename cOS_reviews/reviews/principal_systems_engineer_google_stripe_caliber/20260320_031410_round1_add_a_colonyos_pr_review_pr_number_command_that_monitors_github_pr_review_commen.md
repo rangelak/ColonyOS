@@ -39,11 +39,11 @@ FINDINGS:
 - [src/colonyos/pr_review.py:454-477]: `verify_head_sha()` function is defined but never called in the CLI command. The `expected_head_sha` is passed to `run_thread_fix()` which handles it internally, so this is likely dead code. Consider removing or documenting why it exists.
 
 SYNTHESIS:
-The implementation has solid foundations: clean data model (`PRReviewState`), proper atomic file persistence, comprehensive test coverage (24 tests), and correct reuse of the triage and sanitization infrastructure. The safety guards (budget cap, circuit breaker, max fix rounds) are correctly wired. However, from a systems reliability perspective, there are several concerning gaps: 
+The implementation has solid foundations: clean data model (`PRReviewState`), proper atomic file persistence, comprehensive test coverage (24 tests), and correct reuse of the triage and sanitization infrastructure. The safety guards (budget cap, circuit breaker, max fix rounds) are correctly wired. However, from a systems reliability perspective, there are several concerning gaps:
 
 1. **Broken observability**: The placeholder URLs mean that when debugging a 3am incident, the commit links in GitHub comments will be useless `https://github.com/.../commit/abc123` links. This fundamentally breaks the "auditability" goal.
 
-2. **Incomplete analytics tracking**: FR-15/FR-16 require `QueueItem` with `source_type="pr_review_fix"` for cost attribution and analytics. The current implementation bypasses this entirely, meaning PR review fixes won't appear in `colonyos stats` breakdowns, making it impossible to answer "how much are we spending on PR review auto-fixes?" 
+2. **Incomplete analytics tracking**: FR-15/FR-16 require `QueueItem` with `source_type="pr_review_fix"` for cost attribution and analytics. The current implementation bypasses this entirely, meaning PR review fixes won't appear in `colonyos stats` breakdowns, making it impossible to answer "how much are we spending on PR review auto-fixes?"
 
 3. **Watch mode semantics**: FR-8's "only new comments" requirement is not implemented. If a team runs `--watch` on a PR with 50 historical review comments, all 50 will be processed immediately, potentially hitting the budget cap before any actual reviewer feedback arrives.
 

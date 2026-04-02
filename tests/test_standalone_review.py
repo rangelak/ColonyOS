@@ -3,7 +3,7 @@ parallel execution, artifact saving, and exit code logic."""
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -544,7 +544,6 @@ class TestPrintReviewSummary:
             Persona(role="Sec", expertise="x", perspective="y", reviewer=True),
         ]
         results = [_approve_result(), _request_changes_result()]
-        import io
         from unittest.mock import patch as p
         from click.testing import CliRunner
 

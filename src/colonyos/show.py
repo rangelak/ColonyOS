@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import re
-import sys
+from typing import cast
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -20,7 +20,13 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from colonyos.ui import _format_duration
+
+def _format_duration_ms(ms: int) -> str:
+    secs = ms // 1000
+    if secs < 60:
+        return f"{secs}s"
+    mins, rem = divmod(secs, 60)
+    return f"{mins}m {rem}s"
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -95,6 +101,81 @@ class ShowResult:
 _UNSAFE_PATTERN = re.compile(r"[/\\]|\.\.")
 
 
+def _json_str(v: object, default: str = "") -> str:
+    if v is None:
+        return default
+    if isinstance(v, str):
+        return v
+    return str(v)
+
+
+def _json_str_optional(v: object) -> str | None:
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return v
+    return str(v)
+
+
+def _json_float(v: object, default: float = 0.0) -> float:
+    if isinstance(v, bool) or v is None:
+        return default
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v.strip())
+        except ValueError:
+            return default
+    return default
+
+
+def _json_float_optional(v: object) -> float | None:
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _json_int(v: object, default: int = 0) -> int:
+    if isinstance(v, bool) or v is None:
+        return default
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return int(v)
+    if isinstance(v, str):
+        try:
+            return int(float(v.strip()))
+        except ValueError:
+            return default
+    return default
+
+
+def _json_bool(v: object, default: bool = True) -> bool:
+    if isinstance(v, bool):
+        return v
+    return default
+
+
+def _as_phase_dict_list(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, object]] = []
+    for item in cast(list[object], value):
+        if isinstance(item, dict):
+            out.append(cast(dict[str, object], item))
+    return out
+
+
 def validate_run_id_input(partial_id: str) -> None:
     """Reject inputs that could cause path traversal.
 
@@ -139,7 +220,7 @@ def resolve_run_id(runs_dir: Path, partial_id: str) -> str | list[str]:
     return matches
 
 
-def load_single_run(runs_dir: Path, run_id: str) -> dict:
+def load_single_run(runs_dir: Path, run_id: str) -> dict[str, object]:
     """Load a single run JSON file by run ID.
 
     Raises:
@@ -149,7 +230,10 @@ def load_single_run(runs_dir: Path, run_id: str) -> dict:
     file_path = runs_dir / f"{run_id}.json"
     if not file_path.exists():
         raise FileNotFoundError(f"Run file not found: {file_path}")
-    return json.loads(file_path.read_text(encoding="utf-8"))
+    return cast(
+        dict[str, object],
+        json.loads(file_path.read_text(encoding="utf-8")),
+    )
 
 
 def _compute_wall_clock_ms(started_at: str, finished_at: str | None) -> int:
@@ -172,31 +256,34 @@ def _truncate_prompt(prompt: str, max_len: int = 120) -> str:
     return prompt[:max_len - 3] + "..."
 
 
-def compute_run_header(run_data: dict) -> RunHeader:
+def compute_run_header(run_data: dict[str, object]) -> RunHeader:
     """FR-2: Extract metadata for the run header panel."""
-    started_at = run_data.get("started_at", "")
-    finished_at = run_data.get("finished_at")
-    prompt = run_data.get("prompt", "")
+    started_at = _json_str(run_data.get("started_at", ""))
+    finished_at = _json_str_optional(run_data.get("finished_at"))
+    prompt = _json_str(run_data.get("prompt", ""))
+    raw_cost = run_data.get("total_cost_usd", 0) or 0
 
     return RunHeader(
-        run_id=run_data.get("run_id", "?"),
-        status=run_data.get("status", "unknown"),
-        branch_name=run_data.get("branch_name"),
-        total_cost_usd=run_data.get("total_cost_usd", 0) or 0,
+        run_id=_json_str(run_data.get("run_id", "?")),
+        status=_json_str(run_data.get("status", "unknown")),
+        branch_name=_json_str_optional(run_data.get("branch_name")),
+        total_cost_usd=_json_float(raw_cost, 0.0),
         started_at=started_at,
         finished_at=finished_at,
         wall_clock_ms=_compute_wall_clock_ms(started_at, finished_at),
         prompt=prompt,
         prompt_truncated=_truncate_prompt(prompt),
-        source_issue_url=run_data.get("source_issue_url"),
-        last_successful_phase=run_data.get("last_successful_phase"),
-        prd_rel=run_data.get("prd_rel"),
-        task_rel=run_data.get("task_rel"),
+        source_issue_url=_json_str_optional(run_data.get("source_issue_url")),
+        last_successful_phase=_json_str_optional(
+            run_data.get("last_successful_phase")
+        ),
+        prd_rel=_json_str_optional(run_data.get("prd_rel")),
+        task_rel=_json_str_optional(run_data.get("task_rel")),
     )
 
 
 def collapse_phase_timeline(
-    phases: list[dict],
+    phases: list[dict[str, object]],
 ) -> list[PhaseTimelineEntry]:
     """FR-3: Build a timeline with contiguous review phases collapsed.
 
@@ -212,48 +299,54 @@ def collapse_phase_timeline(
 
     while i < len(phases):
         phase_entry = phases[i]
-        phase_name = phase_entry.get("phase", "")
+        phase_name = _json_str(phase_entry.get("phase", ""))
 
         if phase_name == "review":
             # Collect contiguous review phases
             round_number += 1
-            review_group: list[dict] = []
+            contiguous_reviews: list[dict[str, object]] = []
             while i < len(phases) and phases[i].get("phase", "") == "review":
-                review_group.append(phases[i])
+                contiguous_reviews.append(phases[i])
                 i += 1
 
             total_cost = sum(
-                p.get("cost_usd", 0) or 0 for p in review_group
+                _json_float(p.get("cost_usd", 0) or 0, 0.0)
+                for p in contiguous_reviews
             )
             total_duration = sum(
-                p.get("duration_ms", 0) for p in review_group
+                _json_int(p.get("duration_ms", 0), 0)
+                for p in contiguous_reviews
             )
-            all_success = all(p.get("success", True) for p in review_group)
+            all_success = all(
+                _json_bool(p.get("success", True), True)
+                for p in contiguous_reviews
+            )
 
-            if len(review_group) == 1:
+            if len(contiguous_reviews) == 1:
+                first_rev = contiguous_reviews[0]
                 entries.append(
                     PhaseTimelineEntry(
                         phase="review",
-                        model=review_group[0].get("model"),
+                        model=_json_str_optional(first_rev.get("model")),
                         duration_ms=total_duration,
                         cost_usd=total_cost,
                         success=all_success,
                         is_collapsed=False,
                         collapsed_count=1,
                         round_number=round_number,
-                        session_id=review_group[0].get("session_id", ""),
-                        error=review_group[0].get("error"),
+                        session_id=_json_str(first_rev.get("session_id", "")),
+                        error=_json_str_optional(first_rev.get("error")),
                     )
                 )
             else:
                 entries.append(
                     PhaseTimelineEntry(
-                        phase=f"review x{len(review_group)}",
+                        phase=f"review x{len(contiguous_reviews)}",
                         duration_ms=total_duration,
                         cost_usd=total_cost,
                         success=all_success,
                         is_collapsed=True,
-                        collapsed_count=len(review_group),
+                        collapsed_count=len(contiguous_reviews),
                         round_number=round_number,
                     )
                 )
@@ -261,12 +354,12 @@ def collapse_phase_timeline(
             entries.append(
                 PhaseTimelineEntry(
                     phase="fix",
-                    model=phase_entry.get("model"),
-                    duration_ms=phase_entry.get("duration_ms", 0),
-                    cost_usd=phase_entry.get("cost_usd"),
-                    success=phase_entry.get("success", True),
-                    session_id=phase_entry.get("session_id", ""),
-                    error=phase_entry.get("error"),
+                    model=_json_str_optional(phase_entry.get("model")),
+                    duration_ms=_json_int(phase_entry.get("duration_ms", 0), 0),
+                    cost_usd=_json_float_optional(phase_entry.get("cost_usd")),
+                    success=_json_bool(phase_entry.get("success", True), True),
+                    session_id=_json_str(phase_entry.get("session_id", "")),
+                    error=_json_str_optional(phase_entry.get("error")),
                 )
             )
             i += 1
@@ -274,12 +367,12 @@ def collapse_phase_timeline(
             entries.append(
                 PhaseTimelineEntry(
                     phase=phase_name,
-                    model=phase_entry.get("model"),
-                    duration_ms=phase_entry.get("duration_ms", 0),
-                    cost_usd=phase_entry.get("cost_usd"),
-                    success=phase_entry.get("success", True),
-                    session_id=phase_entry.get("session_id", ""),
-                    error=phase_entry.get("error"),
+                    model=_json_str_optional(phase_entry.get("model")),
+                    duration_ms=_json_int(phase_entry.get("duration_ms", 0), 0),
+                    cost_usd=_json_float_optional(phase_entry.get("cost_usd")),
+                    success=_json_bool(phase_entry.get("success", True), True),
+                    session_id=_json_str(phase_entry.get("session_id", "")),
+                    error=_json_str_optional(phase_entry.get("error")),
                 )
             )
             i += 1
@@ -287,12 +380,12 @@ def collapse_phase_timeline(
     return entries
 
 
-def compute_review_summary(phases: list[dict]) -> ReviewSummary | None:
+def compute_review_summary(phases: list[dict[str, object]]) -> ReviewSummary | None:
     """FR-4: Compute review statistics from phase list.
 
     Returns None if no review phases exist.
     """
-    phase_names = [p.get("phase", "") for p in phases]
+    phase_names = [_json_str(p.get("phase", "")) for p in phases]
     if "review" not in phase_names:
         return None
 
@@ -327,11 +420,11 @@ def compute_review_summary(phases: list[dict]) -> ReviewSummary | None:
 
 
 def compute_show_result(
-    run_data: dict, phase_filter: str | None = None
+    run_data: dict[str, object], phase_filter: str | None = None
 ) -> ShowResult:
     """Assemble all computed sections into a ShowResult."""
-    phases = run_data.get("phases", [])
-    phase_names = [p.get("phase", "") for p in phases]
+    phases = _as_phase_dict_list(run_data.get("phases", []))
+    phase_names = [_json_str(p.get("phase", "")) for p in phases]
 
     header = compute_run_header(run_data)
     timeline = collapse_phase_timeline(phases)
@@ -341,28 +434,38 @@ def compute_show_result(
     has_decision = "decision" in phase_names
     decision_success = False
     if has_decision:
-        decision_phases = [p for p in phases if p.get("phase") == "decision"]
-        decision_success = all(p.get("success", True) for p in decision_phases)
+        decision_phases = [
+            p for p in phases if _json_str(p.get("phase", "")) == "decision"
+        ]
+        decision_success = all(
+            _json_bool(p.get("success", True), True) for p in decision_phases
+        )
 
     # CI fix
-    ci_fix_phases = [p for p in phases if p.get("phase") == "ci_fix"]
+    ci_fix_phases = [
+        p for p in phases if _json_str(p.get("phase", "")) == "ci_fix"
+    ]
     has_ci_fix = len(ci_fix_phases) > 0
-    ci_fix_final_success = ci_fix_phases[-1].get("success", False) if ci_fix_phases else False
+    ci_fix_final_success = (
+        _json_bool(ci_fix_phases[-1].get("success", False), False)
+        if ci_fix_phases
+        else False
+    )
 
     # Phase detail for --phase filter
     phase_detail: list[PhaseTimelineEntry] = []
     if phase_filter:
-        for idx, p in enumerate(phases):
-            if p.get("phase", "") == phase_filter:
+        for _, p in enumerate(phases):
+            if _json_str(p.get("phase", "")) == phase_filter:
                 phase_detail.append(
                     PhaseTimelineEntry(
-                        phase=p.get("phase", ""),
-                        model=p.get("model"),
-                        duration_ms=p.get("duration_ms", 0),
-                        cost_usd=p.get("cost_usd"),
-                        success=p.get("success", True),
-                        session_id=p.get("session_id", ""),
-                        error=p.get("error"),
+                        phase=_json_str(p.get("phase", "")),
+                        model=_json_str_optional(p.get("model")),
+                        duration_ms=_json_int(p.get("duration_ms", 0), 0),
+                        cost_usd=_json_float_optional(p.get("cost_usd")),
+                        success=_json_bool(p.get("success", True), True),
+                        session_id=_json_str(p.get("session_id", "")),
+                        error=_json_str_optional(p.get("error")),
                     )
                 )
 
@@ -402,7 +505,7 @@ def render_run_header(console: Console, header: RunHeader) -> None:
     if header.branch_name:
         lines.append(f"Branch:   {header.branch_name}")
     lines.append(f"Cost:     ${header.total_cost_usd:.4f}")
-    lines.append(f"Duration: {_format_duration(header.wall_clock_ms)}")
+    lines.append(f"Duration: {_format_duration_ms(header.wall_clock_ms)}")
     if header.started_at:
         lines.append(f"Started:  {header.started_at}")
     if header.finished_at:
@@ -444,7 +547,7 @@ def render_phase_timeline(
         table.add_row(
             phase_label,
             model_str,
-            _format_duration(entry.duration_ms),
+            _format_duration_ms(entry.duration_ms),
             cost_str,
             status_str,
             style=style,
@@ -512,7 +615,7 @@ def render_phase_detail(
         table.add_row(
             str(idx),
             entry.model or "",
-            _format_duration(entry.duration_ms),
+            _format_duration_ms(entry.duration_ms),
             cost_str,
             status_str,
             entry.session_id or "",

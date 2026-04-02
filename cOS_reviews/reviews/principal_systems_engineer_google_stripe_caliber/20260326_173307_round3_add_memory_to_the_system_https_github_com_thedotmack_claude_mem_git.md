@@ -47,7 +47,7 @@ Here is my review as **Principal Systems Engineer (Google/Stripe caliber)**:
 ### What happens at 3am?
 
 - If the SQLite DB is corrupted, `_get_memory_store()` catches the exception, logs a warning, and continues without memory. The pipeline won't crash. ✅
-- If the DB file is locked (another process), same graceful degradation. ✅  
+- If the DB file is locked (another process), same graceful degradation. ✅
 - If pruning fails mid-transaction, the `add_memory()` call wraps insert+prune in a single `commit()`, so either both succeed or neither does. ✅
 - Can I debug from logs? The `_log()` calls report how many memories were injected and their character count per phase. Could be more detailed (e.g., which categories matched), but adequate for MVP. ✅
 

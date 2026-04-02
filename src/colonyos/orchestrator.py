@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 import click
 from claude_agent_sdk import AgentDefinition
@@ -19,7 +19,6 @@ from claude_agent_sdk import AgentDefinition
 from colonyos.agent import run_phase_sync, run_phases_parallel_sync
 from colonyos.config import ColonyConfig, runs_dir_path
 from colonyos.dag import TaskDAG, parse_task_file
-from colonyos.models import TaskStatus
 from colonyos.parallel_orchestrator import (
     ParallelOrchestrator,
     should_use_parallel,
@@ -30,7 +29,6 @@ from colonyos.learnings import (
     append_learnings,
     learnings_path,
     load_learnings_for_injection,
-    parse_learnings,
 )
 from colonyos.models import BranchRestoreError, Persona, Phase, PhaseResult, PreflightError, PreflightResult, ResumeState, RetryInfo, RunLog, RunStatus
 from colonyos.naming import (
@@ -48,13 +46,11 @@ from colonyos.repo_map import generate_repo_map
 from colonyos.memory import MemoryCategory, MemoryStore, load_memory_for_injection
 from colonyos.outcomes import OutcomeStore, format_outcome_summary
 from colonyos.recovery import (
-    PreservationResult,
     checkout_branch,
     create_branch,
     incident_slug,
     preserve_and_reset_worktree,
     pull_branch,
-    recovery_dir_path,
     write_incident_summary,
 )
 from colonyos.sanitize import sanitize_for_slack, sanitize_untrusted_content
@@ -87,6 +83,9 @@ class UIFactory(Protocol):
         task_id: str | None = None,
         badge: StreamBadge | None = None,
     ) -> object: ...
+
+
+UIFactoryCallable = Callable[..., PhaseUI | NullUI | None]
 
 
 def _touch_heartbeat(repo_root: Path) -> None:
@@ -221,6 +220,15 @@ def _inject_repo_map(system: str, repo_map_text: str) -> str:
         return system
     _log(f"Injected repo map ({len(repo_map_text)} chars)")
     return system + f"\n\n## Repository Structure\n\n{repo_map_text}"
+
+
+def _parse_parent_tasks(content: str) -> list[str]:  # pyright: ignore[reportUnusedFunction]
+    """Extract top-level markdown checkbox tasks from content."""
+    tasks: list[str] = []
+    for line in content.splitlines():
+        if line.startswith("- [ ] ") or line.startswith("- [x] "):
+            tasks.append(line[6:].strip())
+    return tasks
 
 
 def _get_current_branch(repo_root: Path) -> str:
@@ -787,7 +795,7 @@ def _run_sequential_implement(
     branch_name: str,
     prd_rel: str,
     task_rel: str,
-    _make_ui,
+    _make_ui: UIFactoryCallable,
     memory_store: MemoryStore | None = None,
     user_injection_provider: Callable[[], list[str]] | None = None,
     repo_map_text: str = "",
@@ -837,7 +845,7 @@ def _run_sequential_implement(
     completed: set[str] = set()
     failed: set[str] = set()
     blocked: set[str] = set()
-    task_results: dict[str, dict] = {}
+    task_results: dict[str, dict[str, object]] = {}
     total_cost = 0.0
     total_duration_ms = 0
     overall_success = True
@@ -894,7 +902,7 @@ def _run_sequential_implement(
             system = _inject_memory_block(system, memory_store, "implement", user, config)
             user += _drain_injected_context(user_injection_provider)
 
-            ui = _make_ui()
+            ui: PhaseUI | NullUI | None = _make_ui()
             if ui is not None:
                 safe_desc_ui = sanitize_for_slack(sanitize_untrusted_content(task_desc))
                 short_desc = safe_desc_ui[:_SLACK_TASK_DESC_MAX]
@@ -1106,7 +1114,7 @@ def _run_parallel_implement(
     branch_name: str,
     prd_rel: str,
     task_rel: str,
-    _make_ui,
+    _make_ui: UIFactoryCallable,
 ) -> PhaseResult | None:
     """Run parallel implementation using the ParallelOrchestrator.
 
@@ -1166,7 +1174,7 @@ def _run_parallel_implement(
             )
 
             # Create a task-specific UI with prefix
-            task_ui = _make_ui(task_id=task_id)
+            task_ui: PhaseUI | NullUI | None = _make_ui(task_id=task_id)
 
             # Run the agent
             result = run_phase_sync(
@@ -1206,7 +1214,7 @@ def _run_parallel_implement(
                 working_dir,
             )
 
-            conflict_ui = _make_ui(
+            conflict_ui: PhaseUI | NullUI | None = _make_ui(
                 badge=StreamBadge(text=f"[CONFLICT {task_id}]", style="dim"),
             )
 
@@ -1274,7 +1282,7 @@ def _run_parallel_implement(
         orchestrator.cleanup_worktrees()
 
         # Add all task results to log
-        for task_id, task in state.tasks.items():
+        for _tid, task in state.tasks.items():
             if task.phase_result is not None:
                 log.phases.append(task.phase_result)
 
@@ -1282,24 +1290,32 @@ def _run_parallel_implement(
 
         # Update log with parallel metadata (FR-11)
         summary = orchestrator.get_summary()
-        log.parallel_tasks = summary["total_tasks"]
-        log.wall_time_ms = summary["wall_time_ms"]
-        log.agent_time_ms = summary["agent_time_ms"]
+        total_tasks = cast(int, summary["total_tasks"])
+        wall_time_ms = cast(int, summary["wall_time_ms"])
+        agent_time_ms = cast(int, summary["agent_time_ms"])
+        total_actual_cost_usd = cast(float, summary["total_actual_cost_usd"])
+        completed_tasks = cast(int, summary["completed"])
+        failed_tasks = cast(int, summary["failed"])
+        blocked_tasks = cast(int, summary["blocked"])
+        parallelism_ratio = cast(float, summary["parallelism_ratio"])
+        log.parallel_tasks = total_tasks
+        log.wall_time_ms = wall_time_ms
+        log.agent_time_ms = agent_time_ms
 
         # Create aggregate result
         any_failed = len(state.failed) > 0
         aggregate_result = PhaseResult(
             phase=Phase.IMPLEMENT,
             success=not any_failed,
-            cost_usd=summary["total_actual_cost_usd"],
-            duration_ms=summary["wall_time_ms"],
+            cost_usd=total_actual_cost_usd,
+            duration_ms=wall_time_ms,
             artifacts={
-                "parallel_tasks": str(summary["total_tasks"]),
-                "total_tasks": str(summary["total_tasks"]),
-                "completed": str(summary["completed"]),
-                "failed": str(summary["failed"]),
-                "blocked": str(summary["blocked"]),
-                "parallelism_ratio": f"{summary['parallelism_ratio']:.2f}x",
+                "parallel_tasks": str(total_tasks),
+                "total_tasks": str(total_tasks),
+                "completed": str(completed_tasks),
+                "failed": str(failed_tasks),
+                "blocked": str(blocked_tasks),
+                "parallelism_ratio": f"{parallelism_ratio:.2f}x",
                 "task_results": {
                     task_id: {
                         "status": task.status.value.upper(),
@@ -1459,11 +1475,12 @@ def _parse_task_results_artifact(raw: object) -> dict[str, dict[str, object]]:
     if not raw:
         return {}
     if isinstance(raw, dict):
-        normalized: dict[str, dict[str, object]] = {}
-        for task_id, info in raw.items():
-            if isinstance(task_id, str) and isinstance(info, dict):
-                normalized[task_id] = dict(info)
-        return normalized
+        raw_d = cast(dict[str, Any], raw)
+        from_dict: dict[str, dict[str, object]] = {}
+        for task_id, info in raw_d.items():
+            if isinstance(info, dict):
+                from_dict[task_id] = dict(cast(dict[str, Any], info))
+        return from_dict
     if not isinstance(raw, (str, bytes, bytearray)):
         return {}
     try:
@@ -1472,16 +1489,42 @@ def _parse_task_results_artifact(raw: object) -> dict[str, dict[str, object]]:
         return {}
     if not isinstance(parsed, dict):
         return {}
-    normalized = dict[str, dict[str, object]]()
-    for task_id, info in parsed.items():
-        if isinstance(task_id, str) and isinstance(info, dict):
-            normalized[task_id] = dict(info)
-    return normalized
+    parsed_d = cast(dict[str, Any], parsed)
+    from_json: dict[str, dict[str, object]] = {}
+    for task_id, info in parsed_d.items():
+        if isinstance(info, dict):
+            from_json[task_id] = dict(cast(dict[str, Any], info))
+    return from_json
 
 
-def _format_task_ids(task_ids: list[str]) -> str:
-    ordered = sorted(task_ids, key=_task_sort_key)
-    return ", ".join(f"`{task_id}`" for task_id in ordered)
+def _coerce_task_metric(value: object) -> float | None:
+    """Parse cost_usd-style JSON values for Slack task summaries."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_task_duration_ms(value: object) -> int | None:
+    """Parse duration_ms-style JSON values for Slack task summaries."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value.strip()))
+        except ValueError:
+            return None
+    return None
 
 
 def _format_task_list_with_descriptions(
@@ -1506,12 +1549,11 @@ def _format_task_list_with_descriptions(
         suffix = ""
         cost = info.get("cost_usd")
         dur = info.get("duration_ms")
-        if cost is not None and dur is not None:
-            try:
-                secs = int(dur) // 1000
-                suffix = f" — ${float(cost):.2f}, {secs}s"
-            except (ValueError, TypeError):
-                logger.debug("Skipping malformed cost/duration for task %s: cost=%r, dur=%r", task_id, cost, dur)
+        cost_f = _coerce_task_metric(cost)
+        dur_ms = _coerce_task_duration_ms(dur)
+        if cost_f is not None and dur_ms is not None:
+            secs = dur_ms // 1000
+            suffix = f" — ${cost_f:.2f}, {secs}s"
         line = f"• `{task_id}` {desc}{suffix}" if desc else f"• `{task_id}`{suffix}"
         lines.append(line)
     if len(ordered) > max_shown:
@@ -1588,7 +1630,7 @@ def _invoke_ui_factory(
                 fallback_prefix = f"{badge.markup} "
             elif task_id is not None:
                 fallback_prefix = make_task_prefix(task_id)
-            return ui_factory(fallback_prefix)  # type: ignore[operator]
+            return ui_factory(prefix=fallback_prefix)
 
     return ui_factory(prefix=prefix, task_id=task_id, badge=badge)  # type: ignore[operator]
 
@@ -1635,7 +1677,7 @@ def _extract_review_findings_summary(
                 # Hit a non-finding line or blank after enough findings — stop
                 break
     if findings_lines:
-        truncated = []
+        truncated: list[str] = []
         for f in findings_lines[:max_findings]:
             f = sanitize_for_slack(sanitize_untrusted_content(f))
             if len(f) > max_chars:
@@ -2412,7 +2454,7 @@ VALID_CATEGORIES = {"code-quality", "testing", "architecture", "security", "styl
 
 def _parse_learn_output(text: str) -> list[LearningEntry]:
     """Parse the structured output from the learn phase agent."""
-    entries = []
+    entries: list[LearningEntry] = []
     for match in _LEARNING_ENTRY_RE.finditer(text):
         category = match.group(1)
         entry_text = match.group(2).strip()[:150]
@@ -2487,7 +2529,9 @@ def _build_ceo_prompt(
             )
             for iss in open_issues:
                 safe_title = sanitize_untrusted_content(iss.title)
-                safe_labels = [sanitize_untrusted_content(l) for l in iss.labels]
+                safe_labels = [
+                    sanitize_untrusted_content(label) for label in iss.labels
+                ]
                 label_str = (
                     " [" + ", ".join(safe_labels) + "]" if safe_labels else ""
                 )
@@ -2516,7 +2560,9 @@ def _build_ceo_prompt(
             for pr in open_prs:
                 safe_title = sanitize_untrusted_content(pr.title)
                 safe_branch = sanitize_untrusted_content(pr.branch)
-                safe_labels = [sanitize_untrusted_content(l) for l in pr.labels]
+                safe_labels = [
+                    sanitize_untrusted_content(label) for label in pr.labels
+                ]
                 label_str = (
                     " [" + ", ".join(safe_labels) + "]" if safe_labels else ""
                 )
@@ -2738,7 +2784,7 @@ def _build_sweep_prompt(
     return system, user
 
 
-def parse_sweep_findings(raw_output: str) -> list[dict]:
+def parse_sweep_findings(raw_output: str) -> list[dict[str, object]]:
     """Parse structured findings from sweep agent markdown output.
 
     Each finding is extracted from parent task lines matching the pattern:
@@ -2747,7 +2793,7 @@ def parse_sweep_findings(raw_output: str) -> list[dict]:
     Returns a sorted list of dicts with keys:
     number, category, title, impact, risk, score, raw_line
     """
-    findings: list[dict] = []
+    findings: list[dict[str, object]] = []
     pattern = re.compile(
         r"^- \[ \]\s+(\d+\.\d+)\s+\[([^\]]+)\]\s+(.+?)\s*—\s*impact:(\d+)\s+risk:(\d+)",
         re.MULTILINE,
@@ -2764,7 +2810,7 @@ def parse_sweep_findings(raw_output: str) -> list[dict]:
             "score": impact * risk,
             "raw_line": m.group(0),
         })
-    findings.sort(key=lambda f: f["score"], reverse=True)
+    findings.sort(key=lambda f: cast(int, f["score"]), reverse=True)
     return findings
 
 
@@ -2877,21 +2923,11 @@ def run_sweep(
     )
 
     # If execution failed, propagate the failure so callers know
-    if exec_result is not None and exec_result.status == RunStatus.FAILED:
+    if exec_result.status == RunStatus.FAILED:
         result.success = False
         result.error = "Sweep execution failed during implementation"
 
     return findings_text, result
-
-
-def _parse_parent_tasks(task_content: str) -> list[str]:
-    """Extract parent task lines from a task file.
-
-    Parent tasks match the pattern: `- [ ] N.0 Title` or `- [x] N.0 Title`.
-    Returns the full task line text for each parent task.
-    """
-    pattern = re.compile(r"^- \[[ x]\] \d+\.0 .+", re.MULTILINE)
-    return pattern.findall(task_content)
 
 
 def _save_review_artifact(
@@ -3074,7 +3110,7 @@ def _load_run_log(repo_root: Path, run_id: str) -> RunLog:
         raise click.ClickException(f"Corrupted run log: {log_path}: {exc}")
 
     try:
-        phases = []
+        phases: list[PhaseResult] = []
         for p in data.get("phases", []):
             phases.append(PhaseResult(
                 phase=Phase(p["phase"]),
@@ -3249,9 +3285,9 @@ def prepare_resume(repo_root: Path, run_id: str) -> ResumeState:
 
     return ResumeState(
         log=log,
-        branch_name=log.branch_name,  # type: ignore[arg-type]
-        prd_rel=log.prd_rel,  # type: ignore[arg-type]
-        task_rel=log.task_rel,  # type: ignore[arg-type]
+        branch_name=log.branch_name or "",
+        prd_rel=log.prd_rel or "",
+        task_rel=log.task_rel or "",
         last_successful_phase=last_successful_phase,
         completed_task_ids=completed_task_ids,
         failed_task_ids=failed_task_ids,
@@ -3456,7 +3492,7 @@ def run_standalone_review(
             print_reviewer_legend([(i, p.role) for i, p in enumerate(reviewers)])
 
         # Build parallel review calls
-        review_calls = []
+        review_calls: list[dict[str, Any]] = []
         for i, persona in enumerate(reviewers):
             sys_prompt, usr_prompt = _build_standalone_review_prompt(
                 persona, config, branch, base, diff_text,
@@ -3645,7 +3681,7 @@ def _run_learn_phase(
     repo_root: Path,
     log: RunLog,
     prompt: str,
-    _make_ui,
+    _make_ui: UIFactoryCallable,
     memory_store: MemoryStore | None = None,
 ) -> None:
     """Execute the learn phase: extract patterns from reviews into the ledger.
@@ -3660,7 +3696,7 @@ def _run_learn_phase(
         return
 
     try:
-        learn_ui = _make_ui()
+        learn_ui: PhaseUI | NullUI | None = _make_ui()
         if learn_ui is not None:
             learn_budget = min(0.50, config.budget.per_phase / 2)
             learn_ui.phase_header("Learn", learn_budget, config.get_model(Phase.LEARN))
@@ -4007,12 +4043,15 @@ def run_thread_fix(
         badge: StreamBadge | None = None,
     ) -> PhaseUI | NullUI | None:
         if ui_factory is not None:
-            return _invoke_ui_factory(
-                ui_factory,
-                prefix=prefix,
-                task_id=task_id,
-                badge=badge,
-            )  # type: ignore[return-value]
+            return cast(
+                PhaseUI | NullUI | None,
+                _invoke_ui_factory(
+                    ui_factory,
+                    prefix=prefix,
+                    task_id=task_id,
+                    badge=badge,
+                ),
+            )
         if quiet:
             return None
         return PhaseUI(verbose=verbose, prefix=prefix, task_id=task_id, badge=badge)
@@ -4283,12 +4322,15 @@ def run(
         badge: StreamBadge | None = None,
     ) -> PhaseUI | NullUI | None:
         if ui_factory is not None:
-            return _invoke_ui_factory(
-                ui_factory,
-                prefix=prefix,
-                task_id=task_id,
-                badge=badge,
-            )  # type: ignore[return-value]
+            return cast(
+                PhaseUI | NullUI | None,
+                _invoke_ui_factory(
+                    ui_factory,
+                    prefix=prefix,
+                    task_id=task_id,
+                    badge=badge,
+                ),
+            )
         if quiet:
             return None
         return PhaseUI(verbose=verbose, prefix=prefix, task_id=task_id, badge=badge)
@@ -4754,7 +4796,7 @@ def _run_pipeline(
                 impl_ui.phase_header("Implement", config.budget.per_phase, config.get_model(Phase.IMPLEMENT), branch_name)
                 task_outline = _load_task_outline(repo_root, task_rel)
                 task_outline_note = _format_task_outline_note(task_outline)
-                if task_outline_note and impl_ui is not None:
+                if task_outline_note:
                     impl_ui.slack_note(task_outline_note)  # type: ignore[union-attr]
             else:
                 _log("=== Phase 2: Implement ===")
@@ -4911,7 +4953,7 @@ def _run_pipeline(
                     if not quiet:
                         print_reviewer_legend([(i, p.role) for i, p in enumerate(reviewers)])
 
-                    review_calls = []
+                    review_calls_loop: list[dict[str, Any]] = []
                     for i, persona in enumerate(reviewers):
                         sys_prompt, usr_prompt = _build_persona_review_prompt(
                             persona, config, prd_rel, branch_name
@@ -4921,7 +4963,7 @@ def _run_pipeline(
                         sys_prompt = _inject_memory_block(sys_prompt, memory_store, "review", usr_prompt, config)
                         usr_prompt += _drain_injected_context(user_injection_provider)
                         persona_ui = _make_ui(badge=make_reviewer_badge(i))
-                        review_calls.append(dict(
+                        review_calls_loop.append(dict(
                             phase=Phase.REVIEW,
                             prompt=usr_prompt,
                             cwd=repo_root,
@@ -4941,7 +4983,7 @@ def _run_pipeline(
                         progress_tracker = ParallelProgressLine(reviewer_list, is_tty=is_tty)
 
                     results = run_phases_parallel_sync(
-                        review_calls,
+                        review_calls_loop,
                         on_complete=progress_tracker.on_reviewer_complete if progress_tracker else None,
                     )
 

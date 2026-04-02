@@ -20,10 +20,21 @@ from colonyos.ui import (
     TOOL_ARG_KEYS,
     TOOL_STYLE,
     StreamBadge,
-    _first_meaningful_line,
-    _truncate,
     make_task_badge,
 )
+
+
+def _first_meaningful_line(text: str) -> str:
+    """Extract the first non-blank, non-heading line from an agent prompt."""
+    for line in text.splitlines():
+        stripped = line.strip().lstrip("#").strip()
+        if stripped and len(stripped) > 5:
+            return stripped
+    return text.split("\n", 1)[0].strip()
+
+
+def _truncate(s: str, maxlen: int) -> str:
+    return s if len(s) <= maxlen else s[: maxlen - 1] + "…"
 
 if TYPE_CHECKING:
     import janus

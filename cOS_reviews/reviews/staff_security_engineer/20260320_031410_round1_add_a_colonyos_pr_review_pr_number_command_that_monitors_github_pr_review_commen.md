@@ -44,7 +44,7 @@ As Staff Security Engineer, I have reviewed this implementation from a supply ch
 
 1. **[MEDIUM] No Per-Reviewer Rate Limits**: The PRD acknowledges this is deferred to v2 (Non-Goals #5), but without per-reviewer limits, a single malicious reviewer can spam comments to exhaust the per-PR budget. This is a sockpuppet attack vector mentioned in the PRD.
 
-2. **[LOW] Placeholder URLs in commit replies** (`cli.py`): 
+2. **[LOW] Placeholder URLs in commit replies** (`cli.py`):
    ```python
    pr_url=f"https://github.com/.../{pr_number}",  # Placeholder
    commit_url = f"https://github.com/.../commit/{commit_sha}"
@@ -61,7 +61,7 @@ As Staff Security Engineer, I have reviewed this implementation from a supply ch
 
 The tests verify:
 - ✅ Budget cap checks (`TestSafetyGuards::test_budget_cap_check`)
-- ✅ Circuit breaker checks (`TestSafetyGuards::test_circuit_breaker_check`)  
+- ✅ Circuit breaker checks (`TestSafetyGuards::test_circuit_breaker_check`)
 - ✅ Max fix rounds checks (`TestSafetyGuards::test_max_fix_rounds_check`)
 - ✅ Comment body sanitization (`TestTriagePRReviewComment::test_sanitizes_comment_body`)
 - ✅ PR state (merged/closed) handling (`TestFetchPRState`)

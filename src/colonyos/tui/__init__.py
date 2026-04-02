@@ -14,13 +14,17 @@ def _check_dependencies() -> None:
     """Verify that required TUI dependencies are installed."""
     missing: list[str] = []
     try:
-        import textual  # noqa: F401
+        import textual as _textual
     except ImportError:
         missing.append("textual")
+    else:
+        _ = _textual.__name__
     try:
-        import janus  # noqa: F401
+        import janus as _janus
     except ImportError:
         missing.append("janus")
+    else:
+        _ = _janus.__name__
 
     if missing:
         pkgs = ", ".join(missing)

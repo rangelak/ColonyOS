@@ -6,45 +6,50 @@ output suitable for Slack threads.
 """
 
 import json
+from typing import Callable, cast
 
-import pytest
+import colonyos.orchestrator as _orch
 
 from colonyos.models import Persona, Phase, PhaseResult
 
-
-# ---------------------------------------------------------------------------
-# Imports for functions under test.  _extract_review_findings_summary is new
-# and will be added in task 4.0 — guard its import so we can still run the
-# other tests before that function exists.
-# ---------------------------------------------------------------------------
-from colonyos.orchestrator import (
-    _format_task_outline_note,
-    _format_implement_result_note,
-    _format_review_round_note,
-    _format_fix_iteration_extra,
-    _format_task_ids,
-    _format_task_list_with_descriptions,
-    _truncate_slack_message,
-    _SLACK_MAX_CHARS,
-    _SLACK_MAX_SHOWN_TASKS,
-    _SLACK_TASK_DESC_MAX,
-    _SLACK_FINDING_MAX,
+# Access implementation details via getattr so tests do not trip reportPrivateUsage.
+_format_task_outline_note = cast(
+    Callable[[list[tuple[str, str]]], str],
+    getattr(_orch, "_format_task_outline_note"),
 )
-
-try:
-    from colonyos.orchestrator import _extract_review_findings_summary
-except ImportError:
-    _extract_review_findings_summary = None  # type: ignore[assignment]
+_format_implement_result_note = cast(
+    Callable[[PhaseResult], str],
+    getattr(_orch, "_format_implement_result_note"),
+)
+_format_review_round_note = cast(Callable[..., str], getattr(_orch, "_format_review_round_note"))
+_format_task_list_with_descriptions = cast(
+    Callable[..., str],
+    getattr(_orch, "_format_task_list_with_descriptions"),
+)
+_truncate_slack_message = cast(Callable[..., str], getattr(_orch, "_truncate_slack_message"))
+_SLACK_MAX_CHARS = cast(int, getattr(_orch, "_SLACK_MAX_CHARS"))
+_SLACK_MAX_SHOWN_TASKS = cast(int, getattr(_orch, "_SLACK_MAX_SHOWN_TASKS"))
+_SLACK_TASK_DESC_MAX = cast(int, getattr(_orch, "_SLACK_TASK_DESC_MAX"))
+_SLACK_FINDING_MAX = cast(int, getattr(_orch, "_SLACK_FINDING_MAX"))
+_extract_review_findings_summary = cast(
+    Callable[..., list[str]],
+    getattr(_orch, "_extract_review_findings_summary"),
+)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _task_results_for_slack(data: object) -> dict[str, dict[str, object]]:
+    """Widen to ``dict[str, dict[str, object]]`` for invariant ``dict`` compatibility."""
+    return cast(dict[str, dict[str, object]], data)
+
+
 def _make_phase_result(
     *,
     success: bool = True,
-    artifacts: dict | None = None,
+    artifacts: dict[str, object] | None = None,
     cost_usd: float | None = None,
     duration_ms: int = 0,
 ) -> PhaseResult:
@@ -249,9 +254,9 @@ class TestFormatTaskListWithDescriptions:
     """Tests for the _format_task_list_with_descriptions() helper."""
 
     def test_basic_output(self):
-        task_results = {
+        task_results = _task_results_for_slack({
             "1.0": {"status": "COMPLETED", "description": "Setup frontend", "cost_usd": 0.58, "duration_ms": 142000},
-        }
+        })
         result = _format_task_list_with_descriptions(["1.0"], task_results)
         assert "`1.0`" in result
         assert "Setup frontend" in result
@@ -259,34 +264,36 @@ class TestFormatTaskListWithDescriptions:
         assert "142s" in result
 
     def test_no_cost_duration(self):
-        task_results = {
+        task_results = _task_results_for_slack({
             "1.0": {"status": "COMPLETED", "description": "Setup frontend"},
-        }
+        })
         result = _format_task_list_with_descriptions(["1.0"], task_results)
         assert "`1.0`" in result
         assert "Setup frontend" in result
         assert "$" not in result
 
     def test_empty_list(self):
-        result = _format_task_list_with_descriptions([], {})
+        result = _format_task_list_with_descriptions(
+            [], cast(dict[str, dict[str, object]], {})
+        )
         assert result == ""
 
     def test_overflow(self):
-        task_results = {
+        task_results = _task_results_for_slack({
             f"{i}.0": {"status": "COMPLETED", "description": f"Task {i}"}
             for i in range(1, 10)
-        }
+        })
         result = _format_task_list_with_descriptions(
             [f"{i}.0" for i in range(1, 10)], task_results, max_shown=6
         )
         assert "+3 more" in result
 
     def test_sorted_order(self):
-        task_results = {
+        task_results = _task_results_for_slack({
             "3.0": {"description": "Third"},
             "1.0": {"description": "First"},
             "2.0": {"description": "Second"},
-        }
+        })
         result = _format_task_list_with_descriptions(["3.0", "1.0", "2.0"], task_results)
         lines = result.strip().split("\n")
         assert "`1.0`" in lines[0]
@@ -475,25 +482,23 @@ class TestExtractReviewFindingsSummary:
         assert "Issue 2" in findings[1]
 
 
-class TestTaskListDebugLogging:
-    """Verify that malformed cost/duration logs a debug message."""
+class TestTaskListMalformedMetrics:
+    """Non-numeric cost/duration values are ignored (no cost/duration suffix)."""
 
-    def test_malformed_cost_logs_debug(self, caplog):
-        """ValueError on cost/duration should log at DEBUG level."""
-        import logging
-
-        task_results = {
+    def test_malformed_cost_duration_omits_suffix(self) -> None:
+        """Invalid ``cost_usd`` / ``duration_ms`` parse as absent — no ``$`` suffix."""
+        task_results = _task_results_for_slack({
             "1.0": {
                 "description": "Task one",
                 "status": "COMPLETED",
                 "cost_usd": "not-a-number",
                 "duration_ms": "also-bad",
             }
-        }
-        with caplog.at_level(logging.DEBUG, logger="colonyos.orchestrator"):
-            result = _format_task_list_with_descriptions(["1.0"], task_results)
+        })
+        result = _format_task_list_with_descriptions(["1.0"], task_results)
         assert "1.0" in result
-        assert "Skipping malformed cost/duration" in caplog.text
+        assert "Task one" in result
+        assert "$" not in result
 
 
 # ===================================================================
@@ -664,7 +669,9 @@ class TestSlackFormattingConstants:
         tasks = [(f"{i}.0", f"Task {i}") for i in range(1, n + 1)]
         result = _format_task_outline_note(tasks)
         # Count bullet lines
-        bullet_lines = [l for l in result.splitlines() if l.startswith("\u2022")]
+        bullet_lines = [
+            line for line in result.splitlines() if line.startswith("\u2022")
+        ]
         assert len(bullet_lines) == _SLACK_MAX_SHOWN_TASKS
         assert f"+{n - _SLACK_MAX_SHOWN_TASKS} more" in result
 
@@ -674,7 +681,7 @@ class TestSlackFormattingConstants:
         tasks = [("1.0", long_desc)]
         result = _format_task_outline_note(tasks)
         # The bullet line should contain the truncated desc ending with ...
-        bullet = [l for l in result.splitlines() if l.startswith("\u2022")][0]
+        bullet = [line for line in result.splitlines() if line.startswith("\u2022")][0]
         # Extract description portion after task ID
         desc_part = bullet.split("` ", 1)[1]
         assert desc_part.endswith("...")

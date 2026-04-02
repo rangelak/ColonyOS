@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from typing import cast
 import textwrap
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -145,7 +146,8 @@ class TestCleanupConfig:
 
     def test_defaults_dict_has_cleanup(self):
         assert "cleanup" in DEFAULTS
-        assert DEFAULTS["cleanup"]["artifact_retention_days"] == 30
+        cleanup_defaults = cast(dict[str, object], DEFAULTS["cleanup"])
+        assert cleanup_defaults["artifact_retention_days"] == 30
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +603,7 @@ class TestWriteCleanupLog:
     def test_creates_log_file(self, tmp_path: Path):
         runs_dir = tmp_path / ".colonyos" / "runs"
         runs_dir.mkdir(parents=True)
-        result = {"deleted": 5, "skipped": 2}
+        result: dict[str, object] = {"deleted": 5, "skipped": 2}
         log_path = write_cleanup_log(runs_dir, "branches", result)
         assert log_path.exists()
         assert log_path.name.startswith("cleanup_")

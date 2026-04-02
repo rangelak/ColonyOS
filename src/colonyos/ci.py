@@ -11,9 +11,8 @@ import logging
 import re
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import click
 
@@ -108,7 +107,7 @@ def fetch_pr_checks(pr_number: int, repo_root: Path) -> list[CheckResult]:
     return checks
 
 
-def extract_run_id_from_url(url: str) -> str | None:
+def extract_run_id_from_url(url: object) -> str | None:
     """Extract the run ID from a GitHub Actions details URL.
 
     Public API — used by both the CLI and orchestrator modules.

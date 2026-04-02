@@ -37,7 +37,7 @@ However, the `sanitize_untrusted_content()` call on prompts in `launch_run()` ma
 - **FR-3** (web-build CI job): ✅ Present
 - **FR-12** (inline config editing): ✅ `InlineEdit.tsx` component exists
 - **FR-16** (Proposals page): ✅ `Proposals.tsx` exists
-- **FR-17** (Reviews page): ✅ `Reviews.tsx` exists  
+- **FR-17** (Reviews page): ✅ `Reviews.tsx` exists
 - **FR-18** (Auth flow): Partially — token is stored in localStorage, but there's no explicit prompt on first load asking for the token. The `AuthTokenPrompt.tsx` component exists but I don't see it wired into the app startup flow conditionally.
 
 ---

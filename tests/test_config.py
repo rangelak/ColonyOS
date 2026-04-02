@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import cast
 
 import pytest
 import yaml
@@ -21,11 +22,28 @@ from colonyos.config import (
     SlackConfig,
     VerifyConfig,
     VALID_MODELS,
-    _SAFETY_CRITICAL_PHASES,
+    SAFETY_CRITICAL_PHASES,
     load_config,
     save_config,
 )
 from colonyos.models import Persona, Phase, ProjectInfo
+
+
+def _as_str_mapping(obj: object) -> dict[str, object]:
+    assert isinstance(obj, dict)
+    return cast(dict[str, object], obj)
+
+
+def _yaml_mapping_from_text(text: str) -> dict[str, object]:
+    return _as_str_mapping(cast(object, yaml.safe_load(text)))
+
+
+def _defaults_at(*keys: str) -> object:
+    cur: object = DEFAULTS
+    for k in keys:
+        m = _as_str_mapping(cur)
+        cur = m[k]
+    return cur
 
 
 @pytest.fixture
@@ -55,7 +73,7 @@ class TestLoadConfig:
     def test_loads_from_yaml(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "project": {
                     "name": "TestApp",
@@ -96,7 +114,7 @@ class TestLoadConfig:
     def test_ignores_personas_without_role(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "personas": [
                     {"role": "", "expertise": "x", "perspective": "y"},
@@ -113,7 +131,7 @@ class TestLoadConfig:
         """Existing configs missing review/reviews_dir fields get defaults."""
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "model": "sonnet",
                 "phases": {"plan": True, "implement": True, "deliver": True},
@@ -133,7 +151,7 @@ class TestLoadConfig:
     def test_loads_ceo_persona_from_yaml(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "ceo_persona": {
                     "role": "Growth CEO",
@@ -165,7 +183,7 @@ class TestDefaults:
         assert DEFAULTS["reviews_dir"] == "cOS_reviews"
 
     def test_defaults_have_review_phase(self):
-        assert DEFAULTS["phases"]["review"] is True
+        assert _defaults_at("phases", "review") is True
 
     def test_defaults_have_proposals_dir(self):
         assert DEFAULTS["proposals_dir"] == "cOS_proposals"
@@ -187,7 +205,7 @@ class TestSaveConfig:
             reviews_dir="r",
         )
 
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
 
         assert loaded.project is not None
@@ -205,7 +223,7 @@ class TestSaveConfig:
         original = ColonyConfig(
             phases=PhasesConfig(review=False),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.phases.review is False
 
@@ -219,7 +237,7 @@ class TestSaveConfig:
             vision="Build the best tool",
             proposals_dir="my_proposals",
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.ceo_persona is not None
         assert loaded.ceo_persona.role == "Growth CEO"
@@ -228,17 +246,17 @@ class TestSaveConfig:
 
     def test_roundtrip_without_ceo_persona(self, tmp_repo: Path):
         original = ColonyConfig(vision="Some vision")
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.ceo_persona is None
         assert loaded.vision == "Some vision"
 
     def test_reviews_dir_persisted(self, tmp_repo: Path):
         original = ColonyConfig(reviews_dir="custom_reviews")
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
 
         config_path = tmp_repo / ".colonyos" / "config.yaml"
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        raw = _yaml_mapping_from_text(config_path.read_text(encoding="utf-8"))
         assert raw["reviews_dir"] == "custom_reviews"
 
     def test_recovery_roundtrip(self, tmp_repo: Path):
@@ -251,7 +269,7 @@ class TestSaveConfig:
                 incident_char_cap=6000,
             )
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.recovery.max_phase_retries == 2
         assert loaded.recovery.allow_nuke is True
@@ -263,7 +281,7 @@ class TestReviewerField:
     def test_defaults_to_false(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "personas": [
                     {"role": "Eng", "expertise": "x", "perspective": "y"},
@@ -277,7 +295,7 @@ class TestReviewerField:
     def test_parsed_when_true(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "personas": [
                     {"role": "Eng", "expertise": "x", "perspective": "y", "reviewer": True},
@@ -295,7 +313,7 @@ class TestReviewerField:
                 Persona(role="Planner", expertise="x", perspective="y", reviewer=False),
             ],
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.personas[0].reviewer is True
         assert loaded.personas[1].reviewer is False
@@ -309,7 +327,7 @@ class TestAutoApprove:
     def test_parsed_from_yaml(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"auto_approve": True}),
             encoding="utf-8",
         )
@@ -318,13 +336,13 @@ class TestAutoApprove:
 
     def test_roundtrip(self, tmp_repo: Path):
         original = ColonyConfig(auto_approve=True)
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.auto_approve is True
 
     def test_roundtrip_false(self, tmp_repo: Path):
         original = ColonyConfig(auto_approve=False)
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.auto_approve is False
 
@@ -337,7 +355,7 @@ class TestMaxFixIterations:
     def test_parsed_from_yaml(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"max_fix_iterations": 5}),
             encoding="utf-8",
         )
@@ -347,7 +365,7 @@ class TestMaxFixIterations:
     def test_zero_disables_fix_loop(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"max_fix_iterations": 0}),
             encoding="utf-8",
         )
@@ -356,7 +374,7 @@ class TestMaxFixIterations:
 
     def test_serialized_via_save_config(self, tmp_repo: Path):
         original = ColonyConfig(max_fix_iterations=3)
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.max_fix_iterations == 3
 
@@ -376,7 +394,7 @@ class TestBudgetConfigLongRunning:
     def test_parsed_from_yaml(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "budget": {
                     "per_phase": 5.0,
@@ -400,7 +418,7 @@ class TestBudgetConfigLongRunning:
                 max_total_usd=250.0,
             ),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.budget.max_duration_hours == 12.0
         assert loaded.budget.max_total_usd == 250.0
@@ -409,7 +427,7 @@ class TestBudgetConfigLongRunning:
         """Old configs with only per_phase and per_run still work."""
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"budget": {"per_phase": 10.0, "per_run": 30.0}}),
             encoding="utf-8",
         )
@@ -420,8 +438,8 @@ class TestBudgetConfigLongRunning:
         assert config.budget.max_total_usd == 500.0
 
     def test_defaults_dict_has_new_fields(self):
-        assert DEFAULTS["budget"]["max_duration_hours"] == 8.0
-        assert DEFAULTS["budget"]["max_total_usd"] == 500.0
+        assert _defaults_at("budget", "max_duration_hours") == 8.0
+        assert _defaults_at("budget", "max_total_usd") == 500.0
 
 
 class TestLearningsConfig:
@@ -433,7 +451,7 @@ class TestLearningsConfig:
     def test_parsed_from_yaml(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"learnings": {"enabled": False, "max_entries": 50}}),
             encoding="utf-8",
         )
@@ -444,7 +462,7 @@ class TestLearningsConfig:
     def test_missing_section_falls_back_to_defaults(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"model": "sonnet"}),
             encoding="utf-8",
         )
@@ -454,14 +472,14 @@ class TestLearningsConfig:
 
     def test_roundtrip(self, tmp_repo: Path):
         original = ColonyConfig(learnings=LearningsConfig(enabled=False, max_entries=42))
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.learnings.enabled is False
         assert loaded.learnings.max_entries == 42
 
     def test_defaults_dict_has_learnings(self):
-        assert DEFAULTS["learnings"]["enabled"] is True
-        assert DEFAULTS["learnings"]["max_entries"] == 100
+        assert _defaults_at("learnings", "enabled") is True
+        assert _defaults_at("learnings", "max_entries") == 100
 
 
 class TestPhaseModels:
@@ -484,7 +502,7 @@ class TestPhaseModels:
     def test_load_config_parses_phase_models(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "model": "sonnet",
                 "phase_models": {"implement": "opus", "deliver": "haiku"},
@@ -497,7 +515,7 @@ class TestPhaseModels:
     def test_load_config_defaults_to_empty_dict(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"model": "sonnet"}),
             encoding="utf-8",
         )
@@ -507,7 +525,7 @@ class TestPhaseModels:
     def test_load_config_rejects_invalid_model_in_phase_models(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "model": "sonnet",
                 "phase_models": {"implement": "gpt4"},
@@ -515,22 +533,22 @@ class TestPhaseModels:
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="Invalid model 'gpt4'"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_load_config_rejects_invalid_top_level_model(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"model": "invalid-model"}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="Invalid model 'invalid-model'"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_load_config_rejects_invalid_phase_key(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "model": "sonnet",
                 "phase_models": {"nonexistent": "opus"},
@@ -538,23 +556,23 @@ class TestPhaseModels:
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="Invalid phase key 'nonexistent'"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_save_config_serializes_phase_models_when_nonempty(self, tmp_repo: Path):
         config = ColonyConfig(
             model="sonnet",
             phase_models={"implement": "opus", "deliver": "haiku"},
         )
-        save_config(tmp_repo, config)
-        raw = yaml.safe_load(
+        _ = save_config(tmp_repo, config)
+        raw = _yaml_mapping_from_text(
             (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
         )
         assert raw["phase_models"] == {"implement": "opus", "deliver": "haiku"}
 
     def test_save_config_omits_phase_models_when_empty(self, tmp_repo: Path):
         config = ColonyConfig(model="sonnet", phase_models={})
-        save_config(tmp_repo, config)
-        raw = yaml.safe_load(
+        _ = save_config(tmp_repo, config)
+        raw = _yaml_mapping_from_text(
             (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
         )
         assert "phase_models" not in raw
@@ -564,7 +582,7 @@ class TestPhaseModels:
             model="sonnet",
             phase_models={"implement": "opus", "review": "sonnet", "deliver": "haiku"},
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.phase_models == original.phase_models
         assert loaded.model == "sonnet"
@@ -573,10 +591,12 @@ class TestPhaseModels:
         config = load_config(tmp_repo)
         assert config.phase_models == {}
 
-    def test_warns_when_haiku_assigned_to_review(self, tmp_repo: Path, caplog):
+    def test_warns_when_haiku_assigned_to_review(
+        self, tmp_repo: Path, caplog: pytest.LogCaptureFixture
+    ):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "model": "sonnet",
                 "phase_models": {"review": "haiku"},
@@ -589,10 +609,12 @@ class TestPhaseModels:
         assert "safety gate" in caplog.text
         assert "'review'" in caplog.text
 
-    def test_warns_when_haiku_assigned_to_decision(self, tmp_repo: Path, caplog):
+    def test_warns_when_haiku_assigned_to_decision(
+        self, tmp_repo: Path, caplog: pytest.LogCaptureFixture
+    ):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "model": "sonnet",
                 "phase_models": {"decision": "haiku"},
@@ -600,13 +622,15 @@ class TestPhaseModels:
             encoding="utf-8",
         )
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
         assert "'decision'" in caplog.text
 
-    def test_warns_when_haiku_assigned_to_fix(self, tmp_repo: Path, caplog):
+    def test_warns_when_haiku_assigned_to_fix(
+        self, tmp_repo: Path, caplog: pytest.LogCaptureFixture
+    ):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "model": "sonnet",
                 "phase_models": {"fix": "haiku"},
@@ -614,13 +638,15 @@ class TestPhaseModels:
             encoding="utf-8",
         )
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
         assert "'fix'" in caplog.text
 
-    def test_no_warning_when_haiku_assigned_to_learn(self, tmp_repo: Path, caplog):
+    def test_no_warning_when_haiku_assigned_to_learn(
+        self, tmp_repo: Path, caplog: pytest.LogCaptureFixture
+    ):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "model": "sonnet",
                 "phase_models": {"learn": "haiku"},
@@ -628,13 +654,15 @@ class TestPhaseModels:
             encoding="utf-8",
         )
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
         assert "safety gate" not in caplog.text
 
-    def test_no_warning_when_sonnet_assigned_to_review(self, tmp_repo: Path, caplog):
+    def test_no_warning_when_sonnet_assigned_to_review(
+        self, tmp_repo: Path, caplog: pytest.LogCaptureFixture
+    ):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "model": "sonnet",
                 "phase_models": {"review": "sonnet"},
@@ -642,28 +670,30 @@ class TestPhaseModels:
             encoding="utf-8",
         )
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
         assert "safety gate" not in caplog.text
 
     def test_safety_critical_phases_constant(self):
-        assert _SAFETY_CRITICAL_PHASES == frozenset({"review", "decision", "fix"})
+        assert SAFETY_CRITICAL_PHASES == frozenset({"review", "decision", "fix"})
 
     def test_fix_phase_is_safety_critical_covers_verify_fix(self):
         """Phase.FIX is safety-critical, so the verify-fix agent (which reuses
         Phase.FIX) inherits the haiku-warning guard automatically — no
         separate entry is needed for verify-fix."""
-        assert Phase.FIX.value in _SAFETY_CRITICAL_PHASES
+        assert Phase.FIX.value in SAFETY_CRITICAL_PHASES
 
     def test_verify_phase_not_safety_critical(self):
         """Phase.VERIFY is a read-only test runner intentionally designed to
         use a lightweight model (haiku).  It must NOT be in the safety-critical
         set so that assigning haiku to verify does not trigger a warning."""
-        assert Phase.VERIFY.value not in _SAFETY_CRITICAL_PHASES
+        assert Phase.VERIFY.value not in SAFETY_CRITICAL_PHASES
 
-    def test_no_warning_when_haiku_assigned_to_verify(self, tmp_repo: Path, caplog):
+    def test_no_warning_when_haiku_assigned_to_verify(
+        self, tmp_repo: Path, caplog: pytest.LogCaptureFixture
+    ):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "model": "sonnet",
                 "phase_models": {"verify": "haiku"},
@@ -671,23 +701,23 @@ class TestPhaseModels:
             encoding="utf-8",
         )
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
         assert "safety gate" not in caplog.text
 
     def test_invalid_model_error_mentions_short_names(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"model": "claude-opus-4-20250514"}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="short names"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_invalid_phase_model_error_mentions_short_names(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "model": "sonnet",
                 "phase_models": {"implement": "claude-opus-4-20250514"},
@@ -695,7 +725,7 @@ class TestPhaseModels:
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="short names"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
 
 class TestCIFixConfig:
@@ -709,7 +739,7 @@ class TestCIFixConfig:
     def test_parsed_from_yaml(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "ci_fix": {
                     "enabled": True,
@@ -729,7 +759,7 @@ class TestCIFixConfig:
     def test_missing_section_gets_defaults(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"model": "sonnet"}),
             encoding="utf-8",
         )
@@ -740,38 +770,38 @@ class TestCIFixConfig:
     def test_negative_retries_raises(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"ci_fix": {"max_retries": -1}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="non-negative"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_negative_timeout_raises(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"ci_fix": {"wait_timeout": -1}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="non-negative"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_roundtrip(self, tmp_repo: Path):
         original = ColonyConfig(
             ci_fix=CIFixConfig(enabled=True, max_retries=5, wait_timeout=300),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.ci_fix.enabled is True
         assert loaded.ci_fix.max_retries == 5
         assert loaded.ci_fix.wait_timeout == 300
 
     def test_defaults_dict_has_ci_fix(self):
-        assert DEFAULTS["ci_fix"]["enabled"] is False
-        assert DEFAULTS["ci_fix"]["max_retries"] == 2
-        assert DEFAULTS["ci_fix"]["wait_timeout"] == 600
-        assert DEFAULTS["ci_fix"]["log_char_cap"] == 12_000
+        assert _defaults_at("ci_fix", "enabled") is False
+        assert _defaults_at("ci_fix", "max_retries") == 2
+        assert _defaults_at("ci_fix", "wait_timeout") == 600
+        assert _defaults_at("ci_fix", "log_char_cap") == 12_000
 
 
 class TestSlackConfigTriageFields:
@@ -790,7 +820,7 @@ class TestSlackConfigTriageFields:
     def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "slack": {
                     "enabled": True,
@@ -816,7 +846,7 @@ class TestSlackConfigTriageFields:
     def test_missing_new_fields_use_defaults(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"enabled": True}}),
             encoding="utf-8",
         )
@@ -831,22 +861,22 @@ class TestSlackConfigTriageFields:
     def test_negative_daily_budget_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"daily_budget_usd": -5.0}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_zero_max_queue_depth_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"max_queue_depth": 0}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_roundtrip(self, tmp_repo: Path) -> None:
         original = ColonyConfig(
@@ -861,7 +891,7 @@ class TestSlackConfigTriageFields:
                 circuit_breaker_cooldown_minutes=45,
             ),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.slack.triage_scope == "bugs only"
         assert loaded.slack.daily_budget_usd == 25.0
@@ -873,13 +903,13 @@ class TestSlackConfigTriageFields:
 
 class TestDaemonConfigBudgetAndControl:
     def test_default_daily_budget_is_500(self) -> None:
-        assert DEFAULTS["daemon"]["daily_budget_usd"] == 500.0
-        assert DEFAULTS["daemon"]["auto_recover_dirty_worktree"] is True
+        assert _defaults_at("daemon", "daily_budget_usd") == 500.0
+        assert _defaults_at("daemon", "auto_recover_dirty_worktree") is True
 
     def test_parses_unlimited_daemon_budget(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"daily_budget_usd": "unlimited"}}),
             encoding="utf-8",
         )
@@ -893,7 +923,7 @@ class TestDaemonConfigBudgetAndControl:
                 allow_all_control_users=True,
             ),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.daemon.daily_budget_usd is None
         assert loaded.daemon.allow_all_control_users is True
@@ -904,7 +934,7 @@ class TestDaemonConfigBudgetAndControl:
                 auto_recover_dirty_worktree=True,
             ),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.daemon.auto_recover_dirty_worktree is True
 
@@ -926,7 +956,7 @@ class TestDaemonConfigBudgetAndControl:
             ],
             max_log_files=12,
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.retry.max_attempts == 5
         assert loaded.retry.base_delay_seconds == 20.0
@@ -948,7 +978,7 @@ class TestSlackMaxFixRoundsPerThread:
     def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "slack": {
                     "enabled": True,
@@ -963,7 +993,7 @@ class TestSlackMaxFixRoundsPerThread:
     def test_invalid_zero_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "slack": {
                     "enabled": True,
@@ -973,12 +1003,12 @@ class TestSlackMaxFixRoundsPerThread:
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="max_fix_rounds_per_thread must be positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_invalid_negative_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "slack": {
                     "enabled": True,
@@ -988,7 +1018,7 @@ class TestSlackMaxFixRoundsPerThread:
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="max_fix_rounds_per_thread must be positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
         original = ColonyConfig(
@@ -998,7 +1028,7 @@ class TestSlackMaxFixRoundsPerThread:
                 max_fix_rounds_per_thread=7,
             ),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.slack.max_fix_rounds_per_thread == 7
 
@@ -1013,27 +1043,27 @@ class TestSlackMaxRunsPerHourValidation:
     def test_zero_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"max_runs_per_hour": 0}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="max_runs_per_hour must be positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_negative_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"max_runs_per_hour": -1}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="max_runs_per_hour must be positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_valid_value_accepted(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"max_runs_per_hour": 10}}),
             encoding="utf-8",
         )
@@ -1047,23 +1077,23 @@ class TestSlackAutoApproveWarning:
     def test_auto_approve_true_no_config_warning(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"auto_approve": True}}),
             encoding="utf-8",
         )
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
         assert not any("auto_approve" in msg for msg in caplog.messages)
 
     def test_auto_approve_empty_allowlist_no_config_warning(self, tmp_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"auto_approve": True, "allowed_user_ids": []}}),
             encoding="utf-8",
         )
         with caplog.at_level(logging.WARNING, logger="colonyos.config"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
         assert not any("allowed_user_ids" in msg for msg in caplog.messages)
 
 
@@ -1094,7 +1124,7 @@ class TestRouterConfig:
         """RouterConfig is correctly parsed from YAML."""
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "router": {
                     "enabled": False,
@@ -1119,7 +1149,7 @@ class TestRouterConfig:
         """Config without router section uses defaults."""
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"model": "sonnet"}),
             encoding="utf-8",
         )
@@ -1135,7 +1165,7 @@ class TestRouterConfig:
         """Partial router section uses defaults for missing fields."""
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "router": {
                     "enabled": False,
@@ -1155,7 +1185,7 @@ class TestRouterConfig:
         """Invalid model in router section raises ValueError."""
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "router": {
                     "model": "gpt4",
@@ -1164,13 +1194,13 @@ class TestRouterConfig:
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="Invalid router model 'gpt4'"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_negative_confidence_threshold_raises(self, tmp_repo: Path) -> None:
         """Negative confidence_threshold raises ValueError."""
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "router": {
                     "confidence_threshold": -0.1,
@@ -1179,13 +1209,13 @@ class TestRouterConfig:
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="confidence_threshold must be between 0 and 1"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_confidence_threshold_above_one_raises(self, tmp_repo: Path) -> None:
         """confidence_threshold > 1 raises ValueError."""
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "router": {
                     "confidence_threshold": 1.5,
@@ -1194,13 +1224,13 @@ class TestRouterConfig:
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="confidence_threshold must be between 0 and 1"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_small_fix_threshold_above_one_raises(self, tmp_repo: Path) -> None:
         """small_fix_threshold > 1 raises ValueError."""
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "router": {
                     "small_fix_threshold": 1.1,
@@ -1209,13 +1239,13 @@ class TestRouterConfig:
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="small_fix_threshold must be between 0 and 1"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_negative_qa_budget_raises(self, tmp_repo: Path) -> None:
         """Negative qa_budget raises ValueError."""
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "router": {
                     "qa_budget": -0.5,
@@ -1224,13 +1254,13 @@ class TestRouterConfig:
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="qa_budget must be positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_zero_qa_budget_raises(self, tmp_repo: Path) -> None:
         """Zero qa_budget raises ValueError."""
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "router": {
                     "qa_budget": 0,
@@ -1239,7 +1269,7 @@ class TestRouterConfig:
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="qa_budget must be positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_roundtrip(self, tmp_repo: Path) -> None:
         """RouterConfig survives save/load roundtrip."""
@@ -1253,7 +1283,7 @@ class TestRouterConfig:
                 qa_budget=0.75,
             ),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.router.enabled is False
         assert loaded.router.model == "sonnet"
@@ -1265,7 +1295,7 @@ class TestRouterConfig:
     def test_roundtrip_with_defaults(self, tmp_repo: Path) -> None:
         """RouterConfig with defaults survives roundtrip (may not be serialized)."""
         original = ColonyConfig(router=RouterConfig())
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.router.enabled is True
         assert loaded.router.model == "haiku"
@@ -1277,18 +1307,18 @@ class TestRouterConfig:
     def test_defaults_dict_has_router(self) -> None:
         """DEFAULTS dict has router section."""
         assert "router" in DEFAULTS
-        assert DEFAULTS["router"]["enabled"] is True
-        assert DEFAULTS["router"]["model"] == "haiku"
-        assert DEFAULTS["router"]["qa_model"] == "opus"
-        assert DEFAULTS["router"]["confidence_threshold"] == 0.7
-        assert DEFAULTS["router"]["small_fix_threshold"] == 0.85
-        assert DEFAULTS["router"]["qa_budget"] == 0.50
+        assert _defaults_at("router", "enabled") is True
+        assert _defaults_at("router", "model") == "haiku"
+        assert _defaults_at("router", "qa_model") == "opus"
+        assert _defaults_at("router", "confidence_threshold") == 0.7
+        assert _defaults_at("router", "small_fix_threshold") == 0.85
+        assert _defaults_at("router", "qa_budget") == 0.50
 
     def test_serialization_omits_defaults(self, tmp_repo: Path) -> None:
         """When RouterConfig has all defaults, it may not be serialized."""
         original = ColonyConfig(router=RouterConfig())
-        save_config(tmp_repo, original)
-        raw = yaml.safe_load(
+        _ = save_config(tmp_repo, original)
+        raw = _yaml_mapping_from_text(
             (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
         )
         # With default values, router section should not be serialized
@@ -1306,17 +1336,18 @@ class TestRouterConfig:
                 qa_budget=1.0,
             ),
         )
-        save_config(tmp_repo, original)
-        raw = yaml.safe_load(
+        _ = save_config(tmp_repo, original)
+        raw = _yaml_mapping_from_text(
             (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
         )
         assert "router" in raw
-        assert raw["router"]["enabled"] is False
-        assert raw["router"]["model"] == "sonnet"
-        assert raw["router"]["qa_model"] == "sonnet"
-        assert raw["router"]["confidence_threshold"] == 0.9
-        assert raw["router"]["small_fix_threshold"] == 0.95
-        assert raw["router"]["qa_budget"] == 1.0
+        router = _as_str_mapping(raw["router"])
+        assert router["enabled"] is False
+        assert router["model"] == "sonnet"
+        assert router["qa_model"] == "sonnet"
+        assert router["confidence_threshold"] == 0.9
+        assert router["small_fix_threshold"] == 0.95
+        assert router["qa_budget"] == 1.0
 
 
 class TestRetryConfig:
@@ -1330,7 +1361,7 @@ class TestRetryConfig:
     def test_parsed_from_yaml(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "retry": {
                     "max_attempts": 5,
@@ -1350,7 +1381,7 @@ class TestRetryConfig:
     def test_missing_section_uses_defaults(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"model": "sonnet"}),
             encoding="utf-8",
         )
@@ -1363,7 +1394,7 @@ class TestRetryConfig:
     def test_partial_override(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"retry": {"max_attempts": 5}}),
             encoding="utf-8",
         )
@@ -1374,47 +1405,47 @@ class TestRetryConfig:
     def test_invalid_fallback_model_raises(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"retry": {"fallback_model": "gpt-4"}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="Invalid retry fallback_model"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_max_attempts_zero_raises(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"retry": {"max_attempts": 0}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="must be positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_negative_base_delay_raises(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"retry": {"base_delay_seconds": -1.0}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="non-negative"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_negative_max_delay_raises(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"retry": {"max_delay_seconds": -5.0}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="non-negative"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_fallback_model_none_is_valid(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"retry": {"fallback_model": None}}),
             encoding="utf-8",
         )
@@ -1425,7 +1456,7 @@ class TestRetryConfig:
         for model in VALID_MODELS:
             config_dir = tmp_repo / ".colonyos"
             config_dir.mkdir(exist_ok=True)
-            (config_dir / "config.yaml").write_text(
+            _ = (config_dir / "config.yaml").write_text(
                 yaml.dump({"retry": {"fallback_model": model}}),
                 encoding="utf-8",
             )
@@ -1436,7 +1467,7 @@ class TestRetryConfig:
         """max_attempts > 10 is accepted (not rejected) but logs a warning."""
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir(exist_ok=True)
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"retry": {"max_attempts": 20}}),
             encoding="utf-8",
         )
@@ -1448,7 +1479,7 @@ class TestRetryConfig:
         """max_attempts=10 should not trigger any warning."""
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir(exist_ok=True)
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"retry": {"max_attempts": 10}}),
             encoding="utf-8",
         )
@@ -1457,10 +1488,10 @@ class TestRetryConfig:
 
     def test_defaults_dict_has_retry_section(self):
         assert "retry" in DEFAULTS
-        assert DEFAULTS["retry"]["max_attempts"] == 3
-        assert DEFAULTS["retry"]["base_delay_seconds"] == 10.0
-        assert DEFAULTS["retry"]["max_delay_seconds"] == 120.0
-        assert DEFAULTS["retry"]["fallback_model"] is None
+        assert _defaults_at("retry", "max_attempts") == 3
+        assert _defaults_at("retry", "base_delay_seconds") == 10.0
+        assert _defaults_at("retry", "max_delay_seconds") == 120.0
+        assert _defaults_at("retry", "fallback_model") is None
 
 
 class TestRecoveryConfig:
@@ -1471,7 +1502,7 @@ class TestRecoveryConfig:
     def test_max_task_retries_parsed_from_yaml(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"recovery": {"max_task_retries": 2}}),
             encoding="utf-8",
         )
@@ -1481,7 +1512,7 @@ class TestRecoveryConfig:
     def test_max_task_retries_zero_disables_retry(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"recovery": {"max_task_retries": 0}}),
             encoding="utf-8",
         )
@@ -1491,12 +1522,12 @@ class TestRecoveryConfig:
     def test_negative_max_task_retries_raises(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"recovery": {"max_task_retries": -1}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="non-negative"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_max_task_retries_roundtrip(self, tmp_repo: Path):
         original = ColonyConfig(
@@ -1504,12 +1535,12 @@ class TestRecoveryConfig:
                 max_task_retries=3,
             )
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.recovery.max_task_retries == 3
 
     def test_defaults_dict_has_max_task_retries(self):
-        assert DEFAULTS["recovery"]["max_task_retries"] == 1
+        assert _defaults_at("recovery", "max_task_retries") == 1
 
 
 class TestDaemonOutcomePollInterval:
@@ -1520,12 +1551,12 @@ class TestDaemonOutcomePollInterval:
         assert config.outcome_poll_interval_minutes == 30
 
     def test_defaults_dict_has_outcome_poll_interval(self) -> None:
-        assert DEFAULTS["daemon"]["outcome_poll_interval_minutes"] == 30
+        assert _defaults_at("daemon", "outcome_poll_interval_minutes") == 30
 
     def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"outcome_poll_interval_minutes": 15}}),
             encoding="utf-8",
         )
@@ -1535,28 +1566,28 @@ class TestDaemonOutcomePollInterval:
     def test_validation_zero_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"outcome_poll_interval_minutes": 0}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="outcome_poll_interval_minutes must be positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_validation_negative_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"outcome_poll_interval_minutes": -5}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="outcome_poll_interval_minutes must be positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
         original = ColonyConfig(
             daemon=DaemonConfig(outcome_poll_interval_minutes=45),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.daemon.outcome_poll_interval_minutes == 45
 
@@ -1565,13 +1596,13 @@ class TestPhaseTimeoutConfig:
     """Tests for budget.phase_timeout_seconds config field."""
 
     def test_default_value(self) -> None:
-        assert DEFAULTS["budget"]["phase_timeout_seconds"] == 1800
+        assert _defaults_at("budget", "phase_timeout_seconds") == 1800
         assert BudgetConfig().phase_timeout_seconds == 1800
 
     def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"budget": {"phase_timeout_seconds": 900}}),
             encoding="utf-8",
         )
@@ -1581,16 +1612,16 @@ class TestPhaseTimeoutConfig:
     def test_validation_too_low_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"budget": {"phase_timeout_seconds": 10}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="phase_timeout_seconds must be >= 30"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
         original = ColonyConfig(budget=BudgetConfig(phase_timeout_seconds=600))
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.budget.phase_timeout_seconds == 600
 
@@ -1599,13 +1630,13 @@ class TestPipelineTimeoutConfig:
     """Tests for daemon.pipeline_timeout_seconds config field."""
 
     def test_default_value(self) -> None:
-        assert DEFAULTS["daemon"]["pipeline_timeout_seconds"] == 7200
+        assert _defaults_at("daemon", "pipeline_timeout_seconds") == 7200
         assert DaemonConfig().pipeline_timeout_seconds == 7200
 
     def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"pipeline_timeout_seconds": 3600}}),
             encoding="utf-8",
         )
@@ -1615,18 +1646,18 @@ class TestPipelineTimeoutConfig:
     def test_validation_too_low_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"pipeline_timeout_seconds": 30}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="pipeline_timeout_seconds must be >= 60"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_roundtrip_via_save_load(self, tmp_repo: Path) -> None:
         original = ColonyConfig(
             daemon=DaemonConfig(pipeline_timeout_seconds=3600),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.daemon.pipeline_timeout_seconds == 3600
 
@@ -1635,13 +1666,13 @@ class TestWatchdogStallSecondsConfig:
     """Tests for daemon.watchdog_stall_seconds config field."""
 
     def test_default_value(self) -> None:
-        assert DEFAULTS["daemon"]["watchdog_stall_seconds"] == 1920
+        assert _defaults_at("daemon", "watchdog_stall_seconds") == 1920
         assert DaemonConfig().watchdog_stall_seconds == 1920
 
     def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"watchdog_stall_seconds": 3600}}),
             encoding="utf-8",
         )
@@ -1651,7 +1682,7 @@ class TestWatchdogStallSecondsConfig:
     def test_minimum_floor_clamps_to_120(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"watchdog_stall_seconds": 30}}),
             encoding="utf-8",
         )
@@ -1661,7 +1692,7 @@ class TestWatchdogStallSecondsConfig:
     def test_exactly_120_is_accepted(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"watchdog_stall_seconds": 120}}),
             encoding="utf-8",
         )
@@ -1672,7 +1703,7 @@ class TestWatchdogStallSecondsConfig:
         original = ColonyConfig(
             daemon=DaemonConfig(watchdog_stall_seconds=2400),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.daemon.watchdog_stall_seconds == 2400
 
@@ -1686,7 +1717,7 @@ class TestDashboardWriteEnabledConfig:
     def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"dashboard_write_enabled": True}}),
             encoding="utf-8",
         )
@@ -1697,7 +1728,7 @@ class TestDashboardWriteEnabledConfig:
         original = ColonyConfig(
             daemon=DaemonConfig(dashboard_write_enabled=True),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.daemon.dashboard_write_enabled is True
 
@@ -1724,7 +1755,7 @@ class TestRepoMapConfig:
     def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "repo_map": {
                     "enabled": False,
@@ -1746,7 +1777,7 @@ class TestRepoMapConfig:
     def test_partial_yaml_uses_defaults(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"repo_map": {"max_tokens": 6000}}),
             encoding="utf-8",
         )
@@ -1759,22 +1790,22 @@ class TestRepoMapConfig:
     def test_validation_max_tokens_positive(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"repo_map": {"max_tokens": 0}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="max_tokens must be positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_validation_max_files_positive(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"repo_map": {"max_files": -1}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="max_files must be positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_roundtrip(self, tmp_repo: Path) -> None:
         original = ColonyConfig(
@@ -1786,7 +1817,7 @@ class TestRepoMapConfig:
                 exclude_patterns=["tests/**"],
             ),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.repo_map.enabled is False
         assert loaded.repo_map.max_tokens == 8000
@@ -1797,8 +1828,8 @@ class TestRepoMapConfig:
     def test_save_omits_when_defaults(self, tmp_repo: Path) -> None:
         """save_config should not serialize repo_map when all values are defaults."""
         original = ColonyConfig()
-        save_config(tmp_repo, original)
-        raw = yaml.safe_load(
+        _ = save_config(tmp_repo, original)
+        raw = _yaml_mapping_from_text(
             (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
         )
         assert "repo_map" not in raw
@@ -1816,7 +1847,7 @@ class TestPRSyncConfig:
     def test_parsed_from_yaml(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "daemon": {
                     "pr_sync": {
@@ -1836,7 +1867,7 @@ class TestPRSyncConfig:
     def test_missing_section_gets_defaults(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"daily_budget_usd": 100.0}}),
             encoding="utf-8",
         )
@@ -1848,22 +1879,22 @@ class TestPRSyncConfig:
     def test_interval_minutes_below_one_raises(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"pr_sync": {"interval_minutes": 0}}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="pr_sync.interval_minutes must be >= 1"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_max_sync_failures_below_one_raises(self, tmp_repo: Path):
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"pr_sync": {"max_sync_failures": 0}}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="pr_sync.max_sync_failures must be >= 1"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_roundtrip(self, tmp_repo: Path):
         original = ColonyConfig(
@@ -1873,7 +1904,7 @@ class TestPRSyncConfig:
                 ),
             ),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.daemon.pr_sync.enabled is True
         assert loaded.daemon.pr_sync.interval_minutes == 45
@@ -1885,19 +1916,21 @@ class TestPRSyncConfig:
                 pr_sync=PRSyncConfig(enabled=True, interval_minutes=30),
             ),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         config_path = tmp_repo / ".colonyos" / "config.yaml"
-        saved_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        saved_data = _yaml_mapping_from_text(config_path.read_text(encoding="utf-8"))
         assert "daemon" in saved_data
-        assert "pr_sync" in saved_data["daemon"]
-        assert saved_data["daemon"]["pr_sync"]["enabled"] is True
-        assert saved_data["daemon"]["pr_sync"]["interval_minutes"] == 30
+        daemon = _as_str_mapping(saved_data["daemon"])
+        assert "pr_sync" in daemon
+        pr_sync = _as_str_mapping(daemon["pr_sync"])
+        assert pr_sync["enabled"] is True
+        assert pr_sync["interval_minutes"] == 30
 
     def test_defaults_dict_has_pr_sync(self):
-        assert "pr_sync" in DEFAULTS["daemon"]
-        assert DEFAULTS["daemon"]["pr_sync"]["enabled"] is False
-        assert DEFAULTS["daemon"]["pr_sync"]["interval_minutes"] == 60
-        assert DEFAULTS["daemon"]["pr_sync"]["max_sync_failures"] == 3
+        assert "pr_sync" in _as_str_mapping(DEFAULTS["daemon"])
+        assert _defaults_at("daemon", "pr_sync", "enabled") is False
+        assert _defaults_at("daemon", "pr_sync", "interval_minutes") == 60
+        assert _defaults_at("daemon", "pr_sync", "max_sync_failures") == 3
 
 
 class TestSlackDailyThreadConfig:
@@ -1917,7 +1950,7 @@ class TestSlackDailyThreadConfig:
     def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "slack": {
                     "enabled": True,
@@ -1937,7 +1970,7 @@ class TestSlackDailyThreadConfig:
     def test_daily_mode_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "slack": {
                     "enabled": True,
@@ -1957,37 +1990,37 @@ class TestSlackDailyThreadConfig:
     def test_invalid_notification_mode_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"notification_mode": "weekly"}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="Invalid slack notification_mode"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_daily_thread_hour_negative_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"daily_thread_hour": -1}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="daily_thread_hour must be 0-23"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_daily_thread_hour_24_raises(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"daily_thread_hour": 24}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="daily_thread_hour must be 0-23"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_invalid_timezone_falls_back_to_utc(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"daily_thread_timezone": "Not/A/Timezone"}}),
             encoding="utf-8",
         )
@@ -2004,7 +2037,7 @@ class TestSlackDailyThreadConfig:
                 daily_thread_timezone="Asia/Tokyo",
             ),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.slack.notification_mode == "per_item"
         assert loaded.slack.daily_thread_hour == 14
@@ -2013,7 +2046,7 @@ class TestSlackDailyThreadConfig:
     def test_defaults_when_omitted_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"enabled": True, "channels": ["C123"]}}),
             encoding="utf-8",
         )
@@ -2043,11 +2076,11 @@ class TestVerifyConfig:
         assert pc.verify is False
 
     def test_defaults_phases_verify_is_true(self) -> None:
-        assert DEFAULTS["phases"]["verify"] is True
+        assert _defaults_at("phases", "verify") is True
 
     def test_defaults_verify_section_exists(self) -> None:
         assert "verify" in DEFAULTS
-        assert DEFAULTS["verify"]["max_fix_attempts"] == 2
+        assert _defaults_at("verify", "max_fix_attempts") == 2
 
     def test_colony_config_has_verify(self) -> None:
         cc = ColonyConfig()
@@ -2062,7 +2095,7 @@ class TestVerifyConfig:
     def test_load_config_verify_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "phases": {"verify": False},
                 "verify": {"max_fix_attempts": 4},
@@ -2076,19 +2109,19 @@ class TestVerifyConfig:
     def test_load_config_verify_invalid_max_fix_attempts(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"verify": {"max_fix_attempts": 0}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="verify.max_fix_attempts must be positive"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_roundtrip_verify_config(self, tmp_repo: Path) -> None:
         original = ColonyConfig(
             phases=PhasesConfig(verify=False),
             verify=VerifyConfig(max_fix_attempts=5),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.phases.verify is False
         assert loaded.verify.max_fix_attempts == 5
@@ -2118,7 +2151,7 @@ class TestDaemonMaintenanceConfig:
         assert cfg.branch_sync_enabled is True
 
     def test_defaults_in_defaults_dict(self) -> None:
-        d = DEFAULTS["daemon"]
+        d = _as_str_mapping(DEFAULTS["daemon"])
         assert d["self_update"] is False
         assert d["self_update_command"] == "uv pip install ."
         assert d["maintenance_budget_usd"] == 20.0
@@ -2128,7 +2161,7 @@ class TestDaemonMaintenanceConfig:
     def test_parsed_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "daemon": {
                     "self_update": True,
@@ -2150,7 +2183,7 @@ class TestDaemonMaintenanceConfig:
     def test_defaults_when_omitted_from_yaml(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"daily_budget_usd": 100.0}}),
             encoding="utf-8",
         )
@@ -2164,32 +2197,32 @@ class TestDaemonMaintenanceConfig:
     def test_maintenance_budget_must_be_positive(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"maintenance_budget_usd": -5.0}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="maintenance_budget_usd"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_maintenance_budget_zero_rejected(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"maintenance_budget_usd": 0}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="maintenance_budget_usd"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_max_ci_fix_items_must_be_positive(self, tmp_repo: Path) -> None:
         config_dir = tmp_repo / ".colonyos"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"daemon": {"max_ci_fix_items": 0}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="max_ci_fix_items"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_roundtrip_save_load(self, tmp_repo: Path) -> None:
         original = ColonyConfig(
@@ -2201,7 +2234,7 @@ class TestDaemonMaintenanceConfig:
                 branch_sync_enabled=False,
             ),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.daemon.self_update is True
         assert loaded.daemon.self_update_command == "pip install ."

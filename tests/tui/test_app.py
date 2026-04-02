@@ -8,44 +8,36 @@ messages in the transcript.
 from __future__ import annotations
 
 import asyncio
+import os
+import stat
+import threading
+from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import pytest
 
 from colonyos.models import PreflightError
 
+pytest.importorskip("textual")
+pytest.importorskip("janus")
 
-def _tui_available() -> bool:
-    try:
-        import textual  # noqa: F401
-        import janus  # noqa: F401
-        return True
-    except ImportError:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _tui_available(),
-    reason="TUI extras not installed",
+from colonyos.tui.adapter import (
+    CommandOutputMsg,
+    NoticeMsg,
+    PhaseCompleteMsg,
+    PhaseErrorMsg,
+    PhaseHeaderMsg,
+    TextBlockMsg,
+    ToolLineMsg,
+    TurnCompleteMsg,
+    UserInjectionMsg,
 )
-
-if _tui_available():
-    from colonyos.tui.adapter import (
-        CommandOutputMsg,
-        NoticeMsg,
-        PhaseCompleteMsg,
-        PhaseErrorMsg,
-        PhaseHeaderMsg,
-        TextBlockMsg,
-        ToolLineMsg,
-        TurnCompleteMsg,
-        UserInjectionMsg,
-    )
-    from colonyos.tui.app import AssistantApp
-    from colonyos.tui.widgets.composer import Composer
-    from colonyos.tui.widgets.hint_bar import HintBar
-    from colonyos.tui.widgets.status_bar import StatusBar
-    from colonyos.tui.widgets.transcript import TranscriptView
+from colonyos.tui.app import AssistantApp
+from colonyos.tui.widgets.composer import Composer
+from colonyos.tui.widgets.hint_bar import HintBar
+from colonyos.tui.widgets.status_bar import StatusBar
+from colonyos.tui.widgets.transcript import TranscriptView
 
 
 class TestAppMounts:
@@ -55,7 +47,7 @@ class TestAppMounts:
     async def test_all_widgets_present(self) -> None:
         """App should contain StatusBar, TranscriptView, Composer, HintBar."""
         app = AssistantApp()
-        async with app.run_test() as pilot:
+        async with app.run_test():
             assert app.query_one(StatusBar) is not None
             assert app.query_one(TranscriptView) is not None
             assert app.query_one(Composer) is not None
@@ -140,7 +132,7 @@ class TestQueueToTranscript:
             await asyncio.sleep(0.15)
             await pilot.pause()
             status = app.query_one(StatusBar)
-            assert "branch: feat/tui" in status._last_rendered
+            assert "branch: feat/tui" in getattr(status, "_last_rendered", "")
 
     @pytest.mark.asyncio
     async def test_tool_line_renders(self) -> None:
@@ -260,7 +252,7 @@ class TestComposerSubmission:
     @pytest.mark.asyncio
     async def test_submit_adds_user_message(self) -> None:
         """Submitting text via the composer should add a user message to transcript."""
-        received = []
+        received: list[str] = []
 
         def on_submit(text: str) -> None:
             received.append(text)
@@ -269,7 +261,7 @@ class TestComposerSubmission:
         async with app.run_test() as pilot:
             composer = app.query_one(Composer)
             ta = composer.query_one("TextArea")
-            ta.focus()
+            _ = ta.focus()
             await pilot.pause()
             await pilot.press("h", "e", "l", "l", "o")
             await pilot.press("enter")
@@ -289,11 +281,11 @@ class TestComposerSubmission:
             received.append(text)
 
         app = AssistantApp(inject_callback=on_inject)
-        app._run_active = True
+        setattr(app, "_run_active", True)
         async with app.run_test() as pilot:
             composer = app.query_one(Composer)
             ta = composer.query_one("TextArea")
-            ta.focus()
+            _ = ta.focus()
             await pilot.pause()
             await pilot.press("h", "i")
             await pilot.press("enter")
@@ -309,11 +301,11 @@ class TestComposerSubmission:
             received.append(text)
 
         app = AssistantApp(run_callback=on_submit)
-        app._run_active = True
+        setattr(app, "_run_active", True)
         async with app.run_test() as pilot:
             composer = app.query_one(Composer)
             ta = composer.query_one("TextArea")
-            ta.focus()
+            _ = ta.focus()
             await pilot.pause()
             await pilot.press("h", "i")
             await pilot.press("enter")
@@ -323,21 +315,21 @@ class TestComposerSubmission:
     @pytest.mark.asyncio
     async def test_preflight_failure_restores_prompt_to_composer(self) -> None:
         """Recoverable run failures should restore the submitted prompt."""
-        def on_submit(text: str) -> None:
+        def on_submit(_text: str) -> None:
             raise PreflightError("Uncommitted changes detected")
 
         app = AssistantApp(run_callback=on_submit)
         async with app.run_test() as pilot:
             composer = app.query_one(Composer)
             ta = composer.query_one("TextArea")
-            ta.focus()
+            _ = ta.focus()
             await pilot.pause()
             await pilot.press("h", "i")
             await pilot.press("enter")
             await pilot.pause()
             await asyncio.sleep(0.15)
             await pilot.pause()
-            assert ta.text == "hi"
+            assert getattr(ta, "text", "") == "hi"
 
     @pytest.mark.asyncio
     async def test_dirty_recovery_submission_routes_to_recovery_callback(self) -> None:
@@ -353,7 +345,7 @@ class TestComposerSubmission:
         async with app.run_test() as pilot:
             composer = app.query_one(Composer)
             ta = composer.query_one("TextArea")
-            ta.focus()
+            _ = ta.focus()
             app.begin_dirty_worktree_recovery("saved prompt", error)
             await pilot.pause()
             await pilot.press("c", "o", "m", "m", "i", "t")
@@ -372,12 +364,12 @@ class TestComposerSubmission:
         async with app.run_test() as pilot:
             composer = app.query_one(Composer)
             ta = composer.query_one("TextArea")
-            ta.focus()
+            _ = ta.focus()
             app.begin_dirty_worktree_recovery("saved prompt", error)
             await pilot.pause()
             app.cancel_dirty_worktree_recovery()
             await pilot.pause()
-            assert ta.text == "saved prompt"
+            assert getattr(ta, "text", "") == "saved prompt"
             assert app.get_dirty_worktree_recovery() is None
 
     @pytest.mark.asyncio
@@ -428,10 +420,10 @@ class TestComposerSubmission:
                 "exclusive": exclusive,
             })
 
-        app.run_worker = fake_run_worker  # type: ignore[method-assign]
-        app._start_run("hello")
+        setattr(app, "run_worker", fake_run_worker)
+        getattr(app, "_start_run")("hello")
 
-        assert app._run_active is True
+        assert getattr(app, "_run_active") is True
         assert len(calls) == 1
         assert calls[0]["thread"] is True
         assert calls[0]["exclusive"] is False
@@ -510,7 +502,11 @@ class TestKeybindings:
             baseline = len(transcript.lines)
             # Temporarily make set_phase raise to simulate a dispatch error
             original = status.set_phase
-            status.set_phase = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom"))
+
+            def boom_set_phase(*_args: object, **_kwargs: object) -> None:
+                raise RuntimeError("boom")
+
+            status.set_phase = boom_set_phase
             app.event_queue.sync_q.put(
                 PhaseHeaderMsg(phase_name="broken", budget=1.0, model="opus")
             )
@@ -538,8 +534,8 @@ class TestCancelRunBehavior:
             app.action_cancel_run()
             await pilot.pause()
             # The app should still be running (not exited)
-            assert app._stop_event.is_set()
-            assert app._auto_loop_active is False
+            assert cast(threading.Event, getattr(app, "_stop_event")).is_set()
+            assert getattr(app, "_auto_loop_active") is False
             # App is still responsive — we can still interact
             transcript = app.query_one(TranscriptView)
             assert len(transcript.lines) > 0
@@ -564,7 +560,7 @@ class TestCancelRunBehavior:
              patch.object(app, "exit") as mock_exit:
             app.action_quit_app()
 
-        assert app._stop_event.is_set()
+        assert cast(threading.Event, getattr(app, "_stop_event")).is_set()
         assert cancel_calls == ["cancelled"]
         mock_request_cancel.assert_called_once_with("Exiting ColonyOS TUI")
         mock_cancel_all.assert_called_once()
@@ -575,44 +571,38 @@ class TestExportTranscriptPermissions:
     """Verify transcript export file permissions."""
 
     @pytest.mark.asyncio
-    async def test_export_creates_file_with_restricted_permissions(self, tmp_path) -> None:
+    async def test_export_creates_file_with_restricted_permissions(self, tmp_path: Path) -> None:
         """Exported transcript files should have 0o600 permissions."""
-        import os
-        import stat
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(tmp_path)
+            app = AssistantApp()
+            async with app.run_test() as pilot:
+                app.event_queue.sync_q.put(TextBlockMsg(text="test content for export"))
+                await pilot.pause()
+                await asyncio.sleep(0.15)
+                await pilot.pause()
 
-        app = AssistantApp()
-        async with app.run_test() as pilot:
-            # Add some content to the transcript
-            app.event_queue.sync_q.put(TextBlockMsg(text="test content for export"))
-            await pilot.pause()
-            await asyncio.sleep(0.15)
-            await pilot.pause()
+                app.action_export_transcript()
+                await pilot.pause()
 
-            # Monkeypatch the logs dir to use tmp_path
-            import colonyos.tui.app as app_module
-            original_path = None
-
-            # Trigger export
-            app.action_export_transcript()
-            await pilot.pause()
-
-            # Find the exported file
-            logs_dir = app_module.Path(".colonyos") / "logs"
-            if logs_dir.exists():
-                exports = list(logs_dir.glob("transcript_*.txt"))
-                if exports:
-                    mode = os.stat(exports[-1]).st_mode
-                    assert stat.S_IMODE(mode) == 0o600
-                    # Cleanup
-                    for f in exports:
-                        f.unlink(missing_ok=True)
+            logs_dir = Path(".colonyos") / "logs"
+            assert logs_dir.is_dir()
+            exports = list(logs_dir.glob("transcript_*.txt"))
+            assert exports
+            mode = os.stat(exports[-1]).st_mode
+            assert stat.S_IMODE(mode) == 0o600
+            for f in exports:
+                f.unlink(missing_ok=True)
+        finally:
+            os.chdir(old_cwd)
 
 
 class TestLogWriterIntegration:
     """Verify log writer is wired into the queue consumer."""
 
     @pytest.mark.asyncio
-    async def test_log_writer_receives_phase_header(self, tmp_path) -> None:
+    async def test_log_writer_receives_phase_header(self, tmp_path: Path) -> None:
         """LogWriter should receive phase header messages from the consumer."""
         from colonyos.tui.log_writer import TranscriptLogWriter
 
@@ -632,7 +622,7 @@ class TestLogWriterIntegration:
         assert "$5.00" in content
 
     @pytest.mark.asyncio
-    async def test_log_writer_receives_tool_lines(self, tmp_path) -> None:
+    async def test_log_writer_receives_tool_lines(self, tmp_path: Path) -> None:
         """LogWriter should receive tool line messages from the consumer."""
         from colonyos.tui.log_writer import TranscriptLogWriter
 
@@ -652,7 +642,7 @@ class TestLogWriterIntegration:
         assert "foo.py" in content
 
     @pytest.mark.asyncio
-    async def test_log_writer_closed_on_unmount(self, tmp_path) -> None:
+    async def test_log_writer_closed_on_unmount(self, tmp_path: Path) -> None:
         """LogWriter should be closed when the app unmounts."""
         from colonyos.tui.log_writer import TranscriptLogWriter
 
@@ -661,7 +651,7 @@ class TestLogWriterIntegration:
         async with app.run_test() as pilot:
             await pilot.pause()
         # After context exit, writer should be closed
-        assert writer._closed
+        assert getattr(writer, "_closed") is True
 
 
 class TestScrollIntegration:
@@ -681,7 +671,7 @@ class TestScrollIntegration:
             await pilot.pause()
 
             # Disable auto-scroll (simulating user scroll-up)
-            transcript._auto_scroll = False
+            setattr(transcript, "_auto_scroll", False)
             saved_scroll_y = transcript.scroll_y
 
             # Push more messages while auto-scroll is off
@@ -694,7 +684,7 @@ class TestScrollIntegration:
             # Scroll position should not have changed
             assert transcript.scroll_y == saved_scroll_y
             # Unread lines should have accumulated
-            assert transcript._unread_lines > 0
+            assert getattr(transcript, "_unread_lines") > 0
 
     @pytest.mark.asyncio
     async def test_end_key_reengages_auto_scroll(self) -> None:
@@ -709,15 +699,15 @@ class TestScrollIntegration:
             await asyncio.sleep(0.2)
             await pilot.pause()
 
-            transcript._auto_scroll = False
-            transcript._unread_lines = 5
+            setattr(transcript, "_auto_scroll", False)
+            setattr(transcript, "_unread_lines", 5)
 
             # Trigger the End key action
             app.action_scroll_to_end()
             await pilot.pause()
 
-            assert transcript._auto_scroll is True
-            assert transcript._unread_lines == 0
+            assert getattr(transcript, "_auto_scroll") is True
+            assert getattr(transcript, "_unread_lines") == 0
 
     @pytest.mark.asyncio
     async def test_auto_scroll_follows_new_content_by_default(self) -> None:
@@ -725,7 +715,7 @@ class TestScrollIntegration:
         app = AssistantApp()
         async with app.run_test() as pilot:
             transcript = app.query_one(TranscriptView)
-            assert transcript._auto_scroll is True
+            assert getattr(transcript, "_auto_scroll") is True
 
             # Push enough content to overflow the viewport
             for i in range(50):
@@ -735,9 +725,9 @@ class TestScrollIntegration:
             await pilot.pause()
 
             # Should still be auto-scrolling
-            assert transcript._auto_scroll is True
+            assert getattr(transcript, "_auto_scroll") is True
             # Unread should be zero (we're following)
-            assert transcript._unread_lines == 0
+            assert getattr(transcript, "_unread_lines") == 0
 
 
 class TestMonitorModeIntegration:
@@ -750,8 +740,8 @@ class TestMonitorModeIntegration:
         async with app.run_test() as pilot:
             await pilot.pause()
             screen = pilot.app.screen
-            assert screen.styles.overflow_x == "hidden"
-            assert screen.styles.overflow_y == "hidden"
+            assert getattr(screen.styles, "overflow_x", None) == "hidden"
+            assert getattr(screen.styles, "overflow_y", None) == "hidden"
 
     @pytest.mark.asyncio
     async def test_monitor_mode_no_composer_or_hintbar(self) -> None:
@@ -800,9 +790,9 @@ class TestMonitorModeIntegration:
     async def test_monitor_mode_auto_scroll_disabled_on_richlog(self) -> None:
         """Monitor mode transcript should have RichLog auto_scroll=False (custom logic controls it)."""
         app = AssistantApp(monitor_mode=True)
-        async with app.run_test() as pilot:
+        async with app.run_test():
             transcript = app.query_one(TranscriptView)
             # RichLog's built-in auto_scroll is disabled
             assert transcript.auto_scroll is False
             # But our custom auto_scroll is active
-            assert transcript._auto_scroll is True
+            assert getattr(transcript, "_auto_scroll") is True

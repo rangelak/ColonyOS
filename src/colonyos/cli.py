@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import logging
 import os
 import re
 import signal
 import io
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -16,7 +18,8 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout, suppres
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from types import FrameType
+from typing import Any, Callable, cast
 
 import click
 
@@ -33,6 +36,8 @@ from colonyos.models import (
     BranchRestoreError,
     LoopState,
     LoopStatus,
+    Persona,
+    PhaseResult,
     PreflightError,
     QueueItem,
     QueueItemStatus,
@@ -44,7 +49,7 @@ from colonyos.models import (
 )
 from colonyos.naming import generate_timestamp, slugify
 from colonyos.orchestrator import (
-    _touch_heartbeat,
+    _touch_heartbeat,  # pyright: ignore[reportPrivateUsage]
     validate_branch_exists,
     extract_review_verdict,
     run as run_orchestrator,
@@ -59,10 +64,8 @@ from colonyos.queue_runtime import (
     build_similarity_context,
     find_related_history_items,
     notification_targets,
-    pending_queue_snapshot,
     reprioritize_queue_item,
     select_next_pending_item,
-    sorted_pending_items,
 )
 from colonyos.recovery import pull_branch
 from colonyos.runtime_lock import RepoRuntimeGuard, RuntimeBusyError
@@ -94,13 +97,12 @@ def _find_repo_root() -> Path:
 
 def _tui_available() -> bool:
     """Return True when the optional TUI dependencies are importable."""
-    try:
-        import colonyos.tui  # noqa: F401
-        import janus  # noqa: F401
-        import textual  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    import importlib.util
+
+    return all(
+        importlib.util.find_spec(name) is not None
+        for name in ("colonyos.tui", "janus", "textual")
+    )
 
 
 def _interactive_stdio() -> bool:
@@ -145,9 +147,9 @@ def _print_run_summary(log: RunLog) -> None:
     header = Text()
     header.append(f" {status_icon} ", style=status_style)
     header.append(log.run_id, style="bold")
-    header.append(f"  │  ", style="dim")
+    header.append("  │  ", style="dim")
     header.append(f"${log.total_cost_usd:.2f}", style="bold cyan")
-    header.append(f"  │  ", style="dim")
+    header.append("  │  ", style="dim")
     header.append(log.status.value, style=f"bold {status_style}")
 
     con.print()
@@ -512,17 +514,6 @@ def app(ctx: click.Context) -> None:
                 _run_repl()
 
 
-def _repl_command_names() -> set[str]:
-    """Return the set of registered Click command names (including groups)."""
-    names: set[str] = set()
-    for name, cmd in app.commands.items():
-        names.add(name)
-        if isinstance(cmd, click.Group):
-            for sub in cmd.commands:
-                names.add(f"{name} {sub}")
-    return names
-
-
 def _repl_top_level_names() -> set[str]:
     """Return just the top-level command names for first-token matching."""
     return set(app.commands.keys())
@@ -542,18 +533,22 @@ def _invoke_cli_command(tokens: list[str]) -> None:
         click.echo(f"Error: {exc}", err=True)
 
 
-def _capture_click_output(callback, *args, **kwargs) -> str:  # noqa: ANN001, ANN002, ANN003
+def _capture_click_output(
+    callback: Callable[..., Any], *args: Any, **kwargs: Any,
+) -> str:
     """Capture stdout/stderr produced by a Click-oriented callback."""
-    output, _ = _capture_click_output_and_result(callback, *args, **kwargs)
+    output, _result = _capture_click_output_and_result(callback, *args, **kwargs)
     return output
 
 
-def _capture_click_output_and_result(callback, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+def _capture_click_output_and_result(
+    callback: Callable[..., Any], *args: Any, **kwargs: Any,
+) -> tuple[str, Any]:
     """Capture stdout/stderr and return both the output and callback result."""
     stdout = io.StringIO()
     stderr = io.StringIO()
     with redirect_stdout(stdout), redirect_stderr(stderr):
-        result = callback(*args, **kwargs)
+        result: Any = callback(*args, **kwargs)
     output = stdout.getvalue().strip()
     error = stderr.getvalue().strip()
     return "\n".join(part for part in (output, error) if part), result
@@ -957,19 +952,16 @@ def _handle_routed_query(
     prompt: str,
     config: ColonyConfig,
     repo_root: Path,
+    *,
     source: str,
-    quiet: bool = False,
-) -> str | None:
-    """Compatibility wrapper preserving the legacy category-based helper behavior."""
+) -> str | None:  # pyright: ignore[reportUnusedFunction]
+    """Compatibility helper for tests and REPL query routing."""
     from colonyos.router import (
         RouterCategory,
         answer_question,
         log_router_decision,
         route_query,
     )
-
-    if not quiet:
-        click.echo(click.style("Classifying intent...", dim=True))
 
     router_result = route_query(
         prompt,
@@ -979,6 +971,7 @@ def _handle_routed_query(
         project_stack=config.project.stack if config.project else "",
         vision=config.vision,
         source=source,
+        model=config.router.model,
     )
     log_router_decision(
         repo_root=repo_root,
@@ -989,6 +982,8 @@ def _handle_routed_query(
 
     if router_result.confidence < config.router.confidence_threshold:
         return None
+    if router_result.category == RouterCategory.CODE_CHANGE:
+        return None
     if router_result.category == RouterCategory.QUESTION:
         return answer_question(
             prompt,
@@ -997,16 +992,14 @@ def _handle_routed_query(
             project_description=config.project.description if config.project else "",
             project_stack=config.project.stack if config.project else "",
             model=config.router.qa_model,
-            qa_budget=config.router.qa_budget,
         )
     if router_result.category == RouterCategory.STATUS:
-        return router_result.suggested_command or "colonyos status"
-    if router_result.category == RouterCategory.OUT_OF_SCOPE:
-        return (
-            "This request doesn't seem related to coding or this project. "
-            "For code changes, describe the feature you want to build."
-        )
-    return None
+        suggested_command = router_result.suggested_command or "colonyos status"
+        return f"Try `{suggested_command}`."
+    return "This request doesn't seem related to work ColonyOS can take on."
+
+
+_HANDLE_ROUTED_QUERY_COMPAT = _handle_routed_query
 
 
 def _tui_command_hints() -> list[str]:
@@ -1532,8 +1525,8 @@ def run(prompt: str | None, plan_only: bool, from_prd: str | None, resume_run_id
 
 
 def _print_review_summary(
-    phase_results: list,
-    reviewers: list,
+    phase_results: list[PhaseResult],
+    reviewers: list[Persona],
     total_cost: float,
     decision_verdict: str | None = None,
 ) -> None:
@@ -1831,17 +1824,10 @@ def _print_queue_summary(state: QueueState) -> None:
 
     # Aggregate totals
     total_items = len(state.items)
-    if total_duration_ms >= 60_000:
-        t_mins, t_secs = divmod(total_duration_ms // 1000, 60)
-        total_dur = f"{t_mins}m {t_secs}s"
-    elif total_duration_ms > 0:
-        total_dur = f"{total_duration_ms // 1000}s"
-    else:
-        total_dur = "-"
 
     header = Text()
     header.append(" Queue Summary ", style="bold")
-    header.append(f" │ ", style="dim")
+    header.append(" │ ", style="dim")
     header.append(f"{completed} completed", style="green")
     if failed:
         header.append(f", {failed} failed", style="red")
@@ -1850,7 +1836,7 @@ def _print_queue_summary(state: QueueState) -> None:
     pending = total_items - completed - failed - rejected
     if pending:
         header.append(f", {pending} pending", style="dim")
-    header.append(f" │ ", style="dim")
+    header.append(" │ ", style="dim")
     header.append(f"${total_cost:.2f} total", style="bold cyan")
 
     con.print()
@@ -2575,7 +2561,7 @@ def memory_stats() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _render_outcomes_table(outcomes: list) -> None:
+def _render_outcomes_table(outcomes: list[sqlite3.Row]) -> None:
     """Render a Rich table of PR outcome records.
 
     Accepts a list of sqlite3.Row objects from OutcomeStore.get_outcomes().
@@ -3146,7 +3132,8 @@ def directions(regenerate: bool, static: bool, auto_update: bool, verbose: bool)
         display_directions,
         load_directions,
     )
-    from colonyos.init import _collect_strategic_goals, generate_directions
+    from colonyos.init import generate_directions
+    from colonyos.init import _collect_strategic_goals  # pyright: ignore[reportPrivateUsage]
 
     repo_root = _find_repo_root()
     config = load_config(repo_root)
@@ -3256,36 +3243,21 @@ def _watch_slack_impl(
         SlackClient,
         SlackUI,
         SlackWatchState,
-        check_rate_limit,
         create_slack_app,
-        extract_base_branch,
-        extract_prompt_from_mention,
         extract_raw_from_formatted_prompt,
-        find_parent_queue_item,
         format_phase_breakdown_line,
         is_valid_git_ref,
-        format_fix_acknowledgment,
-        format_fix_error,
-        format_fix_round_limit,
-        format_slack_as_prompt,
-        format_triage_skip,
-        increment_hourly_count,
         post_acknowledgment,
         post_run_summary,
-        post_triage_acknowledgment,
-        post_triage_skip,
         react_to_message,
         remove_reaction,
         resolve_channel_names,
-        sanitize_slack_content,
         save_watch_state,
-        should_process_message,
-        should_process_thread_fix,
         start_socket_mode,
-        triage_message,
         wait_for_approval,
     )
     from colonyos.slack_queue import SlackQueueEngine
+    from colonyos.ui import PhaseUI, StreamBadge
 
     try:
         bolt_app = create_slack_app(config.slack)
@@ -3335,7 +3307,7 @@ def _watch_slack_impl(
             bolt_app.client, config.slack.channels
         )
         config.slack.channels = [ch.id for ch in resolved_channels]
-        channel_display = {ch.id: ch.name for ch in resolved_channels}
+        {ch.id: ch.name for ch in resolved_channels}
     except RuntimeError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
@@ -3349,8 +3321,6 @@ def _watch_slack_impl(
 
     def _check_budget_exceeded() -> bool:
         """Return True if aggregate spend exceeds the configured budget cap."""
-        if effective_max_budget is None:
-            return False
         with state_lock:
             return watch_state.aggregate_cost_usd >= effective_max_budget
 
@@ -3364,338 +3334,8 @@ def _watch_slack_impl(
 
     def _check_time_exceeded() -> bool:
         """Return True if wall-clock time exceeds the configured max hours."""
-        if effective_max_hours is None:
-            return False
         elapsed_hours = (time.monotonic() - start_time) / 3600
         return elapsed_hours >= effective_max_hours
-
-    def _handle_thread_fix(event: dict, client: object) -> None:
-        """Handle a thread-fix request from Slack.
-
-        Looks up the parent QueueItem, validates fix round limits, enqueues
-        a ``slack_fix`` item, and acknowledges in the thread.
-        """
-        channel = event.get("channel", "")
-        ts = event.get("ts", "")
-        thread_ts = event.get("thread_ts", "")
-        user = event.get("user", "unknown")
-        raw_text = event.get("text", "")
-
-        fix_prompt_text = extract_prompt_from_mention(raw_text, bot_user_id)
-        if not fix_prompt_text.strip():
-            return
-
-        # Note: sanitize_slack_content is called inside format_slack_as_prompt
-        # below, so we do not double-sanitize here.
-
-        with state_lock:
-            parent_item = find_parent_queue_item(thread_ts, queue_state.items)
-            if parent_item is None:
-                logger.warning("Thread fix: no completed parent for thread_ts=%s", thread_ts)
-                return
-
-            # Check fix round limit
-            if parent_item.fix_rounds >= config.slack.max_fix_rounds_per_thread:
-                # Sum cumulative cost across parent + all fix items for this thread (FR-17)
-                cumulative_cost = parent_item.cost_usd + sum(
-                    qi.cost_usd for qi in queue_state.items
-                    if qi.parent_item_id == parent_item.id
-                )
-                try:
-                    client.chat_postMessage(  # type: ignore[union-attr]
-                        channel=channel,
-                        thread_ts=thread_ts,
-                        text=format_fix_round_limit(cumulative_cost),
-                    )
-                except Exception:
-                    logger.debug("Failed to post fix round limit message", exc_info=True)
-                return
-
-            # Check branch_name and pr_url exist on parent
-            if not parent_item.branch_name:
-                try:
-                    client.chat_postMessage(  # type: ignore[union-attr]
-                        channel=channel,
-                        thread_ts=thread_ts,
-                        text=format_fix_error("No branch", "No branch name recorded for the original run."),
-                    )
-                except Exception:
-                    logger.debug("Failed to post no-branch message", exc_info=True)
-                return
-
-            # Increment fix rounds on parent
-            parent_item.fix_rounds += 1
-
-            # Create fix queue item
-            fix_run_id = f"slack-fix-{generate_timestamp()}"
-            formatted_prompt = format_slack_as_prompt(fix_prompt_text, channel, user)
-            fix_item = QueueItem(
-                id=fix_run_id,
-                source_type="slack_fix",
-                source_value=formatted_prompt,
-                raw_prompt=fix_prompt_text,
-                status=QueueItemStatus.PENDING,
-                slack_ts=thread_ts,
-                slack_channel=channel,
-                branch_name=parent_item.branch_name,
-                parent_item_id=parent_item.id,
-                pr_url=parent_item.pr_url,
-                base_branch=parent_item.base_branch,
-                head_sha=parent_item.head_sha,
-            )
-            queue_state.items.append(fix_item)
-            _save_queue_state(repo_root, queue_state)
-            save_watch_state(repo_root, watch_state)
-
-        # Structured audit log for security-relevant Slack-triggered execution
-        logger.info(
-            "AUDIT: thread_fix_enqueued item_id=%s user=%s channel=%s "
-            "parent_id=%s branch=%s fix_round=%d",
-            fix_run_id, user, channel,
-            parent_item.id, parent_item.branch_name, parent_item.fix_rounds,
-        )
-
-        # Acknowledge
-        try:
-            react_to_message(client, channel, ts, "eyes")  # type: ignore[arg-type]
-        except Exception:
-            logger.debug("Failed to add :eyes: reaction to fix request", exc_info=True)
-
-        try:
-            client.chat_postMessage(  # type: ignore[union-attr]
-                channel=channel,
-                thread_ts=thread_ts,
-                text=format_fix_acknowledgment(parent_item.branch_name),
-            )
-        except Exception:
-            logger.debug("Failed to post fix acknowledgment", exc_info=True)
-
-    def _handle_event(event: dict, client: object) -> None:
-        """Handle app_mention and reaction_added events from Slack.
-
-        Triage → queue insertion flow (FR-6, FR-7).
-        """
-        nonlocal _slack_client
-        # Publish the Slack client for the executor thread (idempotent).
-        # Bolt types `client` as object; at runtime it's a WebClient that
-        # satisfies SlackClient.
-        if not _slack_client_ready.is_set():
-            _slack_client = client  # type: ignore[assignment]
-            _slack_client_ready.set()
-
-        if not should_process_message(event, config.slack, bot_user_id):
-            # Check if this is a thread-fix request — snapshot items to avoid
-            # iterating shared mutable state without holding state_lock.
-            with state_lock:
-                items_snapshot = list(queue_state.items)
-            if should_process_thread_fix(event, config.slack, bot_user_id, items_snapshot):
-                # Enforce rate limiting and budget checks for thread-fix requests
-                # to prevent unbounded cost accumulation across many threads.
-                if _check_time_exceeded():
-                    logger.warning("Thread fix: max hours exceeded, ignoring")
-                    return
-                if _check_budget_exceeded():
-                    logger.warning("Thread fix: max budget exceeded, ignoring")
-                    return
-                if _check_daily_budget_exceeded():
-                    logger.warning("Thread fix: daily budget exceeded, ignoring")
-                    return
-                _handle_thread_fix(event, client)
-            return
-
-        # Enforce time and budget caps
-        if _check_time_exceeded():
-            logger.warning("Max hours exceeded, ignoring event")
-            return
-        if _check_budget_exceeded():
-            logger.warning("Max budget exceeded, ignoring event")
-            return
-        if _check_daily_budget_exceeded():
-            logger.warning("Daily budget exceeded, ignoring event")
-            return
-
-        channel = event.get("channel", "")
-        ts = event.get("ts", "")
-        user = event.get("user", "unknown")
-
-        # Extract prompt before acquiring lock so a bare @mention with no
-        # text does not burn a rate-limit slot (review finding #2).
-        raw_text = event.get("text", "")
-        prompt_text = extract_prompt_from_mention(raw_text, bot_user_id)
-        if not prompt_text.strip():
-            return
-
-        with state_lock:
-            if watch_state.is_processed(channel, ts):
-                logger.info("Message %s:%s already processed, skipping", channel, ts)
-                return
-
-            if not check_rate_limit(watch_state, config.slack):
-                logger.warning("Rate limit reached, skipping message %s:%s", channel, ts)
-                try:
-                    client.chat_postMessage(  # type: ignore[union-attr]
-                        channel=channel,
-                        thread_ts=ts,
-                        text=":warning: Rate limit reached. Try again later.",
-                    )
-                except Exception:
-                    logger.debug("Failed to post rate-limit message", exc_info=True)
-                return
-
-            # Check queue depth limit
-            pending_count = sum(
-                1 for item in queue_state.items
-                if item.status == QueueItemStatus.PENDING
-            )
-            if pending_count >= config.slack.max_queue_depth:
-                logger.warning("Queue depth limit reached (%d), skipping", pending_count)
-                try:
-                    client.chat_postMessage(  # type: ignore[union-attr]
-                        channel=channel,
-                        thread_ts=ts,
-                        text=f":warning: Queue is full ({pending_count} pending items). Try again later.",
-                    )
-                except Exception:
-                    logger.debug("Failed to post queue-full message", exc_info=True)
-                return
-
-            # Mark as processed early (under lock) to prevent TOCTOU races.
-            run_id = f"slack-{generate_timestamp()}"
-            watch_state.mark_processed(channel, ts, run_id)
-            increment_hourly_count(watch_state)
-            watch_state.runs_triggered += 1
-
-        if dry_run:
-            click.echo(f"[dry-run] Would trigger pipeline for: {prompt_text[:100]}")
-            return
-
-        # Acknowledge receipt
-        try:
-            react_to_message(client, channel, ts, "eyes")  # type: ignore[arg-type]
-        except Exception:
-            logger.debug("Failed to add :eyes: reaction", exc_info=True)
-
-        # --- Triage phase (runs in background thread to avoid Slack ack timeout) ---
-        def _triage_and_enqueue() -> None:
-            if shutdown_event.is_set():
-                return
-            triage_kwargs: dict[str, str] = {}
-            if config.project:
-                triage_kwargs["project_name"] = config.project.name
-                triage_kwargs["project_description"] = config.project.description
-                triage_kwargs["project_stack"] = config.project.stack
-            if config.vision:
-                triage_kwargs["vision"] = config.vision
-            if config.slack.triage_scope:
-                triage_kwargs["triage_scope"] = config.slack.triage_scope
-
-            try:
-                triage_result = triage_message(prompt_text, repo_root=repo_root, **triage_kwargs)
-            except Exception:
-                logger.exception("Triage failed for message %s:%s", channel, ts)
-                try:
-                    client.chat_postMessage(  # type: ignore[union-attr]
-                        channel=channel,
-                        thread_ts=ts,
-                        text=":warning: Triage failed. Check server logs for details.",
-                    )
-                except Exception:
-                    logger.debug("Failed to post triage failure message", exc_info=True)
-                return
-
-            if shutdown_event.is_set():
-                logger.info(
-                    "Watcher shutdown in progress; dropping triaged message %s:%s before enqueue",
-                    channel,
-                    ts,
-                )
-                return
-
-            if not triage_result.actionable:
-                # If the router answered a question, post the answer back
-                if triage_result.answer:
-                    if shutdown_event.is_set():
-                        return
-                    try:
-                        client.chat_postMessage(  # type: ignore[union-attr]
-                            channel=channel,
-                            thread_ts=ts,
-                            text=triage_result.answer,
-                        )
-                    except Exception:
-                        logger.debug("Failed to post Q&A answer to Slack", exc_info=True)
-                    return
-
-                logger.info("Triage skipped message %s:%s: %s", channel, ts, triage_result.reasoning[:100])
-                if config.slack.triage_verbose:
-                    try:
-                        post_triage_skip(client, channel, ts, triage_result.reasoning)  # type: ignore[arg-type]
-                    except Exception:
-                        logger.debug("Failed to post triage skip message", exc_info=True)
-                return
-
-            # Extract base branch (from triage or explicit syntax)
-            base_branch = triage_result.base_branch or extract_base_branch(prompt_text)
-
-            formatted_prompt = format_slack_as_prompt(prompt_text, channel, user)
-
-            # --- Insert into queue ---
-            with state_lock:
-                if shutdown_event.is_set():
-                    return
-                queue_item = QueueItem(
-                    id=run_id,
-                    source_type="slack",
-                    source_value=formatted_prompt,
-                    raw_prompt=prompt_text,
-                    status=QueueItemStatus.PENDING,
-                    slack_ts=ts,
-                    slack_channel=channel,
-                    base_branch=base_branch,
-                )
-                queue_state.items.append(queue_item)
-                _save_queue_state(repo_root, queue_state)
-                save_watch_state(repo_root, watch_state)
-
-                pending_items = [
-                    i for i in queue_state.items
-                    if i.status == QueueItemStatus.PENDING
-                ]
-                position = len(pending_items)
-                total = len(pending_items)
-
-            # Structured audit log for security-relevant Slack-triggered execution
-            logger.info(
-                "AUDIT: pipeline_enqueued item_id=%s user=%s channel=%s "
-                "base_branch=%s",
-                run_id, user, channel, base_branch or "default",
-            )
-
-            needs_approval = not config.slack.auto_approve
-            if shutdown_event.is_set():
-                return
-            try:
-                post_triage_acknowledgment(
-                    client,  # type: ignore[arg-type]
-                    channel,
-                    ts,
-                    triage_result.summary,
-                    needs_approval=needs_approval,
-                    queue_position=position,
-                    queue_total=total,
-                )
-            except Exception:
-                logger.debug("Failed to post triage acknowledgment", exc_info=True)
-
-        # NOTE: Daemon thread — if the process shuts down while triage is
-        # in flight, the message may be mark_processed but never queued.
-        # This is an acceptable trade-off for v1; the window is very small.
-        # Recovery: on startup, processed messages with no matching queue item
-        # are logged at WARNING level so operators can detect orphans.
-        if not shutdown_event.is_set():
-            threading.Thread(
-                target=_triage_and_enqueue, daemon=True, name=f"triage-{ts}",
-            ).start()
 
     class _DualUI:
         """Forwards UI calls to both terminal and Slack UIs.
@@ -3705,7 +3345,7 @@ def _watch_slack_impl(
         to avoid masking the actual pipeline output.
         """
 
-        def __init__(self, terminal: object, slack: object) -> None:
+        def __init__(self, terminal: PhaseUI, slack: SlackUI | FanoutSlackUI) -> None:
             self._terminal = terminal
             self._slack = slack
 
@@ -3716,39 +3356,45 @@ def _watch_slack_impl(
             except Exception:
                 logger.debug("Slack UI call %s failed", method, exc_info=True)
 
-        def phase_header(self, *a: object, **kw: object) -> None:
-            self._terminal.phase_header(*a, **kw)  # type: ignore[union-attr]
-            self._safe_slack_call("phase_header", *a, **kw)
+        def phase_header(
+            self,
+            phase_name: str,
+            budget: float,
+            model: str,
+            extra: str = "",
+        ) -> None:
+            self._terminal.phase_header(phase_name, budget, model, extra)
+            self._safe_slack_call("phase_header", phase_name, budget, model, extra)
 
-        def phase_complete(self, *a: object, **kw: object) -> None:
-            self._terminal.phase_complete(*a, **kw)  # type: ignore[union-attr]
-            self._safe_slack_call("phase_complete", *a, **kw)
+        def phase_complete(self, cost: float, turns: int, duration_ms: int) -> None:
+            self._terminal.phase_complete(cost, turns, duration_ms)
+            self._safe_slack_call("phase_complete", cost, turns, duration_ms)
 
-        def phase_error(self, *a: object, **kw: object) -> None:
-            self._terminal.phase_error(*a, **kw)  # type: ignore[union-attr]
-            self._safe_slack_call("phase_error", *a, **kw)
+        def phase_error(self, error: str) -> None:
+            self._terminal.phase_error(error)
+            self._safe_slack_call("phase_error", error)
 
-        def phase_note(self, *a: object, **kw: object) -> None:
-            self._terminal.phase_note(*a, **kw)  # type: ignore[union-attr]
-            self._safe_slack_call("phase_note", *a, **kw)
+        def phase_note(self, text: str) -> None:
+            self._terminal.phase_note(text)
+            self._safe_slack_call("phase_note", text)
 
         def slack_note(self, text: str) -> None:
             self._safe_slack_call("phase_note", text)
 
-        def on_tool_start(self, *a: object) -> None:
-            self._terminal.on_tool_start(*a)  # type: ignore[union-attr]
+        def on_tool_start(self, tool_name: str) -> None:
+            self._terminal.on_tool_start(tool_name)
 
-        def on_tool_input_delta(self, *a: object) -> None:
-            self._terminal.on_tool_input_delta(*a)  # type: ignore[union-attr]
+        def on_tool_input_delta(self, partial_json: str) -> None:
+            self._terminal.on_tool_input_delta(partial_json)
 
         def on_tool_done(self) -> None:
-            self._terminal.on_tool_done()  # type: ignore[union-attr]
+            self._terminal.on_tool_done()
 
-        def on_text_delta(self, *a: object) -> None:
-            self._terminal.on_text_delta(*a)  # type: ignore[union-attr]
+        def on_text_delta(self, text: str) -> None:
+            self._terminal.on_text_delta(text)
 
         def on_turn_complete(self) -> None:
-            self._terminal.on_turn_complete()  # type: ignore[union-attr]
+            self._terminal.on_turn_complete()
 
     class QueueExecutor:
         """Drains QueueState items sequentially in a background thread.
@@ -3954,12 +3600,12 @@ def _watch_slack_impl(
             # Build UI factory — streams to both terminal and Slack thread
             ui_factory = None
             if client and slack_ts and slack_channel:
-                from colonyos.ui import PhaseUI, NullUI
+                from colonyos.ui import NullUI
 
                 def _dual_ui_factory(
                     prefix: str = "",
                     *,
-                    badge: object | None = None,
+                    badge: StreamBadge | None = None,
                     task_id: str | None = None,
                 ) -> object:
                     is_nested_stream = badge is not None or task_id is not None or bool(prefix)
@@ -3976,7 +3622,7 @@ def _watch_slack_impl(
                             verbose=self._verbose,
                             prefix=prefix,
                             task_id=task_id,
-                            badge=badge,  # type: ignore[arg-type]
+                            badge=badge,
                         )
                     if self._quiet:
                         return slack_ui
@@ -3984,7 +3630,7 @@ def _watch_slack_impl(
                         verbose=self._verbose,
                         prefix=prefix,
                         task_id=task_id,
-                        badge=badge,  # type: ignore[arg-type]
+                        badge=badge,
                     )
                     return _DualUI(terminal_ui, slack_ui)
 
@@ -3992,7 +3638,7 @@ def _watch_slack_impl(
 
                 try:
                     for channel, thread_ts in slack_targets:
-                        post_acknowledgment(client, channel, thread_ts, item_to_run.source_value[:200])  # type: ignore[arg-type]
+                        post_acknowledgment(client, channel, thread_ts, item_to_run.source_value[:200])
                 except Exception:
                     logger.debug("Failed to post pipeline start", exc_info=True)
 
@@ -4044,21 +3690,21 @@ def _watch_slack_impl(
                 emoji = "white_check_mark" if log.status == RunStatus.COMPLETED else "x"
                 for channel, thread_ts in slack_targets:
                     try:
-                        remove_reaction(client, channel, thread_ts, "eyes")  # type: ignore[arg-type]
+                        remove_reaction(client, channel, thread_ts, "eyes")
                     except Exception:
                         logger.debug("Failed to remove eyes reaction", exc_info=True)
                     try:
-                        react_to_message(client, channel, thread_ts, emoji)  # type: ignore[arg-type]
+                        react_to_message(client, channel, thread_ts, emoji)
                     except Exception:
                         logger.debug("Failed to add result reaction", exc_info=True)
                     if log.status == RunStatus.COMPLETED:
                         try:
-                            react_to_message(client, channel, thread_ts, "tada")  # type: ignore[arg-type]
+                            react_to_message(client, channel, thread_ts, "tada")
                         except Exception:
                             logger.debug("Failed to add tada reaction", exc_info=True)
 
                 self._post_run_summary_to_targets(
-                    client,  # type: ignore[arg-type]
+                    client,
                     item_to_run,
                     status=log.status.value,
                     total_cost=log.total_cost_usd,
@@ -4082,7 +3728,7 @@ def _watch_slack_impl(
                     notify_channel = current_config.slack.channels[0]
                     try:
                         cooldown = current_config.slack.circuit_breaker_cooldown_minutes
-                        client.chat_postMessage(  # type: ignore[union-attr]
+                        client.chat_postMessage(
                             channel=notify_channel,
                             text=(
                                 f":rotating_light: Queue paused after {current_failures} "
@@ -4094,7 +3740,7 @@ def _watch_slack_impl(
                         logger.debug("Failed to post circuit-breaker notification", exc_info=True)
 
         def _run_approval_gate(
-            self, client: object, channel: str, ts: str, item: QueueItem,
+            self, client: SlackClient, channel: str, ts: str, item: QueueItem,
             *, allowed_approver_ids: list[str] | None = None,
         ) -> bool:
             """Run the approval gate. Returns True if approved, False otherwise.
@@ -4104,19 +3750,19 @@ def _watch_slack_impl(
             from approving their own requests.
             """
             try:
-                approval_resp = client.chat_postMessage(  # type: ignore[union-attr]
+                approval_resp = client.chat_postMessage(
                     channel=channel,
                     thread_ts=ts,
                     text=":question: Awaiting approval — react with :thumbsup: to proceed.",
                 )
                 approval_ts = approval_resp.get("ts", "")
                 approved = wait_for_approval(
-                    client, channel, ts, approval_ts,  # type: ignore[arg-type]
+                    client, channel, ts, approval_ts,
                     allowed_approver_ids=allowed_approver_ids,
                 )
                 if not approved:
                     try:
-                        client.chat_postMessage(  # type: ignore[union-attr]
+                        client.chat_postMessage(
                             channel=channel,
                             thread_ts=ts,
                             text=":no_entry: Approval timed out. Pipeline not executed.",
@@ -4171,12 +3817,12 @@ def _watch_slack_impl(
             # Build UI factory for the fix
             ui_factory = None
             if client and slack_ts and slack_channel:
-                from colonyos.ui import PhaseUI, NullUI
+                from colonyos.ui import NullUI
 
                 def _fix_ui_factory(
                     prefix: str = "",
                     *,
-                    badge: object | None = None,
+                    badge: StreamBadge | None = None,
                     task_id: str | None = None,
                 ) -> object:
                     is_nested_stream = badge is not None or task_id is not None or bool(prefix)
@@ -4193,7 +3839,7 @@ def _watch_slack_impl(
                             verbose=self._verbose,
                             prefix=prefix,
                             task_id=task_id,
-                            badge=badge,  # type: ignore[arg-type]
+                            badge=badge,
                         )
                     if self._quiet:
                         return slack_ui
@@ -4201,7 +3847,7 @@ def _watch_slack_impl(
                         verbose=self._verbose,
                         prefix=prefix,
                         task_id=task_id,
-                        badge=badge,  # type: ignore[arg-type]
+                        badge=badge,
                     )
                     return _DualUI(terminal_ui, slack_ui)
 
@@ -4228,7 +3874,7 @@ def _watch_slack_impl(
             # Try to get PRD/task from parent run log
             if parent_item and parent_item.run_id:
                 try:
-                    from colonyos.orchestrator import _load_run_log
+                    from colonyos.orchestrator import _load_run_log  # pyright: ignore[reportPrivateUsage]
                     parent_log = _load_run_log(self._repo_root, parent_item.run_id)
                     if parent_log:
                         prd_rel = parent_log.prd_rel or ""
@@ -4298,7 +3944,6 @@ def _watch_slack_impl(
                 self._watch_state.reset_daily_cost_if_needed()
                 self._watch_state.daily_cost_usd += log.total_cost_usd
                 self._queue_state.aggregate_cost_usd += log.total_cost_usd
-                current_failures = self._watch_state.consecutive_failures
                 _save_queue_state(self._repo_root, self._queue_state)
                 save_watch_state(self._repo_root, self._watch_state)
 
@@ -4307,21 +3952,21 @@ def _watch_slack_impl(
                 emoji = "white_check_mark" if log.status == RunStatus.COMPLETED else "x"
                 for channel, thread_ts in slack_targets:
                     try:
-                        remove_reaction(client, channel, thread_ts, "eyes")  # type: ignore[arg-type]
+                        remove_reaction(client, channel, thread_ts, "eyes")
                     except Exception:
                         logger.debug("Failed to remove eyes reaction", exc_info=True)
                     try:
-                        react_to_message(client, channel, thread_ts, emoji)  # type: ignore[arg-type]
+                        react_to_message(client, channel, thread_ts, emoji)
                     except Exception:
                         logger.debug("Failed to add fix result reaction", exc_info=True)
                     if log.status == RunStatus.COMPLETED:
                         try:
-                            react_to_message(client, channel, thread_ts, "tada")  # type: ignore[arg-type]
+                            react_to_message(client, channel, thread_ts, "tada")
                         except Exception:
                             logger.debug("Failed to add tada reaction", exc_info=True)
 
                 self._post_run_summary_to_targets(
-                    client,  # type: ignore[arg-type]
+                    client,
                     item_to_run,
                     status=log.status.value,
                     total_cost=log.total_cost_usd,
@@ -4401,10 +4046,8 @@ def _watch_slack_impl(
     info.add_column()
     info.add_row("channels", channels_text)
     info.add_row("trigger", Text(trigger_label, style="bold"))
-    if effective_max_hours is not None:
-        info.add_row("max hours", Text(str(effective_max_hours), style="yellow"))
-    if effective_max_budget is not None:
-        info.add_row("max budget", Text(f"${effective_max_budget:.2f}", style="yellow"))
+    info.add_row("max hours", Text(str(effective_max_hours), style="yellow"))
+    info.add_row("max budget", Text(f"${effective_max_budget:.2f}", style="yellow"))
     if config.slack.daily_budget_usd is not None:
         info.add_row("daily budget", Text(f"${config.slack.daily_budget_usd:.2f}", style="yellow"))
     if config.slack.max_runs_per_hour:
@@ -4535,7 +4178,8 @@ def run_pipeline_for_queue_item(
     from colonyos.github import fetch_issue, format_issue_as_prompt
 
     if item.source_type == "slack_fix":
-        from colonyos.orchestrator import _load_run_log, run_thread_fix
+        from colonyos.orchestrator import _load_run_log  # pyright: ignore[reportPrivateUsage]
+        from colonyos.orchestrator import run_thread_fix
         from colonyos.sanitize import sanitize_untrusted_content
         from colonyos.slack import extract_raw_from_formatted_prompt, is_valid_git_ref
 
@@ -4629,7 +4273,6 @@ def _launch_daemon_tui(
     dry_run: bool,
 ) -> None:
     """Launch daemon mode inside the existing Textual shell."""
-    import colonyos.tui  # noqa: F401
     import threading
 
     from colonyos.tui.app import AssistantApp
@@ -4792,7 +4435,7 @@ def _launch_daemon_tui(
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     previous_sighup = signal.getsignal(signal.SIGHUP) if hasattr(signal, "SIGHUP") else None
 
-    def _sigint_handler(signum, frame) -> None:  # noqa: ANN001
+    def _sigint_handler(signum: int, frame: FrameType | None) -> None:
         try:
             app_instance.call_from_thread(app_instance.action_cancel_run)
         except Exception:
@@ -4801,13 +4444,13 @@ def _launch_daemon_tui(
                 mark_shutdown=True,
             )
 
-    def _terminate_handler(signum, frame) -> None:  # noqa: ANN001
+    def _terminate_handler(signum: int, frame: FrameType | None) -> None:
         _terminate_daemon_process(
             reason=f"Parent received {signal.Signals(signum).name}",
             force=False,
             mark_shutdown=True,
         )
-        raise SystemExit(128 + signum)
+        raise SystemExit(128 + int(signum))
 
     signal.signal(signal.SIGINT, _sigint_handler)
     signal.signal(signal.SIGTERM, _terminate_handler)
@@ -4854,7 +4497,6 @@ def daemon(
     from rich.logging import RichHandler
 
     from colonyos.config import load_config
-    from colonyos.daemon import Daemon, DaemonError
 
     use_tui = tui if tui is not None else (_interactive_stdio() and _tui_available())
     monitor_mode = os.environ.get(_DAEMON_MONITOR_ENV) == "1"
@@ -4943,6 +4585,10 @@ def daemon(
                 err=True,
             )
 
+    _daemon_mod = importlib.import_module("colonyos.daemon")
+    Daemon = _daemon_mod.Daemon
+    DaemonError = _daemon_mod.DaemonError
+
     d = Daemon(
         repo_root=repo_root,
         config=config,
@@ -4995,7 +4641,8 @@ def ci_fix(
         validate_clean_worktree,
         validate_gh_auth,
     )
-    from colonyos.orchestrator import _build_ci_fix_prompt, _save_run_log
+    from colonyos.orchestrator import _build_ci_fix_prompt  # pyright: ignore[reportPrivateUsage]
+    from colonyos.orchestrator import _save_run_log  # pyright: ignore[reportPrivateUsage]
 
     repo_root = _find_repo_root()
     config = load_config(repo_root)
@@ -5219,7 +4866,7 @@ def cleanup_branches(
         "errors": result.errors,
         "execute": execute,
     }
-    write_cleanup_log(runs_dir_path(repo_root), "branches", log_data)
+    write_cleanup_log(runs_dir_path(repo_root), "branches", cast(dict[str, object], log_data))
 
 
 @cleanup.command("artifacts")
@@ -5244,7 +4891,7 @@ def cleanup_artifacts(
     days = retention_days if retention_days is not None else config.cleanup.artifact_retention_days
     runs_dir = runs_dir_path(repo_root)
 
-    stale, skipped = list_stale_artifacts(runs_dir, retention_days=days)
+    stale, _ = list_stale_artifacts(runs_dir, retention_days=days)
 
     if not stale:
         click.echo(f"No stale artifacts found (retention: {days} days).")
@@ -5296,7 +4943,7 @@ def cleanup_artifacts(
         "execute": execute,
         "retention_days": days,
     }
-    write_cleanup_log(runs_dir, "artifacts", log_data)
+    write_cleanup_log(runs_dir, "artifacts", cast(dict[str, object], log_data))
 
 
 def _run_cleanup_scan_impl(
@@ -5388,7 +5035,7 @@ def _run_cleanup_scan_impl(
             for r in results
         ],
     }
-    write_cleanup_log(runs_dir_path(repo_root), "scan", log_data)
+    write_cleanup_log(runs_dir_path(repo_root), "scan", cast(dict[str, object], log_data))
 
     # AI scan
     if use_ai:
@@ -5485,7 +5132,6 @@ def sweep(path: str | None, execute: bool, plan_only: bool, max_tasks: int | Non
 
     Optionally pass a PATH to scope analysis to a specific file or directory.
     """
-    from datetime import datetime, timezone
 
     from colonyos.config import load_config, runs_dir_path
     from colonyos.models import PreflightError
@@ -5567,7 +5213,7 @@ def sweep(path: str | None, execute: bool, plan_only: bool, max_tasks: int | Non
                 table.add_column("Description")
 
                 for f in findings:
-                    score = f["score"]
+                    score = cast(int, f["score"])
                     if score >= 16:
                         score_style = "bold red"
                     elif score >= 9:
@@ -5575,12 +5221,12 @@ def sweep(path: str | None, execute: bool, plan_only: bool, max_tasks: int | Non
                     else:
                         score_style = "dim"
                     table.add_row(
-                        f["number"],
-                        f["category"],
+                        str(f["number"]),
+                        str(f["category"]),
                         str(f["impact"]),
                         str(f["risk"]),
                         f"[{score_style}]{score}[/{score_style}]",
-                        f["title"],
+                        str(f["title"]),
                     )
 
                 con.print(table)
@@ -5610,7 +5256,7 @@ def sweep(path: str | None, execute: bool, plan_only: bool, max_tasks: int | Non
                 "cost_usd": phase_result.cost_usd,
                 "plan_only": plan_only,
             }
-            write_cleanup_log(runs_dir_path(repo_root), "sweep", log_data)
+            write_cleanup_log(runs_dir_path(repo_root), "sweep", cast(dict[str, object], log_data))
         except Exception:
             logger.debug("Failed to write sweep audit log", exc_info=True)
 
@@ -5811,7 +5457,7 @@ def pr_review(
 
         if not new_comments:
             if not quiet:
-                click.echo(f"[colonyos] No new actionable comments found.")
+                click.echo("[colonyos] No new actionable comments found.")
             return fixes_applied
 
         click.echo(f"[colonyos] Found {len(new_comments)} new comment(s) to process.")
@@ -6110,9 +5756,9 @@ def _launch_tui(
     Raises:
         ImportError: If textual or janus is not installed.
     """
-    import colonyos.tui  # noqa: F401 — triggers dependency check
     from colonyos.tui.app import AssistantApp
     from colonyos.tui.adapter import CommandOutputMsg, TextBlockMsg, TextualUI
+    from colonyos.ui import StreamBadge
 
     current_adapter: TextualUI | None = None
     last_direct_session_id: str | None = None
@@ -6206,14 +5852,14 @@ def _launch_tui(
         def _ui_factory(
             prefix: str = "",
             *,
-            badge: object | None = None,
+            badge: StreamBadge | None = None,
             task_id: str | None = None,
         ) -> TextualUI:
             if badge is None and task_id is None and not prefix:
                 return adapter
             return TextualUI(
                 queue.sync_q,
-                badge=badge,  # type: ignore[arg-type]
+                badge=badge,
                 task_id=task_id,
             )
 
@@ -6316,7 +5962,7 @@ def _launch_tui(
         nonlocal current_adapter
 
         # Guard against concurrent auto loops (FR-1.7)
-        if app_instance._auto_loop_active:
+        if app_instance._auto_loop_active:  # pyright: ignore[reportPrivateUsage]
             queue = app_instance.event_queue
             queue.sync_q.put(CommandOutputMsg(
                 text="An auto loop is already running. Wait for it to finish or press Ctrl+C to cancel."
@@ -6360,8 +6006,8 @@ def _launch_tui(
         custom_profiles = config.ceo_profiles if config.ceo_profiles else None
 
         queue = app_instance.event_queue
-        app_instance._stop_event.clear()
-        app_instance._auto_loop_active = True
+        app_instance._stop_event.clear()  # pyright: ignore[reportPrivateUsage]
+        app_instance._auto_loop_active = True  # pyright: ignore[reportPrivateUsage]
 
         aggregate_cost = 0.0
         last_persona_role: str | None = None
@@ -6370,7 +6016,7 @@ def _launch_tui(
 
         try:
             for iteration in range(1, loop_count + 1):
-                if app_instance._stop_event.is_set():
+                if app_instance._stop_event.is_set():  # pyright: ignore[reportPrivateUsage]
                     break
 
                 # --- Time cap check ---
@@ -6448,7 +6094,7 @@ def _launch_tui(
                     except Exception:
                         logger.exception("Directions update failed in auto TUI loop")
 
-                if app_instance._stop_event.is_set():
+                if app_instance._stop_event.is_set():  # pyright: ignore[reportPrivateUsage]
                     break
 
                 # Run the orchestrator pipeline
@@ -6458,14 +6104,14 @@ def _launch_tui(
                 def _ui_factory(
                     prefix: str = "",
                     *,
-                    badge: object | None = None,
+                    badge: StreamBadge | None = None,
                     task_id: str | None = None,
                 ) -> TextualUI:
                     if badge is None and task_id is None and not prefix:
                         return adapter2
                     return TextualUI(
                         queue.sync_q,
-                        badge=badge,  # type: ignore[arg-type]
+                        badge=badge,
                         task_id=task_id,
                     )
 
@@ -6500,7 +6146,7 @@ def _launch_tui(
                     break
 
         finally:
-            app_instance._auto_loop_active = False
+            app_instance._auto_loop_active = False  # pyright: ignore[reportPrivateUsage]
             queue.sync_q.put(LoopCompleteMsg(
                 iterations_completed=completed,
                 total_cost=aggregate_cost,
@@ -6531,7 +6177,7 @@ def _launch_tui(
 
     previous_handler = signal.getsignal(signal.SIGINT)
 
-    def _sigint_handler(signum, frame) -> None:  # noqa: ANN001
+    def _sigint_handler(signum: int, frame: FrameType | None) -> None:
         app_instance.call_from_thread(app_instance.action_cancel_run)
 
     signal.signal(signal.SIGINT, _sigint_handler)

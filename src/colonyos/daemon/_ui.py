@@ -20,7 +20,20 @@ class DaemonError(RuntimeError):
     """Raised for unrecoverable daemon errors."""
 
 
-class _CombinedUI:
+def _daemon_first_meaningful_line(text: str) -> str:
+    """Extract the first non-blank, non-heading line (mirrors colonyos.ui tool display)."""
+    for line in text.splitlines():
+        stripped = line.strip().lstrip("#").strip()
+        if stripped and len(stripped) > 5:
+            return stripped
+    return text.split("\n", 1)[0].strip()
+
+
+def _daemon_truncate(s: str, maxlen: int) -> str:
+    return s if len(s) <= maxlen else s[: maxlen - 1] + "…"
+
+
+class CombinedUI:
     """Forward phase UI events to a terminal UI and a secondary mirror UI."""
 
     _SECONDARY_CALL_TIMEOUT_SECONDS = 3.0
@@ -93,7 +106,7 @@ class _CombinedUI:
         self._secondary_call("on_turn_complete")
 
 
-class _DaemonMonitorEventUI:
+class DaemonMonitorEventUI:
     """Emit structured TUI events over stdout for the daemon monitor."""
 
     def __init__(
@@ -202,14 +215,14 @@ class _DaemonMonitorEventUI:
         })
 
     def _emit_tool_line(self, arg: str) -> None:
-        from colonyos.ui import DEFAULT_TOOL_STYLE, TOOL_ARG_KEYS, TOOL_STYLE, _first_meaningful_line, _truncate
+        from colonyos.ui import DEFAULT_TOOL_STYLE, TOOL_STYLE
 
         name = self._tool_name or "?"
         style = TOOL_STYLE.get(name, DEFAULT_TOOL_STYLE)
         display_arg = arg
         if name in {"Agent", "Dispatch", "Task"} and display_arg:
-            display_arg = _first_meaningful_line(display_arg)
-        display_arg = _truncate(display_arg, 80) if display_arg else ""
+            display_arg = _daemon_first_meaningful_line(display_arg)
+        display_arg = _daemon_truncate(display_arg, 80) if display_arg else ""
         self._emit({
             "type": "tool_line",
             "tool_name": name,

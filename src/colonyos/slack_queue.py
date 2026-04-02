@@ -87,7 +87,10 @@ class SlackQueueEngine:
         if self.config.slack.trigger_mode == "all":
             bolt_app.event("message")(self._handle_event)
         if self.config.slack.trigger_mode not in ("reaction", "all"):
-            bolt_app.event("reaction_added")(lambda event, client: None)
+            def _noop_reaction(_event: object, _client: object) -> None:
+                return
+
+            bolt_app.event("reaction_added")(_noop_reaction)
             return
         bolt_app.event("reaction_added")(self._handle_reaction)
 
@@ -328,6 +331,9 @@ class SlackQueueEngine:
             )
             return
 
+        if triage_result is None:
+            return
+
         if not triage_result.actionable:
             try:
                 if triage_result.answer:
@@ -400,10 +406,12 @@ class SlackQueueEngine:
                 )
                 reprioritize_queue_item(queue_item)
                 self.queue_state.items.append(queue_item)
+            item_for_mark = merged_item or queue_item
+            assert item_for_mark is not None
             self.watch_state.mark_processed(
                 channel,
                 ts,
-                (merged_item.id if merged_item else queue_item.id),  # type: ignore[union-attr]
+                item_for_mark.id,
             )
             self.watch_state.runs_triggered += 1
             self.persist_queue()

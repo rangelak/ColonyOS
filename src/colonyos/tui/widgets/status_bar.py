@@ -8,6 +8,7 @@ elapsed time with a cycling spinner during active phases.
 from __future__ import annotations
 
 import time
+from typing import Any
 
 from rich.text import Text
 from textual.reactive import reactive
@@ -43,12 +44,12 @@ class StatusBar(Static):
     phase_extra: reactive[str] = reactive("")
     total_cost: reactive[float] = reactive(0.0)
     turn_count: reactive[int] = reactive(0)
-    is_running: reactive[bool] = reactive(False)
+    phase_active: reactive[bool] = reactive(False)
     error_msg: reactive[str] = reactive("")
     iteration_current: reactive[int] = reactive(0)
     iteration_total: reactive[int] = reactive(0)
 
-    def __init__(self, **kwargs) -> None:  # noqa: ANN003
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._phase_start: float | None = None
         self._spinner_index: int = 0
@@ -75,7 +76,7 @@ class StatusBar(Static):
 
     def _advance_idle(self) -> None:
         """Advance the idle animation when no phase is active."""
-        if self.is_running or self.error_msg:
+        if self.phase_active or self.error_msg:
             return
         self._idle_index = (self._idle_index + 1) % max(len(IDLE_GLYPHS), len(IDLE_PHRASES))
         self._render_bar()
@@ -119,7 +120,7 @@ class StatusBar(Static):
         self.phase_model = model
         self.phase_extra = extra
         self.turn_count = 0
-        self.is_running = True
+        self.phase_active = True
         self.error_msg = ""
         self._phase_start = time.monotonic()
         self._spinner_index = 0
@@ -131,7 +132,7 @@ class StatusBar(Static):
         self._stop_spinner()
         self.total_cost += cost
         self.turn_count = turns
-        self.is_running = False
+        self.phase_active = False
         self.phase_name = ""
         self.phase_model = ""
         self.phase_extra = ""
@@ -143,7 +144,7 @@ class StatusBar(Static):
     def set_error(self, msg: str) -> None:
         """Display an error state on the status bar."""
         self._stop_spinner()
-        self.is_running = False
+        self.phase_active = False
         self.phase_name = ""
         self.phase_model = ""
         self.phase_extra = ""
@@ -201,7 +202,7 @@ class StatusBar(Static):
             self.update(text)
             return
 
-        if not self.phase_name and not self.is_running:
+        if not self.phase_name and not self.phase_active:
             text = Text()
             glyph = IDLE_GLYPHS[self._idle_index % len(IDLE_GLYPHS)]
             phrase = IDLE_PHRASES[self._idle_index % len(IDLE_PHRASES)]
@@ -216,7 +217,7 @@ class StatusBar(Static):
         text = Text()
 
         # Spinner or check mark
-        if self.is_running:
+        if self.phase_active:
             spinner = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)]
             text.append(f"{spinner} ", style=f"bold {COLOR_ACCENT}")
         else:
@@ -254,4 +255,3 @@ class StatusBar(Static):
 
         self._last_rendered = text.plain
         self.update(text)
-

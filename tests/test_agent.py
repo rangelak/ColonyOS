@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Callable
-from unittest.mock import patch, MagicMock, AsyncMock
+from typing import NoReturn, cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import colonyos.agent as _agent_mod
 import pytest
+from claude_agent_sdk import ClaudeAgentOptions, ResultMessage
 
 from colonyos.agent import (
     PhaseTimeoutError,
@@ -18,6 +21,60 @@ from colonyos.agent import (
     run_phase_sync,
 )
 from colonyos.models import Phase, PhaseResult
+
+_friendly_error = cast(Callable[[Exception], str], getattr(_agent_mod, "_friendly_error"))
+_is_transient_error = cast(Callable[[Exception], bool], getattr(_agent_mod, "_is_transient_error"))
+
+
+def _async_gen_dummy_branch() -> bool:
+    """Always False; allows async generators to include a yield that never runs."""
+    return False
+
+
+def _dummy_result_message() -> ResultMessage:
+    return ResultMessage(
+        subtype="noop",
+        duration_ms=0,
+        duration_api_ms=0,
+        is_error=False,
+        num_turns=0,
+        session_id="noop",
+        result=None,
+    )
+
+
+class _TestApiError(Exception):
+    """Exception with optional API-shaped attributes for error-classification tests."""
+
+    status_code: int | None
+    stderr: str | None
+    result: str | None
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        stderr: str | None = None,
+        result: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.stderr = stderr
+        self.result = result
+
+
+async def _query_always_raises(
+    exc: BaseException,
+    *,
+    prompt: str,
+    options: ClaudeAgentOptions,
+) -> AsyncIterator[ResultMessage]:
+    """Async generator whose first iteration raises ``exc`` (matches ``query`` shape)."""
+    _ = (prompt, options)
+    if _async_gen_dummy_branch():
+        yield _dummy_result_message()
+    raise exc
 
 
 def _fake_phase_result(idx: int, phase: Phase = Phase.REVIEW) -> PhaseResult:
@@ -57,6 +114,7 @@ class TestRunPhasesParallel:
             system_prompt: str,
             **kwargs: object,
         ) -> PhaseResult:
+            _ = (phase, cwd, system_prompt, kwargs)
             idx = prompt_to_idx[prompt]
             # Simulate different completion times based on index
             await asyncio.sleep(0.01 * (3 - idx))  # Earlier indices complete later
@@ -101,6 +159,7 @@ class TestRunPhasesParallel:
             system_prompt: str,
             **kwargs: object,
         ) -> PhaseResult:
+            _ = (phase, cwd, system_prompt, kwargs)
             idx = prompt_to_idx[prompt]
             # Second task completes first
             await asyncio.sleep(0.01 if idx == 0 else 0.001)
@@ -113,7 +172,7 @@ class TestRunPhasesParallel:
 
         async def run_test() -> None:
             with patch("colonyos.agent.run_phase", side_effect=mock_run_phase):
-                await run_phases_parallel(calls, on_complete=on_complete)
+                _ = await run_phases_parallel(calls, on_complete=on_complete)
 
         asyncio.run(run_test())
 
@@ -142,6 +201,7 @@ class TestRunPhasesParallel:
             system_prompt: str,
             **kwargs: object,
         ) -> PhaseResult:
+            _ = (phase, cwd, system_prompt, kwargs)
             idx = prompt_to_idx[prompt]
             return _fake_phase_result(idx)
 
@@ -167,7 +227,7 @@ class TestRunPhasesParallel:
 
         completion_order: list[int] = []
 
-        def on_complete(idx: int, result: PhaseResult) -> None:
+        def on_complete(idx: int, _result: PhaseResult) -> None:
             completion_order.append(idx)
 
         prompt_to_idx = {"prompt 0": 0, "prompt 1": 1, "prompt 2": 2}
@@ -180,6 +240,7 @@ class TestRunPhasesParallel:
             system_prompt: str,
             **kwargs: object,
         ) -> PhaseResult:
+            _ = (phase, cwd, system_prompt, kwargs)
             idx = prompt_to_idx[prompt]
             # Create explicit completion order: 2, 0, 1
             delays = {0: 0.02, 1: 0.03, 2: 0.01}
@@ -193,7 +254,7 @@ class TestRunPhasesParallel:
 
         async def run_test() -> None:
             with patch("colonyos.agent.run_phase", side_effect=mock_run_phase):
-                await run_phases_parallel(calls, on_complete=on_complete)
+                _ = await run_phases_parallel(calls, on_complete=on_complete)
 
         asyncio.run(run_test())
 
@@ -207,11 +268,11 @@ class TestRunPhasesParallel:
         results = [_fake_phase_result(i) for i in range(2)]
         callback_called: list[int] = []
 
-        def on_complete(idx: int, result: PhaseResult) -> None:
+        def on_complete(idx: int, _result: PhaseResult) -> None:
             callback_called.append(idx)
 
         async def mock_run_phases_parallel(
-            calls: list[dict],
+            calls: list[dict[str, object]],
             on_complete: Callable[[int, PhaseResult], None] | None = None,
         ) -> list[PhaseResult]:
             # Verify callback was passed through
@@ -235,7 +296,7 @@ class TestRunPhasesParallel:
 
         callback_called: list[int] = []
 
-        def on_complete(idx: int, result: PhaseResult) -> None:
+        def on_complete(idx: int, _result: PhaseResult) -> None:
             callback_called.append(idx)
 
         async def run_test() -> list[PhaseResult]:
@@ -260,6 +321,7 @@ class TestRunPhasesParallel:
             system_prompt: str,
             **kwargs: object,
         ) -> PhaseResult:
+            _ = (phase, cwd, system_prompt, kwargs)
             idx = prompt_to_idx[prompt]
             # Reverse completion order
             await asyncio.sleep(0.01 * (3 - idx))
@@ -287,12 +349,10 @@ class TestRunPhasesParallel:
         but execution continues.
         """
         from colonyos.agent import run_phases_parallel
-        import logging
 
         callback_indices: list[int] = []
-        exception_raised = False
 
-        def on_complete(idx: int, result: PhaseResult) -> None:
+        def on_complete(idx: int, _result: PhaseResult) -> None:
             callback_indices.append(idx)
             if idx == 1:
                 # Raise an exception on the second callback
@@ -308,6 +368,7 @@ class TestRunPhasesParallel:
             system_prompt: str,
             **kwargs: object,
         ) -> PhaseResult:
+            _ = (phase, cwd, system_prompt, kwargs)
             idx = prompt_to_idx[prompt]
             return _fake_phase_result(idx)
 
@@ -325,9 +386,11 @@ class TestRunPhasesParallel:
             results = asyncio.run(run_test())
 
             # Logger.exception should have been called for the failing callback
-            mock_logger.exception.assert_called_once()
+            exc_log = cast(MagicMock, mock_logger.exception)
+            exc_log.assert_called_once()
             # The call should include index 1 (either as format string arg or in message)
-            call_args = mock_logger.exception.call_args
+            call_args = exc_log.call_args
+            assert call_args is not None
             assert call_args[0][1] == 1, "Expected index 1 in exception log"
 
         # All 3 results should still be returned
@@ -340,39 +403,55 @@ class TestRunPhaseResume:
     """Tests for the resume parameter on run_phase() and run_phase_sync()."""
 
     @pytest.fixture
-    def mock_query(self):
+    def mock_query(
+        self,
+    ) -> tuple[
+        Callable[[str, ClaudeAgentOptions], AsyncIterator[ResultMessage]],
+        ResultMessage,
+    ]:
         """Create a mock for the query function that yields a ResultMessage."""
-        result_msg = MagicMock()
-        result_msg.is_error = False
-        result_msg.total_cost_usd = 0.01
-        result_msg.num_turns = 1
-        result_msg.duration_ms = 100
-        result_msg.session_id = "sess-abc123"
-        result_msg.result = "done"
+        result_msg = ResultMessage(
+            subtype="result",
+            duration_ms=100,
+            duration_api_ms=50,
+            is_error=False,
+            num_turns=1,
+            session_id="sess-abc123",
+            total_cost_usd=0.01,
+            result="done",
+        )
 
-        # Make it a ResultMessage instance
-        from claude_agent_sdk import ResultMessage
-        result_msg.__class__ = ResultMessage
-
-        async def fake_query(prompt, options):
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = (prompt, options)
             yield result_msg
 
         return fake_query, result_msg
 
-    def test_run_phase_without_resume_does_not_set_resume(self, mock_query):
+    def test_run_phase_without_resume_does_not_set_resume(
+        self,
+        mock_query: tuple[
+            Callable[[str, ClaudeAgentOptions], AsyncIterator[ResultMessage]],
+            ResultMessage,
+        ],
+    ) -> None:
         """run_phase() without resume should not set resume/continue_conversation on options."""
-        fake_query, _ = mock_query
-        captured_options = {}
+        fake_query, _result_msg = mock_query
+        captured_options: dict[str, ClaudeAgentOptions] = {}
 
         original_fake = fake_query
 
-        async def capturing_query(prompt, options):
+        async def capturing_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = prompt
             captured_options["options"] = options
             async for msg in original_fake(prompt, options):
                 yield msg
 
         with patch("colonyos.agent.query", side_effect=capturing_query):
-            result = asyncio.run(
+            _ = asyncio.run(
                 run_phase(
                     Phase.REVIEW,
                     "test prompt",
@@ -386,20 +465,29 @@ class TestRunPhaseResume:
         assert getattr(opts, "resume", None) is None
         assert not getattr(opts, "continue_conversation", False)
 
-    def test_run_phase_with_resume_sets_options(self, mock_query):
+    def test_run_phase_with_resume_sets_options(
+        self,
+        mock_query: tuple[
+            Callable[[str, ClaudeAgentOptions], AsyncIterator[ResultMessage]],
+            ResultMessage,
+        ],
+    ) -> None:
         """run_phase() with resume should set resume and continue_conversation on options."""
-        fake_query, _ = mock_query
-        captured_options = {}
+        fake_query, _result_msg = mock_query
+        captured_options: dict[str, ClaudeAgentOptions] = {}
 
         original_fake = fake_query
 
-        async def capturing_query(prompt, options):
+        async def capturing_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = prompt
             captured_options["options"] = options
             async for msg in original_fake(prompt, options):
                 yield msg
 
         with patch("colonyos.agent.query", side_effect=capturing_query):
-            result = asyncio.run(
+            _ = asyncio.run(
                 run_phase(
                     Phase.REVIEW,
                     "test prompt",
@@ -413,20 +501,29 @@ class TestRunPhaseResume:
         assert opts.resume == "sess-abc123"
         assert opts.continue_conversation is True
 
-    def test_run_phase_with_resume_none_does_not_set_continue(self, mock_query):
+    def test_run_phase_with_resume_none_does_not_set_continue(
+        self,
+        mock_query: tuple[
+            Callable[[str, ClaudeAgentOptions], AsyncIterator[ResultMessage]],
+            ResultMessage,
+        ],
+    ) -> None:
         """run_phase() with resume=None should not set continue_conversation."""
-        fake_query, _ = mock_query
-        captured_options = {}
+        fake_query, _result_msg = mock_query
+        captured_options: dict[str, ClaudeAgentOptions] = {}
 
         original_fake = fake_query
 
-        async def capturing_query(prompt, options):
+        async def capturing_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = prompt
             captured_options["options"] = options
             async for msg in original_fake(prompt, options):
                 yield msg
 
         with patch("colonyos.agent.query", side_effect=capturing_query):
-            result = asyncio.run(
+            _ = asyncio.run(
                 run_phase(
                     Phase.REVIEW,
                     "test prompt",
@@ -440,14 +537,23 @@ class TestRunPhaseResume:
         assert getattr(opts, "resume", None) is None
         assert not getattr(opts, "continue_conversation", False)
 
-    def test_run_phase_sync_passes_resume_through(self, mock_query):
+    def test_run_phase_sync_passes_resume_through(
+        self,
+        mock_query: tuple[
+            Callable[[str, ClaudeAgentOptions], AsyncIterator[ResultMessage]],
+            ResultMessage,
+        ],
+    ) -> None:
         """run_phase_sync() should pass resume parameter through to run_phase()."""
-        fake_query, _ = mock_query
-        captured_options = {}
+        fake_query, _result_msg = mock_query
+        captured_options: dict[str, ClaudeAgentOptions] = {}
 
         original_fake = fake_query
 
-        async def capturing_query(prompt, options):
+        async def capturing_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = prompt
             captured_options["options"] = options
             async for msg in original_fake(prompt, options):
                 yield msg
@@ -466,11 +572,19 @@ class TestRunPhaseResume:
         assert opts.continue_conversation is True
         assert result.success is True
 
-    def test_run_phase_sync_without_resume_backward_compatible(self, mock_query):
+    def test_run_phase_sync_without_resume_backward_compatible(
+        self,
+        mock_query: tuple[
+            Callable[[str, ClaudeAgentOptions], AsyncIterator[ResultMessage]],
+            ResultMessage,
+        ],
+    ) -> None:
         """run_phase_sync() without resume should work as before (backward compatible)."""
-        fake_query, _ = mock_query
+        fake_query, _result_msg = mock_query
 
-        async def capturing_query(prompt, options):
+        async def capturing_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
             async for msg in fake_query(prompt, options):
                 yield msg
 
@@ -488,26 +602,28 @@ class TestRunPhaseResume:
 class TestCancellation:
     def test_controller_cancel_ignores_closed_loop_race(self) -> None:
         controller = _SyncRunController(label="test")
-        loop = MagicMock()
+        loop: MagicMock = MagicMock()
         loop.is_closed.return_value = False
         loop.call_soon_threadsafe.side_effect = RuntimeError("Event loop is closed")
-        task = MagicMock()
+        task: MagicMock = MagicMock()
         task.done.return_value = False
         controller.attach(loop, task)
 
         controller.cancel("test cancel")
 
-        loop.call_soon_threadsafe.assert_called_once_with(task.cancel)
+        loop_threadsafe = cast(MagicMock, loop.call_soon_threadsafe)
+        loop_threadsafe.assert_called_once_with(task.cancel)
 
     def test_run_phase_sync_cancels_active_phase(self) -> None:
         cancelled = threading.Event()
 
-        async def blocking_run_phase(*args, **kwargs) -> PhaseResult:
+        async def blocking_run_phase(*_args: object, **_kwargs: object) -> NoReturn:
             try:
-                await asyncio.Event().wait()
+                _ = await asyncio.Event().wait()
             except asyncio.CancelledError:
-                cancelled.set()
+                _ = cancelled.set()
                 raise
+            raise RuntimeError("expected hang or cancellation")
 
         def _cancel_soon() -> None:
             cancelled_count = 0
@@ -519,7 +635,7 @@ class TestCancellation:
 
         with patch("colonyos.agent.run_phase", side_effect=blocking_run_phase):
             with pytest.raises(KeyboardInterrupt, match="test cancel"):
-                run_phase_sync(
+                _ = run_phase_sync(
                     Phase.REVIEW,
                     "test prompt",
                     cwd=Path("/tmp"),
@@ -541,12 +657,14 @@ class TestCancellation:
             cwd: object,
             system_prompt: str,
             **kwargs: object,
-        ) -> PhaseResult:
+        ) -> NoReturn:
+            _ = (phase, cwd, system_prompt, kwargs)
             try:
-                await asyncio.Event().wait()
+                _ = await asyncio.Event().wait()
             except asyncio.CancelledError:
                 cancellations.append(prompt)
                 raise
+            raise RuntimeError("expected hang or cancellation")
 
         def _cancel_soon() -> None:
             cancelled_count = 0
@@ -563,7 +681,7 @@ class TestCancellation:
 
         with patch("colonyos.agent.run_phase", side_effect=blocking_run_phase):
             with pytest.raises(KeyboardInterrupt, match="parallel cancel"):
-                run_phases_parallel_sync(calls)
+                _ = run_phases_parallel_sync(calls)
 
         cancel_thread.join(timeout=1)
         assert sorted(cancellations) == ["prompt 0", "prompt 1"]
@@ -572,121 +690,82 @@ class TestIsTransientError:
 
     def test_529_overloaded_via_status_code(self) -> None:
         """Exception with status_code=529 is transient."""
-        from colonyos.agent import _is_transient_error
-
-        exc = Exception("overloaded")
-        exc.status_code = 529  # type: ignore[attr-defined]
+        exc = _TestApiError("overloaded", status_code=529)
         assert _is_transient_error(exc) is True
 
     def test_503_service_unavailable_via_status_code(self) -> None:
         """Exception with status_code=503 is transient."""
-        from colonyos.agent import _is_transient_error
-
-        exc = Exception("service unavailable")
-        exc.status_code = 503  # type: ignore[attr-defined]
+        exc = _TestApiError("service unavailable", status_code=503)
         assert _is_transient_error(exc) is True
 
     def test_429_rate_limit_via_status_code(self) -> None:
         """Exception with status_code=429 is transient."""
-        from colonyos.agent import _is_transient_error
-
-        exc = Exception("rate limited")
-        exc.status_code = 429  # type: ignore[attr-defined]
+        exc = _TestApiError("rate limited", status_code=429)
         assert _is_transient_error(exc) is True
 
     def test_auth_error_not_transient(self) -> None:
         """Authentication errors are permanent, not transient."""
-        from colonyos.agent import _is_transient_error
-
         exc = Exception("authentication failed: invalid API key")
         assert _is_transient_error(exc) is False
 
     def test_credit_error_not_transient(self) -> None:
         """Credit balance errors are permanent, not transient."""
-        from colonyos.agent import _is_transient_error
-
         exc = Exception("credit balance is too low")
         assert _is_transient_error(exc) is False
 
     def test_generic_error_not_transient(self) -> None:
         """Generic errors without overloaded/529/503 are not transient."""
-        from colonyos.agent import _is_transient_error
-
         exc = Exception("something went wrong")
         assert _is_transient_error(exc) is False
 
     def test_string_match_overloaded_in_message(self) -> None:
         """String 'overloaded' in exception message → transient (no status_code attr)."""
-        from colonyos.agent import _is_transient_error
-
         exc = Exception("API is overloaded, please try later")
         assert _is_transient_error(exc) is True
 
     def test_string_match_529_in_message(self) -> None:
         """String '529' in exception message → transient (no status_code attr)."""
-        from colonyos.agent import _is_transient_error
-
         exc = Exception("HTTP error 529")
         assert _is_transient_error(exc) is True
 
     def test_string_match_503_in_message(self) -> None:
         """String '503' in exception message → transient (no status_code attr)."""
-        from colonyos.agent import _is_transient_error
-
         exc = Exception("HTTP error 503 Service Unavailable")
         assert _is_transient_error(exc) is True
 
     def test_503_in_file_path_not_transient(self) -> None:
         """'503' as part of a file path should NOT trigger transient detection."""
-        from colonyos.agent import _is_transient_error
-
         exc = Exception("Error reading /data/error_503_report.txt")
         assert _is_transient_error(exc) is False
 
     def test_529_in_port_number_not_transient(self) -> None:
         """'529' as part of a port number should NOT trigger transient detection."""
-        from colonyos.agent import _is_transient_error
-
         exc = Exception("Connection to localhost:5290 failed")
         assert _is_transient_error(exc) is False
 
     def test_503_standalone_in_message_is_transient(self) -> None:
         """'503' as a standalone token in error message is transient."""
-        from colonyos.agent import _is_transient_error
-
         exc = Exception("got 503 from upstream")
         assert _is_transient_error(exc) is True
 
     def test_string_match_overloaded_in_stderr(self) -> None:
         """String 'overloaded' in exc.stderr → transient."""
-        from colonyos.agent import _is_transient_error
-
-        exc = Exception("exit code 1")
-        exc.stderr = "Error: API overloaded"  # type: ignore[attr-defined]
+        exc = _TestApiError("exit code 1", stderr="Error: API overloaded")
         assert _is_transient_error(exc) is True
 
     def test_string_match_529_in_result(self) -> None:
         """String '529' in exc.result → transient."""
-        from colonyos.agent import _is_transient_error
-
-        exc = Exception("exit code 1")
-        exc.result = "got 529 from server"  # type: ignore[attr-defined]
+        exc = _TestApiError("exit code 1", result="got 529 from server")
         assert _is_transient_error(exc) is True
 
     def test_status_code_takes_priority(self) -> None:
         """Structured status_code is used even when message looks non-transient."""
-        from colonyos.agent import _is_transient_error
-
-        exc = Exception("everything is fine")
-        exc.status_code = 529  # type: ignore[attr-defined]
+        exc = _TestApiError("everything is fine", status_code=529)
         assert _is_transient_error(exc) is True
 
     def test_non_transient_status_code(self) -> None:
         """Status code 401 is not transient."""
-        from colonyos.agent import _is_transient_error
-
-        exc = Exception("unauthorized")
-        exc.status_code = 401  # type: ignore[attr-defined]
+        exc = _TestApiError("unauthorized", status_code=401)
         assert _is_transient_error(exc) is False
 
 
@@ -695,8 +774,6 @@ class TestFriendlyErrorOverloaded:
 
     def test_overloaded_in_message(self) -> None:
         """Exception containing 'overloaded' returns clear transient error message."""
-        from colonyos.agent import _friendly_error
-
         exc = Exception("API is overloaded")
         result = _friendly_error(exc)
         assert "overloaded" in result.lower()
@@ -704,8 +781,6 @@ class TestFriendlyErrorOverloaded:
 
     def test_529_in_message(self) -> None:
         """Exception containing '529' returns clear overloaded message."""
-        from colonyos.agent import _friendly_error
-
         exc = Exception("got HTTP 529")
         result = _friendly_error(exc)
         assert "overloaded" in result.lower()
@@ -713,44 +788,33 @@ class TestFriendlyErrorOverloaded:
 
     def test_529_in_stderr(self) -> None:
         """Exception with '529' in stderr returns clear overloaded message."""
-        from colonyos.agent import _friendly_error
-
-        exc = Exception("exit code 1")
-        exc.stderr = "529 overloaded"  # type: ignore[attr-defined]
+        exc = _TestApiError("exit code 1", stderr="529 overloaded")
         result = _friendly_error(exc)
         assert "overloaded" in result.lower()
         assert "retry" in result.lower()
 
     def test_credit_balance_still_works(self) -> None:
         """Existing credit balance detection is not broken."""
-        from colonyos.agent import _friendly_error
-
         exc = Exception("credit balance is too low")
         result = _friendly_error(exc)
         assert "credit balance" in result.lower()
 
     def test_auth_error_still_works(self) -> None:
         """Existing authentication error detection is not broken."""
-        from colonyos.agent import _friendly_error
-
         exc = Exception("authentication failed")
         result = _friendly_error(exc)
         assert "authentication" in result.lower()
 
     def test_rate_limit_still_works(self) -> None:
         """Existing rate limit detection is not broken."""
-        from colonyos.agent import _friendly_error
-
         exc = Exception("rate limit exceeded")
         result = _friendly_error(exc)
         assert "rate limit" in result.lower()
 
     def test_529_substring_in_filepath_not_overloaded(self) -> None:
         """_friendly_error should not match '529' as a substring in file paths."""
-        from colonyos.agent import _friendly_error
-
         exc = Exception("Error at line 529 of config.py")
-        result = _friendly_error(exc)
+        _ = _friendly_error(exc)
         # Should NOT return the overloaded message — "529" here is a line number,
         # but it's a standalone word so it will match. This test documents the
         # boundary: standalone "529" does match, but port-like "5290" does not.
@@ -758,8 +822,6 @@ class TestFriendlyErrorOverloaded:
 
     def test_529_as_port_not_overloaded(self) -> None:
         """_friendly_error should not match '529' as part of a port number like 5290."""
-        from colonyos.agent import _friendly_error
-
         exc = Exception("Connection to localhost:5290 failed")
         result = _friendly_error(exc)
         assert "overloaded" not in result.lower()
@@ -767,8 +829,6 @@ class TestFriendlyErrorOverloaded:
     def test_503_error_not_hardcoded_529(self) -> None:
         """_friendly_error should return generic 'overloaded' message for 503 errors,
         not mentioning '529' specifically."""
-        from colonyos.agent import _friendly_error
-
         exc = Exception("Error: 503 Service Unavailable")
         result = _friendly_error(exc)
         assert "overloaded" in result.lower()
@@ -778,30 +838,26 @@ class TestFriendlyErrorOverloaded:
 class TestRetryLoop:
     """Tests for the retry loop in run_phase() (FR-3, FR-4, FR-8, FR-10)."""
 
-    def _make_result_message(self):
-        """Create a mock ResultMessage for successful responses."""
-        result_msg = MagicMock()
-        result_msg.is_error = False
-        result_msg.total_cost_usd = 0.05
-        result_msg.num_turns = 2
-        result_msg.duration_ms = 500
-        result_msg.session_id = "sess-retry-test"
-        result_msg.result = "done"
-        from claude_agent_sdk import ResultMessage
-        result_msg.__class__ = ResultMessage
-        return result_msg
+    def _make_result_message(self) -> ResultMessage:
+        """Create a ResultMessage for successful responses."""
+        return ResultMessage(
+            subtype="result",
+            duration_ms=500,
+            duration_api_ms=250,
+            is_error=False,
+            num_turns=2,
+            session_id="sess-retry-test",
+            total_cost_usd=0.05,
+            result="done",
+        )
 
-    def _make_transient_exc(self):
+    def _make_transient_exc(self) -> _TestApiError:
         """Create a transient 529 exception."""
-        exc = Exception("API is overloaded")
-        exc.status_code = 529  # type: ignore[attr-defined]
-        return exc
+        return _TestApiError("API is overloaded", status_code=529)
 
-    def _make_permanent_exc(self):
+    def _make_permanent_exc(self) -> _TestApiError:
         """Create a permanent auth exception."""
-        exc = Exception("authentication failed: invalid API key")
-        exc.status_code = 401  # type: ignore[attr-defined]
-        return exc
+        return _TestApiError("authentication failed: invalid API key", status_code=401)
 
     def test_transient_error_succeeds_on_second_attempt(self) -> None:
         """Transient error on first attempt, success on second → retry_info.attempts=2."""
@@ -811,7 +867,10 @@ class TestRetryLoop:
         transient_exc = self._make_transient_exc()
         call_count = 0
 
-        async def fake_query(prompt, options):
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = (prompt, options)
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -840,9 +899,13 @@ class TestRetryLoop:
 
         transient_exc = self._make_transient_exc()
 
-        async def fake_query(prompt, options):
-            raise transient_exc
-            yield  # make it a generator  # noqa: E711
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            async for msg in _query_always_raises(
+                    transient_exc, prompt=prompt, options=options
+                ):
+                yield msg
 
         retry_config = RetryConfig(max_attempts=3, base_delay_seconds=0.01, max_delay_seconds=0.02)
 
@@ -866,9 +929,13 @@ class TestRetryLoop:
 
         permanent_exc = self._make_permanent_exc()
 
-        async def fake_query(prompt, options):
-            raise permanent_exc
-            yield  # noqa: E711
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            async for msg in _query_always_raises(
+                    permanent_exc, prompt=prompt, options=options
+                ):
+                yield msg
 
         retry_config = RetryConfig(max_attempts=3, base_delay_seconds=0.01, max_delay_seconds=0.02)
 
@@ -896,7 +963,10 @@ class TestRetryLoop:
         transient_exc = self._make_transient_exc()
         call_count = 0
 
-        async def fake_query(prompt, options):
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = (prompt, options)
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -917,7 +987,8 @@ class TestRetryLoop:
 
         assert result.success is True
         # Check that UI received a retry notification
-        ui_calls = [str(c) for c in mock_ui.on_text_delta.call_args_list]
+        on_delta = cast(MagicMock, mock_ui.on_text_delta)
+        ui_calls = [str(c) for c in on_delta.call_args_list]
         retry_msgs = [c for c in ui_calls if "retry" in c.lower() or "overloaded" in c.lower()]
         assert len(retry_msgs) > 0, f"Expected retry message via UI, got: {ui_calls}"
 
@@ -929,7 +1000,10 @@ class TestRetryLoop:
         transient_exc = self._make_transient_exc()
         call_count = 0
 
-        async def fake_query(prompt, options):
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = (prompt, options)
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -949,7 +1023,8 @@ class TestRetryLoop:
             )
 
         assert result.success is True
-        log_msgs = [str(c) for c in mock_log.call_args_list]
+        log_fn = cast(MagicMock, mock_log)
+        log_msgs = [str(c) for c in log_fn.call_args_list]
         retry_msgs = [c for c in log_msgs if "retry" in c.lower() or "overloaded" in c.lower()]
         assert len(retry_msgs) > 0, f"Expected retry log message, got: {log_msgs}"
 
@@ -961,7 +1036,10 @@ class TestRetryLoop:
         transient_exc = self._make_transient_exc()
         call_count = 0
 
-        async def fake_query(prompt, options):
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = (prompt, options)
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
@@ -994,14 +1072,18 @@ class TestRetryLoop:
 
         transient_exc = self._make_transient_exc()
 
-        async def fake_query(prompt, options):
-            raise transient_exc
-            yield  # noqa: E711
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            async for msg in _query_always_raises(
+                    transient_exc, prompt=prompt, options=options
+                ):
+                yield msg
 
         retry_config = RetryConfig(max_attempts=3, base_delay_seconds=1.0, max_delay_seconds=10.0)
-        sleep_values = []
+        sleep_values: list[float] = []
 
-        async def capture_sleep(delay):
+        async def capture_sleep(delay: float) -> None:
             sleep_values.append(delay)
 
         with patch("colonyos.agent.query", side_effect=fake_query), \
@@ -1027,9 +1109,13 @@ class TestRetryLoop:
 
         transient_exc = self._make_transient_exc()
 
-        async def fake_query(prompt, options):
-            raise transient_exc
-            yield  # noqa: E711
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            async for msg in _query_always_raises(
+                    transient_exc, prompt=prompt, options=options
+                ):
+                yield msg
 
         retry_config = RetryConfig(max_attempts=1, base_delay_seconds=0.01, max_delay_seconds=0.02)
 
@@ -1054,9 +1140,12 @@ class TestRetryLoop:
         result_msg = self._make_result_message()
         transient_exc = self._make_transient_exc()
         call_count = 0
-        captured_options: list = []
+        captured_options: list[ClaudeAgentOptions] = []
 
-        async def fake_query(prompt, options):
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = prompt
             nonlocal call_count
             call_count += 1
             captured_options.append(options)
@@ -1087,7 +1176,10 @@ class TestRetryLoop:
         """When no retry_config is passed, defaults are used (backward compatible)."""
         result_msg = self._make_result_message()
 
-        async def fake_query(prompt, options):
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = (prompt, options)
             yield result_msg
 
         with patch("colonyos.agent.query", side_effect=fake_query):
@@ -1108,24 +1200,22 @@ class TestRetryLoop:
 class TestModelFallback:
     """Tests for optional model fallback (FR-6, FR-7)."""
 
-    def _make_result_message(self):
-        """Create a mock ResultMessage for successful responses."""
-        result_msg = MagicMock()
-        result_msg.is_error = False
-        result_msg.total_cost_usd = 0.05
-        result_msg.num_turns = 2
-        result_msg.duration_ms = 500
-        result_msg.session_id = "sess-fallback-test"
-        result_msg.result = "done"
-        from claude_agent_sdk import ResultMessage
-        result_msg.__class__ = ResultMessage
-        return result_msg
+    def _make_result_message(self) -> ResultMessage:
+        """Create a ResultMessage for successful responses."""
+        return ResultMessage(
+            subtype="result",
+            duration_ms=500,
+            duration_api_ms=250,
+            is_error=False,
+            num_turns=2,
+            session_id="sess-fallback-test",
+            total_cost_usd=0.05,
+            result="done",
+        )
 
-    def _make_transient_exc(self):
+    def _make_transient_exc(self) -> _TestApiError:
         """Create a transient 529 exception."""
-        exc = Exception("API is overloaded")
-        exc.status_code = 529  # type: ignore[attr-defined]
-        return exc
+        return _TestApiError("API is overloaded", status_code=529)
 
     def test_fallback_succeeds_after_primary_exhausted(self) -> None:
         """Retries exhausted + fallback_model='sonnet' → retries with sonnet, succeeds."""
@@ -1136,7 +1226,10 @@ class TestModelFallback:
         call_count = 0
         captured_models: list[str | None] = []
 
-        async def fake_query(prompt, options):
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = prompt
             nonlocal call_count
             call_count += 1
             captured_models.append(options.model)
@@ -1171,9 +1264,13 @@ class TestModelFallback:
 
         transient_exc = self._make_transient_exc()
 
-        async def fake_query(prompt, options):
-            raise transient_exc
-            yield  # noqa: E711
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            async for msg in _query_always_raises(
+                    transient_exc, prompt=prompt, options=options
+                ):
+                yield msg
 
         retry_config = RetryConfig(
             max_attempts=2, base_delay_seconds=0.01,
@@ -1199,9 +1296,13 @@ class TestModelFallback:
 
         transient_exc = self._make_transient_exc()
 
-        async def fake_query(prompt, options):
-            raise transient_exc
-            yield  # noqa: E711
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            async for msg in _query_always_raises(
+                    transient_exc, prompt=prompt, options=options
+                ):
+                yield msg
 
         retry_config = RetryConfig(
             max_attempts=2, base_delay_seconds=0.01,
@@ -1218,6 +1319,7 @@ class TestModelFallback:
             )
 
         assert result.success is False
+        assert result.retry_info is not None
         assert result.retry_info.fallback_model_used is None
 
     def test_fallback_blocked_on_fix_phase(self) -> None:
@@ -1226,9 +1328,13 @@ class TestModelFallback:
 
         transient_exc = self._make_transient_exc()
 
-        async def fake_query(prompt, options):
-            raise transient_exc
-            yield  # noqa: E711
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            async for msg in _query_always_raises(
+                    transient_exc, prompt=prompt, options=options
+                ):
+                yield msg
 
         retry_config = RetryConfig(
             max_attempts=2, base_delay_seconds=0.01,
@@ -1245,6 +1351,7 @@ class TestModelFallback:
             )
 
         assert result.success is False
+        assert result.retry_info is not None
         assert result.retry_info.fallback_model_used is None
 
     def test_no_fallback_when_fallback_model_is_none(self) -> None:
@@ -1253,9 +1360,13 @@ class TestModelFallback:
 
         transient_exc = self._make_transient_exc()
 
-        async def fake_query(prompt, options):
-            raise transient_exc
-            yield  # noqa: E711
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            async for msg in _query_always_raises(
+                    transient_exc, prompt=prompt, options=options
+                ):
+                yield msg
 
         retry_config = RetryConfig(
             max_attempts=2, base_delay_seconds=0.01,
@@ -1281,9 +1392,13 @@ class TestModelFallback:
 
         transient_exc = self._make_transient_exc()
 
-        async def fake_query(prompt, options):
-            raise transient_exc
-            yield  # noqa: E711
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            async for msg in _query_always_raises(
+                    transient_exc, prompt=prompt, options=options
+                ):
+                yield msg
 
         retry_config = RetryConfig(
             max_attempts=2, base_delay_seconds=0.01,
@@ -1314,7 +1429,10 @@ class TestModelFallback:
         transient_exc = self._make_transient_exc()
         call_count = 0
 
-        async def fake_query(prompt, options):
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = (prompt, options)
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
@@ -1338,7 +1456,8 @@ class TestModelFallback:
             )
 
         assert result.success is True
-        log_msgs = [str(c) for c in mock_log.call_args_list]
+        log_fn = cast(MagicMock, mock_log)
+        log_msgs = [str(c) for c in log_fn.call_args_list]
         fallback_msgs = [c for c in log_msgs if "falling back" in c.lower()]
         assert len(fallback_msgs) > 0, f"Expected fallback log message, got: {log_msgs}"
 
@@ -1350,7 +1469,10 @@ class TestModelFallback:
         transient_exc = self._make_transient_exc()
         call_count = 0
 
-        async def fake_query(prompt, options):
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = (prompt, options)
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
@@ -1374,7 +1496,8 @@ class TestModelFallback:
             )
 
         assert result.success is True
-        ui_calls = [str(c) for c in mock_ui.on_text_delta.call_args_list]
+        on_delta = cast(MagicMock, mock_ui.on_text_delta)
+        ui_calls = [str(c) for c in on_delta.call_args_list]
         fallback_msgs = [c for c in ui_calls if "falling back" in c.lower()]
         assert len(fallback_msgs) > 0, f"Expected fallback UI message, got: {ui_calls}"
 
@@ -1385,9 +1508,13 @@ class TestModelFallback:
 
         transient_exc = self._make_transient_exc()
 
-        async def fake_query(prompt, options):
-            raise transient_exc
-            yield  # noqa: E711
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            async for msg in _query_always_raises(
+                    transient_exc, prompt=prompt, options=options
+                ):
+                yield msg
 
         retry_config = RetryConfig(
             max_attempts=2, base_delay_seconds=0.01,
@@ -1419,11 +1546,11 @@ class TestPhaseTimeout:
         """_run_async_sync should raise PhaseTimeoutError when deadline is exceeded."""
 
         async def _hang_forever() -> str:
-            await asyncio.sleep(3600)
+            _ = await asyncio.sleep(3600)
             return "never"
 
         with pytest.raises(PhaseTimeoutError) as exc_info:
-            _run_async_sync(
+            _ = _run_async_sync(
                 _hang_forever,
                 label="test-hang",
                 timeout_seconds=1,
@@ -1460,9 +1587,13 @@ class TestPhaseTimeout:
     def test_run_phase_sync_returns_failed_result_on_timeout(self) -> None:
         """run_phase_sync should return a failed PhaseResult when timeout is hit."""
 
-        async def fake_query(prompt, options):
-            await asyncio.sleep(3600)
-            yield  # noqa: E711
+        async def fake_query(
+            prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[ResultMessage]:
+            _ = (prompt, options)
+            if _async_gen_dummy_branch():
+                yield _dummy_result_message()
+            _ = await asyncio.sleep(3600)
 
         with patch("colonyos.agent.query", side_effect=fake_query):
             result = run_phase_sync(

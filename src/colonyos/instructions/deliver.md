@@ -14,6 +14,13 @@ You are opening a pull request for the work on branch `{branch_name}`.
 
 Check `git status`. If there are uncommitted changes, commit them with a descriptive message.
 
+If `git commit` fails because pre-commit hooks report lint, type-check, or test failures:
+1. Read the hook output carefully and identify every reported issue
+2. Fix the reported problems in code or tests as appropriate
+3. Re-run the relevant commands yourself to confirm the failures are resolved
+4. Retry `git commit`
+5. Repeat until the commit succeeds or you hit an environmental/tooling failure you cannot fix from the repository
+
 ### Step 2: Update the Changelog
 
 Read `CHANGELOG.md` in the project root. Add a new entry at the **top** (immediately after the `# Changelog` heading) with:
@@ -56,3 +63,4 @@ Output the PR URL so it can be recorded in the run log.
 - Never target a branch other than the default branch
 - The PR title should describe the feature, not the implementation details
 - The PR body should be useful to a reviewer who hasn't seen the PRD
+- Do not stop after the first failed `git commit` if the failure came from fixable pre-commit hook output

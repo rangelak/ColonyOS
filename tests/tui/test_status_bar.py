@@ -20,7 +20,7 @@ async def test_status_bar_mounts_idle():
     """StatusBar should display the animated colony idle state when inactive."""
     async with StatusBarApp().run_test() as pilot:
         bar = pilot.app.query_one(StatusBar)
-        assert not bar.is_running
+        assert not bar.phase_active
         assert bar.phase_name == ""
         assert "colony" in bar._last_rendered.lower()
 
@@ -33,7 +33,7 @@ async def test_status_bar_set_phase():
         bar.set_phase("Planning", budget=1.0, model="opus")
         await pilot.pause()
 
-        assert bar.is_running is True
+        assert bar.phase_active is True
         assert bar.phase_name == "Planning"
         assert bar.phase_model == "opus"
         assert "Planning" in bar._last_rendered
@@ -61,7 +61,7 @@ async def test_status_bar_set_complete_accumulates_cost():
         bar.set_complete(cost=0.50, turns=3, duration=10.0)
         await pilot.pause()
 
-        assert bar.is_running is False
+        assert bar.phase_active is False
         assert bar.total_cost == pytest.approx(0.50)
         assert bar.turn_count == 3
 
@@ -110,7 +110,7 @@ async def test_status_bar_set_error():
         bar.set_error("Budget exceeded")
         await pilot.pause()
 
-        assert bar.is_running is False
+        assert bar.phase_active is False
         assert bar.error_msg == "Budget exceeded"
         assert "Budget exceeded" in bar._last_rendered
         assert bar.phase_name == ""
@@ -138,7 +138,7 @@ async def test_status_bar_returns_to_idle_animation_after_complete():
         bar.set_complete(cost=0.25, turns=1, duration=2.0)
         await pilot.pause()
 
-        assert not bar.is_running
+        assert not bar.phase_active
         assert bar.phase_name == ""
         assert bar.phase_model == ""
         assert bar.phase_extra == ""
@@ -165,7 +165,7 @@ async def test_status_bar_spinner_timer_not_running_when_idle():
     """The spinner timer should not be active when no phase is running."""
     async with StatusBarApp().run_test() as pilot:
         bar = pilot.app.query_one(StatusBar)
-        assert bar.is_running is False
+        assert bar.phase_active is False
         assert bar._spinner_timer is None
         assert bar._idle_timer is not None
 

@@ -473,7 +473,7 @@ class TestTimestampFiltering:
 
     def test_watch_started_at_is_set_on_creation(self) -> None:
         from colonyos.pr_review import PRReviewState
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         state = PRReviewState(pr_number=42)
         # Should have a valid ISO timestamp
@@ -503,7 +503,7 @@ class TestPRReviewCLIIntegration:
     @pytest.fixture
     def mock_config(self, tmp_path: Path):
         """Create a minimal config for testing."""
-        from colonyos.config import ColonyConfig, ProjectInfo, save_config, PRReviewConfig
+        from colonyos.config import ColonyConfig, ProjectInfo, save_config
 
         config = ColonyConfig(
             project=ProjectInfo(name="Test", description="test", stack="Python"),
@@ -673,6 +673,7 @@ class TestCircuitBreakerCooldown:
 
         # Simulate auto-recovery check
         cooldown_minutes = 15
+        assert state.queue_paused_at is not None
         paused_at = datetime.fromisoformat(state.queue_paused_at)
         elapsed = (datetime.now(timezone.utc) - paused_at).total_seconds()
         cooldown_sec = cooldown_minutes * 60

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 import yaml
@@ -31,7 +31,7 @@ def tmp_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def store(tmp_repo: Path) -> MemoryStore:
+def store(tmp_repo: Path) -> Iterator[MemoryStore]:
     s = MemoryStore(tmp_repo)
     yield s
     s.close()
@@ -460,7 +460,6 @@ class TestReviewPhaseMemory:
 class TestLearnPhaseMemory:
     def test_learn_phase_writes_memories(self, tmp_repo: Path):
         """_run_learn_phase writes extracted learnings to memory store."""
-        from colonyos.orchestrator import _run_learn_phase
 
         with MemoryStore(tmp_repo) as store:
             # Pre-populate a learning memory to verify the store is used

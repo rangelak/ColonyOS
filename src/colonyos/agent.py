@@ -8,10 +8,10 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Awaitable
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Literal, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, TypeAlias, TypeVar, cast
 
 from claude_agent_sdk import (
     AgentDefinition,
@@ -22,8 +22,8 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import StreamEvent, SystemMessage
 
-from colonyos.cancellation import cancellation_scope, request_cancel
-from colonyos.config import RetryConfig, _SAFETY_CRITICAL_PHASES
+from colonyos.cancellation import cancellation_scope
+from colonyos.config import RetryConfig, SAFETY_CRITICAL_PHASES
 from colonyos.models import Phase, PhaseResult, RetryInfo
 
 if TYPE_CHECKING:
@@ -147,7 +147,7 @@ class _SyncRunController:
 
     label: str
     _loop: asyncio.AbstractEventLoop | None = None
-    _task: asyncio.Task[PhaseResult | list[PhaseResult]] | None = None
+    _task: asyncio.Task[object] | None = None
     _cancel_requested: bool = False
     _cancel_reason: str = "Cancelled by user"
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -155,7 +155,7 @@ class _SyncRunController:
     def attach(
         self,
         loop: asyncio.AbstractEventLoop,
-        task: asyncio.Task[PhaseResult | list[PhaseResult]],
+        task: asyncio.Task[object],
     ) -> None:
         with self._lock:
             self._loop = loop
@@ -335,7 +335,7 @@ async def run_phase(
     passes: list[tuple[str | None, int]] = [(model, max_attempts)]
     if (
         retry_config.fallback_model is not None
-        and phase.value not in _SAFETY_CRITICAL_PHASES
+        and phase.value not in SAFETY_CRITICAL_PHASES
     ):
         passes.append((retry_config.fallback_model, max_attempts))
 
@@ -348,18 +348,32 @@ async def run_phase(
     for pass_idx, (current_model, pass_max) in enumerate(passes):
         for attempt in range(1, pass_max + 1):
             overall_attempt += 1
-            options = ClaudeAgentOptions(
-                cwd=cwd,
-                system_prompt=system_prompt,
-                model=current_model,
-                max_turns=max_turns,
-                max_budget_usd=budget_usd,
-                permission_mode=permission_mode,
-                allowed_tools=allowed_tools,
-                agents=agents,
-                include_partial_messages=ui is not None,
-                **({"resume": current_resume, "continue_conversation": True} if current_resume else {}),
-            )
+            if current_resume:
+                options = ClaudeAgentOptions(
+                    cwd=cwd,
+                    system_prompt=system_prompt,
+                    model=current_model,
+                    max_turns=max_turns,
+                    max_budget_usd=budget_usd,
+                    permission_mode=permission_mode,
+                    allowed_tools=allowed_tools,
+                    agents=agents,
+                    include_partial_messages=ui is not None,
+                    resume=current_resume,
+                    continue_conversation=True,
+                )
+            else:
+                options = ClaudeAgentOptions(
+                    cwd=cwd,
+                    system_prompt=system_prompt,
+                    model=current_model,
+                    max_turns=max_turns,
+                    max_budget_usd=budget_usd,
+                    permission_mode=permission_mode,
+                    allowed_tools=allowed_tools,
+                    agents=agents,
+                    include_partial_messages=ui is not None,
+                )
 
             attempt_result = await _run_phase_attempt(
                 phase=phase,
@@ -505,7 +519,7 @@ async def run_phase(
 
 
 def _run_async_sync(
-    coro_factory: Callable[[], Awaitable[_T]],
+    coro_factory: Callable[[], Coroutine[Any, Any, _T]],
     *,
     label: str,
     timeout_seconds: int | None = None,
@@ -521,19 +535,22 @@ def _run_async_sync(
     """
     controller = _SyncRunController(label=label)
     done = threading.Event()
-    outcome: dict[str, object] = {}
+    result: _T | None = None
+    error: BaseException | None = None
+    cancelled_reason: str | None = None
 
     def _worker() -> None:
+        nonlocal cancelled_reason, error, result
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        task = loop.create_task(coro_factory())  # type: ignore[arg-type]
+        task = loop.create_task(coro_factory())
         controller.attach(loop, task)
         try:
-            outcome["result"] = loop.run_until_complete(task)
+            result = loop.run_until_complete(task)
         except asyncio.CancelledError:
-            outcome["cancelled"] = controller.cancel_reason
+            cancelled_reason = controller.cancel_reason
         except BaseException as exc:
-            outcome["error"] = exc
+            error = exc
         finally:
             try:
                 pending = [item for item in asyncio.all_tasks(loop) if not item.done()]
@@ -572,7 +589,8 @@ def _run_async_sync(
                                 "it will be abandoned as a daemon thread",
                                 label,
                             )
-                        raise PhaseTimeoutError(label, timeout_seconds)  # type: ignore[arg-type]
+                        assert timeout_seconds is not None
+                        raise PhaseTimeoutError(label, timeout_seconds)
             except KeyboardInterrupt:
                 controller.cancel("Interrupted by user (Ctrl+C)")
                 worker.join(timeout=10)
@@ -581,11 +599,11 @@ def _run_async_sync(
         _unregister_active_phase_controller(controller)
 
     worker.join(timeout=0.1)
-    if "error" in outcome:
-        raise outcome["error"]  # type: ignore[misc]
-    if "cancelled" in outcome:
-        raise KeyboardInterrupt(str(outcome["cancelled"]))
-    return cast(_T, outcome["result"])
+    if error is not None:
+        raise error
+    if cancelled_reason is not None:
+        raise KeyboardInterrupt(str(cancelled_reason))
+    return cast(_T, result)
 
 
 def run_phase_sync(
@@ -649,7 +667,7 @@ def run_phase_sync(
 
 
 async def run_phases_parallel(
-    calls: list[dict],
+    calls: list[dict[str, Any]],
     on_complete: Callable[[int, PhaseResult], None] | None = None,
 ) -> list[PhaseResult]:
     """Run multiple phase calls concurrently, invoking callback as each completes.
@@ -676,12 +694,16 @@ async def run_phases_parallel(
 
     # Collect results in completion order, storing by original index
     results: dict[int, PhaseResult] = {}
-    pending = {task for _, task in tasks_with_indices}
+    pending: set[asyncio.Task[PhaseResult]] = {task for _, task in tasks_with_indices}
 
     try:
         while pending:
-            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
+            done_set, pending_set = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            pending = pending_set
+            for task in done_set:
                 idx = task_to_index[task]
                 result = task.result()
                 results[idx] = result
@@ -702,7 +724,7 @@ async def run_phases_parallel(
 
 
 def run_phases_parallel_sync(
-    calls: list[dict],
+    calls: list[dict[str, Any]],
     on_complete: Callable[[int, PhaseResult], None] | None = None,
 ) -> list[PhaseResult]:
     """Synchronous wrapper for run_phases_parallel.

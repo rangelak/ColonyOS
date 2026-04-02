@@ -2,20 +2,45 @@
 
 from __future__ import annotations
 
+import importlib
 import json
+import sqlite3
 import subprocess
+from collections.abc import Callable, Generator, Sequence
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import cast
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
+from click.testing import CliRunner
 
+from colonyos.cli import app
+from colonyos.memory import MemoryStore
 from colonyos.outcomes import (
     OutcomeStore,
     poll_outcomes,
     compute_outcome_stats,
     format_outcome_summary,
 )
+
+
+def _memory_db_path(repo_root: Path) -> Path:
+    return repo_root / ".colonyos" / "memory.db"
+
+
+def _exec_sql(repo_root: Path, sql: str, params: tuple[object, ...] = ()) -> None:
+    conn = sqlite3.connect(str(_memory_db_path(repo_root)), timeout=10)
+    try:
+        _ = conn.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _orch_register_pr_outcome() -> Callable[..., None]:
+    orch = importlib.import_module("colonyos.orchestrator")
+    return cast(Callable[..., None], getattr(orch, "_register_pr_outcome"))
 
 
 @pytest.fixture
@@ -25,7 +50,7 @@ def tmp_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def store(tmp_repo: Path) -> OutcomeStore:
+def store(tmp_repo: Path) -> Generator[OutcomeStore, None, None]:
     s = OutcomeStore(tmp_repo)
     yield s
     s.close()
@@ -40,10 +65,16 @@ class TestOutcomeStoreInit:
     def test_creates_table(self, tmp_repo: Path):
         """OutcomeStore creates pr_outcomes table on init."""
         s = OutcomeStore(tmp_repo)
-        # Verify table exists by querying it
-        cur = s._conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='pr_outcomes'")
-        assert cur.fetchone() is not None
+        # Verify table exists by querying it (separate connection; store may hold one open)
+        conn = sqlite3.connect(str(_memory_db_path(tmp_repo)), timeout=10)
+        try:
+            cur = conn.cursor()
+            _ = cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='pr_outcomes'"
+            )
+            assert cur.fetchone() is not None
+        finally:
+            conn.close()
         s.close()
 
     def test_idempotent_init(self, tmp_repo: Path):
@@ -56,7 +87,7 @@ class TestOutcomeStoreInit:
     def test_shares_memory_db(self, tmp_repo: Path):
         """OutcomeStore uses the same memory.db as MemoryStore."""
         s = OutcomeStore(tmp_repo)
-        assert s._db_path == tmp_repo / ".colonyos" / "memory.db"
+        assert _memory_db_path(tmp_repo).exists()
         s.close()
 
     def test_context_manager(self, tmp_repo: Path):
@@ -103,10 +134,7 @@ class TestGetOpenOutcomes:
         store.track_pr("run-1", 42, "url1", "b1")
         store.track_pr("run-2", 43, "url2", "b2")
         # Manually close one
-        store._conn.execute(
-            "UPDATE pr_outcomes SET status = 'merged' WHERE pr_number = 42"
-        )
-        store._conn.commit()
+        store.update_outcome(pr_number=42, status="merged")
         open_outcomes = store.get_open_outcomes()
         assert len(open_outcomes) == 1
         assert open_outcomes[0]["pr_number"] == 43
@@ -155,11 +183,11 @@ def _make_gh_result(
     state: str = "OPEN",
     merged_at: str | None = None,
     closed_at: str | None = None,
-    reviews: list | None = None,
-    comments: list | None = None,
-    status_checks: list | None = None,
-    labels: list | None = None,
-) -> dict:
+    reviews: list[dict[str, object]] | None = None,
+    comments: list[dict[str, object]] | None = None,
+    status_checks: list[dict[str, object]] | None = None,
+    labels: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     """Build a dict matching `gh pr view --json` output."""
     return {
         "state": state,
@@ -175,7 +203,7 @@ def _make_gh_result(
 class TestPollOutcomes:
     def test_open_to_merged(self, store: OutcomeStore, tmp_repo: Path):
         store.track_pr("run-1", 42, "url1", "b1")
-        gh_data = _make_gh_result(
+        gh_data: dict[str, object] = _make_gh_result(
             state="MERGED",
             merged_at="2025-01-15T10:00:00Z",
             reviews=[{"body": "LGTM"}, {"body": "Nice work"}],
@@ -193,7 +221,7 @@ class TestPollOutcomes:
 
     def test_open_to_closed_with_context(self, store: OutcomeStore, tmp_repo: Path):
         store.track_pr("run-1", 42, "url1", "b1")
-        gh_data = _make_gh_result(
+        gh_data: dict[str, object] = _make_gh_result(
             state="CLOSED",
             closed_at="2025-01-15T10:00:00Z",
             comments=[{"body": "This PR is too large, please split into smaller PRs."}],
@@ -202,12 +230,14 @@ class TestPollOutcomes:
             poll_outcomes(tmp_repo)
         outcomes = store.get_outcomes()
         assert outcomes[0]["status"] == "closed"
-        assert "too large" in outcomes[0]["close_context"].lower()
+        raw_close: object = outcomes[0]["close_context"]
+        close_ctx = str(raw_close)
+        assert "too large" in close_ctx.lower()
 
     def test_close_context_sanitized(self, store: OutcomeStore, tmp_repo: Path):
         """close_context is sanitized with sanitize_ci_logs."""
         store.track_pr("run-1", 42, "url1", "b1")
-        gh_data = _make_gh_result(
+        gh_data: dict[str, object] = _make_gh_result(
             state="CLOSED",
             closed_at="2025-01-15T10:00:00Z",
             comments=[{"body": "Bad token: ghp_abc123def456 found in code"}],
@@ -222,7 +252,7 @@ class TestPollOutcomes:
     def test_close_context_capped_at_500_chars(self, store: OutcomeStore, tmp_repo: Path):
         store.track_pr("run-1", 42, "url1", "b1")
         long_comment = "x" * 1000
-        gh_data = _make_gh_result(
+        gh_data: dict[str, object] = _make_gh_result(
             state="CLOSED",
             closed_at="2025-01-15T10:00:00Z",
             comments=[{"body": long_comment}],
@@ -230,14 +260,15 @@ class TestPollOutcomes:
         with patch("colonyos.outcomes._call_gh_pr_view", return_value=gh_data):
             poll_outcomes(tmp_repo)
         outcomes = store.get_outcomes()
-        assert len(outcomes[0]["close_context"]) <= 500
+        raw_ctx: object = outcomes[0]["close_context"]
+        assert len(str(raw_ctx)) <= 500
 
     def test_gh_cli_failure_logs_and_continues(self, store: OutcomeStore, tmp_repo: Path):
         store.track_pr("run-1", 42, "url1", "b1")
         store.track_pr("run-2", 43, "url2", "b2")
         call_count = 0
 
-        def mock_gh(pr_number, repo_root):
+        def mock_gh(pr_number: int, _repo_root: Path) -> dict[str, object]:
             nonlocal call_count
             call_count += 1
             if pr_number == 42:
@@ -260,10 +291,7 @@ class TestPollOutcomes:
     def test_skips_already_resolved(self, store: OutcomeStore, tmp_repo: Path):
         """Already merged/closed PRs should not be polled."""
         store.track_pr("run-1", 42, "url1", "b1")
-        store._conn.execute(
-            "UPDATE pr_outcomes SET status = 'merged' WHERE pr_number = 42"
-        )
-        store._conn.commit()
+        store.update_outcome(pr_number=42, status="merged")
 
         with patch("colonyos.outcomes._call_gh_pr_view") as mock_gh:
             poll_outcomes(tmp_repo)
@@ -304,27 +332,30 @@ class TestComputeOutcomeStats:
         assert stats["closed_count"] == 1
         assert stats["open_count"] == 1
         # merge_rate = merged / (merged + closed) = 2/3
-        assert abs(stats["merge_rate"] - 2.0 / 3.0) < 0.01
+        merge_rate = cast(float, stats["merge_rate"])
+        assert abs(merge_rate - 2.0 / 3.0) < 0.01
 
     def test_avg_time_to_merge(self, store: OutcomeStore, tmp_repo: Path):
         base = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
         # PR merged after 2 hours
         store.track_pr("run-1", 42, "url1", "b1")
-        store._conn.execute(
+        _exec_sql(
+            tmp_repo,
             "UPDATE pr_outcomes SET status='merged', created_at=?, merged_at=? WHERE pr_number=42",
             (base.isoformat(), (base + timedelta(hours=2)).isoformat()),
         )
         # PR merged after 4 hours
         store.track_pr("run-2", 43, "url2", "b2")
-        store._conn.execute(
+        _exec_sql(
+            tmp_repo,
             "UPDATE pr_outcomes SET status='merged', created_at=?, merged_at=? WHERE pr_number=43",
             (base.isoformat(), (base + timedelta(hours=4)).isoformat()),
         )
-        store._conn.commit()
 
         stats = compute_outcome_stats(tmp_repo)
         # avg = (2 + 4) / 2 = 3.0 hours
-        assert abs(stats["avg_time_to_merge_hours"] - 3.0) < 0.1
+        avg_hours = cast(float, stats["avg_time_to_merge_hours"])
+        assert abs(avg_hours - 3.0) < 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -343,15 +374,16 @@ class TestFormatOutcomeSummary:
             store.track_pr(f"run-{i}", 40 + i, f"url{i}", f"b{i}")
         # Merge 3, close 1, leave 1 open
         for i in range(3):
-            store._conn.execute(
+            _exec_sql(
+                tmp_repo,
                 "UPDATE pr_outcomes SET status='merged', created_at=?, merged_at=? WHERE pr_number=?",
                 (base.isoformat(), (base + timedelta(hours=2)).isoformat(), 40 + i),
             )
-        store._conn.execute(
+        _exec_sql(
+            tmp_repo,
             "UPDATE pr_outcomes SET status='closed', closed_at=?, close_context='too large' WHERE pr_number=44",
             ((base + timedelta(hours=1)).isoformat(),),
         )
-        store._conn.commit()
 
         result = format_outcome_summary(tmp_repo)
         assert "merged" in result.lower()
@@ -363,11 +395,11 @@ class TestFormatOutcomeSummary:
         for i in range(50):
             store.track_pr(f"run-{i}", 100 + i, f"url{i}", f"branch-with-long-name-{i}")
             if i % 2 == 0:
-                store._conn.execute(
+                _exec_sql(
+                    tmp_repo,
                     "UPDATE pr_outcomes SET status='merged', created_at=?, merged_at=? WHERE pr_number=?",
                     (base.isoformat(), (base + timedelta(hours=i + 1)).isoformat(), 100 + i),
                 )
-        store._conn.commit()
 
         result = format_outcome_summary(tmp_repo)
         # ~500 tokens ≈ ~2000 chars
@@ -384,30 +416,30 @@ class TestRegisterPrOutcome:
 
     def test_registers_pr_with_correct_args(self, tmp_repo: Path):
         """track_pr is called with run_id, pr_number, pr_url, branch_name."""
-        from colonyos.orchestrator import _register_pr_outcome
+        register_pr = _orch_register_pr_outcome()
 
         with patch("colonyos.orchestrator.OutcomeStore") as MockStore:
-            mock_instance = MagicMock()
+            mock_instance = cast(OutcomeStore, create_autospec(OutcomeStore, instance=True))
             MockStore.return_value.__enter__ = MagicMock(return_value=mock_instance)
             MockStore.return_value.__exit__ = MagicMock(return_value=False)
 
-            _register_pr_outcome(
+            register_pr(
                 repo_root=tmp_repo,
                 run_id="run-abc",
                 pr_url="https://github.com/org/repo/pull/99",
                 branch_name="colonyos/my-feature",
             )
 
-            mock_instance.track_pr.assert_called_once_with(
+            cast(MagicMock, mock_instance.track_pr).assert_called_once_with(
                 "run-abc", 99, "https://github.com/org/repo/pull/99", "colonyos/my-feature",
             )
 
     def test_not_called_when_no_pr_url(self, tmp_repo: Path):
         """_register_pr_outcome is a no-op when pr_url is empty."""
-        from colonyos.orchestrator import _register_pr_outcome
+        register_pr = _orch_register_pr_outcome()
 
         with patch("colonyos.orchestrator.OutcomeStore") as MockStore:
-            _register_pr_outcome(
+            register_pr(
                 repo_root=tmp_repo,
                 run_id="run-abc",
                 pr_url="",
@@ -417,10 +449,10 @@ class TestRegisterPrOutcome:
 
     def test_not_called_when_pr_number_not_extractable(self, tmp_repo: Path):
         """_register_pr_outcome is a no-op when PR number can't be parsed."""
-        from colonyos.orchestrator import _register_pr_outcome
+        register_pr = _orch_register_pr_outcome()
 
         with patch("colonyos.orchestrator.OutcomeStore") as MockStore:
-            _register_pr_outcome(
+            register_pr(
                 repo_root=tmp_repo,
                 run_id="run-abc",
                 pr_url="https://github.com/org/repo/not-a-pull-url",
@@ -430,29 +462,21 @@ class TestRegisterPrOutcome:
 
     def test_handles_track_pr_exception_gracefully(self, tmp_repo: Path):
         """Exceptions from track_pr are caught and logged, not raised."""
-        from colonyos.orchestrator import _register_pr_outcome
+        register_pr = _orch_register_pr_outcome()
 
         with patch("colonyos.orchestrator.OutcomeStore") as MockStore:
-            mock_instance = MagicMock()
-            mock_instance.track_pr.side_effect = Exception("DB locked")
+            mock_instance = cast(OutcomeStore, create_autospec(OutcomeStore, instance=True))
+            cast(MagicMock, mock_instance.track_pr).side_effect = Exception("DB locked")
             MockStore.return_value.__enter__ = MagicMock(return_value=mock_instance)
             MockStore.return_value.__exit__ = MagicMock(return_value=False)
 
             # Should NOT raise
-            _register_pr_outcome(
+            register_pr(
                 repo_root=tmp_repo,
                 run_id="run-abc",
                 pr_url="https://github.com/org/repo/pull/99",
                 branch_name="colonyos/my-feature",
             )
-
-
-# ---------------------------------------------------------------------------
-# 5.1 CLI command tests
-# ---------------------------------------------------------------------------
-
-from click.testing import CliRunner
-from colonyos.cli import app
 
 
 @pytest.fixture
@@ -558,7 +582,7 @@ class TestMemoryCapture:
     def test_closed_pr_creates_failure_memory(self, store: OutcomeStore, tmp_repo: Path):
         """When poll_outcomes detects open→closed, a FAILURE MemoryEntry is created."""
         store.track_pr("run-1", 42, "url1", "feat/x")
-        gh_data = _make_gh_result(
+        gh_data: dict[str, object] = _make_gh_result(
             state="CLOSED",
             closed_at="2025-01-15T10:00:00Z",
             comments=[{"body": "This PR is too large, please split."}],
@@ -567,28 +591,33 @@ class TestMemoryCapture:
             patch("colonyos.outcomes._call_gh_pr_view", return_value=gh_data),
             patch("colonyos.outcomes.MemoryStore") as MockMemStore,
         ):
-            mock_mem_instance = MagicMock()
+            mock_mem_instance = cast(MemoryStore, create_autospec(MemoryStore, instance=True))
             MockMemStore.return_value.__enter__ = MagicMock(return_value=mock_mem_instance)
             MockMemStore.return_value.__exit__ = MagicMock(return_value=False)
 
             poll_outcomes(tmp_repo)
 
-            mock_mem_instance.add_memory.assert_called_once()
-            call_kwargs = mock_mem_instance.add_memory.call_args
+            add_mem = cast(MagicMock, mock_mem_instance.add_memory)
+            add_mem.assert_called_once()
+            call_kwargs = add_mem.call_args
+            assert call_kwargs is not None
             # Check category is FAILURE
             from colonyos.memory import MemoryCategory
-            assert call_kwargs.kwargs["category"] == MemoryCategory.FAILURE
+
+            kwargs = cast(dict[str, object], call_kwargs.kwargs)
+            assert kwargs["category"] == MemoryCategory.FAILURE
             # Check phase is "deliver"
-            assert call_kwargs.kwargs["phase"] == "deliver"
+            assert kwargs["phase"] == "deliver"
             # Check text contains PR number and reviewer feedback
-            assert "PR #42" in call_kwargs.kwargs["text"]
-            assert "closed without merge" in call_kwargs.kwargs["text"]
-            assert "too large" in call_kwargs.kwargs["text"].lower()
+            text = str(kwargs["text"])
+            assert "PR #42" in text
+            assert "closed without merge" in text
+            assert "too large" in text.lower()
 
     def test_merged_pr_does_not_create_memory(self, store: OutcomeStore, tmp_repo: Path):
         """No memory entry is created for merged PRs."""
         store.track_pr("run-1", 42, "url1", "feat/x")
-        gh_data = _make_gh_result(
+        gh_data: dict[str, object] = _make_gh_result(
             state="MERGED",
             merged_at="2025-01-15T10:00:00Z",
             reviews=[{"body": "LGTM"}],
@@ -603,7 +632,7 @@ class TestMemoryCapture:
     def test_closed_pr_without_comments_no_memory(self, store: OutcomeStore, tmp_repo: Path):
         """No memory entry for PRs closed without any reviewer comment."""
         store.track_pr("run-1", 42, "url1", "feat/x")
-        gh_data = _make_gh_result(
+        gh_data: dict[str, object] = _make_gh_result(
             state="CLOSED",
             closed_at="2025-01-15T10:00:00Z",
             # No comments or reviews — close_context will be empty
@@ -621,17 +650,17 @@ class TestMemoryCapture:
         """If MemoryStore.add_memory raises, poll_outcomes continues without crashing."""
         store.track_pr("run-1", 42, "url1", "feat/x")
         store.track_pr("run-2", 43, "url2", "feat/y")
-        gh_data_closed = _make_gh_result(
+        gh_data_closed: dict[str, object] = _make_gh_result(
             state="CLOSED",
             closed_at="2025-01-15T10:00:00Z",
             comments=[{"body": "Rejected: duplicate of another PR"}],
         )
-        gh_data_merged = _make_gh_result(
+        gh_data_merged: dict[str, object] = _make_gh_result(
             state="MERGED",
             merged_at="2025-01-15T12:00:00Z",
         )
 
-        def mock_gh(pr_number, repo_root):
+        def mock_gh(pr_number: int, _repo_root: Path) -> dict[str, object]:
             if pr_number == 42:
                 return gh_data_closed
             return gh_data_merged
@@ -640,8 +669,8 @@ class TestMemoryCapture:
             patch("colonyos.outcomes._call_gh_pr_view", side_effect=mock_gh),
             patch("colonyos.outcomes.MemoryStore") as MockMemStore,
         ):
-            mock_mem_instance = MagicMock()
-            mock_mem_instance.add_memory.side_effect = Exception("DB locked")
+            mock_mem_instance = cast(MemoryStore, create_autospec(MemoryStore, instance=True))
+            cast(MagicMock, mock_mem_instance.add_memory).side_effect = Exception("DB locked")
             MockMemStore.return_value.__enter__ = MagicMock(return_value=mock_mem_instance)
             MockMemStore.return_value.__exit__ = MagicMock(return_value=False)
 
@@ -662,11 +691,16 @@ class TestMemoryCapture:
 class TestSyncColumns:
     """Tests for last_sync_at / sync_failures columns and related methods."""
 
-    def test_new_columns_exist_after_init(self, store: OutcomeStore):
+    def test_new_columns_exist_after_init(self, store: OutcomeStore, tmp_repo: Path):
         """pr_outcomes table has last_sync_at and sync_failures columns."""
-        cur = store._conn.cursor()
-        cur.execute("PRAGMA table_info(pr_outcomes)")
-        columns = {row[1] for row in cur.fetchall()}
+        conn = sqlite3.connect(str(_memory_db_path(tmp_repo)), timeout=10)
+        try:
+            cur = conn.cursor()
+            _ = cur.execute("PRAGMA table_info(pr_outcomes)")
+            rows = cast(Sequence[sqlite3.Row], cur.fetchall())
+            columns = {cast(str, row[1]) for row in rows}
+        finally:
+            conn.close()
         assert "last_sync_at" in columns
         assert "sync_failures" in columns
 
@@ -778,12 +812,18 @@ class TestMergeStateStatusField:
                 }),
                 returncode=0,
             )
-            from colonyos.outcomes import _call_gh_pr_view
-            result = _call_gh_pr_view(42, Path("/tmp/repo"))
+            outcomes_mod = importlib.import_module("colonyos.outcomes")
+            call_gh = cast(
+                Callable[[int, Path], dict[str, object]],
+                getattr(outcomes_mod, "_call_gh_pr_view"),
+            )
+            result = call_gh(42, Path("/tmp/repo"))
 
             # Verify the --json arg includes mergeStateStatus
-            call_args = mock_run.call_args[0][0]
-            json_fields_arg = call_args[call_args.index("--json") + 1]
+            assert mock_run.call_args is not None
+            call_args = cast(list[object], mock_run.call_args[0])[0]
+            argv = cast(list[str], call_args)
+            json_fields_arg = argv[argv.index("--json") + 1]
             assert "mergeStateStatus" in json_fields_arg
 
             # Verify the returned dict includes mergeStateStatus

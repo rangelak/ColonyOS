@@ -12,7 +12,7 @@ import logging
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ class ParallelPreflightResult:
     @property
     def blocking_errors(self) -> list[str]:
         """Return list of blocking error messages."""
-        errors = []
+        errors: list[str] = []
         if not self.worktree_supported and self.worktree_error:
             errors.append(self.worktree_error)
         if not self.disk_space_ok and self.disk_space_error:

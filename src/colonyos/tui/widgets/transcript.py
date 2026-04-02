@@ -39,10 +39,34 @@ class TranscriptView(RichLog):
 
     # Layout CSS is defined in APP_CSS (styles.py) — no DEFAULT_CSS needed.
 
-    def __init__(self, **kwargs: object) -> None:
+    def __init__(
+        self,
+        *,
+        max_lines: int | None = None,
+        min_width: int = 78,
+        wrap: bool = True,
+        highlight: bool = False,
+        markup: bool = True,
+        auto_scroll: bool = False,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
+        disabled: bool = False,
+    ) -> None:
         # Disable RichLog's built-in auto_scroll so our custom _auto_scroll
         # is the sole scroll controller (FR-2.1).
-        super().__init__(highlight=False, markup=True, wrap=True, auto_scroll=False, **kwargs)
+        super().__init__(
+            max_lines=max_lines,
+            min_width=min_width,
+            wrap=wrap,
+            highlight=highlight,
+            markup=markup,
+            auto_scroll=auto_scroll,
+            name=name,
+            id=id,
+            classes=classes,
+            disabled=disabled,
+        )
         self._auto_scroll = True
         self._programmatic_scroll: bool = False
         self._pending_programmatic_clear: bool = False

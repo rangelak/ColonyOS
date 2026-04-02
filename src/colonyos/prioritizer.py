@@ -5,10 +5,11 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 from colonyos.agent import run_phase_sync
 from colonyos.config import ColonyConfig, LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS
-from colonyos.models import Phase, QueueItem, QueueItemStatus, QueueState, extract_result_text
+from colonyos.models import Phase, QueueItemStatus, QueueState, extract_result_text
 from colonyos.queue_runtime import reprioritize_queue_item
 from colonyos.ui import NullUI, PhaseUI
 
@@ -96,17 +97,19 @@ def score_queue_with_agent(
 
     by_id = {item.id for item in pending}
     decisions: list[PriorityDecision] = []
-    raw_decisions = payload.get("decisions", [])
-    if not isinstance(raw_decisions, list):
+    raw_decisions_obj = payload.get("decisions", [])
+    if not isinstance(raw_decisions_obj, list):
         return []
-    for entry in raw_decisions:
-        if not isinstance(entry, dict):
+    raw_decisions = cast(list[object], raw_decisions_obj)
+    for entry_obj in raw_decisions:
+        if not isinstance(entry_obj, dict):
             continue
+        entry = cast(dict[str, object], entry_obj)
         item_id = str(entry.get("item_id", "")).strip()
         if item_id not in by_id:
             continue
         try:
-            urgency_score = float(entry.get("urgency_score", 0.0))
+            urgency_score = float(cast(Any, entry.get("urgency_score", 0.0)))
         except (TypeError, ValueError):
             urgency_score = 0.0
         urgency_score = max(0.0, min(1.0, urgency_score))
@@ -146,7 +149,7 @@ def _extract_json_payload(raw_text: str) -> dict[str, object] | None:
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict):
-            return payload
+            return cast(dict[str, object], payload)
     return None
 
 

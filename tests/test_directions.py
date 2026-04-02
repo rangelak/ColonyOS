@@ -1,7 +1,10 @@
 """Tests for the CEO directions module."""
 
+from __future__ import annotations
+
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from typing import Callable, cast
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -9,21 +12,45 @@ from colonyos.config import ColonyConfig, BudgetConfig, PhasesConfig
 from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo
 from colonyos.directions import (
     DIRECTIONS_FILE,
-    _MAX_DIRECTIONS_LEN,
+    build_directions_update_prompt,
     directions_path,
     load_directions,
-    save_directions,
-    build_directions_update_prompt,
     parse_iteration_from_directions,
+    save_directions,
 )
 
-_SDK_AVAILABLE = True
-try:
-    from colonyos.orchestrator import _build_ceo_prompt, update_directions_after_ceo
-except ImportError:
-    _SDK_AVAILABLE = False
+# Must match colonyos.directions truncation cap (see load_directions).
+_MAX_DIRECTIONS_LOAD_CAP = 3000
 
-needs_sdk = pytest.mark.skipif(not _SDK_AVAILABLE, reason="claude_agent_sdk not installed")
+BuildCeoPromptFn = Callable[..., tuple[str, str]]
+UpdateDirectionsAfterCeoFn = Callable[..., float]
+
+sdk_available: bool
+try:
+    import colonyos.orchestrator as _orch_mod
+    from colonyos.orchestrator import update_directions_after_ceo as _update_directions_after_ceo_raw
+
+    _build_ceo_prompt = cast(
+        BuildCeoPromptFn,
+        getattr(_orch_mod, "_build_ceo_prompt"),
+    )
+    update_directions_after_ceo = cast(
+        UpdateDirectionsAfterCeoFn,
+        _update_directions_after_ceo_raw,
+    )
+except ImportError:
+
+    def _build_ceo_prompt(*_a: object, **_kw: object) -> tuple[str, str]:
+        raise RuntimeError("claude_agent_sdk not installed")
+
+    def update_directions_after_ceo(*_a: object, **_kw: object) -> float:
+        raise RuntimeError("claude_agent_sdk not installed")
+
+    sdk_available = False
+else:
+    sdk_available = True
+
+needs_sdk = pytest.mark.skipif(not sdk_available, reason="claude_agent_sdk not installed")
 
 
 SAMPLE_DIRECTIONS = """\
@@ -89,15 +116,15 @@ class TestLoadDirections:
 
     def test_returns_content_when_file_exists(self, tmp_repo: Path):
         path = directions_path(tmp_repo)
-        path.write_text(SAMPLE_DIRECTIONS, encoding="utf-8")
+        _ = path.write_text(SAMPLE_DIRECTIONS, encoding="utf-8")
         result = load_directions(tmp_repo)
         assert "Strategic Directions" in result
         assert "Click" in result
 
     def test_truncates_long_content(self, tmp_repo: Path):
         path = directions_path(tmp_repo)
-        long_content = "x" * (_MAX_DIRECTIONS_LEN + 500)
-        path.write_text(long_content, encoding="utf-8")
+        long_content = "x" * (_MAX_DIRECTIONS_LOAD_CAP + 500)
+        _ = path.write_text(long_content, encoding="utf-8")
 
         result = load_directions(tmp_repo)
         assert len(result) < len(long_content)
@@ -105,7 +132,7 @@ class TestLoadDirections:
 
     def test_no_truncation_for_short_content(self, tmp_repo: Path):
         path = directions_path(tmp_repo)
-        path.write_text(SAMPLE_DIRECTIONS, encoding="utf-8")
+        _ = path.write_text(SAMPLE_DIRECTIONS, encoding="utf-8")
         result = load_directions(tmp_repo)
         assert "_(truncated)_" not in result
 
@@ -117,12 +144,12 @@ class TestSaveDirections:
         assert result_path.read_text(encoding="utf-8") == SAMPLE_DIRECTIONS
 
     def test_creates_parent_directory(self, tmp_path: Path):
-        save_directions(tmp_path, "test content")
+        _ = save_directions(tmp_path, "test content")
         assert (tmp_path / ".colonyos" / DIRECTIONS_FILE).exists()
 
     def test_overwrites_existing(self, tmp_repo: Path):
-        save_directions(tmp_repo, "old content")
-        save_directions(tmp_repo, "new content")
+        _ = save_directions(tmp_repo, "old content")
+        _ = save_directions(tmp_repo, "new content")
         content = directions_path(tmp_repo).read_text(encoding="utf-8")
         assert content == "new content"
 
@@ -155,59 +182,68 @@ class TestBuildDirectionsGenPrompt:
 
     def test_system_prompt_loads_template(self, tmp_repo: Path, config: ColonyConfig):
         from colonyos.directions import build_directions_gen_prompt
-        system, user = build_directions_gen_prompt(config, "focus on performance", tmp_repo)
+
+        system, _user = build_directions_gen_prompt(config, "focus on performance", tmp_repo)
         assert "landscape" in system.lower() or "inspiration" in system.lower()
 
     def test_user_prompt_contains_project_context(self, tmp_repo: Path, config: ColonyConfig):
         from colonyos.directions import build_directions_gen_prompt
-        system, user = build_directions_gen_prompt(config, "goals", tmp_repo)
+
+        _system, user = build_directions_gen_prompt(config, "goals", tmp_repo)
         assert "TestApp" in user
         assert "A test app" in user
         assert "Python" in user
 
     def test_user_prompt_contains_vision(self, tmp_repo: Path, config: ColonyConfig):
         from colonyos.directions import build_directions_gen_prompt
-        system, user = build_directions_gen_prompt(config, "goals", tmp_repo)
+
+        _system, user = build_directions_gen_prompt(config, "goals", tmp_repo)
         assert "Build the best CLI tool" in user
 
     def test_user_prompt_contains_user_goals(self, tmp_repo: Path, config: ColonyConfig):
         from colonyos.directions import build_directions_gen_prompt
-        system, user = build_directions_gen_prompt(config, "improve developer experience", tmp_repo)
+
+        _system, user = build_directions_gen_prompt(config, "improve developer experience", tmp_repo)
         assert "improve developer experience" in user
         assert "North Star" in user
 
     def test_user_prompt_skips_empty_goals(self, tmp_repo: Path, config: ColonyConfig):
         from colonyos.directions import build_directions_gen_prompt
-        system, user = build_directions_gen_prompt(config, "  ", tmp_repo)
+
+        _system, user = build_directions_gen_prompt(config, "  ", tmp_repo)
         assert "North Star" not in user
 
     def test_user_prompt_includes_readme(self, tmp_repo: Path, config: ColonyConfig):
         from colonyos.directions import build_directions_gen_prompt
-        (tmp_repo / "README.md").write_text("# My Project\nA great project.")
-        system, user = build_directions_gen_prompt(config, "goals", tmp_repo)
+
+        _ = (tmp_repo / "README.md").write_text("# My Project\nA great project.")
+        _system, user = build_directions_gen_prompt(config, "goals", tmp_repo)
         assert "My Project" in user
 
     def test_user_prompt_includes_changelog(self, tmp_repo: Path, config: ColonyConfig):
         from colonyos.directions import build_directions_gen_prompt
-        (tmp_repo / "CHANGELOG.md").write_text("# Changelog\n\n## Added auth system")
-        system, user = build_directions_gen_prompt(config, "goals", tmp_repo)
+
+        _ = (tmp_repo / "CHANGELOG.md").write_text("# Changelog\n\n## Added auth system")
+        _system, user = build_directions_gen_prompt(config, "goals", tmp_repo)
         assert "auth system" in user
 
     def test_user_prompt_without_readme_or_changelog(self, tmp_repo: Path, config: ColonyConfig):
         from colonyos.directions import build_directions_gen_prompt
-        system, user = build_directions_gen_prompt(config, "goals", tmp_repo)
+
+        _system, user = build_directions_gen_prompt(config, "goals", tmp_repo)
         assert "landscape" in user.lower()
 
     def test_handles_missing_project(self, tmp_repo: Path):
         from colonyos.directions import build_directions_gen_prompt
+
         config = ColonyConfig()
-        system, user = build_directions_gen_prompt(config, "goals", tmp_repo)
+        _system, user = build_directions_gen_prompt(config, "goals", tmp_repo)
         assert "Unknown" in user
 
 
 class TestBuildDirectionsUpdatePrompt:
     def test_contains_current_directions(self, tmp_repo: Path, config: ColonyConfig):
-        system, user = build_directions_update_prompt(
+        _system, user = build_directions_update_prompt(
             config, SAMPLE_DIRECTIONS, "Build a plugin system", 4, tmp_repo,
         )
         assert "Click" in user
@@ -215,26 +251,26 @@ class TestBuildDirectionsUpdatePrompt:
         assert "iteration 3" in user
 
     def test_contains_proposal(self, tmp_repo: Path, config: ColonyConfig):
-        system, user = build_directions_update_prompt(
+        _system, user = build_directions_update_prompt(
             config, SAMPLE_DIRECTIONS, "Build a plugin system", 4, tmp_repo,
         )
         assert "plugin system" in user
 
     def test_contains_iteration_number(self, tmp_repo: Path, config: ColonyConfig):
-        system, user = build_directions_update_prompt(
+        _system, user = build_directions_update_prompt(
             config, SAMPLE_DIRECTIONS, "proposal", 7, tmp_repo,
         )
         assert "iteration 7" in user.lower() or "Set iteration to 7" in user
 
     def test_system_prompt_is_landscape_focused(self, tmp_repo: Path, config: ColonyConfig):
-        system, user = build_directions_update_prompt(
+        system, _user = build_directions_update_prompt(
             config, SAMPLE_DIRECTIONS, "proposal", 1, tmp_repo,
         )
         assert "landscape" in system.lower()
         assert "task list" in system.lower()
 
     def test_contains_project_name(self, tmp_repo: Path, config: ColonyConfig):
-        system, user = build_directions_update_prompt(
+        _system, user = build_directions_update_prompt(
             config, SAMPLE_DIRECTIONS, "proposal", 1, tmp_repo,
         )
         assert "TestApp" in user
@@ -245,18 +281,18 @@ class TestCeoPromptDirectionsInjection:
     """Verify that _build_ceo_prompt injects directions into the CEO system prompt."""
 
     def test_injects_directions_when_present(self, tmp_repo: Path, config: ColonyConfig):
-        save_directions(tmp_repo, SAMPLE_DIRECTIONS)
-        system, user = _build_ceo_prompt(config, "test.md", tmp_repo)
+        _ = save_directions(tmp_repo, SAMPLE_DIRECTIONS)
+        system, _user = _build_ceo_prompt(config, "test.md", tmp_repo)
         assert "Click" in system
         assert "Typer" in system
         assert "Landscape" in system or "landscape" in system
 
     def test_shows_placeholder_when_no_directions(self, tmp_repo: Path, config: ColonyConfig):
-        system, user = _build_ceo_prompt(config, "test.md", tmp_repo)
+        system, _user = _build_ceo_prompt(config, "test.md", tmp_repo)
         assert "No directions configured" in system
 
     def test_directions_in_system_not_user_prompt(self, tmp_repo: Path, config: ColonyConfig):
-        save_directions(tmp_repo, SAMPLE_DIRECTIONS)
+        _ = save_directions(tmp_repo, SAMPLE_DIRECTIONS)
         system, user = _build_ceo_prompt(config, "test.md", tmp_repo)
         assert "Click" in system
         assert "Click" not in user
@@ -267,8 +303,10 @@ class TestUpdateDirectionsAfterCeo:
     """Verify update_directions_after_ceo calls the agent and saves output."""
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_updates_directions_on_success(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        save_directions(tmp_repo, SAMPLE_DIRECTIONS)
+    def test_updates_directions_on_success(
+        self, mock_run: MagicMock, tmp_repo: Path, config: ColonyConfig,
+    ):
+        _ = save_directions(tmp_repo, SAMPLE_DIRECTIONS)
         updated = SAMPLE_DIRECTIONS.replace("Iteration: 3", "Iteration: 4")
         mock_run.return_value = PhaseResult(
             phase=Phase.CEO,
@@ -284,14 +322,18 @@ class TestUpdateDirectionsAfterCeo:
         assert cost == 0.01
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_skips_when_no_directions_exist(self, mock_run, tmp_repo: Path, config: ColonyConfig):
+    def test_skips_when_no_directions_exist(
+        self, mock_run: MagicMock, tmp_repo: Path, config: ColonyConfig,
+    ):
         cost = update_directions_after_ceo(tmp_repo, config, "proposal", 1)
         mock_run.assert_not_called()
         assert cost == 0.0
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_skips_when_output_missing_header(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        save_directions(tmp_repo, SAMPLE_DIRECTIONS)
+    def test_skips_when_output_missing_header(
+        self, mock_run: MagicMock, tmp_repo: Path, config: ColonyConfig,
+    ):
+        _ = save_directions(tmp_repo, SAMPLE_DIRECTIONS)
         mock_run.return_value = PhaseResult(
             phase=Phase.CEO,
             success=True,
@@ -306,8 +348,10 @@ class TestUpdateDirectionsAfterCeo:
         assert cost == 0.05  # cost still incurred even though output was rejected
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_survives_agent_failure(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        save_directions(tmp_repo, SAMPLE_DIRECTIONS)
+    def test_survives_agent_failure(
+        self, mock_run: MagicMock, tmp_repo: Path, config: ColonyConfig,
+    ):
+        _ = save_directions(tmp_repo, SAMPLE_DIRECTIONS)
         mock_run.side_effect = RuntimeError("agent exploded")
 
         cost = update_directions_after_ceo(tmp_repo, config, "proposal", 2)
@@ -317,8 +361,10 @@ class TestUpdateDirectionsAfterCeo:
         assert cost == 0.0
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_skips_on_failed_result(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        save_directions(tmp_repo, SAMPLE_DIRECTIONS)
+    def test_skips_on_failed_result(
+        self, mock_run: MagicMock, tmp_repo: Path, config: ColonyConfig,
+    ):
+        _ = save_directions(tmp_repo, SAMPLE_DIRECTIONS)
         mock_run.return_value = PhaseResult(
             phase=Phase.CEO,
             success=False,
@@ -334,8 +380,10 @@ class TestUpdateDirectionsAfterCeo:
         assert cost == 0.03  # cost incurred even on failure
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_uses_capped_budget(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        save_directions(tmp_repo, SAMPLE_DIRECTIONS)
+    def test_uses_capped_budget(
+        self, mock_run: MagicMock, tmp_repo: Path, config: ColonyConfig,
+    ):
+        _ = save_directions(tmp_repo, SAMPLE_DIRECTIONS)
         updated = SAMPLE_DIRECTIONS.replace("Iteration: 3", "Iteration: 4")
         mock_run.return_value = PhaseResult(
             phase=Phase.CEO,
@@ -344,14 +392,17 @@ class TestUpdateDirectionsAfterCeo:
             artifacts={"result": updated},
         )
 
-        update_directions_after_ceo(tmp_repo, config, "proposal", 4)
+        _ = update_directions_after_ceo(tmp_repo, config, "proposal", 4)
 
-        call_kwargs = mock_run.call_args.kwargs
-        assert call_kwargs["budget_usd"] <= 1.0
+        kwargs = cast(dict[str, object], mock_run.call_args.kwargs)
+        budget_usd = kwargs["budget_usd"]
+        assert isinstance(budget_usd, (int, float)) and budget_usd <= 1.0
 
     @patch("colonyos.orchestrator.run_phase_sync")
-    def test_uses_no_tools(self, mock_run, tmp_repo: Path, config: ColonyConfig):
-        save_directions(tmp_repo, SAMPLE_DIRECTIONS)
+    def test_uses_no_tools(
+        self, mock_run: MagicMock, tmp_repo: Path, config: ColonyConfig,
+    ):
+        _ = save_directions(tmp_repo, SAMPLE_DIRECTIONS)
         updated = SAMPLE_DIRECTIONS.replace("Iteration: 3", "Iteration: 4")
         mock_run.return_value = PhaseResult(
             phase=Phase.CEO,
@@ -360,7 +411,7 @@ class TestUpdateDirectionsAfterCeo:
             artifacts={"result": updated},
         )
 
-        update_directions_after_ceo(tmp_repo, config, "proposal", 4)
+        _ = update_directions_after_ceo(tmp_repo, config, "proposal", 4)
 
-        call_kwargs = mock_run.call_args.kwargs
-        assert call_kwargs["allowed_tools"] == []
+        kwargs = cast(dict[str, object], mock_run.call_args.kwargs)
+        assert kwargs["allowed_tools"] == []

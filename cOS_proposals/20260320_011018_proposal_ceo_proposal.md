@@ -18,7 +18,7 @@ Add a **Parallel Progress Tracker** that provides real-time visibility into conc
    - Current status: `⏳ running`, `✅ approved`, `⚠️ request-changes`, `❌ failed`
    - Elapsed time for that persona's review
    - Cost incurred so far
-   
+
 2. **Aggregate Progress Bar**: Show a horizontal progress bar that fills as reviewers complete, with a summary like "3/5 reviewers complete, 2 running..."
 
 3. **Live Cost Accumulator**: Display a running total of cost across all parallel reviews updating in real-time (currently users only see per-phase costs after completion)

@@ -366,4 +366,7 @@ class TestExtractRunIdPublic:
         assert extract_run_id_from_url(url) == "99999"
 
     def test_non_string_returns_none(self) -> None:
-        assert extract_run_id_from_url(None) is None  # type: ignore[arg-type]
+        from typing import cast
+
+        # Runtime guard for non-str URLs; type as str for the public signature.
+        assert extract_run_id_from_url(cast(str, object())) is None

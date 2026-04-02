@@ -155,7 +155,7 @@ def run_doctor_checks(repo_root: Path) -> list[tuple[str, bool, str]]:
         if bot_token and app_token:
             results.append(("Slack tokens", True, ""))
         else:
-            missing = []
+            missing: list[str] = []
             if not bot_token:
                 missing.append("COLONYOS_SLACK_BOT_TOKEN")
             if not app_token:
