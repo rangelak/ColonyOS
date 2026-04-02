@@ -29,8 +29,9 @@ _SCRUBBED_ENV_EXACT: frozenset[str] = frozenset({
 
 _SCRUBBED_ENV_SUBSTRINGS: tuple[str, ...] = (
     "SECRET",
-    "TOKEN",
-    "KEY",
+    "_TOKEN",
+    "_KEY",
+    "API_KEY",
     "PASSWORD",
     "CREDENTIAL",
 )
@@ -78,6 +79,7 @@ class HookResult:
     duration_ms: int
     timed_out: bool
     success: bool
+    blocking: bool = True
     injected_output: str | None = None
 
 
@@ -110,6 +112,10 @@ class HookRunner:
     def __init__(self, config: ColonyConfig) -> None:
         self._hooks = config.hooks
         self._in_failure_handler = False
+
+    def get_hooks(self, event: str) -> list[HookConfig]:
+        """Return the list of HookConfigs for a given event (public accessor)."""
+        return self._hooks.get(event, [])
 
     def run_hooks(self, event: str, context: HookContext) -> list[HookResult]:
         """Execute all hooks for the given event in definition order.
@@ -214,6 +220,7 @@ class HookRunner:
                 shell=True,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 cwd=str(context.repo_root),
                 timeout=hook.timeout_seconds,
                 env=env,
@@ -254,5 +261,6 @@ class HookRunner:
             duration_ms=duration_ms,
             timed_out=timed_out,
             success=success,
+            blocking=hook.blocking,
             injected_output=injected_output,
         )

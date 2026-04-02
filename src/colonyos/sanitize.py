@@ -198,10 +198,11 @@ def sanitize_display_text(text: str) -> str:
 def sanitize_hook_output(text: str, max_bytes: int = 8192) -> str:
     """Sanitize hook subprocess output for safe injection into agent prompts.
 
-    Applies three sanitization passes in order:
+    Applies four sanitization passes in order:
     1. ``sanitize_display_text()`` — strips ANSI escapes and control characters
     2. ``sanitize_ci_logs()`` — strips XML tags and redacts secret patterns
-    3. Byte-level truncation with a ``[truncated]`` marker
+    3. ``sanitize_untrusted_content()`` — additional prompt-injection defenses
+    4. Byte-level truncation with a ``[truncated]`` marker
 
     Args:
         text: Raw stdout captured from a hook subprocess.
@@ -216,7 +217,10 @@ def sanitize_hook_output(text: str, max_bytes: int = 8192) -> str:
     text = sanitize_display_text(text)
     # Pass 2: strip XML tags and redact secrets
     text = sanitize_ci_logs(text)
-    # Pass 3: truncate to max_bytes
+    # Pass 3: additional prompt-injection defenses (XML tag stripping for
+    # any tags that survived ci_logs, e.g. edge cases)
+    text = sanitize_untrusted_content(text)
+    # Pass 4: truncate to max_bytes
     encoded = text.encode("utf-8")
     if len(encoded) > max_bytes:
         original_len = len(encoded)

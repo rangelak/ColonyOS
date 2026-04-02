@@ -310,12 +310,11 @@ class TestHookRunnerShellAndEncoding:
         config = _make_config(("post_implement", hooks))
         runner = HookRunner(config)
         results = runner.run_hooks("post_implement", context)
-        # subprocess.run with text=True raises UnicodeDecodeError for non-UTF8
-        # output; the engine's generic exception handler catches it and returns
-        # exit_code=-1.  The important thing is it does not crash.
+        # subprocess.run with text=True and errors="replace" handles non-UTF8
+        # gracefully by replacing invalid bytes with U+FFFD replacement chars.
         assert len(results) == 1
-        assert results[0].success is False
-        assert results[0].exit_code == -1
+        assert results[0].success is True
+        assert results[0].exit_code == 0
 
     def test_stderr_only_output(self, context: HookContext) -> None:
         hooks = [HookConfig(command="echo error-msg >&2")]
@@ -418,3 +417,124 @@ class TestConfigToRunnerSmokeTest:
         # Event with no hooks → empty
         results = runner.run_hooks("pre_review", ctx)
         assert results == []
+
+
+class TestHookResultBlockingField:
+    """Verify that HookResult carries the blocking flag from HookConfig."""
+
+    def test_blocking_hook_result_has_blocking_true(self, context: HookContext) -> None:
+        hooks = [HookConfig(command="echo hi", blocking=True)]
+        config = _make_config(("pre_plan", hooks))
+        runner = HookRunner(config)
+        results = runner.run_hooks("pre_plan", context)
+        assert results[0].blocking is True
+
+    def test_non_blocking_hook_result_has_blocking_false(self, context: HookContext) -> None:
+        hooks = [HookConfig(command="echo hi", blocking=False)]
+        config = _make_config(("pre_plan", hooks))
+        runner = HookRunner(config)
+        results = runner.run_hooks("pre_plan", context)
+        assert results[0].blocking is False
+
+    def test_get_hooks_public_accessor(self) -> None:
+        hooks = [HookConfig(command="echo test")]
+        config = _make_config(("pre_plan", hooks))
+        runner = HookRunner(config)
+        assert runner.get_hooks("pre_plan") == hooks
+        assert runner.get_hooks("nonexistent") == []
+
+
+class TestEnvScrubKeyPrecision:
+    """Verify that env scrubbing is not overly aggressive after KEY→_KEY fix."""
+
+    def test_keyboard_not_scrubbed(self, context: HookContext) -> None:
+        os.environ["KEYBOARD_LAYOUT"] = "us"
+        try:
+            env = _build_hook_env(context)
+            assert env.get("KEYBOARD_LAYOUT") == "us"
+        finally:
+            os.environ.pop("KEYBOARD_LAYOUT", None)
+
+    def test_colorterm_not_scrubbed(self, context: HookContext) -> None:
+        os.environ["COLORTERM"] = "truecolor"
+        try:
+            env = _build_hook_env(context)
+            assert env.get("COLORTERM") == "truecolor"
+        finally:
+            os.environ.pop("COLORTERM", None)
+
+    def test_api_key_still_scrubbed(self, context: HookContext) -> None:
+        os.environ["MY_API_KEY"] = "secret"
+        try:
+            env = _build_hook_env(context)
+            assert "MY_API_KEY" not in env
+        finally:
+            os.environ.pop("MY_API_KEY", None)
+
+    def test_auth_token_still_scrubbed(self, context: HookContext) -> None:
+        os.environ["AUTH_TOKEN"] = "secret"
+        try:
+            env = _build_hook_env(context)
+            assert "AUTH_TOKEN" not in env
+        finally:
+            os.environ.pop("AUTH_TOKEN", None)
+
+    def test_ssh_key_path_scrubbed(self, context: HookContext) -> None:
+        os.environ["SSH_KEY_PATH"] = "/path/to/key"
+        try:
+            env = _build_hook_env(context)
+            assert "SSH_KEY_PATH" not in env
+        finally:
+            os.environ.pop("SSH_KEY_PATH", None)
+
+
+class TestFormatHookInjection:
+    """Test the nonce-tagged delimiter wrapper for hook output injection."""
+
+    def test_nonce_tagged_delimiters(self) -> None:
+        from colonyos.orchestrator import _format_hook_injection
+
+        result = _format_hook_injection("test output", nonce="abc123")
+        assert '<hook_output nonce="abc123">' in result
+        assert "test output" in result
+        assert "</hook_output>" in result
+
+    def test_auto_generated_nonce(self) -> None:
+        from colonyos.orchestrator import _format_hook_injection
+
+        result = _format_hook_injection("test output")
+        assert "<hook_output nonce=" in result
+        assert "</hook_output>" in result
+
+    def test_nonce_differs_each_call(self) -> None:
+        from colonyos.orchestrator import _format_hook_injection
+
+        r1 = _format_hook_injection("a")
+        r2 = _format_hook_injection("a")
+        # Extract nonces
+        import re
+        nonces = re.findall(r'nonce="([^"]+)"', r1 + r2)
+        assert len(nonces) == 2
+        assert nonces[0] != nonces[1]
+
+
+class TestRunHooksAtBlockingField:
+    """Verify _run_hooks_at uses HookResult.blocking instead of private _hooks."""
+
+    def test_blocking_failure_detected_via_result(self, context: HookContext) -> None:
+        from colonyos.orchestrator import _run_hooks_at, _HOOK_FAILURE_SENTINEL
+
+        hooks = [HookConfig(command="exit 1", blocking=True)]
+        config = _make_config(("pre_plan", hooks))
+        runner = HookRunner(config)
+        result = _run_hooks_at(runner, "pre_plan", context)
+        assert result is _HOOK_FAILURE_SENTINEL
+
+    def test_non_blocking_failure_not_sentinel(self, context: HookContext) -> None:
+        from colonyos.orchestrator import _run_hooks_at, _HOOK_FAILURE_SENTINEL
+
+        hooks = [HookConfig(command="exit 1", blocking=False)]
+        config = _make_config(("pre_plan", hooks))
+        runner = HookRunner(config)
+        result = _run_hooks_at(runner, "pre_plan", context)
+        assert result is not _HOOK_FAILURE_SENTINEL

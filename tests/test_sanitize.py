@@ -528,3 +528,13 @@ class TestSanitizeHookOutput:
         assert "[truncated" in result
         # Should not contain replacement characters from broken codepoints
         assert "\ufffd" not in result
+
+    def test_triple_layer_sanitization(self) -> None:
+        """All three sanitization passes are applied: display_text, ci_logs, untrusted_content."""
+        # ANSI escape (pass 1), secret (pass 2), XML tag (pass 3)
+        text = "\x1b[31m<inject>ghp_secrettoken1234567</inject> safe\x1b[0m"
+        result = sanitize_hook_output(text)
+        assert "\x1b[" not in result  # pass 1: ANSI stripped
+        assert "ghp_secrettoken1234567" not in result  # pass 2: secret redacted
+        assert "<inject>" not in result  # pass 3: XML stripped
+        assert "safe" in result
