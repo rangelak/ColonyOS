@@ -116,15 +116,15 @@
     - Follow the `_drain_injected_context` pattern (orchestrator.py line ~4663)
     - Wrap injected text in delimiters: `\n\n## Hook Output\n\n{text}\n`
 
-- [ ] 5.0 CLI test command
+- [x] 5.0 CLI test command
   depends_on: [3.0]
-  - [ ] 5.1 Write tests in `tests/test_cli.py` for `colonyos hooks test`:
+  - [x] 5.1 Write tests in `tests/test_cli.py` for `colonyos hooks test`:
     - Test with valid event name shows hook execution results
     - Test with invalid event name shows error
     - Test with no hooks configured shows informative message
     - Test --all flag runs all configured events
     - Test exit code is non-zero when a blocking hook fails
-  - [ ] 5.2 Add `hooks` command group and `hooks test` subcommand to `src/colonyos/cli.py`:
+  - [x] 5.2 Add `hooks` command group and `hooks test` subcommand to `src/colonyos/cli.py`:
     - `@cli.group()` for `hooks`
     - `@hooks.command("test")` with `event_name` argument and `--all` flag
     - Load config, create HookRunner, create HookContext with dummy values (run_id="test", phase=event_name, branch="test")

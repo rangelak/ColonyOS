@@ -25,7 +25,7 @@ from colonyos.cancellation import (
     cancellation_scope,
     install_signal_cancel_handlers,
 )
-from colonyos.config import ColonyConfig, load_config, save_config, runs_dir_path
+from colonyos.config import ColonyConfig, VALID_HOOK_EVENTS, load_config, save_config, runs_dir_path
 from colonyos.doctor import run_doctor_checks
 from colonyos.repo_map import generate_repo_map
 from colonyos.init import is_git_repo, run_ai_init, run_init
@@ -5127,6 +5127,115 @@ def ci_fix(
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# colonyos hooks — lifecycle hook management & testing
+# ---------------------------------------------------------------------------
+
+
+@app.group(invoke_without_command=True)
+@click.pass_context
+def hooks(ctx: click.Context) -> None:
+    """Manage and test pipeline lifecycle hooks."""
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
+
+@hooks.command("test")
+@click.argument("event_name", required=False, default=None)
+@click.option("--all", "run_all", is_flag=True, help="Test all configured hook events.")
+def hooks_test(event_name: str | None, run_all: bool) -> None:
+    """Test hook configuration by executing hooks for an event.
+
+    Runs each hook for EVENT_NAME with real subprocess execution and displays
+    results including command, exit code, duration, and stdout preview.
+
+    Use --all to test every configured event.
+    """
+    from colonyos.hooks import HookContext, HookRunner
+
+    repo_root = _find_repo_root()
+    config = load_config(repo_root)
+
+    if not event_name and not run_all:
+        click.echo("Error: provide an event name or use --all.", err=True)
+        raise SystemExit(1)
+
+    if event_name and run_all:
+        click.echo("Error: cannot specify both an event name and --all.", err=True)
+        raise SystemExit(1)
+
+    if event_name and event_name not in VALID_HOOK_EVENTS:
+        click.echo(
+            f"Error: Invalid event '{event_name}'. "
+            f"Valid events: {', '.join(sorted(VALID_HOOK_EVENTS))}",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    if not config.hooks:
+        click.echo("No hooks configured in .colonyos/config.yaml.")
+        return
+
+    # Determine which events to test
+    events_to_test: list[str] = []
+    if run_all:
+        events_to_test = sorted(config.hooks.keys())
+    else:
+        assert event_name is not None
+        if event_name not in config.hooks:
+            click.echo(f"No hooks configured for event '{event_name}'.")
+            return
+        events_to_test = [event_name]
+
+    runner = HookRunner(config)
+    context = HookContext(
+        run_id="test",
+        phase=event_name or "test",
+        branch="test",
+        repo_root=repo_root,
+        status="testing",
+    )
+
+    any_blocking_failure = False
+
+    for event in events_to_test:
+        click.echo(click.style(f"\n── {event} ", bold=True) + "─" * max(0, 60 - len(event)))
+        results = runner.run_hooks(event, context)
+
+        if not results:
+            click.echo("  (no hooks)")
+            continue
+
+        for r in results:
+            status_str = click.style("✓ PASS", fg="green") if r.success else click.style("✗ FAIL", fg="red")
+            click.echo(f"  {status_str}  {r.command[:80]}")
+            click.echo(f"         exit={r.exit_code}  duration={r.duration_ms}ms  timed_out={r.timed_out}")
+            if r.stdout.strip():
+                preview = r.stdout.strip()[:200]
+                click.echo(f"         stdout: {preview}")
+            if r.stderr.strip():
+                preview = r.stderr.strip()[:200]
+                click.echo(f"         stderr: {preview}")
+
+            if not r.success and _is_hook_blocking(config, event, r.command):
+                any_blocking_failure = True
+
+    click.echo("")
+    if any_blocking_failure:
+        click.echo(click.style("Some blocking hooks failed.", fg="red"))
+        raise SystemExit(1)
+    else:
+        click.echo(click.style("All hooks passed.", fg="green"))
+
+
+def _is_hook_blocking(config: ColonyConfig, event: str, command: str) -> bool:
+    """Check if a hook command is configured as blocking for the given event."""
+    for hook in config.hooks.get(event, []):
+        if hook.command == command:
+            return hook.blocking
+    return True
+
+
 # colonyos cleanup — codebase hygiene & structural analysis
 # ---------------------------------------------------------------------------
 
