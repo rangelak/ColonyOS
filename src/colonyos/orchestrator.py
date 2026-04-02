@@ -53,6 +53,7 @@ from colonyos.recovery import (
     create_branch,
     incident_slug,
     preserve_and_reset_worktree,
+    pull_branch,
     recovery_dir_path,
     write_incident_summary,
 )
@@ -393,39 +394,15 @@ def _preflight_check(
             details={"branch_name": branch_name},
         )
 
-    # Check if main is behind origin/main
+    # Pull latest for the current branch instead of just fetching and warning.
     main_behind_count: int | None = None
-    fetch_succeeded = False
     if not offline:
-        try:
-            subprocess.run(
-                ["git", "fetch", "origin", "main"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                cwd=repo_root,
-            )
-            fetch_succeeded = True
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            warnings.append(f"Failed to fetch origin/main: {exc}")
-
-        if fetch_succeeded:
-            try:
-                result = subprocess.run(
-                    ["git", "rev-list", "--count", "main..origin/main"],
-                    capture_output=True,
-                    text=True,
-                    cwd=repo_root,
-                )
-                if result.returncode == 0 and result.stdout.strip().isdigit():
-                    main_behind_count = int(result.stdout.strip())
-                    if main_behind_count > 0:
-                        warnings.append(
-                            f"Local main is {main_behind_count} commit(s) behind origin/main. "
-                            "Consider running: git pull"
-                        )
-            except OSError:
-                pass
+        pull_ok, pull_err = pull_branch(repo_root)
+        if not pull_ok and pull_err is not None:
+            warnings.append(f"Failed to pull latest: {pull_err}")
+        if pull_ok:
+            # Pull succeeded — local branch is up-to-date, no behind count.
+            main_behind_count = 0
 
     action = "proceed"
     if force and (not is_clean or branch_exists):
@@ -4307,6 +4284,16 @@ def run(
                 raise PreflightError(
                     f"Timeout checking out base branch '{base_branch}'"
                 )
+
+            # Pull latest after checking out the base branch so the
+            # feature branch starts from up-to-date remote state.
+            if not offline:
+                pull_ok, pull_err = pull_branch(repo_root)
+                if not pull_ok and pull_err is not None:
+                    raise PreflightError(
+                        f"Failed to pull latest for base branch "
+                        f"'{base_branch}': {pull_err}"
+                    )
 
         # --- Pre-flight git state check ---
         preflight = _preflight_check(
