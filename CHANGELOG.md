@@ -19,6 +19,52 @@ Adds an inter-queue maintenance cycle to the daemon that runs between queue item
 **PRD:** `cOS_prds/20260402_003710_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
 **Tasks:** `cOS_tasks/20260402_003710_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
 
+## 20260402_071500 — Refactor daemon.py into daemon/ Package
+
+Converts the 2,655-line `daemon.py` monolith into a `daemon/` package using mixins, reducing the main file to ~1,960 lines while preserving all existing test mock targets and backward-compatible imports.
+
+**Created:**
+- `src/colonyos/daemon/__init__.py` — Main Daemon class with mixin inheritance
+- `src/colonyos/daemon/_ui.py` — Extracted `DaemonError`, `_CombinedUI`, `_DaemonMonitorEventUI`
+- `src/colonyos/daemon/_watchdog.py` — `_WatchdogMixin` for watchdog thread and stall detection
+- `src/colonyos/daemon/_resilience.py` — `_ResilienceMixin` for crash recovery and dirty worktree handling
+- `src/colonyos/daemon/_helpers.py` — `_HelpersMixin` for formatting and helper methods
+
+**Modified:**
+- `src/colonyos/daemon.py` — Replaced by `daemon/` package (deleted)
+
+**PRD:** `cOS_prds/20260402_054259_prd_colonyos_daemon_py_recovery_context_previous_branch_colonyos_colonyos_daemon_py.md`
+**Tasks:** `cOS_tasks/20260402_054259_tasks_colonyos_daemon_py_recovery_context_previous_branch_colonyos_colonyos_daemon_py.md`
+
+## 20260402_030000 — Task-Level Retry for Auto-Recovery
+
+Adds a task-level retry loop to `_run_sequential_implement()` that retries individual failed tasks with error context injected into the prompt, before falling through to the existing phase-level and nuke recovery cascade. This avoids re-executing already-committed successful tasks when only one task fails.
+
+**Modified:**
+- `src/colonyos/config.py` — Added `max_task_retries` field to `RecoveryConfig` with validation
+- `src/colonyos/orchestrator.py` — Added `_clean_working_tree()` helper, `previous_error` parameter to prompt builder, task-level retry loop with recovery event logging
+- `tests/test_config.py` — Tests for `max_task_retries` configuration and validation
+- `tests/test_sequential_implement.py` — Comprehensive unit tests for retry loop mechanics, git cleanup, error injection, dependent unblocking, and recovery event logging
+
+**PRD:** `cOS_prds/20260402_022155_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260402_022155_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
+## 20260402_015000 — Fix TUI Double Scrollbar, Auto-Scroll, and Text Selection
+
+Fixes three usability bugs in the daemon monitor and main TUI: eliminates the double scrollbar caused by a dead CSS selector and Screen-level overflow, implements smart auto-scroll that preserves the user's scroll position with a 3-line re-engagement threshold, adds a "new content below" indicator when scrolled up, and surfaces Shift+drag text selection hints.
+
+**Modified:**
+- `src/colonyos/tui/styles.py` — Fixed dead CSS selector `TranscriptView RichLog` → `TranscriptView`, added `overflow: hidden` to Screen
+- `src/colonyos/tui/widgets/transcript.py` — Disabled base `auto_scroll`, added scroll threshold re-engagement, unread lines indicator, fixed `_programmatic_scroll` timing
+- `src/colonyos/tui/widgets/hint_bar.py` — Added Shift+drag selection hint
+
+**Created:**
+- `tests/tui/test_transcript.py` — Tests for scroll behavior, unread counter, auto-scroll threshold
+- `tests/tui/test_app.py` — Integration tests for scroll behavior and monitor mode
+
+**PRD:** `cOS_prds/20260402_012507_prd_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+**Tasks:** `cOS_tasks/20260402_012507_tasks_you_are_a_code_assistant_working_on_behalf_of_the_engineering_team_the_following.md`
+
 ## 20260402_004500 — Auto-Pull Latest on Branch Switch
 
 Adds automatic `git pull --ff-only` at all pipeline entry points so that every new run starts from the latest remote state, eliminating stale-base merge conflicts and wasted CI minutes. A shared `pull_branch()` helper in `recovery.py` is used consistently across `restore_to_branch()`, orchestrator base-branch checkout, preflight checks, and `_ensure_on_main()`. Offline mode and thread-fix paths are correctly excluded.

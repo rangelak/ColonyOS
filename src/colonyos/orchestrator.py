@@ -331,6 +331,35 @@ def _get_head_sha(repo_root: Path) -> str:
         return ""
 
 
+def _clean_working_tree(repo_root: Path) -> None:
+    """Discard uncommitted changes and untracked files in *repo_root*.
+
+    Runs ``git checkout -- .`` followed by ``git clean -fd`` so that a failed
+    task's partial changes don't poison a retry attempt.  Logs a warning on
+    failure but does **not** raise — the retry should still proceed even if
+    cleanup is imperfect.
+    """
+    for cmd in (
+        ["git", "checkout", "--", "."],
+        ["git", "clean", "-fd"],
+    ):
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=repo_root,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "git cleanup command %s failed (rc=%d): %s",
+                    cmd, result.returncode, result.stderr.strip(),
+                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("git cleanup command %s raised: %s", cmd, exc)
+
+
 def _preflight_check(
     repo_root: Path,
     branch_name: str,
@@ -629,6 +658,7 @@ def _build_single_task_implement_prompt(
     branch_name: str,
     completed_tasks: list[str],
     repo_root: Path | None = None,
+    previous_error: str | None = None,
 ) -> tuple[str, str]:
     """Build system and user prompts scoped to a single task in sequential mode.
 
@@ -676,6 +706,16 @@ def _build_single_task_implement_prompt(
         f"Work on branch `{branch_name}`.\n\n"
         f"Focus exclusively on task {task_id}. Do not implement other tasks."
     )
+
+    if previous_error is not None:
+        truncated_error = previous_error[:config.recovery.incident_char_cap]
+        user += (
+            "\n\n## Previous Attempt Failed\n\n"
+            "The previous attempt to implement this task failed with the "
+            "following error. Fix the issue and try again.\n\n"
+            f"```\n{truncated_error}\n```"
+        )
+
     return system, user
 
 
@@ -827,149 +867,214 @@ def _run_sequential_implement(
             continue
 
         _log(f"Running task {task_id}: {task_desc}")
-        t0 = time.monotonic()
 
-        system, user = _build_single_task_implement_prompt(
-            config,
-            task_id=task_id,
-            task_description=task_desc,
-            prd_path=prd_rel,
-            task_path=task_rel,
-            branch_name=branch_name,
-            completed_tasks=[
-                f"{tid}: {task_descriptions.get(tid, tid)}" for tid in task_order if tid in completed
-            ],
-            repo_root=repo_root,
-        )
+        max_attempts = 1 + config.recovery.max_task_retries
+        previous_error: str | None = None
+        task_succeeded = False
 
-        # Inject repo map, semantic memory, and external context (Slack/GitHub)
-        system = _inject_repo_map(system, repo_map_text)
-        system = _inject_memory_block(system, memory_store, "implement", user, config)
-        user += _drain_injected_context(user_injection_provider)
+        for attempt in range(max_attempts):
+            t0 = time.monotonic()
 
-        ui = _make_ui()
-        if ui is not None:
-            safe_desc = sanitize_for_slack(sanitize_untrusted_content(task_desc))
-            short_desc = safe_desc[:_SLACK_TASK_DESC_MAX]
-            if len(safe_desc) > _SLACK_TASK_DESC_MAX:
-                short_desc = safe_desc[:_SLACK_TASK_DESC_MAX - 3] + "..."
-            ui.phase_header(
-                f"Implement [{task_id}] {short_desc}",
-                per_task_budget,
-                config.get_model(Phase.IMPLEMENT),
-                branch_name,
+            system, user = _build_single_task_implement_prompt(
+                config,
+                task_id=task_id,
+                task_description=task_desc,
+                prd_path=prd_rel,
+                task_path=task_rel,
+                branch_name=branch_name,
+                completed_tasks=[
+                    f"{tid}: {task_descriptions.get(tid, tid)}" for tid in task_order if tid in completed
+                ],
+                repo_root=repo_root,
+                previous_error=previous_error,
             )
 
-        try:
-            result = run_phase_sync(
-                Phase.IMPLEMENT,
-                user,
-                cwd=repo_root,
-                system_prompt=system,
-                model=config.get_model(Phase.IMPLEMENT),
-                budget_usd=per_task_budget,
-                ui=ui,
-                retry_config=config.retry,
-                timeout_seconds=config.budget.phase_timeout_seconds,
-            )
-        except Exception as exc:
-            _log(f"Task {task_id} raised exception: {exc}")
-            failed.add(task_id)
+            # Inject repo map, semantic memory, and external context (Slack/GitHub)
+            system = _inject_repo_map(system, repo_map_text)
+            system = _inject_memory_block(system, memory_store, "implement", user, config)
+            user += _drain_injected_context(user_injection_provider)
+
+            ui = _make_ui()
+            if ui is not None:
+                safe_desc_ui = sanitize_for_slack(sanitize_untrusted_content(task_desc))
+                short_desc = safe_desc_ui[:_SLACK_TASK_DESC_MAX]
+                if len(safe_desc_ui) > _SLACK_TASK_DESC_MAX:
+                    short_desc = safe_desc_ui[:_SLACK_TASK_DESC_MAX - 3] + "..."
+                retry_label = f" (retry {attempt})" if attempt > 0 else ""
+                ui.phase_header(
+                    f"Implement [{task_id}] {short_desc}{retry_label}",
+                    per_task_budget,
+                    config.get_model(Phase.IMPLEMENT),
+                    branch_name,
+                )
+
+            try:
+                result = run_phase_sync(
+                    Phase.IMPLEMENT,
+                    user,
+                    cwd=repo_root,
+                    system_prompt=system,
+                    model=config.get_model(Phase.IMPLEMENT),
+                    budget_usd=per_task_budget,
+                    ui=ui,
+                    retry_config=config.retry,
+                    timeout_seconds=config.budget.phase_timeout_seconds,
+                )
+            except Exception as exc:
+                _log(f"Task {task_id} raised exception: {exc}")
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                total_duration_ms += elapsed_ms
+                error_str = str(exc)
+
+                if attempt < config.recovery.max_task_retries:
+                    _clean_working_tree(repo_root)
+                    _record_recovery_event(
+                        log,
+                        kind="task_retry",
+                        details={
+                            "task_id": task_id,
+                            "attempt": attempt + 1,
+                            "error": error_str,
+                            "success": False,
+                        },
+                    )
+                    _log(
+                        f"Task {task_id} retry {attempt + 1}/{config.recovery.max_task_retries} "
+                        f"after exception"
+                    )
+                    previous_error = error_str
+                    continue
+
+                failed.add(task_id)
+                task_results[task_id] = {
+                    "status": "FAILED",
+                    "error": error_str,
+                    "description": task_desc,
+                    "duration_ms": elapsed_ms,
+                }
+                overall_success = False
+                break
+
             elapsed_ms = int((time.monotonic() - t0) * 1000)
-            task_results[task_id] = {
-                "status": "FAILED",
-                "error": str(exc),
-                "description": task_desc,
-                "duration_ms": elapsed_ms,
-            }
-            overall_success = False
-            continue
+            task_cost = result.cost_usd or 0.0
+            total_cost += task_cost
+            total_duration_ms += elapsed_ms
 
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        task_cost = result.cost_usd or 0.0
-        total_cost += task_cost
-        total_duration_ms += elapsed_ms
-
-        if result.success:
-            # Selective staging: get changed files, filter out secrets
-            diff_result = subprocess.run(
-                ["git", "diff", "--name-only"],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            untracked_result = subprocess.run(
-                ["git", "ls-files", "--others", "--exclude-standard"],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if diff_result.returncode != 0:
-                _log(f"Task {task_id}: git diff failed (rc={diff_result.returncode}): {diff_result.stderr.strip()}")
-            if untracked_result.returncode != 0:
-                _log(f"Task {task_id}: git ls-files failed (rc={untracked_result.returncode}): {untracked_result.stderr.strip()}")
-            changed_files = [
-                f.strip()
-                for f in (
-                    (diff_result.stdout.splitlines() if diff_result.returncode == 0 else [])
-                    + (untracked_result.stdout.splitlines() if untracked_result.returncode == 0 else [])
-                )
-                if f.strip()
-            ]
-            # Filter out sensitive files
-            safe_files = [f for f in changed_files if not _is_secret_like_path(f)]
-            secret_files = [f for f in changed_files if _is_secret_like_path(f)]
-            if secret_files:
-                _log(
-                    f"Task {task_id}: skipping {len(secret_files)} "
-                    f"sensitive file(s) from staging: {secret_files}"
-                )
-
-            # Audit trail: log what files this task modified
-            if safe_files:
-                _log(f"Task {task_id} modified {len(safe_files)} file(s): {safe_files}")
-
-            if safe_files:
-                subprocess.run(
-                    ["git", "add", "--"] + safe_files,
+            if result.success:
+                # Selective staging: get changed files, filter out secrets
+                diff_result = subprocess.run(
+                    ["git", "diff", "--name-only"],
                     cwd=repo_root,
                     capture_output=True,
+                    text=True,
                     timeout=30,
                 )
-            safe_desc = sanitize_untrusted_content(task_desc)
-            commit_result = subprocess.run(
-                ["git", "commit", "-m", f"Implement task {task_id}: {safe_desc}"],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if commit_result.returncode == 0:
-                _log(f"Task {task_id} completed and committed")
-            else:
-                # Nothing to commit is fine (agent may have already committed)
-                _log(f"Task {task_id} completed (no new changes to commit)")
+                untracked_result = subprocess.run(
+                    ["git", "ls-files", "--others", "--exclude-standard"],
+                    cwd=repo_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if diff_result.returncode != 0:
+                    _log(f"Task {task_id}: git diff failed (rc={diff_result.returncode}): {diff_result.stderr.strip()}")
+                if untracked_result.returncode != 0:
+                    _log(f"Task {task_id}: git ls-files failed (rc={untracked_result.returncode}): {untracked_result.stderr.strip()}")
+                changed_files = [
+                    f.strip()
+                    for f in (
+                        (diff_result.stdout.splitlines() if diff_result.returncode == 0 else [])
+                        + (untracked_result.stdout.splitlines() if untracked_result.returncode == 0 else [])
+                    )
+                    if f.strip()
+                ]
+                # Filter out sensitive files
+                safe_files = [f for f in changed_files if not _is_secret_like_path(f)]
+                secret_files = [f for f in changed_files if _is_secret_like_path(f)]
+                if secret_files:
+                    _log(
+                        f"Task {task_id}: skipping {len(secret_files)} "
+                        f"sensitive file(s) from staging: {secret_files}"
+                    )
 
-            completed.add(task_id)
-            task_results[task_id] = {
-                "status": "COMPLETED",
-                "cost_usd": task_cost,
-                "duration_ms": elapsed_ms,
-                "description": task_desc,
-            }
-        else:
+                # Audit trail: log what files this task modified
+                if safe_files:
+                    _log(f"Task {task_id} modified {len(safe_files)} file(s): {safe_files}")
+
+                if safe_files:
+                    subprocess.run(
+                        ["git", "add", "--"] + safe_files,
+                        cwd=repo_root,
+                        capture_output=True,
+                        timeout=30,
+                    )
+                safe_desc = sanitize_untrusted_content(task_desc)
+                commit_result = subprocess.run(
+                    ["git", "commit", "-m", f"Implement task {task_id}: {safe_desc}"],
+                    cwd=repo_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if commit_result.returncode == 0:
+                    _log(f"Task {task_id} completed and committed")
+                else:
+                    # Nothing to commit is fine (agent may have already committed)
+                    _log(f"Task {task_id} completed (no new changes to commit)")
+
+                completed.add(task_id)
+                task_results[task_id] = {
+                    "status": "COMPLETED",
+                    "cost_usd": task_cost,
+                    "duration_ms": elapsed_ms,
+                    "description": task_desc,
+                }
+                task_succeeded = True
+                break
+            else:
+                # Task failed — retry if attempts remain
+                if attempt < config.recovery.max_task_retries:
+                    _clean_working_tree(repo_root)
+                    _record_recovery_event(
+                        log,
+                        kind="task_retry",
+                        details={
+                            "task_id": task_id,
+                            "attempt": attempt + 1,
+                            "error": result.error or "unknown",
+                            "success": False,
+                        },
+                    )
+                    _log(
+                        f"Task {task_id} retry {attempt + 1}/{config.recovery.max_task_retries} "
+                        f"after failure: {result.error}"
+                    )
+                    previous_error = result.error or "unknown"
+                    continue
+
+                # All retries exhausted
+                failed.add(task_id)
+                task_results[task_id] = {
+                    "status": "FAILED",
+                    "error": result.error or "unknown",
+                    "cost_usd": task_cost,
+                    "duration_ms": elapsed_ms,
+                    "description": task_desc,
+                }
+                overall_success = False
+                _log(f"Task {task_id} failed: {result.error}")
+
+        if not task_succeeded and task_id not in failed:
+            # Safety net: if loop exited without marking task
             failed.add(task_id)
-            task_results[task_id] = {
+            task_results.setdefault(task_id, {
                 "status": "FAILED",
-                "error": result.error or "unknown",
-                "cost_usd": task_cost,
-                "duration_ms": elapsed_ms,
+                "error": "task did not complete (safety net)",
+                "cost_usd": 0.0,
+                "duration_ms": 0,
                 "description": task_desc,
-            }
+            })
             overall_success = False
-            _log(f"Task {task_id} failed: {result.error}")
 
     # Build merged PhaseResult
     artifacts = {
