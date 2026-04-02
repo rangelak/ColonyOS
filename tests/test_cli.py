@@ -32,7 +32,7 @@ from colonyos.cli import (
     _save_loop_state,
     _resolve_latest_prd_path,
 )
-from colonyos.config import ColonyConfig, BudgetConfig, save_config
+from colonyos.config import ColonyConfig, BudgetConfig, HookConfig, save_config
 from colonyos.models import (
     LoopState, LoopStatus, Persona, Phase, PhaseResult,
     PreflightError, ProjectInfo, QueueItem, QueueItemStatus, RunLog, RunStatus,
@@ -3948,6 +3948,81 @@ class TestFixCompletionReactions:
 
         # Should not raise
         self._simulate_fix_completion_reactions(client, "C1", "ts1", RunStatus.COMPLETED)
+
+
+class TestHooksTestCommand:
+    """Tests for ``colonyos hooks test`` CLI command."""
+
+    def _make_hooks_config(self, tmp_path: Path, hooks: dict) -> ColonyConfig:
+        config = ColonyConfig(
+            project=ProjectInfo(name="Test", description="test", stack="Python"),
+            personas=[Persona(role="Engineer", expertise="Backend", perspective="Scale")],
+            hooks=hooks,
+        )
+        save_config(tmp_path, config)
+        return config
+
+    def test_valid_event_shows_results(self, runner: CliRunner, tmp_path: Path):
+        """Test with valid event name shows hook execution results."""
+        self._make_hooks_config(tmp_path, {
+            "pre_plan": [HookConfig(command="echo hello", blocking=False)],
+        })
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.hooks.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="hello\n", stderr="",
+            )
+            result = runner.invoke(app, ["hooks", "test", "pre_plan"])
+        assert result.exit_code == 0
+        assert "echo hello" in result.output
+        assert "pre_plan" in result.output
+
+    def test_invalid_event_shows_error(self, runner: CliRunner, tmp_path: Path):
+        """Test with invalid event name shows error."""
+        self._make_hooks_config(tmp_path, {
+            "pre_plan": [HookConfig(command="echo hello")],
+        })
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["hooks", "test", "bad_event"])
+        assert result.exit_code != 0
+        assert "Invalid event" in result.output or "invalid" in result.output.lower()
+
+    def test_no_hooks_configured_shows_message(self, runner: CliRunner, tmp_path: Path):
+        """Test with no hooks configured shows informative message."""
+        self._make_hooks_config(tmp_path, {})
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path):
+            result = runner.invoke(app, ["hooks", "test", "pre_plan"])
+        assert result.exit_code == 0
+        assert "no hooks" in result.output.lower() or "No hooks" in result.output
+
+    def test_all_flag_runs_all_events(self, runner: CliRunner, tmp_path: Path):
+        """Test --all flag runs all configured events."""
+        self._make_hooks_config(tmp_path, {
+            "pre_plan": [HookConfig(command="echo plan")],
+            "post_implement": [HookConfig(command="echo impl")],
+        })
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.hooks.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="ok\n", stderr="",
+            )
+            result = runner.invoke(app, ["hooks", "test", "--all"])
+        assert result.exit_code == 0
+        assert "pre_plan" in result.output
+        assert "post_implement" in result.output
+
+    def test_blocking_hook_failure_nonzero_exit(self, runner: CliRunner, tmp_path: Path):
+        """Test exit code is non-zero when a blocking hook fails."""
+        self._make_hooks_config(tmp_path, {
+            "pre_plan": [HookConfig(command="false", blocking=True)],
+        })
+        with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
+             patch("colonyos.hooks.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=1, stdout="", stderr="error",
+            )
+            result = runner.invoke(app, ["hooks", "test", "pre_plan"])
+        assert result.exit_code != 0
 
 
 class TestEnsureOnMain:

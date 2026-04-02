@@ -11,7 +11,9 @@ from colonyos.config import (
     BudgetConfig,
     DaemonConfig,
     DEFAULTS,
+    HookConfig,
     LearningsConfig,
+    MAX_HOOK_TIMEOUT_SECONDS,
     PhasesConfig,
     PRSyncConfig,
     RecoveryConfig,
@@ -19,9 +21,11 @@ from colonyos.config import (
     RetryConfig,
     RouterConfig,
     SlackConfig,
+    VALID_HOOK_EVENTS,
     VerifyConfig,
     VALID_MODELS,
     _SAFETY_CRITICAL_PHASES,
+    _parse_hooks_config,
     load_config,
     save_config,
 )
@@ -2021,6 +2025,187 @@ class TestSlackDailyThreadConfig:
         assert config.slack.notification_mode == "daily"
         assert config.slack.daily_thread_hour == 8
         assert config.slack.daily_thread_timezone == "UTC"
+
+
+class TestHookConfig:
+    """Tests for HookConfig data model, parsing, and serialization (Task 1.0)."""
+
+    def test_hook_config_defaults(self):
+        hc = HookConfig(command="echo hi")
+        assert hc.command == "echo hi"
+        assert hc.blocking is True
+        assert hc.inject_output is False
+        assert hc.timeout_seconds == 30
+
+    def test_valid_hook_events_contains_all_nine(self):
+        expected = {
+            "pre_plan", "post_plan",
+            "pre_implement", "post_implement",
+            "pre_review", "post_review",
+            "pre_deliver", "post_deliver",
+            "on_failure",
+        }
+        assert VALID_HOOK_EVENTS == expected
+
+    def test_max_hook_timeout_is_600(self):
+        assert MAX_HOOK_TIMEOUT_SECONDS == 600
+
+
+class TestParseHooksConfig:
+    """Tests for _parse_hooks_config and integration with load_config/save_config."""
+
+    def test_parses_hooks_with_all_fields(self):
+        raw = {
+            "pre_plan": [
+                {
+                    "command": "npm run lint",
+                    "blocking": False,
+                    "inject_output": True,
+                    "timeout_seconds": 60,
+                }
+            ]
+        }
+        hooks = _parse_hooks_config(raw)
+        assert "pre_plan" in hooks
+        assert len(hooks["pre_plan"]) == 1
+        h = hooks["pre_plan"][0]
+        assert h.command == "npm run lint"
+        assert h.blocking is False
+        assert h.inject_output is True
+        assert h.timeout_seconds == 60
+
+    def test_default_values_applied(self):
+        raw = {"post_implement": [{"command": "echo done"}]}
+        hooks = _parse_hooks_config(raw)
+        h = hooks["post_implement"][0]
+        assert h.blocking is True
+        assert h.inject_output is False
+        assert h.timeout_seconds == 30
+
+    def test_invalid_event_name_raises(self):
+        raw = {"pre_unknown": [{"command": "echo hi"}]}
+        with pytest.raises(ValueError, match="Invalid hook event 'pre_unknown'"):
+            _parse_hooks_config(raw)
+
+    def test_timeout_capped_at_hard_limit(self):
+        raw = {"on_failure": [{"command": "notify.sh", "timeout_seconds": 9999}]}
+        hooks = _parse_hooks_config(raw)
+        assert hooks["on_failure"][0].timeout_seconds == MAX_HOOK_TIMEOUT_SECONDS
+
+    def test_timeout_minimum_clamped_to_1(self):
+        raw = {"on_failure": [{"command": "notify.sh", "timeout_seconds": 0}]}
+        hooks = _parse_hooks_config(raw)
+        assert hooks["on_failure"][0].timeout_seconds == 1
+
+    def test_empty_hooks_section_returns_empty_dict(self):
+        assert _parse_hooks_config({}) == {}
+        assert _parse_hooks_config(None) == {}
+
+    def test_skips_entry_with_empty_command(self):
+        raw = {
+            "pre_plan": [
+                {"command": ""},
+                {"command": "real_cmd"},
+            ]
+        }
+        hooks = _parse_hooks_config(raw)
+        assert len(hooks["pre_plan"]) == 1
+        assert hooks["pre_plan"][0].command == "real_cmd"
+
+    def test_skips_entry_with_missing_command(self):
+        raw = {"pre_plan": [{"blocking": True}]}
+        hooks = _parse_hooks_config(raw)
+        assert "pre_plan" not in hooks
+
+    def test_skips_non_dict_entry(self):
+        raw = {"pre_plan": ["just a string"]}
+        hooks = _parse_hooks_config(raw)
+        assert "pre_plan" not in hooks
+
+    def test_multiple_events_multiple_hooks(self):
+        raw = {
+            "pre_plan": [{"command": "lint"}, {"command": "check"}],
+            "post_deliver": [{"command": "notify"}],
+        }
+        hooks = _parse_hooks_config(raw)
+        assert len(hooks["pre_plan"]) == 2
+        assert len(hooks["post_deliver"]) == 1
+
+    def test_colony_config_defaults_to_empty_hooks(self, tmp_repo: Path):
+        config = load_config(tmp_repo)
+        assert config.hooks == {}
+
+    @pytest.fixture
+    def tmp_repo(self, tmp_path: Path) -> Path:
+        return tmp_path
+
+    def test_hooks_loaded_from_yaml(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({
+                "hooks": {
+                    "pre_implement": [
+                        {"command": "npm run lint:fix", "blocking": True},
+                    ],
+                    "on_failure": [
+                        {"command": "slack-notify.sh", "blocking": False, "timeout_seconds": 10},
+                    ],
+                }
+            }),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert len(config.hooks) == 2
+        assert config.hooks["pre_implement"][0].command == "npm run lint:fix"
+        assert config.hooks["on_failure"][0].blocking is False
+        assert config.hooks["on_failure"][0].timeout_seconds == 10
+
+    def test_invalid_event_in_yaml_raises(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"hooks": {"bogus_event": [{"command": "echo"}]}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Invalid hook event"):
+            load_config(tmp_repo)
+
+    def test_hooks_round_trip_save_load(self, tmp_repo: Path):
+        original = ColonyConfig(
+            hooks={
+                "pre_plan": [
+                    HookConfig(command="lint.sh", blocking=True, inject_output=False, timeout_seconds=30),
+                ],
+                "post_deliver": [
+                    HookConfig(command="notify.sh", blocking=False, inject_output=True, timeout_seconds=120),
+                ],
+            }
+        )
+        save_config(tmp_repo, original)
+        loaded = load_config(tmp_repo)
+        assert len(loaded.hooks) == 2
+        assert loaded.hooks["pre_plan"][0].command == "lint.sh"
+        assert loaded.hooks["pre_plan"][0].blocking is True
+        assert loaded.hooks["post_deliver"][0].inject_output is True
+        assert loaded.hooks["post_deliver"][0].timeout_seconds == 120
+
+    def test_empty_hooks_not_persisted(self, tmp_repo: Path):
+        original = ColonyConfig(hooks={})
+        save_config(tmp_repo, original)
+        config_path = tmp_repo / ".colonyos" / "config.yaml"
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "hooks" not in raw
+
+    def test_no_hooks_yaml_produces_empty_dict(self, tmp_repo: Path):
+        config_dir = tmp_repo / ".colonyos"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"model": "opus"}),
+            encoding="utf-8",
+        )
+        config = load_config(tmp_repo)
+        assert config.hooks == {}
 
 
 class TestVerifyConfig:

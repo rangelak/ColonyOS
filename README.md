@@ -282,6 +282,13 @@ flowchart TD
 | `colonyos ci-fix PR --wait` | Fix, then wait for CI re-run to pass |
 | `colonyos ci-fix PR --max-retries N` | Retry the fix-push-wait cycle up to N times |
 
+### Hooks
+
+| Command | Description |
+|---|---|
+| `colonyos hooks test EVENT` | Run configured lifecycle hooks for a specific event |
+| `colonyos hooks test --all` | Run hooks for every configured event |
+
 ### PR review auto-fix
 
 | Command | Description |

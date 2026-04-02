@@ -4,6 +4,7 @@ import inspect
 import json
 import logging
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -17,7 +18,8 @@ import click
 from claude_agent_sdk import AgentDefinition
 
 from colonyos.agent import run_phase_sync, run_phases_parallel_sync
-from colonyos.config import ColonyConfig, runs_dir_path
+from colonyos.config import ColonyConfig, HookConfig, runs_dir_path
+from colonyos.hooks import HookContext, HookResult, HookRunner
 from colonyos.dag import TaskDAG, parse_task_file
 from colonyos.models import TaskStatus
 from colonyos.parallel_orchestrator import (
@@ -2405,6 +2407,73 @@ def _drain_injected_context(
     )
 
 
+class _HookFailureSentinel:
+    """Typed sentinel indicating a blocking hook failure.
+
+    Using a dedicated class instead of a bare ``object()`` gives
+    ``_run_hooks_at`` a meaningful return type annotation.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<_HookFailureSentinel>"
+
+
+_HOOK_FAILURE_SENTINEL = _HookFailureSentinel()
+
+
+def _run_hooks_at(
+    hook_runner: HookRunner | None,
+    event: str,
+    context: HookContext,
+) -> str | None | _HookFailureSentinel:
+    """Execute hooks for *event* and return any injected output text.
+
+    Returns:
+        - ``None`` if no hooks were executed or no output was injected.
+        - A ``str`` with concatenated injected output from hooks that set
+          ``inject_output=True``.
+        - ``_HOOK_FAILURE_SENTINEL`` when a **blocking** hook failed.  The
+          caller is responsible for running ``on_failure`` hooks and halting.
+    """
+    if hook_runner is None:
+        return None
+
+    results = hook_runner.run_hooks(event, context)
+    if not results:
+        return None
+
+    # Check for blocking failure using the blocking field on HookResult
+    for result in results:
+        if not result.success and result.blocking:
+            return _HOOK_FAILURE_SENTINEL
+
+    # Collect injected output
+    injected_parts: list[str] = []
+    for r in results:
+        if r.injected_output:
+            injected_parts.append(r.injected_output)
+
+    if injected_parts:
+        return "\n".join(injected_parts)
+    return None
+
+
+def _format_hook_injection(text: str, nonce: str | None = None) -> str:
+    """Wrap hook output for injection into a phase prompt.
+
+    Uses a nonce-tagged delimiter to prevent hook output from spoofing
+    the delimiter boundary (FR-2.7).
+    """
+    tag = nonce or secrets.token_hex(8)
+    return (
+        f"\n\n<hook_output nonce=\"{tag}\">\n"
+        f"{text}\n"
+        f"</hook_output>\n"
+    )
+
+
 _LEARNING_ENTRY_RE = re.compile(r"^- \*\*\[([a-z-]+)\]\*\*\s+(.+)$", re.MULTILINE)
 
 VALID_CATEGORIES = {"code-quality", "testing", "architecture", "security", "style"}
@@ -4417,6 +4486,11 @@ def run(
     log.prd_rel = prd_rel
     log.task_rel = task_rel
 
+    # Construct HookRunner only when hooks are configured (zero overhead otherwise)
+    hook_runner: HookRunner | None = None
+    if config.hooks:
+        hook_runner = HookRunner(config)
+
     try:
         return _run_pipeline(
             log=log,
@@ -4438,6 +4512,7 @@ def run(
             _make_ui=_make_ui,
             memory_store=memory_store,
             nuke_depth=_nuke_depth,
+            hook_runner=hook_runner,
         )
     except KeyboardInterrupt:
         _log("Interrupted — saving run state...")
@@ -4502,9 +4577,67 @@ def _run_pipeline(
     _make_ui: Callable[..., PhaseUI | NullUI | None],
     memory_store: MemoryStore | None = None,
     nuke_depth: int = 0,
+    hook_runner: HookRunner | None = None,
 ) -> RunLog:
     """Execute the pipeline phases. Extracted from run() for try/finally branch rollback."""
     try:
+        # Accumulated hook injection text that will be appended to the next phase prompt.
+        _hook_injected_text: list[str] = []
+
+        # Maximum aggregate size for hook injection text (prevents prompt bloat).
+        _MAX_HOOK_INJECTION_BYTES = 32768  # 32KB aggregate cap
+
+        def _hooks_at(event: str, *, status: str = "running") -> bool:
+            """Run hooks for *event*; return False on blocking failure (caller should halt)."""
+            if hook_runner is None:
+                return True
+            ctx = HookContext(
+                run_id=log.run_id,
+                phase=event,
+                branch=branch_name,
+                repo_root=repo_root,
+                status=status,
+            )
+            result = _run_hooks_at(hook_runner, event, ctx)
+            if result is _HOOK_FAILURE_SENTINEL:
+                # Don't call run_on_failure() here — _fail_pipeline() is the
+                # single owner of failure-hook dispatch.  Calling it in both
+                # places causes on_failure hooks to fire twice.
+                return False
+            if isinstance(result, str):
+                # Enforce aggregate cap on injected text to prevent prompt bloat
+                current_size = sum(len(t.encode("utf-8")) for t in _hook_injected_text)
+                result_size = len(result.encode("utf-8"))
+                if current_size + result_size <= _MAX_HOOK_INJECTION_BYTES:
+                    _hook_injected_text.append(result)
+                else:
+                    logger.warning(
+                        "Hook injection text exceeded %d byte aggregate cap, discarding output from %s",
+                        _MAX_HOOK_INJECTION_BYTES,
+                        event,
+                    )
+            return True
+
+        def _drain_hook_output() -> str:
+            """Consume and format accumulated hook injection text."""
+            if not _hook_injected_text:
+                return ""
+            text = "\n".join(_hook_injected_text)
+            _hook_injected_text.clear()
+            return _format_hook_injection(text)
+
+        def _fail_pipeline(reason: str) -> RunLog:
+            """Fail the pipeline and run on_failure hooks before persisting."""
+            if hook_runner is not None:
+                failure_ctx = HookContext(
+                    run_id=log.run_id,
+                    phase="on_failure",
+                    branch=branch_name,
+                    repo_root=repo_root,
+                    status="failed",
+                )
+                hook_runner.run_on_failure(failure_ctx)
+            return _fail_run_log(repo_root, log, reason)
 
         # Generate repo map once for the entire pipeline run (FR-15).
         # The prompt text is passed for relevance ranking (FR-8, Task 5.5).
@@ -4577,7 +4710,7 @@ def _run_pipeline(
                 },
             )
             _save_run_log(repo_root, log)
-            _fail_run_log(repo_root, log, f"Escalating to nuke recovery from {failed_phase.value}")
+            _fail_pipeline(f"Escalating to nuke recovery from {failed_phase.value}")
 
             recovery_prompt = (
                 f"{prompt}\n\n"
@@ -4693,6 +4826,9 @@ def _run_pipeline(
             prd_stem = Path(from_prd).stem
             task_rel = f"{config.tasks_dir}/{prd_stem.replace('_prd_', '_tasks_')}.md"
         else:
+            if not _hooks_at("pre_plan"):
+                _fail_pipeline("Pipeline halted: pre_plan hook failed")
+                return log
             plan_ui = _make_ui()
             if plan_ui is not None:
                 extra = ""
@@ -4715,6 +4851,7 @@ def _run_pipeline(
             )
             system = _inject_repo_map(system, repo_map_text)
             system = _inject_memory_block(system, memory_store, "plan", user, config)
+            user += _drain_hook_output()
             plan_result = run_phase_sync(
                 Phase.PLAN,
                 user,
@@ -4732,9 +4869,13 @@ def _run_pipeline(
 
             if not plan_result.success:
                 if plan_ui is None:
-                    _fail_run_log(repo_root, log, f"Plan phase failed: {plan_result.error}")
+                    _fail_pipeline(f"Plan phase failed: {plan_result.error}")
                 else:
-                    _fail_run_log(repo_root, log, "Plan phase failed")
+                    _fail_pipeline("Plan phase failed")
+                return log
+
+            if not _hooks_at("post_plan"):
+                _fail_pipeline("Pipeline halted: post_plan hook failed")
                 return log
 
         if plan_only:
@@ -4749,6 +4890,10 @@ def _run_pipeline(
         if "implement" in skip_phases:
             _log("Skipping implement phase (already completed in previous run)")
         else:
+            if not _hooks_at("pre_implement"):
+                _fail_pipeline("Pipeline halted: pre_implement hook failed")
+                return log
+
             impl_ui = _make_ui()
             if impl_ui is not None:
                 impl_ui.phase_header("Implement", config.budget.per_phase, config.get_model(Phase.IMPLEMENT), branch_name)
@@ -4840,6 +4985,7 @@ def _run_pipeline(
                 system = _inject_repo_map(system, repo_map_text)
                 system = _inject_memory_block(system, memory_store, "implement", user, config)
                 user += _drain_injected_context(user_injection_provider)
+                user += _drain_hook_output()
                 attempt_result = run_phase_sync(
                     Phase.IMPLEMENT,
                     user,
@@ -4868,16 +5014,24 @@ def _run_pipeline(
                     return recovery_log
                 if recovered_result is None:
                     if impl_ui is None:
-                        _fail_run_log(repo_root, log, f"Implement phase failed: {impl_result.error}")
+                        _fail_pipeline(f"Implement phase failed: {impl_result.error}")
                     else:
-                        _fail_run_log(repo_root, log, "Implement phase failed")
+                        _fail_pipeline("Implement phase failed")
                     return log
+
+            if not _hooks_at("post_implement"):
+                _fail_pipeline("Pipeline halted: post_implement hook failed")
+                return log
 
         # --- Phase 3: Review/Fix Loop ---
         _touch_heartbeat(repo_root)
         if "review" in skip_phases:
             _log("Skipping review phase (already completed in previous run)")
         elif config.phases.review:
+            if not _hooks_at("pre_review"):
+                _fail_pipeline("Pipeline halted: pre_review hook failed")
+                return log
+
             reviewers = reviewer_personas(config)
             if not reviewers:
                 _log("No reviewer personas configured, skipping review phase")
@@ -5069,11 +5223,15 @@ def _run_pipeline(
 
                 if verdict == "NO-GO":
                     _run_learn_phase(config, repo_root, log, prompt, _make_ui, memory_store=memory_store)
-                    _fail_run_log(repo_root, log, "Decision gate: NO-GO. Pipeline stopped before deliver.")
+                    _fail_pipeline("Decision gate: NO-GO. Pipeline stopped before deliver.")
                     return log
 
                 if verdict == "UNKNOWN":
                     _log("  Warning: could not parse verdict, proceeding with caution")
+
+            if not _hooks_at("post_review"):
+                _fail_pipeline("Pipeline halted: post_review hook failed")
+                return log
 
         # --- Learn Phase ---
         _run_learn_phase(config, repo_root, log, prompt, _make_ui, memory_store=memory_store)
@@ -5203,6 +5361,10 @@ def _run_pipeline(
         # --- Deliver Phase ---
         _touch_heartbeat(repo_root)
         if config.phases.deliver:
+            if not _hooks_at("pre_deliver"):
+                _fail_pipeline("Pipeline halted: pre_deliver hook failed")
+                return log
+
             deliver_ui = _make_ui()
             if deliver_ui is not None:
                 deliver_ui.phase_header("Deliver", config.budget.per_phase, config.get_model(Phase.DELIVER))
@@ -5218,6 +5380,7 @@ def _run_pipeline(
                 )
                 system = _inject_repo_map(system, repo_map_text)
                 user += _drain_injected_context(user_injection_provider)
+                user += _drain_hook_output()
                 return run_phase_sync(
                     Phase.DELIVER,
                     user,
@@ -5250,15 +5413,19 @@ def _run_pipeline(
                     return recovery_log
                 if recovered_result is None:
                     if deliver_ui is None:
-                        _fail_run_log(repo_root, log, f"Deliver phase failed: {deliver_result.error}")
+                        _fail_pipeline(f"Deliver phase failed: {deliver_result.error}")
                     else:
-                        _fail_run_log(repo_root, log, "Deliver phase failed")
+                        _fail_pipeline("Deliver phase failed")
                     return log
                 recovered_pr_url = recovered_result.artifacts.get("pr_url", "")
                 if recovered_pr_url:
                     log.pr_url = recovered_pr_url
                     # Register the recovered PR for outcome tracking (non-blocking)
                     _register_pr_outcome(repo_root, log.run_id, recovered_pr_url, branch_name)
+
+            if not _hooks_at("post_deliver"):
+                _fail_pipeline("Pipeline halted: post_deliver hook failed")
+                return log
 
         # --- CI Fix Phase (post-deliver) ---
         if config.ci_fix.enabled and config.phases.deliver:
