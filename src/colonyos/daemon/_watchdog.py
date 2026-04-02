@@ -5,9 +5,15 @@ import logging
 import sys
 import time
 import threading
-from typing import Any
+from collections.abc import Callable
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from colonyos.tui.monitor_protocol import encode_monitor_event
+
+if TYPE_CHECKING:
+    from colonyos.config import DaemonConfig
+    from colonyos.models import QueueItem
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +40,18 @@ class _WatchdogMixin:
     the daemon package namespace at call time so that ``unittest.mock.patch``
     substitutions take effect.
     """
+
+    repo_root: Path
+    daemon_config: DaemonConfig
+    _watchdog_thread: threading.Thread | None
+    _stop_event: threading.Event
+    _lock: threading.Lock
+    _pipeline_running: bool
+    _pipeline_started_at: float | None
+    _pipeline_stalled: bool
+    _current_running_item: QueueItem | None
+    _persist_queue: Callable[[], None]
+    _post_slack_message: Callable[[str], None]
 
     def _start_watchdog_thread(self) -> None:
         """Start the watchdog thread that detects stuck pipelines."""

@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from typing import Any, Literal
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Literal
 
 from pathlib import Path
 
-from colonyos.models import PreflightError, QueueItem, QueueItemStatus
+from colonyos.models import PreflightError, QueueItem, QueueItemStatus, QueueState
+
+if TYPE_CHECKING:
+    from colonyos.config import DaemonConfig
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,12 @@ class _ResilienceMixin:
     ``from colonyos.orchestrator import ...``) keep those imports inside the
     method body to avoid circular import issues.
     """
+
+    repo_root: Path
+    daemon_config: DaemonConfig
+    _queue_state: QueueState
+    _persist_queue: Callable[[], None]
+    _record_runtime_incident: Callable[..., Path | None]
 
     def _recover_from_crash(self) -> None:
         """Scan for orphaned RUNNING items and mark them as FAILED."""

@@ -10,15 +10,27 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from colonyos.config import ColonyConfig
+
+if TYPE_CHECKING:
+    from colonyos.config import DaemonConfig
+    from colonyos.daemon_state import DaemonState
 
 logger = logging.getLogger(__name__)
 
 
 class _HelpersMixin:
     """Mixin providing helper/formatting methods for Daemon."""
+
+    # Attributes supplied by the concrete Daemon class.
+    daily_budget: float | None
+    daemon_config: DaemonConfig
+    repo_root: Path
+    _state: DaemonState
+    _last_budget_incident_date: str | None
+    _recent_failure_codes: list[str]
 
     @staticmethod
     def _warn_all_mode_safety(config: ColonyConfig) -> None:
