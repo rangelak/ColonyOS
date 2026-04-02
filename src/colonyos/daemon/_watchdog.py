@@ -81,6 +81,8 @@ class _WatchdogMixin:
         if time_since_heartbeat < stall_seconds:
             return
 
+        # Look up via the daemon module namespace so unittest.mock.patch
+        # targets (e.g. "colonyos.daemon.active_phase_controller_count") work.
         mod = _get_daemon_module()
         active_phases = mod.active_phase_controller_count()
         if active_phases > 0:
@@ -108,6 +110,8 @@ class _WatchdogMixin:
 
     def _watchdog_recover(self, stall_duration: float) -> None:
         """Recover from a stalled pipeline: cancel, wait, force-reset, mark FAILED."""
+        # Lazy module lookup: these functions are patched at "colonyos.daemon.<name>"
+        # in tests, so we must call them via the module namespace, not direct import.
         mod = _get_daemon_module()
         item = self._current_running_item
 
