@@ -167,6 +167,42 @@ def preserve_and_reset_worktree(repo_root: Path, label: str) -> PreservationResu
     )
 
 
+def pull_branch(
+    repo_root: Path, timeout: int = _DEFAULT_GIT_TIMEOUT,
+) -> tuple[bool, str | None]:
+    """Pull the latest from the remote for the current branch using ``--ff-only``.
+
+    Returns ``(True, None)`` on success.  If there is no remote tracking
+    branch the pull is silently skipped and ``(False, None)`` is returned.
+    On failure ``(False, error_message)`` is returned.
+    """
+    # Check for a remote tracking branch first.
+    upstream_result = _git(
+        repo_root, "rev-parse", "--abbrev-ref", "@{upstream}", timeout=10,
+    )
+    if upstream_result.returncode != 0:
+        # No upstream configured — nothing to pull.
+        return False, None
+
+    branch_result = _git(repo_root, "rev-parse", "--abbrev-ref", "HEAD", timeout=10)
+    branch_name = branch_result.stdout.strip() or "unknown"
+
+    try:
+        pull_result = _git(repo_root, "pull", "--ff-only", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        msg = f"git pull --ff-only timed out after {timeout}s on {branch_name}"
+        _LOGGER.warning(msg)
+        return False, msg
+
+    if pull_result.returncode != 0:
+        msg = pull_result.stderr.strip() or f"git pull --ff-only failed on {branch_name}"
+        _LOGGER.warning("Pull failed on %s: %s", branch_name, msg)
+        return False, msg
+
+    _LOGGER.info("Pulled latest for %s", branch_name)
+    return True, None
+
+
 def checkout_branch(repo_root: Path, branch_name: str) -> None:
     """Check out an existing branch."""
     result = _git(repo_root, "checkout", branch_name)
@@ -300,11 +336,17 @@ def safety_commit_partial_work(
         _prune_old_safety_stashes(repo_root)
 
 
-def restore_to_branch(repo_root: Path, target_branch: str) -> str | None:
+def restore_to_branch(
+    repo_root: Path, target_branch: str, *, pull: bool = True,
+) -> str | None:
     """Ensure the repo is on *target_branch*, cleaning up if necessary.
 
     Intended for daemon use: after a pipeline run (success or failure) the
     daemon should be back on the default branch ready for the next item.
+
+    When *pull* is ``True`` (the default) the branch is pulled after checkout
+    so that subsequent work starts from the latest remote state.  Pull
+    failures are logged as warnings but never cause the function to fail.
 
     Returns a description of what was done, or ``None`` if already there.
     Never raises.
@@ -330,6 +372,18 @@ def restore_to_branch(repo_root: Path, target_branch: str) -> str | None:
             return None
 
         desc = f"Restored to {target_branch} (was on {current})"
+
+        if pull:
+            try:
+                pulled, pull_err = pull_branch(repo_root)
+                if pulled:
+                    desc += ", pulled latest"
+                elif pull_err:
+                    _LOGGER.warning("Pull after restore failed: %s", pull_err)
+                    desc += f", pull failed: {pull_err}"
+            except Exception:
+                _LOGGER.warning("Pull after restore raised unexpectedly", exc_info=True)
+
         _LOGGER.info(desc)
         return desc
     except Exception:
