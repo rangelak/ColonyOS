@@ -1,5 +1,26 @@
 # Changelog
 
+## 20260402_083000 — Pipeline Lifecycle Hooks
+
+Adds a `hooks` configuration section to `.colonyos/config.yaml` that lets users define shell commands at pipeline lifecycle points (pre/post each phase, on_failure). Hooks support blocking gates, output injection into agent prompts, timeout enforcement, and secret scrubbing. Includes a `colonyos hooks test` CLI command for validating configuration.
+
+**Created:**
+- `src/colonyos/hooks.py` — HookRunner execution engine, HookContext/HookResult data models
+- `tests/test_hooks.py` — 26+ tests covering execution, blocking, timeouts, secret scrubbing, output injection
+
+**Modified:**
+- `src/colonyos/config.py` — HookConfig dataclass, hooks parsing/serialization in load_config/save_config
+- `src/colonyos/orchestrator.py` — HookRunner integration at every phase boundary and on_failure
+- `src/colonyos/cli.py` — `colonyos hooks test` CLI command
+- `src/colonyos/sanitize.py` — `sanitize_hook_output()` for safe output injection
+- `tests/test_config.py` — Hook config parsing and validation tests
+- `tests/test_orchestrator.py` — Hook integration tests
+- `tests/test_cli.py` — CLI hooks test command tests
+- `tests/test_sanitize.py` — Hook output sanitization tests
+
+**PRD:** `cOS_prds/20260402_071300_prd_add_a_hooks_configuration_section_to_colonyos_config_yaml_that_lets_users_define.md`
+**Tasks:** `cOS_tasks/20260402_071300_tasks_add_a_hooks_configuration_section_to_colonyos_config_yaml_that_lets_users_define.md`
+
 ## 20260401_173000 — Stuck Daemon Detection and Auto-Recovery
 
 Adds an in-process watchdog thread that detects when a pipeline has stalled (no heartbeat progress beyond a configurable threshold) and automatically recovers: canceling the stuck pipeline, marking the item as FAILED, alerting operators via Slack, and resuming the main loop. Also enriches `/healthz` with pipeline duration and stall status, adds `started_at` to `QueueItem`, and bumps the schema to v5.

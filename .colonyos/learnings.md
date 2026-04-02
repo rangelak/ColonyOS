@@ -139,3 +139,11 @@ _Date: 2026-04-01 | Feature: you_are_a_code_assistant_working_on_behalf_of_the_e
 - **[code-quality]** Private aliases (`_fn = fn`) for brand-new functions under backward-compat claims add noise; pick one canonical name.
 - **[code-quality]** LLM agent instruction templates should prohibit suppression annotations (`# type: ignore`, `# noqa`) as valid fixes.
 - **[architecture]** Aggregation modules that dynamically enumerate categories from data avoid code changes when new variants are added.
+
+## Run: run-20260402_071300-2765c916ec
+_Date: 2026-04-02 | Feature: add_a_hooks_configuration_section_to_colonyos_config_yaml_th_
+
+- **[code-quality]** Public functions must self-validate inputs (e.g., path traversal); assuming callers pre-validate creates defense-in-depth gaps.
+- **[security]** API endpoints serving content need server-side sanitization even when client-side escaping exists; single-layer defense is fragile.
+- **[code-quality]** Substring/prefix ID resolution without a minimum-length threshold matches too broadly on 1-2 character inputs.
+- **[architecture]** Functions returning `str | list[str]` unions requiring `isinstance` discrimination are fragile; use typed result dataclasses.
