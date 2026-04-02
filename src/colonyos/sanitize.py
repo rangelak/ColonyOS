@@ -193,3 +193,34 @@ def sanitize_display_text(text: str) -> str:
     # Strip remaining control characters
     text = _CONTROL_CHARS_RE.sub("", text)
     return text.strip()
+
+
+def sanitize_hook_output(text: str, max_bytes: int = 8192) -> str:
+    """Sanitize hook subprocess output for safe injection into agent prompts.
+
+    Applies three sanitization passes in order:
+    1. ``sanitize_display_text()`` — strips ANSI escapes and control characters
+    2. ``sanitize_ci_logs()`` — strips XML tags and redacts secret patterns
+    3. Byte-level truncation with a ``[truncated]`` marker
+
+    Args:
+        text: Raw stdout captured from a hook subprocess.
+        max_bytes: Maximum byte length of the returned string (default 8192).
+            Output exceeding this limit is truncated with a marker showing
+            the original size.
+
+    Returns:
+        Sanitized, size-capped text safe for inclusion in agent prompts.
+    """
+    # Pass 1: strip ANSI escapes and control characters
+    text = sanitize_display_text(text)
+    # Pass 2: strip XML tags and redact secrets
+    text = sanitize_ci_logs(text)
+    # Pass 3: truncate to max_bytes
+    encoded = text.encode("utf-8")
+    if len(encoded) > max_bytes:
+        original_len = len(encoded)
+        # Truncate and decode safely (errors="ignore" handles mid-codepoint cuts)
+        text = encoded[:max_bytes].decode("utf-8", errors="ignore")
+        text += f"\n[truncated — {original_len} bytes total]"
+    return text

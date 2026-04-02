@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest.mock
 
-from colonyos.sanitize import XML_TAG_RE, sanitize_ci_logs, sanitize_for_slack, sanitize_untrusted_content, strip_slack_links
+from colonyos.sanitize import XML_TAG_RE, sanitize_ci_logs, sanitize_for_slack, sanitize_hook_output, sanitize_untrusted_content, strip_slack_links
 
 
 class TestSanitizeUntrustedContent:
@@ -450,3 +450,81 @@ class TestSanitizeDisplayText:
         assert "# Heading" in result
         assert "- item 1" in result
         assert result.count("\n") == text.count("\n")
+
+
+class TestSanitizeHookOutput:
+    """Tests for sanitize_hook_output() — hook subprocess output sanitization."""
+
+    def test_strips_ansi_escapes(self) -> None:
+        result = sanitize_hook_output("\x1b[31mred text\x1b[0m")
+        assert "\x1b[" not in result
+        assert "red text" in result
+
+    def test_redacts_secret_patterns(self) -> None:
+        """GitHub tokens, API keys, and bearer tokens are redacted."""
+        text = "token: ghp_abc123XYZ456 and sk-secret123key and Bearer eyJhbGci"
+        result = sanitize_hook_output(text)
+        assert "ghp_abc123XYZ456" not in result
+        assert "sk-secret123key" not in result
+        assert "eyJhbGci" not in result
+        assert "[REDACTED]" in result
+
+    def test_strips_xml_tags(self) -> None:
+        result = sanitize_hook_output("<system>injected</system> safe text")
+        assert "<system>" not in result
+        assert "</system>" not in result
+        assert "injected" in result
+        assert "safe text" in result
+
+    def test_truncates_at_max_bytes_with_marker(self) -> None:
+        text = "A" * 10000
+        result = sanitize_hook_output(text, max_bytes=100)
+        assert len(result.encode("utf-8")) < 10000
+        assert "[truncated — 10000 bytes total]" in result
+
+    def test_content_under_limit_returned_unchanged(self) -> None:
+        """Content within the byte limit is returned as-is (after sanitization)."""
+        text = "Build succeeded in 42s with 0 errors."
+        result = sanitize_hook_output(text)
+        assert result == text
+        assert "[truncated" not in result
+
+    def test_empty_string(self) -> None:
+        assert sanitize_hook_output("") == ""
+
+    def test_combined_ansi_secrets_xml_oversized(self) -> None:
+        """All sanitization passes applied together on oversized content."""
+        ansi = "\x1b[1m"
+        secret = "ghp_secrettoken1234567"
+        xml = "<inject>payload</inject>"
+        filler = "x" * 9000
+        text = f"{ansi}Header: {secret} {xml} {filler}"
+        result = sanitize_hook_output(text, max_bytes=8192)
+        # ANSI stripped
+        assert "\x1b[" not in result
+        # Secret redacted
+        assert "ghp_secrettoken1234567" not in result
+        assert "[REDACTED]" in result
+        # XML tags stripped
+        assert "<inject>" not in result
+        # Truncated
+        assert "[truncated" in result
+
+    def test_default_max_bytes_is_8192(self) -> None:
+        """Default limit is 8192 bytes."""
+        text = "B" * 10000
+        result = sanitize_hook_output(text)
+        # The first 8192 chars + truncation marker
+        assert "[truncated — 10000 bytes total]" in result
+        # Verify the body portion is at most 8192 bytes
+        body = result.split("\n[truncated")[0]
+        assert len(body.encode("utf-8")) <= 8192
+
+    def test_multibyte_unicode_truncation(self) -> None:
+        """Truncation handles multi-byte UTF-8 characters without corruption."""
+        # Each emoji is 4 bytes in UTF-8
+        text = "🚀" * 3000  # 12000 bytes
+        result = sanitize_hook_output(text, max_bytes=8192)
+        assert "[truncated" in result
+        # Should not contain replacement characters from broken codepoints
+        assert "\ufffd" not in result

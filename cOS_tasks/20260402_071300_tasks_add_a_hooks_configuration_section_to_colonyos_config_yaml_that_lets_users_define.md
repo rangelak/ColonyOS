@@ -37,9 +37,9 @@
     - Log warnings for invalid entries
   - [x] 1.5 Wire `_parse_hooks_config` into `load_config()` and `save_config()`
 
-- [ ] 2.0 Hook sanitization function (sanitize layer)
+- [x] 2.0 Hook sanitization function (sanitize layer)
   depends_on: []
-  - [ ] 2.1 Write tests in `tests/test_sanitize.py` for `sanitize_hook_output()`:
+  - [x] 2.1 Write tests in `tests/test_sanitize.py` for `sanitize_hook_output()`:
     - Test ANSI escape stripping
     - Test secret pattern redaction (github tokens, API keys, bearer tokens)
     - Test XML tag stripping
@@ -47,7 +47,7 @@
     - Test content under limit is returned unchanged (minus sanitization)
     - Test empty string input
     - Test combined: ANSI + secrets + XML tags + oversized content
-  - [ ] 2.2 Add `sanitize_hook_output(text: str, max_bytes: int = 8192) -> str` to `src/colonyos/sanitize.py`:
+  - [x] 2.2 Add `sanitize_hook_output(text: str, max_bytes: int = 8192) -> str` to `src/colonyos/sanitize.py`:
     - Apply `sanitize_display_text()` (ANSI/control char stripping)
     - Apply `sanitize_ci_logs()` (XML stripping + secret redaction)
     - Truncate to `max_bytes` with `\n[truncated — {original_len} bytes total]` marker
