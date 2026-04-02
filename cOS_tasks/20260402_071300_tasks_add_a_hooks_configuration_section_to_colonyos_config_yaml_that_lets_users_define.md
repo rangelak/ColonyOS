@@ -53,9 +53,9 @@
     - Truncate to `max_bytes` with `\n[truncated — {original_len} bytes total]` marker
     - Return sanitized, size-capped text
 
-- [ ] 3.0 Hook execution engine (hooks module)
+- [x] 3.0 Hook execution engine (hooks module)
   depends_on: [1.0, 2.0]
-  - [ ] 3.1 Write tests in `tests/test_hooks.py` for HookRunner:
+  - [x] 3.1 Write tests in `tests/test_hooks.py` for HookRunner:
     - Test successful hook execution (echo command, exit 0)
     - Test blocking hook failure (exit 1) stops execution of remaining hooks
     - Test non-blocking hook failure (exit 1) continues to next hook
@@ -71,7 +71,7 @@
     - Test run_hooks with empty config returns empty list
     - Test run_hooks with unknown event returns empty list
     - Test HookResult fields are populated correctly (exit_code, duration_ms, timed_out)
-  - [ ] 3.2 Create `src/colonyos/hooks.py` with:
+  - [x] 3.2 Create `src/colonyos/hooks.py` with:
     - `HookContext` dataclass: `run_id: str`, `phase: str`, `branch: str`, `repo_root: Path`, `status: str`
     - `HookResult` dataclass: `command: str`, `exit_code: int`, `stdout: str`, `stderr: str`, `duration_ms: int`, `timed_out: bool`, `success: bool`, `injected_output: str | None`
     - `SCRUBBED_ENV_PATTERNS`: list of env var patterns to strip (keys containing SECRET, TOKEN, KEY, PASSWORD, CREDENTIAL, plus explicit names ANTHROPIC_API_KEY, GITHUB_TOKEN, SLACK_BOT_TOKEN)
