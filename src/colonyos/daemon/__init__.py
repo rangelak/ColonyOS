@@ -26,6 +26,7 @@ from typing import Any
 from colonyos.agent import (
     active_phase_controller_count as active_phase_controller_count,
     request_active_phase_cancel,
+    set_heartbeat_path,
 )
 from colonyos.cancellation import cancellation_scope, request_cancel
 from colonyos.config import ColonyConfig, load_config
@@ -145,6 +146,7 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
         self._pipeline_stalled: bool = False
         self._current_running_item: QueueItem | None = None
         self._watchdog_thread: threading.Thread | None = None
+        self._watchdog_suppress_count: int = 0
 
         # Shutdown coordination
         self._stop_event = threading.Event()
@@ -537,6 +539,7 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
             # Reset stall flag — it stays True after recovery until the next
             # pipeline run so /healthz can report the stall that just happened.
             self._pipeline_stalled = False
+            self._watchdog_suppress_count = 0
             self._current_running_item = item
             self._persist_queue()
 
@@ -569,6 +572,7 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
                 self._pipeline_running = False
                 self._pipeline_started_at = None
                 self._current_running_item = None
+                set_heartbeat_path(None)
                 self._persist_state()
                 self._persist_queue()
                 logger.info(
@@ -592,6 +596,7 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
                 self._pipeline_running = False
                 self._pipeline_started_at = None
                 self._current_running_item = None
+                set_heartbeat_path(None)
                 self._persist_state()
                 self._persist_queue()
             self._cleanup_notification_lock(item.id)
@@ -670,6 +675,7 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
                 self._pipeline_running = False
                 self._pipeline_started_at = None
                 self._current_running_item = None
+                set_heartbeat_path(None)
                 self._persist_state()
                 self._persist_queue()
             if systemic_slack is not None:

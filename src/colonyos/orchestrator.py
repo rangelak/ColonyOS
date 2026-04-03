@@ -16,7 +16,7 @@ from typing import Any, Protocol, cast
 import click
 from claude_agent_sdk import AgentDefinition
 
-from colonyos.agent import run_phase_sync, run_phases_parallel_sync
+from colonyos.agent import run_phase_sync, run_phases_parallel_sync, set_heartbeat_path
 from colonyos.config import ColonyConfig, runs_dir_path
 from colonyos.dag import TaskDAG, parse_task_file
 from colonyos.parallel_orchestrator import (
@@ -89,10 +89,11 @@ UIFactoryCallable = Callable[..., PhaseUI | NullUI | None]
 
 
 def _touch_heartbeat(repo_root: Path) -> None:
-    """Touch the heartbeat file to signal the orchestrator is alive."""
-    heartbeat_path = runs_dir_path(repo_root) / "heartbeat"
-    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
-    heartbeat_path.touch()
+    """Touch the heartbeat file and register it for in-phase streaming updates."""
+    hb = runs_dir_path(repo_root) / "heartbeat"
+    hb.parent.mkdir(parents=True, exist_ok=True)
+    hb.touch()
+    set_heartbeat_path(hb)
 
 
 def _log(msg: str) -> None:

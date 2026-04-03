@@ -44,6 +44,9 @@ def _get_daemon_module() -> _DaemonModule:
     return cast(_DaemonModule, cast(object, importlib.import_module("colonyos.daemon")))
 
 
+_FORCE_RECOVER_MULTIPLIER = 3
+
+
 class WatchdogMixin:
     """Mixin providing watchdog thread management for the Daemon class.
 
@@ -109,28 +112,51 @@ class WatchdogMixin:
         # targets (e.g. "colonyos.daemon.active_phase_controller_count") work.
         mod = _get_daemon_module()
         active_phases = mod.active_phase_controller_count()
-        if active_phases > 0:
-            logger.info(
-                "Watchdog: suppressing stall recovery for active pipeline "
-                "(elapsed=%.0fs, threshold=%ds, heartbeat_age=%.0fs, active_phases=%d)",
+
+        # Hard ceiling: if heartbeat is stale for N× the threshold, the phase
+        # controller is itself stuck — recover regardless.
+        force_recover = time_since_heartbeat >= stall_seconds * _FORCE_RECOVER_MULTIPLIER
+
+        if active_phases > 0 and not force_recover:
+            suppress_count = host._watchdog_suppress_count + 1
+            host._watchdog_suppress_count = suppress_count
+            # Log first suppression, then only every 10th (~5 min)
+            if suppress_count == 1 or suppress_count % 10 == 0:
+                logger.info(
+                    "Watchdog: suppressing stall recovery for active pipeline "
+                    "(elapsed=%.0fs, threshold=%ds, heartbeat_age=%.0fs, "
+                    "active_phases=%d, suppressed=%d times)",
+                    elapsed,
+                    stall_seconds,
+                    time_since_heartbeat,
+                    active_phases,
+                    suppress_count,
+                )
+            return
+
+        # Pipeline is stalled (or force-recover ceiling hit)
+        host._pipeline_stalled = True
+        if force_recover:
+            logger.warning(
+                "Watchdog: force-recovering stuck pipeline — heartbeat stale "
+                "for %.0fs (%dx threshold=%ds, active_phases=%d still registered)",
+                time_since_heartbeat,
+                _FORCE_RECOVER_MULTIPLIER,
+                stall_seconds,
+                active_phases,
+            )
+        else:
+            logger.warning(
+                "Watchdog: pipeline stalled for %.0fs "
+                "(threshold=%ds, heartbeat_age=%.0fs, active_phases=%d)",
                 elapsed,
                 stall_seconds,
                 time_since_heartbeat,
                 active_phases,
             )
-            return
-
-        # Both conditions met: pipeline is stalled
-        host._pipeline_stalled = True
-        logger.warning(
-            "Watchdog: pipeline stalled for %.0fs "
-            "(threshold=%ds, heartbeat_age=%.0fs, active_phases=%d)",
-            elapsed,
-            stall_seconds,
-            time_since_heartbeat,
-            active_phases,
+        host._watchdog_recover(
+            stall_duration=time_since_heartbeat if force_recover else elapsed,
         )
-        host._watchdog_recover(stall_duration=elapsed)
 
     def _watchdog_recover(self, stall_duration: float) -> None:
         """Recover from a stalled pipeline: cancel, wait, force-reset, mark FAILED."""
@@ -194,10 +220,12 @@ class WatchdogMixin:
                 logger.exception("Watchdog: request_cancel fallback failed")
 
         # Step 4: Force-reset state under lock
+        from colonyos.agent import set_heartbeat_path
         with host._lock:
             host._pipeline_running = False
             host._pipeline_started_at = None
             host._current_running_item = None
+            set_heartbeat_path(None)
             if item is not None:
                 item.status = mod.QueueItemStatus.FAILED
                 item.error = f"watchdog: no progress for {stall_duration:.0f}s"

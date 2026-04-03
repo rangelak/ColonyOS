@@ -43,6 +43,19 @@ _ACTIVE_PHASE_CONTROLLERS_LOCK = threading.Lock()
 _ACTIVE_PHASE_CONTROLLERS: set["_SyncRunController"] = set()
 _T = TypeVar("_T")
 
+_heartbeat_path: Path | None = None
+
+
+def set_heartbeat_path(path: Path | None) -> None:
+    """Set the heartbeat file path for in-phase progress signaling.
+
+    Called once by the orchestrator before a pipeline starts. The streaming
+    loop touches this file periodically so the watchdog knows the agent is
+    alive even during long-running phases.
+    """
+    global _heartbeat_path  # noqa: PLW0603
+    _heartbeat_path = path
+
 
 class PhaseTimeoutError(RuntimeError):
     """Raised when a phase exceeds its wall-clock timeout."""
@@ -221,6 +234,11 @@ def _register_active_phase_controller(controller: _SyncRunController) -> None:
 def _unregister_active_phase_controller(controller: _SyncRunController) -> None:
     with _ACTIVE_PHASE_CONTROLLERS_LOCK:
         _ACTIVE_PHASE_CONTROLLERS.discard(controller)
+
+
+_HEARTBEAT_INTERVAL_SECONDS = 30
+
+
 async def _run_phase_attempt(
     *,
     phase: Phase,
@@ -240,9 +258,26 @@ async def _run_phase_attempt(
     result_msg: ResultMessage | None = None
     current_tool: str | None = None
     auth_shown = False
+    last_heartbeat = 0.0
+
+    def _maybe_touch_heartbeat() -> None:
+        nonlocal last_heartbeat
+        hb_path = _heartbeat_path
+        if hb_path is None:
+            return
+        now = time.monotonic()
+        if now - last_heartbeat < _HEARTBEAT_INTERVAL_SECONDS:
+            return
+        last_heartbeat = now
+        try:
+            hb_path.touch()
+        except OSError:
+            logger.debug("Heartbeat touch failed", exc_info=True)
 
     try:
         async for message in query(prompt=prompt, options=options):
+            _maybe_touch_heartbeat()
+
             if isinstance(message, SystemMessage) and not auth_shown:
                 source = message.data.get("apiKeySource")
                 if source:
