@@ -3,10 +3,7 @@ from datetime import datetime
 import pytest
 
 from colonyos.naming import (
-    PlanningNames,
-    ProposalNames,
     ReviewArtifactPath,
-    ReviewNames,
     decision_artifact_path,
     generate_timestamp,
     persona_review_artifact_path,
@@ -54,7 +51,7 @@ class TestPlanningNames:
     def test_frozen(self):
         names = planning_names("test", timestamp="20260101_000000")
         with pytest.raises(AttributeError):
-            names.slug = "changed"
+            names.slug = "changed"  # pyright: ignore[reportAttributeAccessIssue]
 
 
 class TestReviewNames:
@@ -79,7 +76,7 @@ class TestReviewNames:
     def test_frozen(self):
         names = review_names("test", task_count=1, timestamp="20260101_000000")
         with pytest.raises(AttributeError):
-            names.slug = "changed"
+            names.slug = "changed"  # pyright: ignore[reportAttributeAccessIssue]
 
     def test_zero_tasks(self):
         names = review_names("test", task_count=0, timestamp="20260101_000000")
@@ -102,7 +99,7 @@ class TestProposalNames:
     def test_frozen(self):
         names = proposal_names("test", timestamp="20260101_000000")
         with pytest.raises(AttributeError):
-            names.slug = "changed"
+            names.slug = "changed"  # pyright: ignore[reportAttributeAccessIssue]
 
 
 class TestTaskFilenameFromPrd:
@@ -135,7 +132,7 @@ class TestReviewArtifactPath:
     def test_frozen(self):
         path = ReviewArtifactPath(subdirectory="decisions", filename="test.md")
         with pytest.raises(AttributeError):
-            path.subdirectory = "changed"
+            path.subdirectory = "changed"  # pyright: ignore[reportAttributeAccessIssue]
 
     def test_nested_subdirectory(self):
         path = ReviewArtifactPath(subdirectory="reviews/engineer", filename="f.md")

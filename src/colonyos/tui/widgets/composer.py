@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from textual import on
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -19,7 +21,7 @@ class _ComposerTextArea(TextArea):
             super().__init__()
             self.text = text
 
-    async def _on_key(self, event) -> None:  # noqa: ANN001
+    async def _on_key(self, event: Any) -> None:
         """Intercept Enter to submit instead of inserting newline.
 
         Shift+Enter and Ctrl+J insert a newline instead.

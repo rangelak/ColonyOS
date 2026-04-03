@@ -1,10 +1,6 @@
 """Tests for the colonyos queue command and related data models."""
 from __future__ import annotations
 
-import json
-import os
-import signal
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -805,7 +801,7 @@ class TestQueueCrashRecovery:
             patch("colonyos.cli._find_repo_root", return_value=configured_repo),
             patch("colonyos.cli.run_orchestrator", side_effect=interrupt_on_call),
         ):
-            result = runner.invoke(app, ["queue", "start"])
+            runner.invoke(app, ["queue", "start"])
 
         loaded = _load_queue_state(configured_repo)
         assert loaded is not None
@@ -837,7 +833,9 @@ class TestQueueCrashRecovery:
         loaded = _load_queue_state(configured_repo)
         assert loaded is not None
         assert loaded.items[0].status == QueueItemStatus.FAILED
-        assert len(loaded.items[0].error) == 500
+        err = loaded.items[0].error
+        assert err is not None
+        assert len(err) == 500
 
 
 class TestNogoVerdictDetection:

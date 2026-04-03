@@ -33,7 +33,7 @@ Good, no TODOs. Now I have a full picture. Let me write my review:
    - The model receives generic "fix request" context instead of structured PR review context
    - The security notes in the PR review template about untrusted input never reach the model
    - The commit message format "Address review feedback from @{username}" is never generated
-   
+
    **This is the equivalent of writing prompts-as-code and then never calling the function.** The effort put into designing a good prompt template is wasted.
 
 2. **Good Prompt Hygiene in the Unused Template**: The `thread_fix_pr_review.md` template is actually well-designed:

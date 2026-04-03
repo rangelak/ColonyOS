@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 from rich.text import Text
 from textual.widgets import Static
@@ -13,7 +14,7 @@ from colonyos.tui.styles import COLOR_ACCENT, COLOR_DIM
 class HintBar(Static):
     """Two-line footer showing command examples and keyboard shortcuts."""
 
-    def __init__(self, **kwargs) -> None:  # noqa: ANN003
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._command_hints: list[str] = []
 

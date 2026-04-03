@@ -17,7 +17,7 @@ class TestPersonaPackDataclass:
             ),
         )
         with pytest.raises(FrozenInstanceError):
-            pack.key = "changed"
+            pack.key = "changed"  # pyright: ignore[reportAttributeAccessIssue]
 
     def test_field_types(self):
         pack = PersonaPack(

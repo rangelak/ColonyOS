@@ -8,6 +8,10 @@ from ``web_dist/``.
 """
 from __future__ import annotations
 
+# FastAPI route handlers are registered via decorators; the type checker
+# does not treat that as a reference to the function.
+# pyright: reportUnusedFunction=false
+
 import json
 import logging
 import os
@@ -18,7 +22,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -198,7 +202,6 @@ def create_app(
 
         config = load_config(repo_root)
         state = load_daemon_state(repo_root)
-        state._maybe_reset_daily()
 
         daily_cap = config.daemon.daily_budget_usd
         allowed, remaining = state.check_daily_budget(daily_cap)
@@ -268,7 +271,7 @@ def create_app(
         if isinstance(resolved, list):
             raise HTTPException(
                 status_code=400,
-                detail=f"Ambiguous run ID: matches multiple runs",
+                detail="Ambiguous run ID: matches multiple runs",
             )
 
         from colonyos.show import load_single_run
@@ -320,9 +323,11 @@ def create_app(
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="Request body must be a JSON object")
 
+        body_dict = cast(dict[str, Any], body)
+
         # Block sensitive field mutations
         for field_name in _SENSITIVE_CONFIG_FIELDS:
-            if field_name in body:
+            if field_name in body_dict:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Field '{field_name}' is not allowed to be modified via API",
@@ -331,15 +336,15 @@ def create_app(
         config = load_config(repo_root)
 
         # Apply updates to non-sensitive fields
-        if "model" in body:
-            model = sanitize_untrusted_content(str(body["model"]))
+        if "model" in body_dict:
+            model = sanitize_untrusted_content(str(body_dict["model"]))
             from colonyos.config import VALID_MODELS
             if model not in VALID_MODELS:
                 raise HTTPException(status_code=400, detail=f"Invalid model: {model}")
             config.model = model
 
-        if "budget" in body and isinstance(body["budget"], dict):
-            budget = body["budget"]
+        if "budget" in body_dict and isinstance(body_dict["budget"], dict):
+            budget = cast(dict[str, Any], body_dict["budget"])
             if "per_phase" in budget:
                 config.budget.per_phase = float(budget["per_phase"])
             if "per_run" in budget:
@@ -349,8 +354,8 @@ def create_app(
             if "max_total_usd" in budget:
                 config.budget.max_total_usd = float(budget["max_total_usd"])
 
-        if "phases" in body and isinstance(body["phases"], dict):
-            phases = body["phases"]
+        if "phases" in body_dict and isinstance(body_dict["phases"], dict):
+            phases = cast(dict[str, Any], body_dict["phases"])
             if "plan" in phases:
                 config.phases.plan = bool(phases["plan"])
             if "implement" in phases:
@@ -360,28 +365,29 @@ def create_app(
             if "deliver" in phases:
                 config.phases.deliver = bool(phases["deliver"])
 
-        if "project" in body and isinstance(body["project"], dict):
+        if "project" in body_dict and isinstance(body_dict["project"], dict):
             from colonyos.models import ProjectInfo
-            proj = body["project"]
+            proj = cast(dict[str, Any], body_dict["project"])
             config.project = ProjectInfo(
                 name=sanitize_untrusted_content(str(proj.get("name", ""))),
                 description=sanitize_untrusted_content(str(proj.get("description", ""))),
                 stack=sanitize_untrusted_content(str(proj.get("stack", ""))),
             )
 
-        if "max_fix_iterations" in body:
-            config.max_fix_iterations = int(body["max_fix_iterations"])
+        if "max_fix_iterations" in body_dict:
+            config.max_fix_iterations = int(body_dict["max_fix_iterations"])
 
-        if "auto_approve" in body:
-            config.auto_approve = bool(body["auto_approve"])
+        if "auto_approve" in body_dict:
+            config.auto_approve = bool(body_dict["auto_approve"])
 
-        if "phase_models" in body and isinstance(body["phase_models"], dict):
+        if "phase_models" in body_dict and isinstance(body_dict["phase_models"], dict):
             from colonyos.config import VALID_MODELS
-            for phase, model in body["phase_models"].items():
+            phase_models = cast(dict[str, Any], body_dict["phase_models"])
+            for phase, model in phase_models.items():
                 model_str = sanitize_untrusted_content(str(model))
                 if model_str not in VALID_MODELS:
                     raise HTTPException(status_code=400, detail=f"Invalid model for {phase}: {model_str}")
-            config.phase_models = {str(k): str(v) for k, v in body["phase_models"].items()}
+            config.phase_models = {str(k): str(v) for k, v in phase_models.items()}
 
         save_config(repo_root, config)
         return _config_to_dict(config)
@@ -395,13 +401,15 @@ def create_app(
         if not isinstance(body, list):
             raise HTTPException(status_code=400, detail="Request body must be a JSON array of personas")
 
-        personas = []
-        for i, p in enumerate(body):
+        raw_personas = cast(list[Any], body)
+        personas: list[Persona] = []
+        for i, p in enumerate(raw_personas):
             if not isinstance(p, dict):
                 raise HTTPException(status_code=400, detail=f"Persona at index {i} must be an object")
-            role = p.get("role")
-            expertise = p.get("expertise")
-            perspective = p.get("perspective")
+            pd = cast(dict[str, Any], p)
+            role = pd.get("role")
+            expertise = pd.get("expertise")
+            perspective = pd.get("perspective")
             if not role or not expertise or not perspective:
                 raise HTTPException(
                     status_code=400,
@@ -411,7 +419,7 @@ def create_app(
                 role=sanitize_untrusted_content(str(role)),
                 expertise=sanitize_untrusted_content(str(expertise)),
                 perspective=sanitize_untrusted_content(str(perspective)),
-                reviewer=bool(p.get("reviewer", False)),
+                reviewer=bool(pd.get("reviewer", False)),
             ))
 
         config = load_config(repo_root)
@@ -497,7 +505,8 @@ def create_app(
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="Request body must be a JSON object")
 
-        prompt = body.get("prompt", "").strip()
+        launch_body = cast(dict[str, Any], body)
+        prompt = str(launch_body.get("prompt", "") or "").strip()
         if not prompt:
             raise HTTPException(status_code=400, detail="Prompt is required and must be non-empty")
 
@@ -601,7 +610,7 @@ def create_app(
         reviews_dir = repo_root / "cOS_reviews"
         if not reviews_dir.exists():
             return []
-        results = []
+        results: list[dict[str, Any]] = []
         for md_file in sorted(reviews_dir.rglob("*.md"), reverse=True):
             rel = md_file.relative_to(repo_root)
             results.append({

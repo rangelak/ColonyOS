@@ -45,7 +45,7 @@ from colonyos.tui.widgets.transcript import TranscriptView
 logger = logging.getLogger(__name__)
 
 
-class AssistantApp(App):
+class AssistantApp(App[None]):
     """Interactive terminal UI for ColonyOS pipeline runs.
 
     Layout (top to bottom):

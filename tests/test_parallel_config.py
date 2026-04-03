@@ -1,6 +1,7 @@
 """Tests for ParallelImplementConfig configuration schema (Task 1.0)."""
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -219,7 +220,7 @@ class TestParallelImplementDefaults:
 
     def test_defaults_has_parallel_implement(self) -> None:
         assert "parallel_implement" in DEFAULTS
-        pi = DEFAULTS["parallel_implement"]
+        pi = cast(dict[str, Any], DEFAULTS["parallel_implement"])
         assert pi["enabled"] is False
         assert pi["max_parallel_agents"] == 3
         assert pi["conflict_strategy"] == "auto"

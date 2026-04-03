@@ -8,9 +8,6 @@ import pytest
 from colonyos.config import ColonyConfig, ParallelImplementConfig
 from colonyos.models import Phase, PhaseResult, TaskStatus
 from colonyos.parallel_orchestrator import (
-    ConflictResolutionFailed,
-    ManualInterventionRequired,
-    MergeLockTimeout,
     ParallelOrchestrator,
     ParallelRunState,
     TaskState,

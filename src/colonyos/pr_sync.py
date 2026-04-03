@@ -209,10 +209,10 @@ def _sync_single_pr(
 
             # Post PR comment
             comment_body = (
-                f"## :warning: ColonyOS Sync Conflict\n\n"
-                f"Failed to merge `main` into this branch. "
-                f"Manual conflict resolution is required.\n\n"
-                f"**Conflicting files:**\n"
+                "## :warning: ColonyOS Sync Conflict\n\n"
+                "Failed to merge `main` into this branch. "
+                "Manual conflict resolution is required.\n\n"
+                "**Conflicting files:**\n"
                 + "\n".join(f"- `{f}`" for f in conflict_files[:10])
                 + f"\n\n_Sync failure #{new_failures}_"
             )
@@ -286,7 +286,7 @@ def _sync_single_pr(
 # ---------------------------------------------------------------------------
 
 
-def _run_git(cwd: Path, cmd: list[str], description: str) -> subprocess.CompletedProcess:
+def _run_git(cwd: Path, cmd: list[str], description: str) -> subprocess.CompletedProcess[str]:
     """Run a git command, raising on failure."""
     result = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=60)
     if result.returncode != 0:

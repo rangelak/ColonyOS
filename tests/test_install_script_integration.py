@@ -7,7 +7,6 @@ targeted tests for specific fix items (stdin handling, PEP 668, etc.).
 import subprocess
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SCRIPT = REPO_ROOT / "install.sh"

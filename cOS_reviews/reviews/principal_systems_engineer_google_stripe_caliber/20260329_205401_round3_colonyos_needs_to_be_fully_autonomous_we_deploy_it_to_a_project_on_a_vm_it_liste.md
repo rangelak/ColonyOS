@@ -26,7 +26,7 @@ After round 2 fixes, this is a solid V1 daemon: 818 lines of orchestration, 183 
 
 None of these are ship-blockers. The daemon will:
 - Start, acquire PID lock, recover from crashes ✅
-- Poll GitHub issues with label filtering and dedup ✅  
+- Poll GitHub issues with label filtering and dedup ✅
 - Execute items in priority order through the full pipeline ✅
 - Enforce daily budget with threshold alerts ✅
 - Trip circuit breaker on consecutive failures ✅

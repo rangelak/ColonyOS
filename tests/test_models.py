@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -21,6 +22,29 @@ from colonyos.models import (
 )
 
 
+def _retry_info_from_optional_raw(raw: object) -> RetryInfo | None:
+    """Deserialize RetryInfo from run-log JSON (object may be missing or wrong type)."""
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    d = cast(dict[str, object], raw)
+    attempts_o = d.get("attempts", 1)
+    attempts = int(attempts_o) if isinstance(attempts_o, (int, float)) else 1
+    transient_o = d.get("transient_errors", 0)
+    transient_errors = int(transient_o) if isinstance(transient_o, (int, float)) else 0
+    fb = d.get("fallback_model_used")
+    fallback_model_used: str | None = fb if isinstance(fb, str) else None
+    delay_o = d.get("total_retry_delay_seconds", 0.0)
+    total_delay = float(delay_o) if isinstance(delay_o, (int, float)) else 0.0
+    return RetryInfo(
+        attempts=attempts,
+        transient_errors=transient_errors,
+        fallback_model_used=fallback_model_used,
+        total_retry_delay_seconds=total_delay,
+    )
+
+
 class TestPhaseResultModel:
     def test_default_model_is_none(self):
         result = PhaseResult(phase=Phase.IMPLEMENT, success=True)
@@ -32,7 +56,7 @@ class TestPhaseResultModel:
 
     def test_backward_compat_old_serialized_data(self):
         """Old PhaseResult dicts without 'model' should load gracefully."""
-        old_data = {
+        old_data: dict[str, object] = {
             "phase": "implement",
             "success": True,
             "cost_usd": 1.5,
@@ -42,13 +66,13 @@ class TestPhaseResultModel:
             "artifacts": {},
         }
         result = PhaseResult(
-            phase=Phase(old_data["phase"]),
-            success=old_data["success"],
-            cost_usd=old_data.get("cost_usd"),
-            duration_ms=old_data.get("duration_ms", 0),
-            session_id=old_data.get("session_id", ""),
-            model=old_data.get("model"),
-            error=old_data.get("error"),
+            phase=Phase(str(old_data["phase"])),
+            success=bool(old_data["success"]),
+            cost_usd=cast(float | None, old_data.get("cost_usd")),
+            duration_ms=int(cast(int | float, old_data.get("duration_ms", 0))),
+            session_id=str(old_data.get("session_id", "")),
+            model=cast(str | None, old_data.get("model")),
+            error=cast(str | None, old_data.get("error")),
         )
         assert result.model is None
         assert result.success is True
@@ -141,9 +165,11 @@ class TestLoopStatePersistence:
             completed_run_ids=["r1", "r2", "r3"],
         )
         save_path = tmp_path / f"loop_state_{state.loop_id}.json"
-        save_path.write_text(json.dumps(state.to_dict(), indent=2), encoding="utf-8")
+        _ = save_path.write_text(
+            json.dumps(state.to_dict(), indent=2), encoding="utf-8"
+        )
 
-        data = json.loads(save_path.read_text(encoding="utf-8"))
+        data = cast(dict[str, object], json.loads(save_path.read_text(encoding="utf-8")))
         loaded = LoopState.from_dict(data)
         assert loaded.loop_id == "loop-persist"
         assert loaded.current_iteration == 3
@@ -808,11 +834,12 @@ class TestPhaseResultRetryInfo:
             success=True,
             retry_info=info,
         )
+        assert result.retry_info is not None
         assert result.retry_info.fallback_model_used == "sonnet"
 
     def test_backward_compat_old_data_without_retry_info(self) -> None:
         """Old PhaseResult dicts without retry_info should load gracefully."""
-        old_data = {
+        old_data: dict[str, object] = {
             "phase": "implement",
             "success": True,
             "cost_usd": 1.5,
@@ -824,14 +851,14 @@ class TestPhaseResultRetryInfo:
         }
         raw_retry = old_data.get("retry_info")
         result = PhaseResult(
-            phase=Phase(old_data["phase"]),
-            success=old_data["success"],
-            cost_usd=old_data.get("cost_usd"),
-            duration_ms=old_data.get("duration_ms", 0),
-            session_id=old_data.get("session_id", ""),
-            model=old_data.get("model"),
-            error=old_data.get("error"),
-            retry_info=RetryInfo(**raw_retry) if raw_retry else None,
+            phase=Phase(str(old_data["phase"])),
+            success=bool(old_data["success"]),
+            cost_usd=cast(float | None, old_data.get("cost_usd")),
+            duration_ms=int(cast(int | float, old_data.get("duration_ms", 0))),
+            session_id=str(old_data.get("session_id", "")),
+            model=cast(str | None, old_data.get("model")),
+            error=cast(str | None, old_data.get("error")),
+            retry_info=_retry_info_from_optional_raw(raw_retry),
         )
         assert result.retry_info is None
         assert result.success is True
@@ -840,8 +867,9 @@ class TestPhaseResultRetryInfo:
     def test_retry_info_roundtrip_none(self) -> None:
         """Serialization round-trip preserves None retry_info."""
         result = PhaseResult(phase=Phase.REVIEW, success=True)
+        ri = result.retry_info
         # Simulate serialization (as done in orchestrator._save_run_log)
-        serialized = {
+        serialized: dict[str, object] = {
             "phase": result.phase.value,
             "success": result.success,
             "cost_usd": result.cost_usd,
@@ -850,25 +878,27 @@ class TestPhaseResultRetryInfo:
             "model": result.model,
             "error": result.error,
             "artifacts": result.artifacts,
-            "retry_info": {
-                "attempts": result.retry_info.attempts,
-                "transient_errors": result.retry_info.transient_errors,
-                "fallback_model_used": result.retry_info.fallback_model_used,
-                "total_retry_delay_seconds": result.retry_info.total_retry_delay_seconds,
-            } if result.retry_info else None,
+            "retry_info": None
+            if ri is None
+            else {
+                "attempts": ri.attempts,
+                "transient_errors": ri.transient_errors,
+                "fallback_model_used": ri.fallback_model_used,
+                "total_retry_delay_seconds": ri.total_retry_delay_seconds,
+            },
         }
         # Simulate deserialization (as done in orchestrator._load_run_log)
         raw_retry = serialized.get("retry_info")
         restored = PhaseResult(
-            phase=Phase(serialized["phase"]),
-            success=serialized["success"],
-            cost_usd=serialized.get("cost_usd"),
-            duration_ms=serialized.get("duration_ms", 0),
-            session_id=serialized.get("session_id", ""),
-            model=serialized.get("model"),
-            error=serialized.get("error"),
-            artifacts=serialized.get("artifacts", {}),
-            retry_info=RetryInfo(**raw_retry) if raw_retry else None,
+            phase=Phase(str(serialized["phase"])),
+            success=bool(serialized["success"]),
+            cost_usd=cast(float | None, serialized.get("cost_usd")),
+            duration_ms=int(cast(int | float, serialized.get("duration_ms", 0))),
+            session_id=str(serialized.get("session_id", "")),
+            model=cast(str | None, serialized.get("model")),
+            error=cast(str | None, serialized.get("error")),
+            artifacts={},
+            retry_info=_retry_info_from_optional_raw(raw_retry),
         )
         assert restored.retry_info is None
 
@@ -886,8 +916,10 @@ class TestPhaseResultRetryInfo:
             cost_usd=0.85,
             retry_info=info,
         )
+        ri = result.retry_info
+        assert ri is not None
         # Simulate serialization
-        serialized = {
+        serialized: dict[str, object] = {
             "phase": result.phase.value,
             "success": result.success,
             "cost_usd": result.cost_usd,
@@ -897,26 +929,27 @@ class TestPhaseResultRetryInfo:
             "error": result.error,
             "artifacts": result.artifacts,
             "retry_info": {
-                "attempts": result.retry_info.attempts,
-                "transient_errors": result.retry_info.transient_errors,
-                "fallback_model_used": result.retry_info.fallback_model_used,
-                "total_retry_delay_seconds": result.retry_info.total_retry_delay_seconds,
-            } if result.retry_info else None,
+                "attempts": ri.attempts,
+                "transient_errors": ri.transient_errors,
+                "fallback_model_used": ri.fallback_model_used,
+                "total_retry_delay_seconds": ri.total_retry_delay_seconds,
+            },
         }
         # Simulate deserialization
         raw_retry = serialized.get("retry_info")
         restored = PhaseResult(
-            phase=Phase(serialized["phase"]),
-            success=serialized["success"],
-            cost_usd=serialized.get("cost_usd"),
-            duration_ms=serialized.get("duration_ms", 0),
-            session_id=serialized.get("session_id", ""),
-            model=serialized.get("model"),
-            error=serialized.get("error"),
-            artifacts=serialized.get("artifacts", {}),
-            retry_info=RetryInfo(**raw_retry) if raw_retry else None,
+            phase=Phase(str(serialized["phase"])),
+            success=bool(serialized["success"]),
+            cost_usd=cast(float | None, serialized.get("cost_usd")),
+            duration_ms=int(cast(int | float, serialized.get("duration_ms", 0))),
+            session_id=str(serialized.get("session_id", "")),
+            model=cast(str | None, serialized.get("model")),
+            error=cast(str | None, serialized.get("error")),
+            artifacts={},
+            retry_info=_retry_info_from_optional_raw(raw_retry),
         )
         assert restored.retry_info == info
+        assert restored.retry_info is not None
         assert restored.retry_info.attempts == 2
         assert restored.retry_info.total_retry_delay_seconds == 12.3
 
@@ -924,7 +957,7 @@ class TestPhaseResultRetryInfo:
         """RetryInfo is immutable (frozen dataclass)."""
         info = RetryInfo(attempts=2, transient_errors=1)
         with pytest.raises(AttributeError):
-            info.attempts = 5  # type: ignore[misc]
+            setattr(info, "attempts", 5)
 
     def test_retry_info_from_dict_with_extra_keys(self) -> None:
         """RetryInfo construction from dict with extra keys should not crash.
@@ -933,7 +966,7 @@ class TestPhaseResultRetryInfo:
         unexpected fields — the explicit field extraction pattern in
         _load_run_log should handle this gracefully.
         """
-        raw = {
+        raw: dict[str, object] = {
             "attempts": 3,
             "transient_errors": 1,
             "fallback_model_used": None,
@@ -941,11 +974,12 @@ class TestPhaseResultRetryInfo:
             "unexpected_future_field": "should be ignored",
         }
         # Explicit extraction (as done in _load_run_log) works fine
+        fb = raw.get("fallback_model_used")
         info = RetryInfo(
-            attempts=raw.get("attempts", 1),
-            transient_errors=raw.get("transient_errors", 0),
-            fallback_model_used=raw.get("fallback_model_used"),
-            total_retry_delay_seconds=raw.get("total_retry_delay_seconds", 0.0),
+            attempts=int(cast(int, raw["attempts"])),
+            transient_errors=int(cast(int, raw["transient_errors"])),
+            fallback_model_used=fb if isinstance(fb, str) else None,
+            total_retry_delay_seconds=float(cast(float, raw["total_retry_delay_seconds"])),
         )
         assert info.attempts == 3
         assert info.transient_errors == 1
@@ -955,12 +989,17 @@ class TestPhaseResultRetryInfo:
 
         Simulates an older run log that doesn't have all RetryInfo fields.
         """
-        raw = {"attempts": 2}
+        raw: dict[str, object] = {"attempts": 2}
+        te = raw.get("transient_errors", 0)
+        transient_errors = int(te) if isinstance(te, (int, float)) else 0
+        fb = raw.get("fallback_model_used")
+        td = raw.get("total_retry_delay_seconds", 0.0)
+        total_delay = float(td) if isinstance(td, (int, float)) else 0.0
         info = RetryInfo(
-            attempts=raw.get("attempts", 1),
-            transient_errors=raw.get("transient_errors", 0),
-            fallback_model_used=raw.get("fallback_model_used"),
-            total_retry_delay_seconds=raw.get("total_retry_delay_seconds", 0.0),
+            attempts=int(cast(int, raw["attempts"])),
+            transient_errors=transient_errors,
+            fallback_model_used=fb if isinstance(fb, str) else None,
+            total_retry_delay_seconds=total_delay,
         )
         assert info.attempts == 2
         assert info.transient_errors == 0

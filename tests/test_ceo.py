@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -41,11 +42,11 @@ def _fake_git_subprocess_run(cmd, *args, **kwargs):
 
 
 @pytest.fixture(autouse=True)
-def _no_real_github_cli() -> None:
+def _no_real_github_cli() -> Generator[None, None, None]:
     """``fetch_open_*`` uses ``gh`` subprocess; stub it so tests never hit the CLI or network."""
     with patch("colonyos.github.subprocess.run") as m:
         m.return_value = CompletedProcess(["gh"], 1, stdout="", stderr="stub: no gh in unit tests")
-        yield
+        yield None
 
 
 @pytest.fixture

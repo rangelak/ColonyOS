@@ -8,7 +8,7 @@ Now I have a complete picture. Let me write the review.
 
 # Review: Daily Slack Thread Consolidation
 
-**Reviewer**: Andrej Karpathy  
+**Reviewer**: Andrej Karpathy
 **Branch**: `colonyos/you_are_sending_too_many_slack_messages_to_the_m_1b324759d9`
 
 ## Analysis

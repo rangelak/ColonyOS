@@ -3,16 +3,18 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from typing import Any, Literal
-
-from pathlib import Path
+from typing import Any, Literal, cast
 
 from colonyos.models import PreflightError, QueueItem, QueueItemStatus
 
 logger = logging.getLogger(__name__)
 
 
-class _ResilienceMixin:
+def _host(obj: object) -> Any:
+    return cast(Any, obj)
+
+
+class ResilienceMixin:
     """Mixin providing crash-recovery and worktree-resilience methods for the Daemon class.
 
     All methods access Daemon state via ``self`` — they remain bound to the
@@ -26,8 +28,9 @@ class _ResilienceMixin:
 
     def _recover_from_crash(self) -> None:
         """Scan for orphaned RUNNING items and mark them as FAILED."""
+        host = _host(self)
         recovered = 0
-        for item in self._queue_state.items:
+        for item in host._queue_state.items:
             if item.status == QueueItemStatus.RUNNING:
                 item.status = QueueItemStatus.FAILED
                 item.error = "daemon crash recovery"
@@ -38,20 +41,20 @@ class _ResilienceMixin:
                 "Crash recovery: marked %d orphaned RUNNING items as FAILED",
                 recovered,
             )
-            self._persist_queue()
+            host._persist_queue()
 
         # Ensure clean git state
         try:
             from colonyos.recovery import git_status_porcelain, preserve_and_reset_worktree
 
-            dirty = git_status_porcelain(self.repo_root)
+            dirty = git_status_porcelain(host.repo_root)
             if dirty.strip():
                 logger.warning("Dirty git state on startup, preserving and resetting")
                 preserve_result = preserve_and_reset_worktree(
-                    self.repo_root,
+                    host.repo_root,
                     "daemon_crash_recovery",
                 )
-                incident_path = self._record_runtime_incident(
+                incident_path = host._record_runtime_incident(
                     label_prefix="daemon-startup-recovery",
                     summary=(
                         "Daemon startup found a dirty worktree and preserved it before reset.\n\n"
@@ -75,19 +78,18 @@ class _ResilienceMixin:
         except Exception:
             logger.exception("Error during git state recovery")
 
-    def _preexec_worktree_state(
-        self,
-    ) -> tuple[Literal["clean", "dirty", "indeterminate"], str]:
+    def _preexec_worktree_state(self) -> tuple[Literal["clean", "dirty", "indeterminate"], str]:
         """Classify worktree before execution: clean, dirty, or indeterminate (fail-closed).
 
         Uses the same rules as pipeline preflight (including ignoring ColonyOS output dirs).
         If ``git status`` errors or times out, returns ``indeterminate`` with a short detail
         string instead of assuming clean.
         """
-        from colonyos.orchestrator import _check_working_tree_clean
+        from colonyos.orchestrator import _check_working_tree_clean  # pyright: ignore[reportPrivateUsage]
 
+        host = _host(self)
         try:
-            is_clean, _dirty_out = _check_working_tree_clean(self.repo_root)
+            is_clean, _dirty_out = _check_working_tree_clean(host.repo_root)
             return ("clean" if is_clean else "dirty", "")
         except PreflightError as exc:
             return ("indeterminate", str(exc).strip() or exc.__class__.__name__)
@@ -101,11 +103,12 @@ class _ResilienceMixin:
         try:
             from colonyos.recovery import preserve_and_reset_worktree
 
+            host = _host(self)
             preserve_result = preserve_and_reset_worktree(
-                self.repo_root,
+                host.repo_root,
                 "daemon-preexec-dirty-recovery",
             )
-            self._record_runtime_incident(
+            host._record_runtime_incident(
                 label_prefix="daemon-preexec-dirty-recovery",
                 summary=(
                     "Pre-execution check found a dirty worktree. "
@@ -130,8 +133,9 @@ class _ResilienceMixin:
             return False
 
     def _should_auto_recover_dirty_worktree(self, exc: Exception) -> bool:
+        host = _host(self)
         return (
-            self.daemon_config.auto_recover_dirty_worktree
+            host.daemon_config.auto_recover_dirty_worktree
             and isinstance(exc, PreflightError)
             and exc.code == "dirty_worktree"
         )
@@ -150,6 +154,7 @@ class _ResilienceMixin:
         item: QueueItem,
         exc: PreflightError,
     ) -> None:
+        host = _host(self)
         branch_name = (exc.details or {}).get("branch_name", "")
         logger.warning(
             "Branch '%s' blocked item %s; deleting stale local branch and retrying",
@@ -162,7 +167,7 @@ class _ResilienceMixin:
                 capture_output=True,
                 text=True,
                 timeout=10,
-                cwd=self.repo_root,
+                cwd=host.repo_root,
             )
             if result.returncode != 0:
                 raise RuntimeError(
@@ -180,14 +185,15 @@ class _ResilienceMixin:
     ) -> None:
         from colonyos.recovery import incident_slug, preserve_and_reset_worktree
 
+        host = _host(self)
         dirty_output = str(exc.details.get("dirty_output", "")).strip()
         recovery_label = incident_slug(f"daemon-dirty-worktree-{item.id}")
         logger.warning(
             "Dirty worktree blocked item %s; preserving state and retrying once",
             item.id,
         )
-        preserve_result = preserve_and_reset_worktree(self.repo_root, recovery_label)
-        incident_path = self._record_runtime_incident(
+        preserve_result = preserve_and_reset_worktree(host.repo_root, recovery_label)
+        incident_path = host._record_runtime_incident(
             label_prefix="daemon-dirty-worktree-recovery",
             summary=(
                 "Daemon queue execution hit a dirty-worktree preflight failure and "

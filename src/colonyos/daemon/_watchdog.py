@@ -1,29 +1,50 @@
 """Watchdog mixin — detects and recovers stuck pipelines."""
 from __future__ import annotations
 
+import importlib
 import logging
 import sys
 import time
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from colonyos.tui.monitor_protocol import encode_monitor_event
+
+if TYPE_CHECKING:
+    from colonyos.models import QueueItemStatus
 
 logger = logging.getLogger(__name__)
 
 
-def _get_daemon_module():
+class _QueueItemStatusEnum(Protocol):
+    FAILED: QueueItemStatus
+
+
+class _DaemonModule(Protocol):
+    QueueItemStatus: _QueueItemStatusEnum
+
+    def active_phase_controller_count(self) -> int: ...
+
+    def request_active_phase_cancel(self, reason: str = "Cancelled by user") -> int: ...
+
+    def request_cancel(self, reason: str = "Cancelled by user") -> int: ...
+
+
+def _host(obj: object) -> Any:
+    return cast(Any, obj)
+
+
+def _get_daemon_module() -> _DaemonModule:
     """Lazily fetch the colonyos.daemon package module.
 
     This avoids circular imports and ensures that ``patch("colonyos.daemon.X")``
     targets are honoured — the mixin looks up names from the same namespace that
     tests patch.
     """
-    import colonyos.daemon as mod
-    return mod
+    return cast(_DaemonModule, cast(object, importlib.import_module("colonyos.daemon")))
 
 
-class _WatchdogMixin:
+class WatchdogMixin:
     """Mixin providing watchdog thread management for the Daemon class.
 
     All methods access Daemon state via ``self`` — they remain bound to the
@@ -37,32 +58,35 @@ class _WatchdogMixin:
 
     def _start_watchdog_thread(self) -> None:
         """Start the watchdog thread that detects stuck pipelines."""
+        host = _host(self)
         t = threading.Thread(
-            target=self._watchdog_loop,
+            target=host._watchdog_loop,
             name="daemon-watchdog",
             daemon=True,
         )
         t.start()
-        self._watchdog_thread = t
+        host._watchdog_thread = t
 
     def _watchdog_loop(self) -> None:
         """Main watchdog loop — wakes every 30s to check for stalled pipelines."""
-        while not self._stop_event.is_set():
+        host = _host(self)
+        while not host._stop_event.is_set():
             try:
-                self._watchdog_check()
+                host._watchdog_check()
             except Exception:
                 logger.exception("Watchdog check failed")
-            self._stop_event.wait(30)
+            host._stop_event.wait(30)
 
     def _watchdog_check(self) -> None:
         """Single watchdog check cycle. Detects stalls and triggers recovery."""
-        if not self._pipeline_running:
+        host = _host(self)
+        if not host._pipeline_running:
             return
 
-        stall_seconds = self.daemon_config.watchdog_stall_seconds
+        stall_seconds = host.daemon_config.watchdog_stall_seconds
 
         # Check 1: Has the pipeline been running longer than the threshold?
-        pipeline_started = self._pipeline_started_at
+        pipeline_started = host._pipeline_started_at
         if pipeline_started is None:
             return
         elapsed = time.monotonic() - pipeline_started
@@ -70,7 +94,7 @@ class _WatchdogMixin:
             return
 
         # Check 2: Is the heartbeat file stale?
-        heartbeat_path = self.repo_root / ".colonyos" / "runs" / "heartbeat"
+        heartbeat_path = host.repo_root / ".colonyos" / "runs" / "heartbeat"
         try:
             hb_mtime = heartbeat_path.stat().st_mtime
             time_since_heartbeat = time.time() - hb_mtime
@@ -97,7 +121,7 @@ class _WatchdogMixin:
             return
 
         # Both conditions met: pipeline is stalled
-        self._pipeline_stalled = True
+        host._pipeline_stalled = True
         logger.warning(
             "Watchdog: pipeline stalled for %.0fs "
             "(threshold=%ds, heartbeat_age=%.0fs, active_phases=%d)",
@@ -106,14 +130,15 @@ class _WatchdogMixin:
             time_since_heartbeat,
             active_phases,
         )
-        self._watchdog_recover(stall_duration=elapsed)
+        host._watchdog_recover(stall_duration=elapsed)
 
     def _watchdog_recover(self, stall_duration: float) -> None:
         """Recover from a stalled pipeline: cancel, wait, force-reset, mark FAILED."""
         # Lazy module lookup: these functions are patched at "colonyos.daemon.<name>"
         # in tests, so we must call them via the module namespace, not direct import.
+        host = _host(self)
         mod = _get_daemon_module()
-        item = self._current_running_item
+        item = host._current_running_item
 
         # Step 0: Emit monitor event for TUI consumption
         try:
@@ -142,7 +167,7 @@ class _WatchdogMixin:
                     f"⚠️ *Stuck Pipeline Detected*\n"
                     f"No progress for {stall_duration:.0f}s. Auto-recovery initiated."
                 )
-            self._post_slack_message(alert_msg)
+            host._post_slack_message(alert_msg)
         except Exception:
             logger.exception("Watchdog: failed to post Slack alert")
 
@@ -156,10 +181,10 @@ class _WatchdogMixin:
             logger.exception("Watchdog: request_active_phase_cancel failed")
 
         # Step 2: Grace period — wait 30s for cooperative cancellation
-        self._stop_event.wait(30)
+        host._stop_event.wait(30)
 
         # Step 3: If still stuck, force cancel
-        if self._pipeline_running:
+        if host._pipeline_running:
             logger.warning("Watchdog: pipeline still running after grace period, forcing cancel")
             try:
                 mod.request_cancel(
@@ -169,11 +194,11 @@ class _WatchdogMixin:
                 logger.exception("Watchdog: request_cancel fallback failed")
 
         # Step 4: Force-reset state under lock
-        with self._lock:
-            self._pipeline_running = False
-            self._pipeline_started_at = None
-            self._current_running_item = None
+        with host._lock:
+            host._pipeline_running = False
+            host._pipeline_started_at = None
+            host._current_running_item = None
             if item is not None:
                 item.status = mod.QueueItemStatus.FAILED
                 item.error = f"watchdog: no progress for {stall_duration:.0f}s"
-            self._persist_queue()
+            host._persist_queue()

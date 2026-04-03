@@ -27,12 +27,11 @@ from colonyos.cli import (
     _handle_tui_command,
     _run_direct_agent,
     _run_cleanup_loop,
-    _resolve_latest_prd_path,
     run_pipeline_for_queue_item,
     _save_loop_state,
     _resolve_latest_prd_path,
 )
-from colonyos.config import ColonyConfig, BudgetConfig, save_config
+from colonyos.config import ColonyConfig, save_config
 from colonyos.models import (
     LoopState, LoopStatus, Persona, Phase, PhaseResult,
     PreflightError, ProjectInfo, QueueItem, QueueItemStatus, RunLog, RunStatus,
@@ -639,6 +638,9 @@ class TestResolveLatestPrdPath:
         )
 
         class FakeApp:
+            blocked: tuple[object, ...] | None = None
+            exited: bool = False
+
             def __init__(self, **kwargs):
                 self.run_callback = kwargs["run_callback"]
                 self.recovery_callback = kwargs["recovery_callback"]
@@ -690,6 +692,8 @@ class TestResolveLatestPrdPath:
         config = _make_config(tmp_path)
 
         class FakeApp:
+            exited: bool = False
+
             def __init__(self, **kwargs):
                 self.run_callback = kwargs["run_callback"]
                 self.messages: list[object] = []
@@ -1392,7 +1396,7 @@ class TestInitCliRouting:
              patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.cli.run_ai_init") as mock_ai:
             mock_ai.return_value = ColonyConfig()
-            result = runner.invoke(app, ["init"])
+            runner.invoke(app, ["init"])
 
         mock_ai.assert_called_once()
 
@@ -1401,7 +1405,7 @@ class TestInitCliRouting:
              patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.cli.run_init") as mock_manual:
             mock_manual.return_value = ColonyConfig()
-            result = runner.invoke(app, ["init", "--manual"], input="n\n")
+            runner.invoke(app, ["init", "--manual"], input="n\n")
 
         mock_manual.assert_called_once()
 
@@ -1410,7 +1414,7 @@ class TestInitCliRouting:
              patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.cli.run_init") as mock_manual:
             mock_manual.return_value = ColonyConfig()
-            result = runner.invoke(app, ["init", "--quick", "--name", "Test"])
+            runner.invoke(app, ["init", "--quick", "--name", "Test"])
 
         mock_manual.assert_called_once()
         call_kwargs = mock_manual.call_args
@@ -1421,7 +1425,7 @@ class TestInitCliRouting:
              patch("colonyos.cli.is_git_repo", return_value=True), \
              patch("colonyos.cli.run_init") as mock_manual:
             mock_manual.return_value = ColonyConfig()
-            result = runner.invoke(app, ["init", "--personas"], input="1\ny\nn\n")
+            runner.invoke(app, ["init", "--personas"], input="1\ny\nn\n")
 
         mock_manual.assert_called_once()
         call_kwargs = mock_manual.call_args
@@ -1842,7 +1846,7 @@ class TestAutoLoopCap:
              patch("colonyos.cli.run_ceo", return_value=("Build webhooks.", fake_ceo_result)), \
              patch("colonyos.cli.run_orchestrator", side_effect=mock_orchestrator), \
              patch("colonyos.cli._compute_elapsed_hours", return_value=0.0):
-            result = runner.invoke(app, [
+            runner.invoke(app, [
                 "auto", "--no-confirm", "--loop", "2",
             ])
 
@@ -2100,7 +2104,6 @@ class TestLoopStatusEnum:
         assert state.status == LoopStatus.RUNNING
 
     def test_from_dict_unknown_status_logs_warning(self):
-        import logging
         d = {
             "loop_id": "test", "total_iterations": 1,
             "status": "garbage",
@@ -2278,7 +2281,7 @@ class TestRunIssueFlag:
             url="https://github.com/org/repo/issues/42", state="open",
         )
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.github.fetch_issue", return_value=fake_issue) as mock_fetch, \
+             patch("colonyos.github.fetch_issue", return_value=fake_issue), \
              patch("colonyos.cli.run_orchestrator", return_value=fake_log) as mock_run:
             result = runner.invoke(app, ["run", "--issue", "42"])
 
@@ -2476,7 +2479,7 @@ class TestRepl:
             mock_stdin.isatty.return_value = True
             # Simulate user typing "quit"
             with patch("builtins.input", side_effect=["quit"]):
-                result = runner.invoke(app, [], input="quit")
+                runner.invoke(app, [], input="quit")
         # CliRunner doesn't use real stdin.isatty, so test _run_repl directly
         pass
 
@@ -2561,9 +2564,8 @@ class TestRepl:
             status=RunStatus.COMPLETED, phases=[], total_cost_usd=2.00,
         )
         # Two prompts with confirmations, then quit
-        inputs = iter(["feat 1", "", "feat 2", "", "quit"])
+        iter(["feat 1", "", "feat 2", "", "quit"])
         prompt_values = []
-        original_input = input
 
         def capture_input(prompt_str=""):
             prompt_values.append(prompt_str)
@@ -2607,7 +2609,7 @@ class TestRepl:
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
              patch("sys.stdin") as mock_stdin:
             mock_stdin.isatty.return_value = False
-            with patch("colonyos.cli._run_repl") as mock_repl:
+            with patch("colonyos.cli._run_repl"):
                 result = runner.invoke(app, [])
         # CliRunner patches stdin, so _run_repl may or may not be called
         # depending on the isatty mock. At minimum, it shouldn't crash.
@@ -2803,7 +2805,6 @@ class TestCIFixCommand:
 
     def test_uncommitted_changes_error(self, runner: CliRunner, tmp_path: Path):
         """Uncommitted changes should block ci-fix."""
-        from colonyos.ci import CheckResult
 
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
              patch("colonyos.cli.load_config", return_value=ColonyConfig()), \
@@ -3655,7 +3656,6 @@ class TestEndToEndSessionPersistence:
     def test_e2e_agent_layer_resume_parameter_threading(self):
         """E2E: verify run_phase_sync passes resume through to ClaudeAgentOptions."""
         from colonyos.agent import run_phase
-        from colonyos.models import Phase
         import inspect
 
         # Verify the resume parameter exists in run_phase signature
@@ -3678,7 +3678,7 @@ class TestEndToEndSessionPersistence:
         """E2E: _run_direct_agent retries without resume when initial call fails."""
         _make_config(tmp_path)
 
-        call_args: list[dict] = []
+        call_args: list[dict[str, object]] = []
 
         def mock_run_phase_sync(phase, prompt, *, cwd, system_prompt, model,
                                  budget_usd, ui, resume=None, **kwargs):
@@ -3776,7 +3776,7 @@ class TestMapCommand:
         """Command handles empty repo map output gracefully."""
         _make_config(tmp_path)
         with patch("colonyos.cli._find_repo_root", return_value=tmp_path), \
-             patch("colonyos.cli.generate_repo_map", return_value="") as mock_gen:
+             patch("colonyos.cli.generate_repo_map", return_value=""):
             result = runner.invoke(app, ["map"])
         assert result.exit_code == 0
         assert "No tracked files" in result.output or result.output.strip() == ""

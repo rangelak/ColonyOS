@@ -13,7 +13,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +217,7 @@ def load_daemon_state(repo_root: Path) -> DaemonState:
                 type(data).__name__,
             )
             return DaemonState()
-        return DaemonState.from_dict(data)
+        return DaemonState.from_dict(cast(dict[str, Any], data))
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         logger.warning("Corrupt daemon state file, starting fresh: %s", exc)
         return DaemonState()

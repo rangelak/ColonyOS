@@ -8,16 +8,19 @@ Extracted as a mixin so methods remain on ``self`` and
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from typing import Any, cast
 from pathlib import Path
-from typing import Any
 
 from colonyos.config import ColonyConfig
 
 logger = logging.getLogger(__name__)
 
 
-class _HelpersMixin:
+def _host(obj: object) -> Any:
+    return cast(Any, obj)
+
+
+class HelpersMixin:
     """Mixin providing helper/formatting methods for Daemon."""
 
     @staticmethod
@@ -40,16 +43,18 @@ class _HelpersMixin:
 
     def _budget_cap_label(self) -> str:
         """Return a user-facing budget cap label."""
-        if self.daily_budget is None:
+        host = _host(self)
+        if host.daily_budget is None:
             return "unlimited"
-        return f"${self.daily_budget:.2f}/day"
+        return f"${host.daily_budget:.2f}/day"
 
     def _spent_summary(self, *, spend: float | None = None) -> str:
         """Return a spend summary string for logs and status output."""
-        current_spend = self._state.daily_spend_usd if spend is None else spend
-        if self.daily_budget is None:
+        host = _host(self)
+        current_spend = host._state.daily_spend_usd if spend is None else spend
+        if host.daily_budget is None:
             return f"${current_spend:.2f}/unlimited"
-        return f"${current_spend:.2f}/${self.daily_budget:.2f}"
+        return f"${current_spend:.2f}/${host.daily_budget:.2f}"
 
     def _record_runtime_incident(
         self,
@@ -59,12 +64,13 @@ class _HelpersMixin:
         metadata: dict[str, object],
     ) -> Path | None:
         """Write an actionable recovery incident summary for daemon failures."""
+        host = _host(self)
         try:
             from colonyos.recovery import incident_slug, write_incident_summary
 
             label = incident_slug(label_prefix)
             return write_incident_summary(
-                self.repo_root,
+                host.repo_root,
                 label,
                 summary=summary,
                 metadata=metadata,
@@ -73,30 +79,35 @@ class _HelpersMixin:
             logger.exception("Failed to write daemon recovery incident")
             return None
 
-    def _maybe_record_budget_incident(self, *, today: str, pending: int) -> Path | None:
+    def _maybe_record_budget_incident(
+        self, *, today: str, pending: int
+    ) -> Path | None:
         """Write at most one budget-exhaustion incident per UTC day."""
-        if self._last_budget_incident_date == today:
+        host = _host(self)
+        if host._last_budget_incident_date == today:
             return None
-        incident_path = self._record_runtime_incident(
+        incident_path = host._record_runtime_incident(
             label_prefix="daemon-budget-exhausted",
             summary=(
                 "The daemon stopped pulling new queue items because the daily budget was exhausted.\n\n"
-                f"Spend: {self._spent_summary()}\n"
+                f"Spend: {host._spent_summary()}\n"
                 f"Pending items: {pending}\n"
                 "Wait for the next UTC day, raise daemon.daily_budget_usd, or restart with "
                 "--unlimited-budget if this run should ignore the cap."
             ),
             metadata={
-                "daily_spend_usd": self._state.daily_spend_usd,
-                "daily_budget": self.daily_budget,
+                "daily_spend_usd": host._state.daily_spend_usd,
+                "daily_budget": host.daily_budget,
                 "pending_items": pending,
             },
         )
         if incident_path is not None:
-            self._last_budget_incident_date = today
+            host._last_budget_incident_date = today
         return incident_path
 
-    def _budget_exhaustion_guidance(self, *, incident_path: Path | None) -> str:
+    def _budget_exhaustion_guidance(
+        self, *, incident_path: Path | None
+    ) -> str:
         """Return actionable operator guidance for budget exhaustion."""
         guidance = (
             "Wait for the next UTC reset, increase daemon.daily_budget_usd, "
@@ -108,8 +119,9 @@ class _HelpersMixin:
 
     def _is_systemic_failure(self) -> bool:
         """True when all recent failure codes are identical (systemic issue)."""
-        codes = self._recent_failure_codes
-        if len(codes) < self.daemon_config.max_consecutive_failures:
+        host = _host(self)
+        codes = host._recent_failure_codes
+        if len(codes) < host.daemon_config.max_consecutive_failures:
             return False
         return len(set(codes)) == 1
 
@@ -146,7 +158,9 @@ class _HelpersMixin:
             "repo or Claude CLI issue is fixed."
         )
 
-    def _format_item_error(self, message: str, *, incident_path: Path | None) -> str:
+    def _format_item_error(
+        self, message: str, *, incident_path: Path | None
+    ) -> str:
         """Format a queue item error with an optional incident reference."""
         if incident_path is None:
             return message[:500]

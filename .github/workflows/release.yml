@@ -236,4 +236,3 @@ jobs:
             --repo rangelak/ColonyOS \
             --title "Homebrew tap update failed for v${VERSION}" \
             --body "The \`update-homebrew\` job failed for release v${VERSION}. The PyPI package was published successfully, but the Homebrew formula was not updated. Please investigate the [workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) and manually update the tap if needed."
-

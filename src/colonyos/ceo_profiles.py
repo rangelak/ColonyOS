@@ -87,7 +87,7 @@ def get_ceo_profile(
     return random.choice(candidates)
 
 
-def parse_custom_ceo_profiles(raw_profiles: list[dict]) -> list[Persona]:
+def parse_custom_ceo_profiles(raw_profiles: list[dict[str, object]]) -> list[Persona]:
     """Parse and sanitize user-defined CEO profiles from config.
 
     Each dict must have 'role', 'expertise', 'perspective' keys.
@@ -95,12 +95,14 @@ def parse_custom_ceo_profiles(raw_profiles: list[dict]) -> list[Persona]:
     """
     result: list[Persona] = []
     for entry in raw_profiles:
-        role = entry.get("role", "").strip()
+        role = str(entry.get("role", "")).strip()
         if not role:
             continue
-        result.append(Persona(
-            role=sanitize_display_text(role),
-            expertise=sanitize_display_text(entry.get("expertise", "")),
-            perspective=sanitize_display_text(entry.get("perspective", "")),
-        ))
+        result.append(
+            Persona(
+                role=sanitize_display_text(role),
+                expertise=sanitize_display_text(str(entry.get("expertise", ""))),
+                perspective=sanitize_display_text(str(entry.get("perspective", ""))),
+            )
+        )
     return result

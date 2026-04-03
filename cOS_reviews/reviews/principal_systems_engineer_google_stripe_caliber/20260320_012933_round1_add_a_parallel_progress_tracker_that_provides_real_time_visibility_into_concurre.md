@@ -40,7 +40,7 @@ I've completed my review. Now let me write out my findings:
 
 ### Reliability/Observability Issues Identified
 
-**Issue 1: Non-TTY render logic is buggy** 
+**Issue 1: Non-TTY render logic is buggy**
 In `_render_non_tty()`, the method iterates through reviewers in index order and prints the first non-pending one, then breaks. This is incorrect behavior when:
 1. Reviewer 0 completes → prints R0 ✓
 2. Reviewer 2 completes → iterates, finds R0 (already complete), prints R0 AGAIN

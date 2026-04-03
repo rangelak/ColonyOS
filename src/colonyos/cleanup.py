@@ -583,7 +583,7 @@ def synthesize_refactor_prompt(
 def write_cleanup_log(
     runs_dir: Path,
     operation: str,
-    result: dict,
+    result: dict[str, object],
 ) -> Path:
     """Write an audit log for a cleanup operation.
 

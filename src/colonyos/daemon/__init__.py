@@ -18,12 +18,15 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
-from colonyos.agent import active_phase_controller_count, request_active_phase_cancel
+from colonyos.agent import (
+    active_phase_controller_count as active_phase_controller_count,
+    request_active_phase_cancel,
+)
 from colonyos.cancellation import cancellation_scope, request_cancel
 from colonyos.config import ColonyConfig, load_config
 from colonyos.maintenance import (
@@ -38,7 +41,7 @@ from colonyos.maintenance import (
     should_rollback,
 )
 from colonyos.daemon_state import (
-    DaemonState,
+    DaemonState as DaemonState,
     atomic_write_json,
     load_daemon_state,
     save_daemon_state,
@@ -48,7 +51,7 @@ from colonyos.models import (
     QueueItem,
     QueueItemStatus,
     QueueState,
-    QueueStatus,
+    QueueStatus as QueueStatus,
     RunLog,
     RunStatus,
     compute_priority,
@@ -60,17 +63,20 @@ from colonyos.queue_runtime import (
     find_similar_queue_item,
     notification_targets,
     pending_queue_snapshot,
-    reprioritize_queue,
+    reprioritize_queue as reprioritize_queue,
     reprioritize_queue_item,
     select_next_pending_item,
 )
 from colonyos.runtime_lock import RepoRuntimeGuard, RuntimeBusyError
-from colonyos.tui.monitor_protocol import encode_monitor_event
+from colonyos.tui.monitor_protocol import encode_monitor_event as encode_monitor_event
 
-from colonyos.daemon._ui import DaemonError, _CombinedUI, _DaemonMonitorEventUI
-from colonyos.daemon._watchdog import _WatchdogMixin
-from colonyos.daemon._resilience import _ResilienceMixin
-from colonyos.daemon._helpers import _HelpersMixin
+from colonyos.daemon._ui import CombinedUI, DaemonError, DaemonMonitorEventUI
+from colonyos.daemon._watchdog import WatchdogMixin
+from colonyos.daemon._resilience import ResilienceMixin
+from colonyos.daemon._helpers import HelpersMixin
+
+# Backward-compatible alias (tests and legacy imports).
+_CombinedUI = CombinedUI
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +88,7 @@ _MAIN_LOOP_INTERVAL = 5
 _DAEMON_WATCH_ID = "daemon"
 
 
-class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
+class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
     """Core daemon orchestrator.
 
     Parameters
@@ -432,7 +438,7 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
                 self._budget_100_alerted = False
                 self._last_budget_incident_date = None
 
-            allowed, remaining = self._state.check_daily_budget(self.daily_budget)
+            allowed, _remaining = self._state.check_daily_budget(self.daily_budget)
 
             # Budget threshold alerts
             spend = self._state.daily_spend_usd
@@ -699,7 +705,7 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
             from colonyos.ui import make_task_badge
 
             badge = make_task_badge(task_id)
-        return _DaemonMonitorEventUI(
+        return DaemonMonitorEventUI(
             prefix=prefix,
             badge_text=getattr(badge, "text", ""),
             badge_style=getattr(badge, "style", ""),
@@ -731,7 +737,7 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
         )
 
         # Import here to avoid circular imports — cli.py imports from many modules
-        from colonyos.cli import _queue_item_branch_name_override
+        from colonyos.cli import _queue_item_branch_name_override  # pyright: ignore[reportPrivateUsage]
         from colonyos.slack import (
             FanoutSlackUI,
             SlackUI,
@@ -754,7 +760,7 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
         targets = notification_targets(item)
         ui_factory = None
         if notification is not None and targets:
-            client, channel, thread_ts = notification
+            client, _channel, _thread_ts = notification
 
             def _slack_ui_factory(
                 prefix: str = "",
@@ -773,7 +779,7 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
                 if is_nested_stream:
                     return monitor_ui if monitor_ui is not None else NullUI()
                 if monitor_ui is not None:
-                    return _CombinedUI(monitor_ui, slack_ui)
+                    return CombinedUI(monitor_ui, slack_ui)
                 return slack_ui
 
             ui_factory = _slack_ui_factory
@@ -802,7 +808,7 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
             item.head_sha = log.preflight.head_sha
 
         if notification is not None and targets:
-            client, channel, thread_ts = notification
+            client, _channel, _thread_ts = notification
             try:
                 for target_channel, target_ts in targets:
                     post_run_summary(
@@ -1209,7 +1215,6 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
                 item.id,
             )
             timed_out.set()
-            from colonyos.agent import request_active_phase_cancel
 
             cancelled = request_active_phase_cancel(
                 f"Pipeline exceeded {timeout}s wall-clock timeout"
@@ -1346,7 +1351,6 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
         try:
             from colonyos.slack import (
                 create_slack_app,
-                load_watch_state,
                 resolve_channel_names,
                 save_watch_state,
                 start_socket_mode,
@@ -1423,9 +1427,9 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
         control_keywords = {"pause", "stop", "halt", "resume", "start", "status"}
 
         @slack_app.event("message")
-        def _handle_message(event: dict, say: Any) -> None:  # noqa: ANN401
-            text = (event.get("text") or "").strip().lower()
-            user_id = event.get("user", "")
+        def _handle_message(event: dict[str, object], say: Any) -> None:  # noqa: ANN401  # pyright: ignore[reportUnusedFunction]
+            text = str(event.get("text") or "").strip().lower()
+            user_id = str(event.get("user") or "")
             if text not in control_keywords:
                 return
             result = self._handle_control_command(user_id, text)
@@ -2206,4 +2210,3 @@ class Daemon(_WatchdogMixin, _ResilienceMixin, _HelpersMixin):
             "Fix the repo state, then send `resume` in Slack.",
             critical=True,
         )
-

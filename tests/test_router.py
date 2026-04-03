@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from colonyos.config import ColonyConfig, RouterConfig, load_config
+from colonyos.config import ColonyConfig, load_config
 from colonyos.router import (
     ModeAgentMode,
     ModeAgentDecision,
@@ -1198,7 +1198,7 @@ class TestLogRouterDecision:
         # parts: ["triage", "YYYYMMDD", "HHMMSS", "ffffff"]
         assert len(parts) == 4, f"Expected 4 parts in filename, got {parts}"
         file_date = parts[1]
-        file_time = parts[2]
+        parts[2]
         # The JSON timestamp should contain the same date/time
         body_ts = data["timestamp"]
         assert file_date[:4] in body_ts  # year

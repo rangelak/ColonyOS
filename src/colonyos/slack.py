@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, runtime_checkable
 
-from colonyos.config import LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS, RouterConfig, SlackConfig, load_config, runs_dir_path
+from colonyos.config import LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS, SlackConfig, load_config, runs_dir_path
 from colonyos.models import extract_result_text
 from colonyos.sanitize import sanitize_untrusted_content, strip_slack_links
 
@@ -1041,7 +1041,7 @@ def triage_message(
     # When triage_scope is set, use the Slack-specific prompt path
     # since the router does not support scope filtering.
     effective_root = repo_root if repo_root is not None else Path.cwd()
-    router_cfg = load_config(effective_root).router if effective_root is not None else RouterConfig()
+    router_cfg = load_config(effective_root).router
     if triage_scope:
         return _triage_message_legacy(
             message_text,
@@ -1406,10 +1406,20 @@ def create_slack_app(config: SlackConfig) -> Any:
     """
 
     try:
-        import slack_sdk  # noqa: F401 — force full load before slack_bolt to avoid KeyError race in threads
-        from slack_bolt import App
+        import slack_sdk as _slack_sdk  # noqa: F401 — force full load before slack_bolt to avoid KeyError race in threads
+        _ = _slack_sdk  # ensure import is used (side-effect import for thread safety)
+        from slack_bolt import App as SlackBoltApp
     except Exception as exc:
         _raise_slack_dependency_error(exc, operation="app startup")
+
+    class ColonyOSSlackApp(SlackBoltApp):
+        """Bolt ``App`` with a typed slot for ColonyOS ``SlackConfig`` (handlers read ``_colonyos_config``)."""
+
+        _colonyos_config: SlackConfig
+
+        def __init__(self, *, token: str, colonyos_config: SlackConfig) -> None:
+            super().__init__(token=token)
+            self._colonyos_config = colonyos_config
 
     bot_token = os.environ.get("COLONYOS_SLACK_BOT_TOKEN", "").strip()
     app_token = os.environ.get("COLONYOS_SLACK_APP_TOKEN", "").strip()
@@ -1423,13 +1433,11 @@ def create_slack_app(config: SlackConfig) -> Any:
             "COLONYOS_SLACK_APP_TOKEN environment variable is not set."
         )
 
-    app = App(token=bot_token)
     # Stash config for downstream use (handlers).
     # NOTE: Do NOT stash the app_token on the app instance — the agent
     # can inspect its own process via Bash, so keeping tokens in Python
     # attributes increases the blast radius of prompt-injection attacks.
-    app._colonyos_config = config  # type: ignore[attr-defined]
-    return app
+    return ColonyOSSlackApp(token=bot_token, colonyos_config=config)
 
 
 def start_socket_mode(app: Any) -> Any:
@@ -1441,7 +1449,8 @@ def start_socket_mode(app: Any) -> Any:
     introspection).
     """
     try:
-        import slack_sdk  # noqa: F401 — same thread-safety guard as create_slack_app
+        import slack_sdk as _slack_sdk  # noqa: F401 — same thread-safety guard as create_slack_app
+        _ = _slack_sdk
         from slack_bolt.adapter.socket_mode import SocketModeHandler
     except Exception as exc:
         _raise_slack_dependency_error(exc, operation="socket mode startup")

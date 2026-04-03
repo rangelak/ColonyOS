@@ -16,7 +16,7 @@ import subprocess
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from colonyos.memory import MemoryCategory, MemoryStore
 from colonyos.sanitize import sanitize_ci_logs
@@ -304,14 +304,22 @@ def _extract_close_context(data: dict[str, Any]) -> str:
     Returns a sanitized, length-capped string.  Empty if no comments/reviews.
     """
     # Prefer the last comment, fall back to the last review body
-    comments = data.get("comments") or []
-    reviews = data.get("reviews") or []
+    raw_comments = data.get("comments")
+    raw_reviews = data.get("reviews")
+    comments = cast(list[Any], raw_comments) if isinstance(raw_comments, list) else []
+    reviews = cast(list[Any], raw_reviews) if isinstance(raw_reviews, list) else []
 
     last_text = ""
     if comments:
-        last_text = comments[-1].get("body", "")
+        last = comments[-1]
+        if isinstance(last, dict):
+            last_d = cast(dict[str, Any], last)
+            last_text = str(last_d.get("body", ""))
     elif reviews:
-        last_text = reviews[-1].get("body", "")
+        last = reviews[-1]
+        if isinstance(last, dict):
+            last_d = cast(dict[str, Any], last)
+            last_text = str(last_d.get("body", ""))
 
     if not last_text:
         return ""
@@ -332,26 +340,40 @@ def _extract_ci_passed(data: dict[str, Any]) -> Optional[bool]:
     Assumes GitHub Actions as the CI provider (SUCCESS/NEUTRAL/SKIPPED
     are the passing conclusion values).
     """
-    checks = data.get("statusCheckRollup") or []
+    raw_checks = data.get("statusCheckRollup")
+    checks = cast(list[Any], raw_checks) if isinstance(raw_checks, list) else []
     if not checks:
         return None
 
     # Filter out in-progress checks (conclusion is None or empty string)
-    completed = [c for c in checks if c.get("conclusion")]
+    completed: list[dict[str, Any]] = []
+    for c in checks:
+        if isinstance(c, dict):
+            cd = cast(dict[str, Any], c)
+            if cd.get("conclusion"):
+                completed.append(cd)
     if len(completed) < len(checks):
         # Some checks still running — we can't determine pass/fail yet
         return None
 
     return all(
-        c["conclusion"].upper() in ("SUCCESS", "NEUTRAL", "SKIPPED")
+        str(c["conclusion"]).upper() in ("SUCCESS", "NEUTRAL", "SKIPPED")
         for c in completed
     )
 
 
 def _extract_labels(data: dict[str, Any]) -> str:
     """Extract label names as comma-separated string."""
-    labels = data.get("labels") or []
-    return ",".join(label.get("name", "") for label in labels if label.get("name"))
+    raw_labels = data.get("labels")
+    labels = cast(list[Any], raw_labels) if isinstance(raw_labels, list) else []
+    parts: list[str] = []
+    for label in labels:
+        if isinstance(label, dict):
+            ld = cast(dict[str, Any], label)
+            name = ld.get("name")
+            if name is not None:
+                parts.append(str(name))
+    return ",".join(parts)
 
 
 # ---------------------------------------------------------------------------

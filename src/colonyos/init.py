@@ -3,22 +3,16 @@ from __future__ import annotations
 import json
 import logging
 import signal
-import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 import click
 from rich.table import Table
-from rich.text import Text
 
 from colonyos.config import (
     DEFAULTS,
-    VALID_MODELS,
     ColonyConfig,
-    BudgetConfig,
-    PhasesConfig,
-    config_dir_path,
     load_config,
     save_config,
 )
@@ -311,20 +305,22 @@ def _parse_ai_config_response(raw_text: str) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return None
 
+    payload = cast(dict[str, Any], data)
+
     # Validate pack_key
-    pk = data.get("pack_key")
+    pk = payload.get("pack_key")
     if pk not in pack_keys():
         logger.debug("AI init response invalid pack_key: %s", pk)
         return None
 
     # Validate preset_name
-    preset = data.get("preset_name")
+    preset = payload.get("preset_name")
     if preset not in MODEL_PRESETS:
         logger.debug("AI init response invalid preset_name: %s", preset)
         return None
 
     # Validate project_name is present and non-empty
-    pname = data.get("project_name")
+    pname = payload.get("project_name")
     if not pname or not isinstance(pname, str):
         logger.debug("AI init response missing project_name")
         return None
@@ -332,10 +328,10 @@ def _parse_ai_config_response(raw_text: str) -> dict[str, Any] | None:
     return {
         "pack_key": pk,
         "preset_name": preset,
-        "project_name": str(data.get("project_name", "")),
-        "project_description": str(data.get("project_description", "")),
-        "project_stack": str(data.get("project_stack", "")),
-        "vision": str(data.get("vision", "")),
+        "project_name": str(payload.get("project_name", "")),
+        "project_description": str(payload.get("project_description", "")),
+        "project_stack": str(payload.get("project_stack", "")),
+        "vision": str(payload.get("vision", "")),
     }
 
 
@@ -615,6 +611,7 @@ def select_persona_pack() -> list[Persona] | None:
         default=1,
         prompt_suffix=" ",
     )
+    assert isinstance(choice, int)
 
     if choice == custom_index:
         return None

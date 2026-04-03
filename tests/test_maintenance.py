@@ -6,9 +6,10 @@ import json
 import subprocess
 import time
 from pathlib import Path
-from unittest.mock import patch
+from typing import Callable, cast
+from unittest.mock import MagicMock, patch
 
-import pytest
+import colonyos.maintenance as colonyos_maintenance
 
 from colonyos.maintenance import (
     BranchStatus,
@@ -22,6 +23,20 @@ from colonyos.maintenance import (
     run_self_update,
     scan_diverged_branches,
     should_rollback,
+)
+from colonyos.models import QueueItem
+
+_FETCH_OPEN_PRS_FOR_PREFIX = cast(
+    Callable[[Path, str], dict[str, int]],
+    getattr(colonyos_maintenance, "_fetch_open_prs_for_prefix"),
+)
+_FETCH_OPEN_PRS_FOR_CI = cast(
+    Callable[[Path], list[dict[str, object]]],
+    getattr(colonyos_maintenance, "_fetch_open_prs_for_ci"),
+)
+_FETCH_CI_CHECKS_FOR_PR = cast(
+    Callable[[int, Path], list[dict[str, str]]],
+    getattr(colonyos_maintenance, "_fetch_ci_checks_for_pr"),
 )
 
 
@@ -46,7 +61,7 @@ class TestPullAndCheckUpdate:
     """Task 2.1 — pull_and_check_update returns (changed, old_sha, new_sha)."""
 
     @patch("colonyos.maintenance._git")
-    def test_no_change(self, mock_git: patch, tmp_path: Path) -> None:
+    def test_no_change(self, mock_git: MagicMock, tmp_path: Path) -> None:
         sha = "abc1234"
         mock_git.side_effect = [
             _completed(stdout=f"{sha}\n"),   # rev-parse HEAD (before)
@@ -59,7 +74,7 @@ class TestPullAndCheckUpdate:
         assert new == sha
 
     @patch("colonyos.maintenance._git")
-    def test_fast_forward_success(self, mock_git: patch, tmp_path: Path) -> None:
+    def test_fast_forward_success(self, mock_git: MagicMock, tmp_path: Path) -> None:
         old_sha = "aaa1111"
         new_sha = "bbb2222"
         mock_git.side_effect = [
@@ -73,7 +88,7 @@ class TestPullAndCheckUpdate:
         assert new == new_sha
 
     @patch("colonyos.maintenance._git")
-    def test_pull_failure_returns_false(self, mock_git: patch, tmp_path: Path) -> None:
+    def test_pull_failure_returns_false(self, mock_git: MagicMock, tmp_path: Path) -> None:
         sha = "ccc3333"
         mock_git.side_effect = [
             _completed(stdout=f"{sha}\n"),
@@ -85,7 +100,7 @@ class TestPullAndCheckUpdate:
         assert new is None
 
     @patch("colonyos.maintenance._git")
-    def test_no_tracking_branch(self, mock_git: patch, tmp_path: Path) -> None:
+    def test_no_tracking_branch(self, mock_git: MagicMock, tmp_path: Path) -> None:
         sha = "ddd4444"
         mock_git.side_effect = [
             _completed(stdout=f"{sha}\n"),
@@ -97,7 +112,7 @@ class TestPullAndCheckUpdate:
         assert new is None
 
     @patch("colonyos.maintenance._git")
-    def test_initial_rev_parse_failure(self, mock_git: patch, tmp_path: Path) -> None:
+    def test_initial_rev_parse_failure(self, mock_git: MagicMock, tmp_path: Path) -> None:
         mock_git.side_effect = [
             _completed(returncode=128, stderr="fatal: not a git repository"),
         ]
@@ -107,7 +122,7 @@ class TestPullAndCheckUpdate:
         assert new is None
 
     @patch("colonyos.maintenance._git")
-    def test_timeout_during_pull(self, mock_git: patch, tmp_path: Path) -> None:
+    def test_timeout_during_pull(self, mock_git: MagicMock, tmp_path: Path) -> None:
         sha = "eee5555"
         mock_git.side_effect = [
             _completed(stdout=f"{sha}\n"),
@@ -128,34 +143,37 @@ class TestRunSelfUpdate:
     """Task 2.2 — run_self_update runs install command and returns success/failure."""
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_success(self, mock_run: patch, tmp_path: Path) -> None:
+    def test_success(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = _completed()
         assert run_self_update(tmp_path, "uv pip install .") is True
         mock_run.assert_called_once()
         call_kwargs = mock_run.call_args
+        assert call_kwargs is not None
         assert call_kwargs.kwargs["cwd"] == tmp_path
         assert call_kwargs.kwargs["shell"] is True
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_nonzero_exit(self, mock_run: patch, tmp_path: Path) -> None:
+    def test_nonzero_exit(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = _completed(returncode=1, stderr="error")
         assert run_self_update(tmp_path, "uv pip install .") is False
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_timeout(self, mock_run: patch, tmp_path: Path) -> None:
+    def test_timeout(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="uv pip install .", timeout=120)
         assert run_self_update(tmp_path, "uv pip install .") is False
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_file_not_found(self, mock_run: patch, tmp_path: Path) -> None:
+    def test_file_not_found(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.side_effect = FileNotFoundError("uv not found")
         assert run_self_update(tmp_path, "uv pip install .") is False
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_custom_command(self, mock_run: patch, tmp_path: Path) -> None:
+    def test_custom_command(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = _completed()
-        run_self_update(tmp_path, "pip install -e .")
-        assert mock_run.call_args.args[0] == "pip install -e ."
+        _ = run_self_update(tmp_path, "pip install -e .")
+        ca = mock_run.call_args
+        assert ca is not None
+        assert ca.args[0] == "pip install -e ."
 
 
 # ---------------------------------------------------------------------------
@@ -186,13 +204,13 @@ class TestLastGoodCommit:
     def test_strips_whitespace(self, tmp_path: Path) -> None:
         commit_file = tmp_path / ".colonyos" / "last_good_commit"
         commit_file.parent.mkdir(parents=True, exist_ok=True)
-        commit_file.write_text("  abc123  \n", encoding="utf-8")
+        _ = commit_file.write_text("  abc123  \n", encoding="utf-8")
         assert read_last_good_commit(tmp_path) == "abc123"
 
     def test_empty_file_returns_none(self, tmp_path: Path) -> None:
         commit_file = tmp_path / ".colonyos" / "last_good_commit"
         commit_file.parent.mkdir(parents=True, exist_ok=True)
-        commit_file.write_text("", encoding="utf-8")
+        _ = commit_file.write_text("", encoding="utf-8")
         assert read_last_good_commit(tmp_path) is None
 
 
@@ -206,7 +224,7 @@ class TestShouldRollback:
 
     @patch("colonyos.maintenance._git")
     def test_rollback_when_sha_differs_and_recent_start(
-        self, mock_git: patch, tmp_path: Path,
+        self, mock_git: MagicMock, tmp_path: Path,
     ) -> None:
         record_last_good_commit(tmp_path, "old_sha")
         mock_git.return_value = _completed(stdout="new_sha\n")
@@ -216,7 +234,7 @@ class TestShouldRollback:
 
     @patch("colonyos.maintenance._git")
     def test_no_rollback_when_sha_matches(
-        self, mock_git: patch, tmp_path: Path,
+        self, mock_git: MagicMock, tmp_path: Path,
     ) -> None:
         record_last_good_commit(tmp_path, "same_sha")
         mock_git.return_value = _completed(stdout="same_sha\n")
@@ -225,7 +243,7 @@ class TestShouldRollback:
 
     @patch("colonyos.maintenance._git")
     def test_no_rollback_when_old_start(
-        self, mock_git: patch, tmp_path: Path,
+        self, mock_git: MagicMock, tmp_path: Path,
     ) -> None:
         record_last_good_commit(tmp_path, "old_sha")
         mock_git.return_value = _completed(stdout="new_sha\n")
@@ -239,7 +257,7 @@ class TestShouldRollback:
 
     @patch("colonyos.maintenance._git")
     def test_no_rollback_on_git_failure(
-        self, mock_git: patch, tmp_path: Path,
+        self, mock_git: MagicMock, tmp_path: Path,
     ) -> None:
         record_last_good_commit(tmp_path, "old_sha")
         mock_git.return_value = _completed(returncode=128, stderr="fatal")
@@ -257,7 +275,7 @@ class TestScanDivergedBranches:
 
     @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
     @patch("colonyos.maintenance._git")
-    def test_no_branches(self, mock_git, mock_prs, tmp_path: Path) -> None:
+    def test_no_branches(self, mock_git: MagicMock, _mock_prs: MagicMock, tmp_path: Path) -> None:
         mock_git.side_effect = [
             _completed(),  # fetch --prune
             _completed(stdout=""),  # branch -r --list
@@ -267,7 +285,7 @@ class TestScanDivergedBranches:
 
     @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
     @patch("colonyos.maintenance._git")
-    def test_all_up_to_date(self, mock_git, mock_prs, tmp_path: Path) -> None:
+    def test_all_up_to_date(self, mock_git: MagicMock, mock_prs: MagicMock, tmp_path: Path) -> None:
         mock_git.side_effect = [
             _completed(),  # fetch --prune
             _completed(stdout="origin/colonyos/feat-a\n"),  # branch -r
@@ -279,7 +297,7 @@ class TestScanDivergedBranches:
 
     @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
     @patch("colonyos.maintenance._git")
-    def test_some_diverged(self, mock_git, mock_prs, tmp_path: Path) -> None:
+    def test_some_diverged(self, mock_git: MagicMock, mock_prs: MagicMock, tmp_path: Path) -> None:
         mock_git.side_effect = [
             _completed(),  # fetch --prune
             _completed(stdout="origin/colonyos/feat-a\norigin/colonyos/feat-b\n"),
@@ -297,7 +315,7 @@ class TestScanDivergedBranches:
 
     @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
     @patch("colonyos.maintenance._git")
-    def test_branch_without_pr(self, mock_git, mock_prs, tmp_path: Path) -> None:
+    def test_branch_without_pr(self, mock_git: MagicMock, mock_prs: MagicMock, tmp_path: Path) -> None:
         mock_git.side_effect = [
             _completed(),  # fetch --prune
             _completed(stdout="origin/colonyos/orphan\n"),
@@ -311,7 +329,7 @@ class TestScanDivergedBranches:
 
     @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
     @patch("colonyos.maintenance._git")
-    def test_git_branch_list_failure(self, mock_git, mock_prs, tmp_path: Path) -> None:
+    def test_git_branch_list_failure(self, mock_git: MagicMock, _mock_prs: MagicMock, tmp_path: Path) -> None:
         mock_git.side_effect = [
             _completed(),  # fetch --prune
             _completed(returncode=1, stderr="error"),  # branch -r failed
@@ -321,7 +339,7 @@ class TestScanDivergedBranches:
 
     @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
     @patch("colonyos.maintenance._git")
-    def test_fetch_failure_continues(self, mock_git, mock_prs, tmp_path: Path) -> None:
+    def test_fetch_failure_continues(self, mock_git: MagicMock, mock_prs: MagicMock, tmp_path: Path) -> None:
         """git fetch failure should not prevent scanning with stale refs."""
         mock_git.side_effect = [
             subprocess.TimeoutExpired(cmd="git fetch", timeout=30),  # fetch fails
@@ -335,7 +353,7 @@ class TestScanDivergedBranches:
 
     @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
     @patch("colonyos.maintenance._git")
-    def test_rev_list_failure_skips_branch(self, mock_git, mock_prs, tmp_path: Path) -> None:
+    def test_rev_list_failure_skips_branch(self, mock_git: MagicMock, mock_prs: MagicMock, tmp_path: Path) -> None:
         mock_git.side_effect = [
             _completed(),  # fetch --prune
             _completed(stdout="origin/colonyos/broken\n"),
@@ -347,7 +365,7 @@ class TestScanDivergedBranches:
 
     @patch("colonyos.maintenance._fetch_open_prs_for_prefix")
     @patch("colonyos.maintenance._git")
-    def test_only_ahead_included(self, mock_git, mock_prs, tmp_path: Path) -> None:
+    def test_only_ahead_included(self, mock_git: MagicMock, mock_prs: MagicMock, tmp_path: Path) -> None:
         """Branches that are ahead-only (behind=0, ahead>0) are still diverged."""
         mock_git.side_effect = [
             _completed(),  # fetch --prune
@@ -393,7 +411,7 @@ class TestFormatBranchSyncReport:
         assert report is not None
         lines = report.splitlines()
         # Find the bullet lines
-        bullets = [l for l in lines if l.startswith("\u2022")]
+        bullets = [line for line in lines if line.startswith("\u2022")]
         assert len(bullets) == 3
         # Most behind first
         assert "colonyos/b" in bullets[0]
@@ -423,9 +441,7 @@ class TestFetchOpenPrsForPrefix:
     """Test the internal _fetch_open_prs_for_prefix helper."""
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_returns_matching_prs(self, mock_run, tmp_path: Path) -> None:
-        from colonyos.maintenance import _fetch_open_prs_for_prefix
-
+    def test_returns_matching_prs(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = _completed(
             stdout=json.dumps([
                 {"number": 10, "headRefName": "colonyos/feat-a"},
@@ -433,31 +449,25 @@ class TestFetchOpenPrsForPrefix:
                 {"number": 30, "headRefName": "other/branch"},
             ])
         )
-        result = _fetch_open_prs_for_prefix(tmp_path, "colonyos/")
+        result = _FETCH_OPEN_PRS_FOR_PREFIX(tmp_path, "colonyos/")
         assert result == {"colonyos/feat-a": 10, "colonyos/feat-b": 20}
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_gh_failure_returns_empty(self, mock_run, tmp_path: Path) -> None:
-        from colonyos.maintenance import _fetch_open_prs_for_prefix
-
+    def test_gh_failure_returns_empty(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = _completed(returncode=1, stderr="not logged in")
-        result = _fetch_open_prs_for_prefix(tmp_path, "colonyos/")
+        result = _FETCH_OPEN_PRS_FOR_PREFIX(tmp_path, "colonyos/")
         assert result == {}
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_timeout_returns_empty(self, mock_run, tmp_path: Path) -> None:
-        from colonyos.maintenance import _fetch_open_prs_for_prefix
-
+    def test_timeout_returns_empty(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=10)
-        result = _fetch_open_prs_for_prefix(tmp_path, "colonyos/")
+        result = _FETCH_OPEN_PRS_FOR_PREFIX(tmp_path, "colonyos/")
         assert result == {}
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_invalid_json_returns_empty(self, mock_run, tmp_path: Path) -> None:
-        from colonyos.maintenance import _fetch_open_prs_for_prefix
-
+    def test_invalid_json_returns_empty(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = _completed(stdout="not json")
-        result = _fetch_open_prs_for_prefix(tmp_path, "colonyos/")
+        result = _FETCH_OPEN_PRS_FOR_PREFIX(tmp_path, "colonyos/")
         assert result == {}
 
 
@@ -471,7 +481,7 @@ class TestFindBranchesWithFailingCI:
 
     @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
     @patch("colonyos.maintenance._fetch_open_prs_for_ci")
-    def test_no_open_prs(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+    def test_no_open_prs(self, mock_prs: MagicMock, mock_checks: MagicMock, tmp_path: Path) -> None:
         mock_prs.return_value = []
         result = find_branches_with_failing_ci(tmp_path)
         assert result == []
@@ -479,7 +489,7 @@ class TestFindBranchesWithFailingCI:
 
     @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
     @patch("colonyos.maintenance._fetch_open_prs_for_ci")
-    def test_all_passing(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+    def test_all_passing(self, mock_prs: MagicMock, mock_checks: MagicMock, tmp_path: Path) -> None:
         mock_prs.return_value = [
             {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": False},
         ]
@@ -491,7 +501,7 @@ class TestFindBranchesWithFailingCI:
 
     @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
     @patch("colonyos.maintenance._fetch_open_prs_for_ci")
-    def test_some_failing(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+    def test_some_failing(self, mock_prs: MagicMock, mock_checks: MagicMock, tmp_path: Path) -> None:
         mock_prs.return_value = [
             {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": False},
             {"number": 20, "headRefName": "colonyos/feat-b", "isDraft": False},
@@ -513,7 +523,7 @@ class TestFindBranchesWithFailingCI:
 
     @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
     @patch("colonyos.maintenance._fetch_open_prs_for_ci")
-    def test_draft_prs_excluded(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+    def test_draft_prs_excluded(self, mock_prs: MagicMock, mock_checks: MagicMock, tmp_path: Path) -> None:
         mock_prs.return_value = [
             {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": True},
         ]
@@ -523,7 +533,7 @@ class TestFindBranchesWithFailingCI:
 
     @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
     @patch("colonyos.maintenance._fetch_open_prs_for_ci")
-    def test_non_prefix_branches_excluded(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+    def test_non_prefix_branches_excluded(self, mock_prs: MagicMock, mock_checks: MagicMock, tmp_path: Path) -> None:
         mock_prs.return_value = [
             {"number": 10, "headRefName": "feature/other", "isDraft": False},
         ]
@@ -533,7 +543,7 @@ class TestFindBranchesWithFailingCI:
 
     @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
     @patch("colonyos.maintenance._fetch_open_prs_for_ci")
-    def test_check_fetch_failure_skips_pr(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+    def test_check_fetch_failure_skips_pr(self, mock_prs: MagicMock, mock_checks: MagicMock, tmp_path: Path) -> None:
         mock_prs.return_value = [
             {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": False},
         ]
@@ -543,7 +553,7 @@ class TestFindBranchesWithFailingCI:
 
     @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
     @patch("colonyos.maintenance._fetch_open_prs_for_ci")
-    def test_pending_checks_not_treated_as_failure(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+    def test_pending_checks_not_treated_as_failure(self, mock_prs: MagicMock, mock_checks: MagicMock, tmp_path: Path) -> None:
         mock_prs.return_value = [
             {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": False},
         ]
@@ -555,7 +565,7 @@ class TestFindBranchesWithFailingCI:
 
     @patch("colonyos.maintenance._fetch_ci_checks_for_pr")
     @patch("colonyos.maintenance._fetch_open_prs_for_ci")
-    def test_multiple_failed_checks(self, mock_prs, mock_checks, tmp_path: Path) -> None:
+    def test_multiple_failed_checks(self, mock_prs: MagicMock, mock_checks: MagicMock, tmp_path: Path) -> None:
         mock_prs.return_value = [
             {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": False},
         ]
@@ -588,9 +598,10 @@ class TestBuildCIFixQueueItems:
         candidates = [self._make_candidate(pr_number=10)]
         items = build_ci_fix_queue_items(candidates, max_items=2, existing_queue=[])
         assert len(items) == 1
-        assert items[0].source_type == "ci-fix"
-        assert items[0].source_value == "10"
-        assert items[0].status.value == "pending"
+        first = cast(QueueItem, items[0])
+        assert first.source_type == "ci-fix"
+        assert first.source_value == "10"
+        assert first.status.value == "pending"
 
     def test_respects_max_items_cap(self) -> None:
         candidates = [
@@ -617,7 +628,7 @@ class TestBuildCIFixQueueItems:
         ]
         items = build_ci_fix_queue_items(candidates, max_items=5, existing_queue=existing)
         assert len(items) == 1
-        assert items[0].source_value == "20"
+        assert cast(QueueItem, items[0]).source_value == "20"
 
     def test_dedup_running_items_too(self) -> None:
         from colonyos.models import QueueItem as QI, QueueItemStatus
@@ -654,12 +665,12 @@ class TestBuildCIFixQueueItems:
     def test_queue_item_has_branch_name(self) -> None:
         candidates = [self._make_candidate(pr_number=10, branch="colonyos/feat-x")]
         items = build_ci_fix_queue_items(candidates, max_items=2, existing_queue=[])
-        assert items[0].branch_name == "colonyos/feat-x"
+        assert cast(QueueItem, items[0]).branch_name == "colonyos/feat-x"
 
     def test_queue_item_id_format(self) -> None:
         candidates = [self._make_candidate(pr_number=42)]
         items = build_ci_fix_queue_items(candidates, max_items=2, existing_queue=[])
-        assert items[0].id.startswith("ci-fix-42-")
+        assert cast(QueueItem, items[0]).id.startswith("ci-fix-42-")
 
 
 # ---------------------------------------------------------------------------
@@ -671,34 +682,28 @@ class TestFetchOpenPrsForCI:
     """Test the internal _fetch_open_prs_for_ci helper."""
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_returns_pr_list_with_draft_field(self, mock_run, tmp_path: Path) -> None:
-        from colonyos.maintenance import _fetch_open_prs_for_ci
-
+    def test_returns_pr_list_with_draft_field(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = _completed(
             stdout=json.dumps([
                 {"number": 10, "headRefName": "colonyos/feat-a", "isDraft": False},
                 {"number": 20, "headRefName": "colonyos/feat-b", "isDraft": True},
             ])
         )
-        result = _fetch_open_prs_for_ci(tmp_path)
+        result = _FETCH_OPEN_PRS_FOR_CI(tmp_path)
         assert len(result) == 2
         assert result[0]["isDraft"] is False
         assert result[1]["isDraft"] is True
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_gh_failure_returns_empty(self, mock_run, tmp_path: Path) -> None:
-        from colonyos.maintenance import _fetch_open_prs_for_ci
-
+    def test_gh_failure_returns_empty(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = _completed(returncode=1, stderr="not logged in")
-        result = _fetch_open_prs_for_ci(tmp_path)
+        result = _FETCH_OPEN_PRS_FOR_CI(tmp_path)
         assert result == []
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_timeout_returns_empty(self, mock_run, tmp_path: Path) -> None:
-        from colonyos.maintenance import _fetch_open_prs_for_ci
-
+    def test_timeout_returns_empty(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=10)
-        result = _fetch_open_prs_for_ci(tmp_path)
+        result = _FETCH_OPEN_PRS_FOR_CI(tmp_path)
         assert result == []
 
 
@@ -711,38 +716,30 @@ class TestFetchCIChecksForPR:
     """Test the internal _fetch_ci_checks_for_pr helper."""
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_returns_check_list(self, mock_run, tmp_path: Path) -> None:
-        from colonyos.maintenance import _fetch_ci_checks_for_pr
-
+    def test_returns_check_list(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = _completed(
             stdout=json.dumps([
                 {"name": "test", "state": "COMPLETED", "conclusion": "SUCCESS"},
                 {"name": "lint", "state": "COMPLETED", "conclusion": "FAILURE"},
             ])
         )
-        result = _fetch_ci_checks_for_pr(10, tmp_path)
+        result = _FETCH_CI_CHECKS_FOR_PR(10, tmp_path)
         assert len(result) == 2
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_gh_failure_returns_empty(self, mock_run, tmp_path: Path) -> None:
-        from colonyos.maintenance import _fetch_ci_checks_for_pr
-
+    def test_gh_failure_returns_empty(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = _completed(returncode=1, stderr="error")
-        result = _fetch_ci_checks_for_pr(10, tmp_path)
+        result = _FETCH_CI_CHECKS_FOR_PR(10, tmp_path)
         assert result == []
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_timeout_returns_empty(self, mock_run, tmp_path: Path) -> None:
-        from colonyos.maintenance import _fetch_ci_checks_for_pr
-
+    def test_timeout_returns_empty(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=10)
-        result = _fetch_ci_checks_for_pr(10, tmp_path)
+        result = _FETCH_CI_CHECKS_FOR_PR(10, tmp_path)
         assert result == []
 
     @patch("colonyos.maintenance.subprocess.run")
-    def test_invalid_json_returns_empty(self, mock_run, tmp_path: Path) -> None:
-        from colonyos.maintenance import _fetch_ci_checks_for_pr
-
+    def test_invalid_json_returns_empty(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = _completed(stdout="not json")
-        result = _fetch_ci_checks_for_pr(10, tmp_path)
+        result = _FETCH_CI_CHECKS_FOR_PR(10, tmp_path)
         assert result == []

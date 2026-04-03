@@ -149,7 +149,7 @@ def pack_keys() -> list[str]:
     return [pack.key for pack in PACKS]
 
 
-def packs_summary() -> list[dict]:
+def packs_summary() -> list[dict[str, object]]:
     """Return a serializable summary of all packs for prompt injection."""
     return [
         {

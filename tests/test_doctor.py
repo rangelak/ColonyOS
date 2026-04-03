@@ -1,10 +1,8 @@
 """Tests for colonyos.doctor module — install-method detection."""
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from colonyos.doctor import detect_install_method
 

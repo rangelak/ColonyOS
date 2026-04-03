@@ -13,7 +13,6 @@ from colonyos.config import RepoMapConfig
 from colonyos.repo_map import (
     FileSymbols,
     Symbol,
-    SENSITIVE_PATTERNS,
     _MAX_PARSE_SIZE,
     _git_clean_env,
     extract_file_symbols,
@@ -710,10 +709,10 @@ class TestFormatTree:
         # Class should be indented under file
         # Methods should be indented under class
         # Check relative indentation
-        file_line = [l for l in lines if "models.py" in l][0]
-        class_line = [l for l in lines if "User" in l][0]
-        method_line = [l for l in lines if "save" in l][0]
-        func_line = [l for l in lines if "create_user" in l][0]
+        file_line = [line for line in lines if "models.py" in line][0]
+        class_line = [line for line in lines if "User" in line][0]
+        method_line = [line for line in lines if "save" in line][0]
+        func_line = [line for line in lines if "create_user" in line][0]
         # Each level should be more indented
         assert len(class_line) - len(class_line.lstrip()) > len(file_line) - len(file_line.lstrip())
         assert len(method_line) - len(method_line.lstrip()) > len(class_line) - len(class_line.lstrip())

@@ -183,8 +183,6 @@ def notification_targets(item: QueueItem) -> list[tuple[str, str]]:
 
     _add(item.notification_channel or item.slack_channel, item.notification_thread_ts or item.slack_ts)
     for source in item.merged_sources:
-        if not isinstance(source, dict):
-            continue
         _add(
             source.get("notification_channel") or source.get("channel") or source.get("slack_channel"),
             source.get("notification_thread_ts") or source.get("thread_ts") or source.get("ts") or source.get("slack_ts"),

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -68,7 +69,7 @@ class TestSweepConfigDefaults:
 
     def test_defaults_match_global_defaults_dict(self):
         cfg = SweepConfig()
-        sweep_defaults = DEFAULTS["sweep"]
+        sweep_defaults = cast(dict[str, Any], DEFAULTS["sweep"])
         assert cfg.max_tasks == sweep_defaults["max_tasks"]
         assert cfg.max_files_per_task == sweep_defaults["max_files_per_task"]
         assert cfg.default_categories == sweep_defaults["default_categories"]
@@ -103,7 +104,8 @@ class TestColonyConfigSweepField:
 
     def test_colony_config_sweep_defaults(self):
         config = ColonyConfig()
-        assert config.sweep.max_tasks == DEFAULTS["sweep"]["max_tasks"]
+        sweep_defaults = cast(dict[str, Any], DEFAULTS["sweep"])
+        assert config.sweep.max_tasks == sweep_defaults["max_tasks"]
 
     def test_get_model_sweep_returns_global_default(self):
         config = ColonyConfig(model="sonnet")
@@ -120,9 +122,10 @@ class TestSweepConfigFromYAML:
             yaml.dump({"model": "opus"}), encoding="utf-8"
         )
         config = load_config(tmp_repo)
-        assert config.sweep.max_tasks == DEFAULTS["sweep"]["max_tasks"]
-        assert config.sweep.max_files_per_task == DEFAULTS["sweep"]["max_files_per_task"]
-        assert config.sweep.default_categories == DEFAULTS["sweep"]["default_categories"]
+        sweep_defaults = cast(dict[str, Any], DEFAULTS["sweep"])
+        assert config.sweep.max_tasks == sweep_defaults["max_tasks"]
+        assert config.sweep.max_files_per_task == sweep_defaults["max_files_per_task"]
+        assert config.sweep.default_categories == sweep_defaults["default_categories"]
 
     def test_load_config_sweep_custom_values(self, tmp_repo: Path):
         (tmp_repo / ".colonyos" / "config.yaml").write_text(
@@ -152,7 +155,8 @@ class TestSweepConfigFromYAML:
         config = load_config(tmp_repo)
         assert config.sweep.max_tasks == 3
         # Remaining fields should use defaults
-        assert config.sweep.max_files_per_task == DEFAULTS["sweep"]["max_files_per_task"]
+        sweep_defaults = cast(dict[str, Any], DEFAULTS["sweep"])
+        assert config.sweep.max_files_per_task == sweep_defaults["max_files_per_task"]
 
     def test_load_config_sweep_invalid_max_tasks_raises(self, tmp_repo: Path):
         (tmp_repo / ".colonyos" / "config.yaml").write_text(
@@ -426,7 +430,7 @@ class TestRunSweepOrchestration:
             findings_text, phase_result = run_sweep(tmp_repo, config, execute=True)
 
             assert phase_result.success is False
-            assert "failed" in phase_result.error.lower()
+            assert "failed" in (phase_result.error or "").lower()
 
     def test_execute_mode_success_preserves_result(
         self, tmp_repo, config, mock_phase_result, analysis_output

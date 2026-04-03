@@ -1,10 +1,8 @@
 """Tests for UI module: parallel task streaming + ParallelProgressLine."""
 from __future__ import annotations
 
-import io
-import sys
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 

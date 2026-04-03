@@ -2,22 +2,30 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from types import ModuleType
+from collections.abc import Mapping, Sequence
+from typing import (
+    Callable,
+    TypedDict,
+    Unpack,
+    cast,
+    get_type_hints,
+)
 from unittest.mock import MagicMock, patch
 
+import colonyos.slack as slack_module
 import pytest
 
 from colonyos.config import ColonyConfig, SlackConfig, load_config, save_config
-from colonyos.models import Phase, PhaseResult
+from colonyos.models import Phase, PhaseResult, QueueItem, QueueItemStatus
 from colonyos.sanitize import XML_TAG_RE, sanitize_untrusted_content
 from colonyos.slack import (
+    SlackClient,
     SlackUI,
     SlackWatchState,
     TriageResult,
-    _MAX_HOURLY_KEYS,
-    _build_triage_prompt,
-    _parse_triage_response,
     check_rate_limit,
     create_slack_app,
     extract_base_branch,
@@ -45,6 +53,91 @@ from colonyos.slack import (
     wait_for_approval,
 )
 
+_MAX_HOURLY_KEYS: int = cast(int, getattr(slack_module, "_MAX_HOURLY_KEYS"))
+_build_triage_prompt = cast(
+    Callable[..., tuple[str, str]],
+    getattr(slack_module, "_build_triage_prompt"),
+)
+_parse_triage_response = cast(
+    Callable[[str], TriageResult],
+    getattr(slack_module, "_parse_triage_response"),
+)
+_build_slack_ts_index = cast(
+    Callable[[list[QueueItem]], dict[str, QueueItem]],
+    getattr(slack_module, "_build_slack_ts_index"),
+)
+_triage_message_legacy = cast(Callable[..., object], getattr(slack_module, "_triage_message_legacy"))
+
+
+class _SlackConfigTestKw(TypedDict, total=False):
+    enabled: bool
+    channels: list[str]
+    trigger_mode: str
+    auto_approve: bool
+    max_runs_per_hour: int
+    allowed_user_ids: list[str]
+    triage_scope: str
+    daily_budget_usd: float | None
+    max_queue_depth: int
+    triage_verbose: bool
+    max_consecutive_failures: int
+    circuit_breaker_cooldown_minutes: int
+    max_fix_rounds_per_thread: int
+    notification_mode: str
+    daily_thread_hour: int
+    daily_thread_timezone: str
+
+
+class _QueueItemTestKw(TypedDict, total=False):
+    id: str
+    source_type: str
+    source_value: str
+    status: QueueItemStatus
+    summary: str | None
+    pr_url: str | None
+    cost_usd: float
+    error: str | None
+
+
+class _WatchStateLegacyV1(TypedDict):
+    """On-disk watch state before daily-cost / circuit-breaker fields."""
+
+    watch_id: str
+    processed_messages: dict[str, str]
+    aggregate_cost_usd: float
+    runs_triggered: int
+    start_time_iso: str
+    hourly_trigger_counts: dict[str, int]
+
+
+class _WatchStateLegacyPaused(TypedDict):
+    """Old file with ``queue_paused`` but no ``queue_paused_at``."""
+
+    watch_id: str
+    processed_messages: dict[str, str]
+    aggregate_cost_usd: float
+    runs_triggered: int
+    start_time_iso: str
+    hourly_trigger_counts: dict[str, int]
+    consecutive_failures: int
+    queue_paused: bool
+
+
+def _slack_client_mock() -> MagicMock:
+    """Slack-shaped mock: ``spec=SlackClient`` keeps method names aligned with the protocol."""
+    return MagicMock(spec=SlackClient)
+
+
+def _watch_state_from_typed_legacy(
+    legacy: _WatchStateLegacyV1 | _WatchStateLegacyPaused,
+) -> dict[str, str | float | int | bool | dict[str, str] | dict[str, int]]:
+    """Round-trip through JSON for a dict shape compatible with ``from_dict``."""
+
+    raw = json.dumps(legacy)
+    parsed = cast(object, json.loads(raw))
+    assert isinstance(parsed, dict)
+    return cast(dict[str, str | float | int | bool | dict[str, str] | dict[str, int]], parsed)
+
 
 # ---------------------------------------------------------------------------
 # SlackConfig parsing tests (Task 1.1)
@@ -70,8 +163,8 @@ class TestSlackConfigParsing:
         import yaml
 
         config_dir = tmp_repo / ".colonyos"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = config_dir.mkdir()
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "slack": {
                     "enabled": True,
@@ -96,8 +189,8 @@ class TestSlackConfigParsing:
         import yaml
 
         config_dir = tmp_repo / ".colonyos"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = config_dir.mkdir()
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"enabled": True}}),
             encoding="utf-8",
         )
@@ -111,8 +204,8 @@ class TestSlackConfigParsing:
         import yaml
 
         config_dir = tmp_repo / ".colonyos"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = config_dir.mkdir()
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"trigger_mode": "all"}}),
             encoding="utf-8",
         )
@@ -123,13 +216,13 @@ class TestSlackConfigParsing:
         import yaml
 
         config_dir = tmp_repo / ".colonyos"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = config_dir.mkdir()
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"trigger_mode": "invalid"}}),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="Invalid slack trigger_mode"):
-            load_config(tmp_repo)
+            _ = load_config(tmp_repo)
 
     def test_roundtrip_save_load(self, tmp_repo: Path) -> None:
         original = ColonyConfig(
@@ -142,7 +235,7 @@ class TestSlackConfigParsing:
                 allowed_user_ids=["U999"],
             ),
         )
-        save_config(tmp_repo, original)
+        _ = save_config(tmp_repo, original)
         loaded = load_config(tmp_repo)
         assert loaded.slack.enabled is True
         assert loaded.slack.channels == ["C123"]
@@ -155,21 +248,34 @@ class TestSlackConfigParsing:
         import yaml
 
         original = ColonyConfig(slack=SlackConfig())
-        save_config(tmp_repo, original)
-        raw = yaml.safe_load(
-            (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8")
+        _ = save_config(tmp_repo, original)
+        raw_candidate = cast(
+            object,
+            yaml.safe_load(
+                (tmp_repo / ".colonyos" / "config.yaml").read_text(encoding="utf-8"),
+            ),
         )
-        assert "slack" not in raw
+        assert isinstance(raw_candidate, dict)
+        assert "slack" not in raw_candidate
 
 
 class TestCreateSlackApp:
     def test_import_failure_surfaces_actionable_runtime_error(self, caplog: pytest.LogCaptureFixture) -> None:
         original_import = __import__
 
-        def fake_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
+        def fake_import(
+            name: str,
+            globals: Mapping[str, object] | None = None,
+            locals: Mapping[str, object] | None = None,
+            fromlist: Sequence[str] = (),
+            level: int = 0,
+        ) -> ModuleType:
             if name in ("slack_bolt", "slack_sdk"):
                 raise KeyError("slack_sdk")
-            return original_import(name, globals, locals, fromlist, level)
+            return cast(
+                ModuleType,
+                original_import(name, globals, locals, fromlist, level),
+            )
 
         caplog.set_level("DEBUG", logger="colonyos.slack")
         with patch("builtins.__import__", side_effect=fake_import):
@@ -183,10 +289,19 @@ class TestCreateSlackApp:
     def test_socket_mode_import_failure_surfaces_actionable_runtime_error(self, caplog: pytest.LogCaptureFixture) -> None:
         original_import = __import__
 
-        def fake_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
+        def fake_import(
+            name: str,
+            globals: Mapping[str, object] | None = None,
+            locals: Mapping[str, object] | None = None,
+            fromlist: Sequence[str] = (),
+            level: int = 0,
+        ) -> ModuleType:
             if name in ("slack_bolt.adapter.socket_mode", "slack_sdk"):
                 raise KeyError("slack_sdk")
-            return original_import(name, globals, locals, fromlist, level)
+            return cast(
+                ModuleType,
+                original_import(name, globals, locals, fromlist, level),
+            )
 
         caplog.set_level("DEBUG", logger="colonyos.slack")
         with patch("builtins.__import__", side_effect=fake_import):
@@ -324,14 +439,9 @@ class TestExtractRawFromFormattedPrompt:
 
 
 class TestShouldProcessMessage:
-    def _config(self, **kwargs: object) -> SlackConfig:
-        defaults = {
-            "enabled": True,
-            "channels": ["C123"],
-            "trigger_mode": "mention",
-        }
-        defaults.update(kwargs)
-        return SlackConfig(**defaults)  # type: ignore[arg-type]
+    def _config(self, **kwargs: Unpack[_SlackConfigTestKw]) -> SlackConfig:
+        base = SlackConfig(enabled=True, channels=["C123"], trigger_mode="mention")
+        return replace(base, **kwargs)
 
     def test_accepts_valid_message(self) -> None:
         event = {"channel": "C123", "user": "U999", "ts": "1234.5"}
@@ -454,7 +564,7 @@ class TestFormatPhaseBreakdownLine:
 
 class TestSlackUI:
     def test_phase_header_posts_message(self) -> None:
-        client = MagicMock()
+        client = _slack_client_mock()
         ui = SlackUI(client, "C123", "1234.5")
         ui.phase_header("implement", 5.0, "sonnet")
         client.chat_postMessage.assert_called_once()
@@ -464,7 +574,7 @@ class TestSlackUI:
         assert "implement" in call_kwargs["text"]
 
     def test_phase_complete_posts_message(self) -> None:
-        client = MagicMock()
+        client = _slack_client_mock()
         ui = SlackUI(client, "C123", "1234.5")
         ui.phase_header("implement", 5.0, "sonnet")
         ui.phase_complete(1.5, 10, 30000)
@@ -473,7 +583,7 @@ class TestSlackUI:
         assert "completed" in call_kwargs["text"]
 
     def test_phase_error_posts_generic_message(self) -> None:
-        client = MagicMock()
+        client = _slack_client_mock()
         ui = SlackUI(client, "C123", "1234.5")
         ui.phase_header("review", 5.0, "sonnet")
         ui.phase_error("something broke")
@@ -484,7 +594,7 @@ class TestSlackUI:
         assert "Check server logs" in call_kwargs["text"]
 
     def test_phase_note_posts_message(self) -> None:
-        client = MagicMock()
+        client = _slack_client_mock()
         ui = SlackUI(client, "C123", "1234.5")
         ui.phase_note("Review round 1: 2 approved, 1 requested changes.")
         call_kwargs = client.chat_postMessage.call_args[1]
@@ -492,7 +602,7 @@ class TestSlackUI:
 
     def test_noop_methods(self) -> None:
         """Streaming callbacks are no-ops and don't raise."""
-        client = MagicMock()
+        client = _slack_client_mock()
         ui = SlackUI(client, "C123", "1234.5")
         ui.on_tool_start("Read")
         ui.on_tool_input_delta("{}")
@@ -553,8 +663,9 @@ class TestSlackWatchState:
         state = SlackWatchState(watch_id="atomic-test")
         path = save_watch_state(tmp_repo, state)
         assert path.exists()
-        data = json.loads(path.read_text(encoding="utf-8"))
-        assert data["watch_id"] == "atomic-test"
+        parsed = cast(object, json.loads(path.read_text(encoding="utf-8")))
+        assert isinstance(parsed, dict)
+        assert parsed["watch_id"] == "atomic-test"
 
 
 # ---------------------------------------------------------------------------
@@ -602,14 +713,15 @@ def mock_doctor_subprocess() -> object:
         yield m
 
 
+@pytest.mark.usefixtures("mock_doctor_subprocess")
 class TestDoctorSlackCheck:
-    def test_slack_tokens_present(self, tmp_repo: Path, mock_doctor_subprocess: object) -> None:
+    def test_slack_tokens_present(self, tmp_repo: Path) -> None:
         import yaml
         from colonyos.doctor import run_doctor_checks
 
         config_dir = tmp_repo / ".colonyos"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = config_dir.mkdir()
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"enabled": True}}),
             encoding="utf-8",
         )
@@ -622,13 +734,13 @@ class TestDoctorSlackCheck:
         assert len(slack_checks) == 1
         assert slack_checks[0][1] is True
 
-    def test_slack_tokens_missing(self, tmp_repo: Path, mock_doctor_subprocess: object) -> None:
+    def test_slack_tokens_missing(self, tmp_repo: Path) -> None:
         import yaml
         from colonyos.doctor import run_doctor_checks
 
         config_dir = tmp_repo / ".colonyos"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = config_dir.mkdir()
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"enabled": True}}),
             encoding="utf-8",
         )
@@ -639,8 +751,8 @@ class TestDoctorSlackCheck:
             # Remove the keys if they exist
             import os
             env_copy = os.environ.copy()
-            env_copy.pop("COLONYOS_SLACK_BOT_TOKEN", None)
-            env_copy.pop("COLONYOS_SLACK_APP_TOKEN", None)
+            _ = env_copy.pop("COLONYOS_SLACK_BOT_TOKEN", None)
+            _ = env_copy.pop("COLONYOS_SLACK_APP_TOKEN", None)
             with patch.dict("os.environ", env_copy, clear=True):
                 results = run_doctor_checks(tmp_repo)
         slack_checks = [(n, p, h) for n, p, h in results if n == "Slack tokens"]
@@ -648,20 +760,20 @@ class TestDoctorSlackCheck:
         assert slack_checks[0][1] is False
         assert "COLONYOS_SLACK_BOT_TOKEN" in slack_checks[0][2]
 
-    def test_slack_check_skipped_when_disabled(self, tmp_repo: Path, mock_doctor_subprocess: object) -> None:
+    def test_slack_check_skipped_when_disabled(self, tmp_repo: Path) -> None:
         from colonyos.doctor import run_doctor_checks
 
         results = run_doctor_checks(tmp_repo)
         slack_checks = [n for n, _, _ in results if n == "Slack tokens"]
         assert len(slack_checks) == 0
 
-    def test_slack_dependency_check_reports_import_failure(self, tmp_repo: Path, mock_doctor_subprocess: object) -> None:
+    def test_slack_dependency_check_reports_import_failure(self, tmp_repo: Path) -> None:
         import yaml
         from colonyos.doctor import run_doctor_checks
 
         config_dir = tmp_repo / ".colonyos"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = config_dir.mkdir()
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({"slack": {"enabled": True}}),
             encoding="utf-8",
         )
@@ -699,8 +811,8 @@ class TestWatchCommand:
         from colonyos.cli import app
 
         config_dir = tmp_repo / ".colonyos"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = config_dir.mkdir()
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "project": {"name": "Test", "description": "t", "stack": "py"},
                 "slack": {"enabled": False},
@@ -719,8 +831,8 @@ class TestWatchCommand:
         from colonyos.cli import app
 
         config_dir = tmp_repo / ".colonyos"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
+        _ = config_dir.mkdir()
+        _ = (config_dir / "config.yaml").write_text(
             yaml.dump({
                 "project": {"name": "Test", "description": "t", "stack": "py"},
                 "slack": {"enabled": True, "channels": []},
@@ -740,7 +852,7 @@ class TestWatchCommand:
 
 
 class TestSlackIntegration:
-    def test_full_mention_flow(self, tmp_repo: Path) -> None:
+    def test_full_mention_flow(self) -> None:
         """Simulates: mention event -> filter -> sanitize -> format -> prompt extraction."""
         config = SlackConfig(
             enabled=True,
@@ -821,7 +933,7 @@ class TestPromptPreambleSecurity:
 
 class TestSlackUIErrorSanitization:
     def test_phase_error_does_not_echo_details(self) -> None:
-        client = MagicMock()
+        client = _slack_client_mock()
         ui = SlackUI(client, "C123", "1234.5")
         ui.phase_error("/home/user/.env: permission denied")
         call_kwargs = client.chat_postMessage.call_args[1]
@@ -838,43 +950,43 @@ class TestSlackUIErrorSanitization:
 
 class TestWaitForApproval:
     def test_approved_immediately(self) -> None:
-        client = MagicMock()
+        client = _slack_client_mock()
         client.reactions_get.return_value = {
             "message": {"reactions": [{"name": "+1", "count": 1}]},
         }
         assert wait_for_approval(client, "C1", "1.0", "2.0", timeout_seconds=1) is True
 
     def test_timeout_no_reaction(self) -> None:
-        client = MagicMock()
+        client = _slack_client_mock()
         client.reactions_get.return_value = {"message": {"reactions": []}}
         assert wait_for_approval(
             client, "C1", "1.0", "2.0",
-            timeout_seconds=0.1, poll_interval=0.05,
+            timeout_seconds=1, poll_interval=0.05,
         ) is False
 
     def test_thumbsup_name_variant(self) -> None:
-        client = MagicMock()
+        client = _slack_client_mock()
         client.reactions_get.return_value = {
             "message": {"reactions": [{"name": "thumbsup", "count": 1}]},
         }
         assert wait_for_approval(client, "C1", "1.0", "2.0", timeout_seconds=1) is True
 
     def test_wrong_reaction_not_approved(self) -> None:
-        client = MagicMock()
+        client = _slack_client_mock()
         client.reactions_get.return_value = {
             "message": {"reactions": [{"name": "eyes", "count": 1}]},
         }
         assert wait_for_approval(
             client, "C1", "1.0", "2.0",
-            timeout_seconds=0.1, poll_interval=0.05,
+            timeout_seconds=1, poll_interval=0.05,
         ) is False
 
     def test_api_error_during_poll_does_not_crash(self) -> None:
-        client = MagicMock()
+        client = _slack_client_mock()
         client.reactions_get.side_effect = RuntimeError("network error")
         assert wait_for_approval(
             client, "C1", "1.0", "2.0",
-            timeout_seconds=0.1, poll_interval=0.05,
+            timeout_seconds=1, poll_interval=0.05,
         ) is False
 
 
@@ -963,9 +1075,9 @@ class TestSlackUIFactory:
 
     def test_slack_ui_factory_returns_slack_ui(self) -> None:
         """A factory closure should produce SlackUI instances."""
-        client = MagicMock()
+        client = _slack_client_mock()
 
-        def factory(prefix: str = "") -> SlackUI:
+        def factory(_prefix: str = "") -> SlackUI:
             return SlackUI(client, "C123", "1234.5")
 
         ui = factory("test-prefix")
@@ -976,9 +1088,9 @@ class TestSlackUIFactory:
 
     def test_slack_ui_factory_ignores_prefix(self) -> None:
         """SlackUI doesn't use prefix, but the factory should accept it."""
-        client = MagicMock()
+        client = _slack_client_mock()
 
-        def factory(prefix: str = "") -> SlackUI:
+        def factory(_prefix: str = "") -> SlackUI:
             return SlackUI(client, "C123", "1234.5")
 
         # Should not raise regardless of prefix value
@@ -1018,7 +1130,7 @@ class TestBuildTriagePrompt:
         assert "hello world" in user
 
     def test_sanitizes_message(self) -> None:
-        system, user = _build_triage_prompt("<script>alert('xss')</script> fix the bug")
+        _system, user = _build_triage_prompt("<script>alert('xss')</script> fix the bug")
         assert "<script>" not in user
         assert "fix the bug" in user
 
@@ -1155,7 +1267,7 @@ class TestSlackWatchStateDailyCost:
 
     def test_from_dict_backward_compat(self) -> None:
         """Old state files without daily fields should load with defaults."""
-        d = {
+        legacy: _WatchStateLegacyV1 = {
             "watch_id": "old-test",
             "processed_messages": {},
             "aggregate_cost_usd": 5.0,
@@ -1163,7 +1275,7 @@ class TestSlackWatchStateDailyCost:
             "start_time_iso": "2026-01-01T00:00:00",
             "hourly_trigger_counts": {},
         }
-        state = SlackWatchState.from_dict(d)
+        state = SlackWatchState.from_dict(_watch_state_from_typed_legacy(legacy))
         assert state.daily_cost_usd == 0.0
         assert state.daily_cost_reset_date != ""  # defaults to today
 
@@ -1285,10 +1397,11 @@ class TestTriageMessageRepoRoot:
     def test_signature_accepts_repo_root(self) -> None:
         """Verify triage_message has a repo_root keyword parameter."""
         import inspect
+
         sig = inspect.signature(triage_message)
         assert "repo_root" in sig.parameters
         param = sig.parameters["repo_root"]
-        assert param.default is None
+        assert str(param).endswith("= None")
 
 
 class TestPhaseTriageEnum:
@@ -1306,10 +1419,9 @@ class TestTriageLegacyDefaults:
     def test_legacy_triage_defaults_to_haiku(self) -> None:
         """The legacy triage function should default to haiku to keep routing costs low."""
         import inspect
-        from colonyos.slack import _triage_message_legacy
 
         sig = inspect.signature(_triage_message_legacy)
-        assert sig.parameters["model"].default == "haiku"
+        assert "haiku" in str(sig.parameters["model"])
 
 
 class TestSlackWatchStateCircuitBreaker:
@@ -1336,7 +1448,7 @@ class TestSlackWatchStateCircuitBreaker:
 
     def test_backward_compat_without_circuit_breaker(self) -> None:
         """Old state files without circuit breaker fields should load with defaults."""
-        d = {
+        legacy: _WatchStateLegacyV1 = {
             "watch_id": "old-cb-test",
             "processed_messages": {},
             "aggregate_cost_usd": 0.0,
@@ -1344,7 +1456,7 @@ class TestSlackWatchStateCircuitBreaker:
             "start_time_iso": "2026-01-01T00:00:00",
             "hourly_trigger_counts": {},
         }
-        state = SlackWatchState.from_dict(d)
+        state = SlackWatchState.from_dict(_watch_state_from_typed_legacy(legacy))
         assert state.consecutive_failures == 0
         assert state.queue_paused is False
 
@@ -1367,7 +1479,7 @@ class TestSlackWatchStateCircuitBreaker:
 
     def test_backward_compat_without_queue_paused_at(self) -> None:
         """Old state files without queue_paused_at should load with None."""
-        d = {
+        legacy: _WatchStateLegacyPaused = {
             "watch_id": "old-paused-at",
             "processed_messages": {},
             "aggregate_cost_usd": 0.0,
@@ -1377,7 +1489,7 @@ class TestSlackWatchStateCircuitBreaker:
             "consecutive_failures": 2,
             "queue_paused": True,
         }
-        state = SlackWatchState.from_dict(d)
+        state = SlackWatchState.from_dict(_watch_state_from_typed_legacy(legacy))
         assert state.queue_paused is True
         assert state.queue_paused_at is None
 
@@ -1414,13 +1526,11 @@ class TestCircuitBreakerCodeQuality:
 class TestShouldProcessThreadFix:
     """Tests for should_process_thread_fix()."""
 
-    def _make_config(self, **kwargs: object) -> SlackConfig:
-        defaults = {"enabled": True, "channels": ["C123"]}
-        defaults.update(kwargs)
-        return SlackConfig(**defaults)  # type: ignore[arg-type]
+    def _make_config(self, **kwargs: Unpack[_SlackConfigTestKw]) -> SlackConfig:
+        base = SlackConfig(enabled=True, channels=["C123"])
+        return replace(base, **kwargs)
 
-    def _make_completed_item(self, slack_ts: str = "100.000") -> object:
-        from colonyos.models import QueueItem, QueueItemStatus
+    def _make_completed_item(self, slack_ts: str = "100.000") -> QueueItem:
         return QueueItem(
             id="q-parent",
             source_type="slack",
@@ -1679,8 +1789,6 @@ class TestBuildSlackTsIndex:
     """Tests for _build_slack_ts_index O(1) lookup optimization."""
 
     def test_builds_index_from_completed_items(self) -> None:
-        from colonyos.models import QueueItem, QueueItemStatus
-        from colonyos.slack import _build_slack_ts_index
         completed = QueueItem(
             id="q-1", source_type="slack", source_value="test",
             status=QueueItemStatus.COMPLETED, slack_ts="100.000",
@@ -1695,12 +1803,9 @@ class TestBuildSlackTsIndex:
         assert index["100.000"] is completed
 
     def test_empty_list_returns_empty_dict(self) -> None:
-        from colonyos.slack import _build_slack_ts_index
         assert _build_slack_ts_index([]) == {}
 
     def test_no_slack_ts_items_skipped(self) -> None:
-        from colonyos.models import QueueItem, QueueItemStatus
-        from colonyos.slack import _build_slack_ts_index
         item = QueueItem(
             id="q-1", source_type="prompt", source_value="test",
             status=QueueItemStatus.COMPLETED, slack_ts=None,
@@ -1715,7 +1820,7 @@ class TestWaitForApprovalAllowedApprovers:
         """When allowed_approver_ids is None, any thumbsup counts."""
         from colonyos.slack import wait_for_approval
 
-        client = MagicMock()
+        client = _slack_client_mock()
         client.reactions_get.return_value = {
             "message": {
                 "reactions": [
@@ -1734,7 +1839,7 @@ class TestWaitForApprovalAllowedApprovers:
         """When allowed_approver_ids is set, thumbsup from non-listed user is ignored."""
         from colonyos.slack import wait_for_approval
 
-        client = MagicMock()
+        client = _slack_client_mock()
         client.reactions_get.return_value = {
             "message": {
                 "reactions": [
@@ -1744,7 +1849,7 @@ class TestWaitForApprovalAllowedApprovers:
         }
         result = wait_for_approval(
             client, "C123", "ts1", "ts2",
-            timeout_seconds=0.2, poll_interval=0.02,
+            timeout_seconds=1, poll_interval=0.02,
             allowed_approver_ids=["U_ADMIN"],
         )
         assert result is False
@@ -1753,7 +1858,7 @@ class TestWaitForApprovalAllowedApprovers:
         """When allowed_approver_ids is set, thumbsup from authorized user succeeds."""
         from colonyos.slack import wait_for_approval
 
-        client = MagicMock()
+        client = _slack_client_mock()
         client.reactions_get.return_value = {
             "message": {
                 "reactions": [
@@ -1772,7 +1877,7 @@ class TestWaitForApprovalAllowedApprovers:
         """Empty list (falsy) should behave like no restriction."""
         from colonyos.slack import wait_for_approval
 
-        client = MagicMock()
+        client = _slack_client_mock()
         client.reactions_get.return_value = {
             "message": {
                 "reactions": [{"name": "+1", "users": ["U_ANYONE"]}],
@@ -1792,7 +1897,6 @@ class TestSlackClientProtocol:
     def test_protocol_defines_required_methods(self) -> None:
         """SlackClient Protocol should define the 5 Slack methods we use."""
         from colonyos.slack import SlackClient
-        import inspect
 
         # Verify the Protocol class defines the expected method signatures
         members = [m for m in dir(SlackClient) if not m.startswith("_")]
@@ -1804,20 +1908,17 @@ class TestSlackClientProtocol:
 
     def test_functions_use_typed_client(self) -> None:
         """Public functions should accept SlackClient, not Any."""
-        import inspect
         from colonyos.slack import post_acknowledgment
 
-        sig = inspect.signature(post_acknowledgment)
-        # The annotation should reference SlackClient, not Any
-        client_param = sig.parameters["client"]
-        assert "SlackClient" in str(client_param.annotation)
+        hints = get_type_hints(post_acknowledgment)
+        assert hints["client"] is SlackClient
 
 
 class TestReactToMessage:
     """Tests for react_to_message() helper."""
 
     def test_calls_reactions_add_with_correct_args(self) -> None:
-        client = MagicMock()
+        client = _slack_client_mock()
         react_to_message(client, "C123", "1234567890.123456", "eyes")
         client.reactions_add.assert_called_once_with(
             channel="C123",
@@ -1830,7 +1931,7 @@ class TestRemoveReaction:
     """Tests for remove_reaction() helper."""
 
     def test_calls_reactions_remove_with_correct_args(self) -> None:
-        client = MagicMock()
+        client = _slack_client_mock()
         remove_reaction(client, "C123", "1234567890.123456", "eyes")
         client.reactions_remove.assert_called_once_with(
             channel="C123",
@@ -1840,7 +1941,7 @@ class TestRemoveReaction:
 
     def test_propagates_exception(self) -> None:
         """remove_reaction does not swallow exceptions — callers handle errors."""
-        client = MagicMock()
+        client = _slack_client_mock()
         client.reactions_remove.side_effect = RuntimeError("no_reaction")
         with pytest.raises(RuntimeError, match="no_reaction"):
             remove_reaction(client, "C123", "1234567890.123456", "eyes")
@@ -1851,22 +1952,19 @@ class TestRemoveReaction:
 # ---------------------------------------------------------------------------
 
 
-def _make_queue_item(**overrides: Any) -> "QueueItem":
+def _make_queue_item(**overrides: Unpack[_QueueItemTestKw]) -> QueueItem:
     """Create a minimal QueueItem for testing format_daily_summary."""
-    from colonyos.models import QueueItem, QueueItemStatus
-
-    defaults: dict[str, Any] = {
-        "id": "test-id",
-        "source_type": "prompt",
-        "source_value": "do something",
-        "status": QueueItemStatus.COMPLETED,
-        "summary": "cli-refactor",
-        "pr_url": None,
-        "cost_usd": 0.0,
-        "error": None,
-    }
-    defaults.update(overrides)
-    return QueueItem(**defaults)
+    base = QueueItem(
+        id="test-id",
+        source_type="prompt",
+        source_value="do something",
+        status=QueueItemStatus.COMPLETED,
+        summary="cli-refactor",
+        pr_url=None,
+        cost_usd=0.0,
+        error=None,
+    )
+    return replace(base, **overrides)
 
 
 class TestFormatDailySummary:

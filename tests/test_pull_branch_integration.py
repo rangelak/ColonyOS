@@ -12,10 +12,9 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from colonyos.config import ColonyConfig
-from colonyos.models import PreflightError, ProjectInfo
+from colonyos.models import ProjectInfo
 
 
 # ---------------------------------------------------------------------------

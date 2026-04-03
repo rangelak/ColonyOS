@@ -476,5 +476,3 @@ def check_fix_rounds(state: PRReviewState, max_rounds: int) -> bool:
     Returns True if under limit, False if at or over limit.
     """
     return state.fix_rounds < max_rounds
-
-

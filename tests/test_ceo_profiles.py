@@ -77,20 +77,24 @@ class TestParseCustomCeoProfiles:
 
     def test_parses_valid_entry(self) -> None:
         """Valid dict entries produce Persona objects."""
-        raw = [{"role": "Test CEO", "expertise": "testing", "perspective": "test everything"}]
+        raw: list[dict[str, object]] = [
+            {"role": "Test CEO", "expertise": "testing", "perspective": "test everything"}
+        ]
         result = parse_custom_ceo_profiles(raw)
         assert len(result) == 1
         assert result[0].role == "Test CEO"
 
     def test_skips_empty_role(self) -> None:
         """Entries with empty role are skipped."""
-        raw = [{"role": "", "expertise": "x", "perspective": "y"}]
+        raw: list[dict[str, object]] = [{"role": "", "expertise": "x", "perspective": "y"}]
         result = parse_custom_ceo_profiles(raw)
         assert len(result) == 0
 
     def test_sanitizes_values(self) -> None:
         """ANSI escape sequences are stripped from profile values."""
-        raw = [{"role": "\x1b[31mEvil CEO\x1b[0m", "expertise": "x", "perspective": "y"}]
+        raw: list[dict[str, object]] = [
+            {"role": "\x1b[31mEvil CEO\x1b[0m", "expertise": "x", "perspective": "y"}
+        ]
         result = parse_custom_ceo_profiles(raw)
         assert "\x1b" not in result[0].role
         assert "Evil CEO" in result[0].role
@@ -101,7 +105,7 @@ class TestParseCustomCeoProfiles:
 
     def test_missing_keys_use_defaults(self) -> None:
         """Missing expertise/perspective default to empty strings."""
-        raw = [{"role": "Minimal CEO"}]
+        raw: list[dict[str, object]] = [{"role": "Minimal CEO"}]
         result = parse_custom_ceo_profiles(raw)
         assert len(result) == 1
         assert result[0].expertise == ""

@@ -17,7 +17,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -364,9 +364,13 @@ def _fetch_open_prs_for_prefix(
     if not isinstance(items, list):
         return {}
 
+    items_list = cast(list[Any], items)
     mapping: dict[str, int] = {}
-    for item in items:
-        branch = item.get("headRefName", "")
+    for raw in items_list:
+        if not isinstance(raw, dict):
+            continue
+        item = cast(dict[str, Any], raw)
+        branch = str(item.get("headRefName", ""))
         number = item.get("number")
         if branch.startswith(prefix) and isinstance(number, int):
             mapping[branch] = number
@@ -449,7 +453,12 @@ def _fetch_open_prs_for_ci(
     if not isinstance(items, list):
         return []
 
-    return items
+    items_list = cast(list[Any], items)
+    out: list[dict[str, Any]] = []
+    for el in items_list:
+        if isinstance(el, dict):
+            out.append(cast(dict[str, Any], el))
+    return out
 
 
 def _fetch_ci_checks_for_pr(
@@ -494,7 +503,12 @@ def _fetch_ci_checks_for_pr(
     if not isinstance(data, list):
         return []
 
-    return data
+    data_list = cast(list[Any], data)
+    out: list[dict[str, str]] = []
+    for el in data_list:
+        if isinstance(el, dict):
+            out.append(cast(dict[str, str], el))
+    return out
 
 
 def find_branches_with_failing_ci(

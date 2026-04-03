@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from colonyos.config import ColonyConfig, SlackConfig
@@ -561,7 +562,6 @@ def test_increment_hourly_count_not_called_during_triage(tmp_path: Path) -> None
 
 def test_eager_increment_makes_rate_limit_reject_burst(tmp_path: Path) -> None:
     """When hourly count is incremented eagerly, subsequent messages hit the rate limit."""
-    from colonyos.config import SlackConfig as SC
 
     queue_state = QueueState(queue_id="q")
     watch_state = SlackWatchState(watch_id="w")
@@ -824,7 +824,6 @@ def test_register_message_handler_is_handle_event(tmp_path: Path) -> None:
     bolt_app = MagicMock()
     # Track all (event_type, handler) pairs registered via bolt_app.event(type)(handler)
     registrations: list[tuple[str, Any]] = []
-    original_event = bolt_app.event
 
     def _track_event(event_type):
         decorator_mock = MagicMock()
@@ -1189,14 +1188,13 @@ def test_all_mode_passive_message_end_to_end(tmp_path: Path) -> None:
     }
 
     react_calls: list[tuple[str, str, str, str]] = []
-    original_react = None
 
     def _track_react(client, channel, ts, name):
         react_calls.append((client, channel, ts, name))
 
     with patch("colonyos.slack_queue.should_process_message", return_value=True), \
          patch("colonyos.slack_queue.check_rate_limit", return_value=True), \
-         patch("colonyos.slack_queue.react_to_message", side_effect=_track_react) as mock_react, \
+         patch("colonyos.slack_queue.react_to_message", side_effect=_track_react), \
          patch("colonyos.slack_queue.triage_message", side_effect=_mock_triage), \
          patch("colonyos.slack_queue.post_triage_acknowledgment") as mock_ack:
         engine._handle_event(event, client)

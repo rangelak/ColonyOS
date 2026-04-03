@@ -50,7 +50,7 @@ from colonyos.stats import (
 def _make_run(
     run_id: str = "run-001",
     status: str = "completed",
-    total_cost_usd: float = 1.0,
+    total_cost_usd: float | None = 1.0,
     started_at: str = "2026-03-17T12:00:00+00:00",
     finished_at: str = "2026-03-17T12:10:00+00:00",
     phases: list[dict] | None = None,

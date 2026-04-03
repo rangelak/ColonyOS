@@ -150,7 +150,7 @@ class TestMakeUiOverride:
         # existing behaviour: when a ui_factory is provided, that factory
         # is used instead of creating PhaseUI.
         sentinel = object()
-        factory = MagicMock(return_value=sentinel)
+        MagicMock(return_value=sentinel)
 
         # We can't easily call run() without a full environment, but we
         # can verify the function signature accepts ui_factory.
@@ -175,8 +175,6 @@ class TestSessionStateTuiWiring:
 
     def test_first_direct_agent_stores_session_id(self, _mock_tui_env: Path):
         """After a successful direct-agent run the session_id is stored."""
-        from colonyos.cli import _run_direct_agent, _handle_tui_command
-        from colonyos.models import PhaseResult, Phase
 
         # Simulate what _run_callback does: call _run_direct_agent and
         # capture the returned session_id.
@@ -333,7 +331,6 @@ class TestResumeFallbackIntegration:
 
     def test_fallback_clears_last_direct_session_id(self):
         """When resume fails and fallback succeeds, session_id updates to fresh."""
-        from colonyos.cli import _run_direct_agent
 
         last_direct_session_id: str | None = "stale-session"
 

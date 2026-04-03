@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -213,7 +212,7 @@ class TestDoctorInstallMethodE2E:
     def _run_doctor_with_executable(self, fake_exe: str) -> list:
         """Run doctor checks with a mocked sys.executable path."""
         with (
-            patch("colonyos.doctor.subprocess.run") as mock_subproc,
+            patch("colonyos.doctor.subprocess.run"),
             patch("colonyos.doctor.sys") as mock_sys,
             patch("colonyos.__version__", "1.0.0"),
         ):

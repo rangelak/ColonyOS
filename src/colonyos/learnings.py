@@ -112,7 +112,7 @@ def append_learnings(
 
     existing_sections = parse_learnings(content)
 
-    existing_texts = set()
+    existing_texts: set[str] = set()
     for _rid, _d, _f, entries in existing_sections:
         for e in entries:
             existing_texts.add(_normalize(e.text))
@@ -181,7 +181,7 @@ def load_learnings_for_injection(repo_root: Path, max_entries: int = 20) -> str:
     if not recent_entries:
         return ""
 
-    lines = []
+    lines: list[str] = []
     for entry in recent_entries:
         lines.append(f"- **[{entry.category}]** {entry.text}")
     return "\n".join(lines)

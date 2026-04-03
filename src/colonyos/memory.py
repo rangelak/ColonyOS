@@ -413,7 +413,7 @@ def load_memory_for_injection(
     """
     # Determine relevant categories for this phase
     category_names = PHASE_CATEGORY_MAP.get(phase, list(PHASE_CATEGORY_MAP["direct_agent"]))
-    categories = []
+    categories: list[MemoryCategory] = []
     for name in category_names:
         try:
             categories.append(MemoryCategory(name))

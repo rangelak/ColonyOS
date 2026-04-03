@@ -1,4 +1,5 @@
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -77,7 +78,7 @@ def tmp_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def tmp_git_repo(tmp_path: Path) -> Path:
+def tmp_git_repo(tmp_path: Path) -> Iterator[Path]:
     """Directory structure with subprocess.run mocked for git calls.
 
     Tests that call run() / run_thread_fix() use this. No real git init —
@@ -226,7 +227,7 @@ class TestBuildPersonaAgents:
         assert "steve_jobs" in agents
         assert "linus_torvalds" in agents
         assert agents["steve_jobs"].description.startswith("Steve Jobs")
-        assert "Read" in agents["linus_torvalds"].tools
+        assert "Read" in (agents["linus_torvalds"].tools or [])
 
     def test_empty_personas(self):
         agents = _build_persona_agents([])
@@ -750,7 +751,7 @@ class TestRun:
         ]
         mock_parallel.return_value = [_approve_review_result()]
 
-        log = run("Add feature", repo_root=tmp_git_repo, config=config)
+        run("Add feature", repo_root=tmp_git_repo, config=config)
 
         runs_dir = tmp_git_repo / ".colonyos" / "runs"
         assert runs_dir.exists()
@@ -1870,11 +1871,7 @@ class TestLearnPhaseWiring:
         """Learn phase failure does not prevent deliver from running."""
         save_config(tmp_git_repo, config)
 
-        def learn_side_effect(*args, **kwargs):
-            # Determine which call this is by checking side_effect_calls
-            return learn_side_effect.results.pop(0)
-
-        learn_side_effect.results = [
+        _learn_phase_results = [
             _fake_phase_result(Phase.PLAN),
             _fake_phase_result(Phase.IMPLEMENT),
             PhaseResult(phase=Phase.DECISION, success=True, cost_usd=0.01,
@@ -1884,6 +1881,10 @@ class TestLearnPhaseWiring:
             _fake_phase_result(Phase.VERIFY),
             _fake_phase_result(Phase.DELIVER),
         ]
+
+        def learn_side_effect(*args: object, **kwargs: object) -> PhaseResult:
+            return _learn_phase_results.pop(0)
+
         mock_run.side_effect = learn_side_effect
         mock_parallel.return_value = [_approve_review_result()]
 
@@ -3575,7 +3576,7 @@ class TestParallelImplementIntegration:
         with patch("colonyos.orchestrator._validate_resume_preconditions"):
             # Prepare resume (need to load log manually since we skipped validation)
             from colonyos.orchestrator import _load_run_log
-            loaded_log = _load_run_log(tmp_path, log.run_id)
+            _load_run_log(tmp_path, log.run_id)
 
             # Now call the actual function with mocked validation
             resume_state = prepare_resume(tmp_path, log.run_id)
@@ -3969,7 +3970,9 @@ class TestRetryConfigWiring:
         impl_phases = [p for p in log.phases if p.phase == Phase.IMPLEMENT]
         assert len(impl_phases) >= 1
         assert impl_phases[0].retry_info == retry_info
-        assert impl_phases[0].retry_info.attempts == 2
+        ri = impl_phases[0].retry_info
+        assert ri is not None
+        assert ri.attempts == 2
 
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")

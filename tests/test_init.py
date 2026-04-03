@@ -1,5 +1,5 @@
 from pathlib import Path
-from unittest.mock import patch, call, MagicMock
+from unittest.mock import patch
 
 import pytest
 import click
@@ -50,7 +50,7 @@ class TestRepoContext:
     def test_frozen(self):
         ctx = RepoContext(name="foo", description="", stack="")
         with pytest.raises(AttributeError):
-            ctx.name = "bar"
+            ctx.name = "bar"  # pyright: ignore[reportAttributeAccessIssue]
 
 
 class TestScanRepoContext:
@@ -678,7 +678,7 @@ class TestFriendlyInitError:
 class TestSelectPersonaPack:
     def test_returns_pack_personas_when_pack_selected(self):
         # User picks pack 1 (startup), then confirms
-        inputs = iter(["1", "y"])
+        iter(["1", "y"])
         with patch("colonyos.init.click") as mock_click:
             mock_click.prompt.return_value = 1
             mock_click.confirm.return_value = True
@@ -890,7 +890,7 @@ class TestQuickInit:
         assert config.personas[0].role == first_pack.personas[0].role
 
     def test_quick_creates_valid_config(self, tmp_path: Path):
-        config = run_init(
+        run_init(
             tmp_path,
             quick=True,
             project_name="TestProject",

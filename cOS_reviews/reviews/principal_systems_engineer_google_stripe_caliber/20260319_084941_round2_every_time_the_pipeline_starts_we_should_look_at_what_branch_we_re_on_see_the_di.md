@@ -8,16 +8,16 @@ Now I have a complete picture. Let me write the review.
 
 ### Completeness Assessment
 
-**FR-1** ✅ `_preflight_check()` added to `orchestrator.py`, called before agent phases  
-**FR-2** ✅ Dirty working tree check with `git status --porcelain`, raises `ClickException`  
-**FR-3** ✅ Branch existence check + open PR detection via `gh pr list`  
-**FR-4** ✅ `git fetch origin main` with 5s timeout, `rev-list` count, graceful degradation  
-**FR-5** ✅ `PreflightResult` dataclass in `models.py` with all specified fields  
-**FR-6** ✅ `PreflightResult` stored on `RunLog`, serialized/deserialized  
-**FR-7** ✅ `_ensure_on_main` + `ClickException` catch in `_run_single_iteration`  
-**FR-8** ✅ `_resume_preflight` with clean-tree check and HEAD SHA comparison  
-**FR-9** ✅ `--offline` flag on both `run` and `auto` CLI commands  
-**FR-10** ✅ `--force` flag on `run` CLI command  
+**FR-1** ✅ `_preflight_check()` added to `orchestrator.py`, called before agent phases
+**FR-2** ✅ Dirty working tree check with `git status --porcelain`, raises `ClickException`
+**FR-3** ✅ Branch existence check + open PR detection via `gh pr list`
+**FR-4** ✅ `git fetch origin main` with 5s timeout, `rev-list` count, graceful degradation
+**FR-5** ✅ `PreflightResult` dataclass in `models.py` with all specified fields
+**FR-6** ✅ `PreflightResult` stored on `RunLog`, serialized/deserialized
+**FR-7** ✅ `_ensure_on_main` + `ClickException` catch in `_run_single_iteration`
+**FR-8** ✅ `_resume_preflight` with clean-tree check and HEAD SHA comparison
+**FR-9** ✅ `--offline` flag on both `run` and `auto` CLI commands
+**FR-10** ✅ `--force` flag on `run` CLI command
 
 All 10 functional requirements have corresponding implementations and 37 dedicated tests pass, plus all 174 existing orchestrator/CEO tests continue to pass.
 

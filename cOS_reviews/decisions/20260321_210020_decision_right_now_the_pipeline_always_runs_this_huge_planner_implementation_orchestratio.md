@@ -20,7 +20,7 @@ The Intent Router Agent implementation is complete and ready to ship:
 - **Fail-open behavior** is correctly applied at every decision point
 
 ### Minor follow-ups (all LOW severity, non-blocking):
-- Fix stale docstring in `answer_question()` 
+- Fix stale docstring in `answer_question()`
 - Forward `qa_model`/`qa_budget` config to Slack Q&A path
 - File story for triage log rotation
 - Consider `/no-triage` REPL command

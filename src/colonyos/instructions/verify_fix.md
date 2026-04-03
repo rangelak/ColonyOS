@@ -39,6 +39,13 @@ After making fixes, run the full test suite to verify:
 
 Commit all fixes on branch `{branch_name}` with a clear commit message describing what was fixed and why.
 
+If `git commit` fails because pre-commit hooks report lint, type-check, or test failures:
+1. Read the hook output carefully and identify every reported issue
+2. Fix the reported problems in code or tests as appropriate
+3. Re-run the relevant commands yourself to confirm the failures are resolved
+4. Retry `git commit`
+5. Repeat until the commit succeeds or you hit an environmental/tooling failure you cannot fix from the repository
+
 ## Rules
 
 - Fix the code, not the tests — unless the test is genuinely incorrect
@@ -48,3 +55,4 @@ Commit all fixes on branch `{branch_name}` with a clear commit message describin
 - Follow existing code conventions exactly
 - Run the full test suite after fixing, not just the failing tests
 - Do not suppress or skip tests to make them pass (e.g., no `@pytest.mark.skip`, no `# type: ignore`, no `# noqa`)
+- Do not give up after the first failed `git commit` if the failure came from fixable pre-commit hook output

@@ -1,0 +1,55 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre-commit:
+    name: Pre-commit lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run lint hooks on changed files
+        env:
+          SKIP: pytest
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch origin "${{ github.base_ref }}" --depth=1
+            mapfile -t files < <(git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}"...HEAD)
+          elif [[ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+            mapfile -t files < <(git diff --name-only --diff-filter=ACMR "${{ github.event.before }}" "${{ github.sha }}")
+          else
+            mapfile -t files < <(git ls-files)
+          fi
+
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "No changed files to lint"
+            exit 0
+          fi
+
+          printf 'Linting %s changed files\n' "${#files[@]}"
+          pre-commit run --show-diff-on-failure --files "${files[@]}"

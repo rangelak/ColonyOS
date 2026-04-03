@@ -49,7 +49,7 @@ This branch implements three PRDs in one shot: (1) a Textual TUI with transcript
 ### Safety
 
 - No secrets or credentials in committed code ✅
-- Secret file detection in preflight recovery prevents auto-committing `.env`, private keys, certificates ✅  
+- Secret file detection in preflight recovery prevents auto-committing `.env`, private keys, certificates ✅
 - All user-injected text goes through `sanitize_untrusted_content()` before reaching agents ✅
 - Sweep analysis phase is read-only — no Write/Edit/Bash tools ✅
 - Review phase is never skipped regardless of complexity classification ✅

@@ -10,7 +10,7 @@ Based on my comprehensive review of the implementation against the PRD, here is 
 
 **What's Implemented (Tasks 1.0-5.0):**
 - ✅ `RouterCategory` enum with CODE_CHANGE, QUESTION, STATUS, OUT_OF_SCOPE
-- ✅ `RouterResult` dataclass (frozen, immutable) 
+- ✅ `RouterResult` dataclass (frozen, immutable)
 - ✅ `_build_router_prompt()` with proper input sanitization
 - ✅ `_parse_router_response()` with JSON/markdown-fence handling and fail-open fallback
 - ✅ `route_query()` using haiku model, no tools, $0.05 budget
@@ -23,7 +23,7 @@ Based on my comprehensive review of the implementation against the PRD, here is 
 
 **What's NOT Implemented (Tasks 6.0-10.0):**
 - ❌ **FR-6: `--no-triage` CLI flag** - Not added to `run` command
-- ❌ **FR-4: CLI integration** - `route_query()` never called from `cli.py` 
+- ❌ **FR-4: CLI integration** - `route_query()` never called from `cli.py`
 - ❌ **FR-4: REPL integration** - No routing before orchestrator
 - ❌ **FR-2: Slack refactor** - `triage_message()` in slack.py unchanged
 - ❌ **FR-8: Audit logging** - No `_log_router_decision()`, no `.colonyos/runs/triage_<timestamp>.json`

@@ -150,7 +150,6 @@ class TestDAGAwareSkipLogic:
         deps = parse_task_file(SIMPLE_TASK_FILE)
         dag = TaskDAG(dependencies=deps)
 
-        completed: set[str] = set()
         failed: set[str] = {"1.0"}
         blocked: set[str] = set()
 

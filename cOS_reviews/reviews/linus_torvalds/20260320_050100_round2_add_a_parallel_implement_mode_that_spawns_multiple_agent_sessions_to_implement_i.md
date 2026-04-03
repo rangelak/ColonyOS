@@ -57,7 +57,7 @@ The per-task budget calculation is `phase_budget / max_parallel_agents`, but thi
 
 This is a **solid, competent implementation**. The core architecture is correct:
 - DAG-based dependency management ✓
-- Git worktree isolation ✓  
+- Git worktree isolation ✓
 - Asyncio-based parallelism with proper locking ✓
 - Graceful degradation ✓
 - Clean integration with existing pipeline ✓

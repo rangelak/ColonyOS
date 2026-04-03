@@ -1,8 +1,12 @@
 """Tests for the pre-delivery verify-fix loop in the main pipeline (Tasks 4.0 & 6.0)."""
 
+from collections.abc import Iterator, Sequence
+from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from typing import Callable, cast
+from unittest.mock import MagicMock, patch
 
+import colonyos.orchestrator as _orch_mod
 import pytest
 
 from colonyos.config import (
@@ -10,9 +14,19 @@ from colonyos.config import (
     ColonyConfig,
     PhasesConfig,
     VerifyConfig,
+    runs_dir_path,
     save_config,
 )
 from colonyos.models import Persona, Phase, PhaseResult, ProjectInfo, ResumeState, RunLog, RunStatus
+
+_verify_detected_failures = cast(
+    Callable[[str], bool],
+    getattr(_orch_mod, "_verify_detected_failures"),
+)
+_compute_next_phase = cast(
+    Callable[[str | None], str | None],
+    getattr(_orch_mod, "_compute_next_phase"),
+)
 
 
 REVIEWER_PERSONA = Persona(
@@ -20,9 +34,14 @@ REVIEWER_PERSONA = Persona(
 )
 
 
-def _mock_git(*args, **kwargs):
+def _mock_git(*args: object, **kwargs: object) -> MagicMock:
     """Stub for subprocess.run — returns plausible defaults for git commands."""
-    cmd = args[0] if args else kwargs.get("args", [])
+    cmd_raw = args[0] if args else kwargs.get("args", [])
+    if isinstance(cmd_raw, (list, tuple)):
+        seq = cast(Sequence[object], cmd_raw)
+        cmd: list[str] = [str(x) for x in seq]
+    else:
+        cmd = [str(cmd_raw)]
     m = MagicMock()
     m.returncode = 0
     m.stderr = ""
@@ -47,7 +66,7 @@ def _mock_git(*args, **kwargs):
 
 
 @pytest.fixture
-def tmp_git_repo(tmp_path: Path) -> Path:
+def tmp_git_repo(tmp_path: Path) -> Iterator[Path]:
     (tmp_path / "cOS_prds").mkdir()
     (tmp_path / "cOS_tasks").mkdir()
     (tmp_path / "cOS_reviews").mkdir()
@@ -56,19 +75,30 @@ def tmp_git_repo(tmp_path: Path) -> Path:
         yield tmp_path
 
 
-def _fake_phase_result(phase: Phase, success: bool = True, **kwargs) -> PhaseResult:
+def _fake_phase_result(
+    phase: Phase,
+    success: bool = True,
+    *,
+    cost_usd: float | None = 0.01,
+    artifacts: dict[str, str] | None = None,
+) -> PhaseResult:
     return PhaseResult(
         phase=phase,
         success=success,
-        cost_usd=kwargs.get("cost_usd", 0.01),
+        cost_usd=cost_usd,
         duration_ms=100,
         session_id="test-session",
-        artifacts=kwargs.get("artifacts", {"result": "done"}),
+        artifacts=artifacts if artifacts is not None else {"result": "done"},
     )
 
 
-def _config(**overrides) -> ColonyConfig:
-    defaults = dict(
+def _config(
+    *,
+    budget: BudgetConfig | None = None,
+    phases: PhasesConfig | None = None,
+    verify: VerifyConfig | None = None,
+) -> ColonyConfig:
+    base = ColonyConfig(
         project=ProjectInfo(name="Test", description="test", stack="Python"),
         personas=[REVIEWER_PERSONA],
         model="test-model",
@@ -76,8 +106,13 @@ def _config(**overrides) -> ColonyConfig:
         phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True, verify=True),
         verify=VerifyConfig(max_fix_attempts=2),
     )
-    defaults.update(overrides)
-    return ColonyConfig(**defaults)
+    if budget is not None:
+        base = replace(base, budget=budget)
+    if phases is not None:
+        base = replace(base, phases=phases)
+    if verify is not None:
+        base = replace(base, verify=verify)
+    return base
 
 
 class TestVerifyPhaseInMainPipeline:
@@ -86,11 +121,11 @@ class TestVerifyPhaseInMainPipeline:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_verify_passes_proceeds_to_deliver(
-        self, mock_run, mock_parallel, tmp_git_repo: Path
-    ):
+        self, mock_run: MagicMock, mock_parallel: MagicMock, tmp_git_repo: Path
+    ) -> None:
         """(a) Verify passes on first try → deliver runs normally."""
         config = _config()
-        save_config(tmp_git_repo, config)
+        _ = save_config(tmp_git_repo, config)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
@@ -125,11 +160,11 @@ class TestVerifyPhaseInMainPipeline:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_verify_fails_fix_succeeds_then_delivers(
-        self, mock_run, mock_parallel, tmp_git_repo: Path
-    ):
+        self, mock_run: MagicMock, mock_parallel: MagicMock, tmp_git_repo: Path
+    ) -> None:
         """(b) Verify fails → fix runs → re-verify passes → deliver proceeds."""
         config = _config()
-        save_config(tmp_git_repo, config)
+        _ = save_config(tmp_git_repo, config)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
@@ -164,11 +199,11 @@ class TestVerifyPhaseInMainPipeline:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_verify_fails_exhausts_retries_blocks_delivery(
-        self, mock_run, mock_parallel, tmp_git_repo: Path
-    ):
+        self, mock_run: MagicMock, mock_parallel: MagicMock, tmp_git_repo: Path
+    ) -> None:
         """(c) Verify fails → fix exhausts retries → FAILED, no delivery."""
         config = _config(verify=VerifyConfig(max_fix_attempts=2))
-        save_config(tmp_git_repo, config)
+        _ = save_config(tmp_git_repo, config)
 
         fail_verify = _fake_phase_result(
             Phase.VERIFY,
@@ -209,14 +244,14 @@ class TestVerifyPhaseInMainPipeline:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_budget_guard_stops_verify_loop(
-        self, mock_run, mock_parallel, tmp_git_repo: Path
-    ):
+        self, mock_run: MagicMock, mock_parallel: MagicMock, tmp_git_repo: Path
+    ) -> None:
         """(d) Budget guard prevents fix loop when budget exhausted."""
         config = _config(
             budget=BudgetConfig(per_phase=1.0, per_run=5.5),
             verify=VerifyConfig(max_fix_attempts=2),
         )
-        save_config(tmp_git_repo, config)
+        _ = save_config(tmp_git_repo, config)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN, cost_usd=1.0),
@@ -249,13 +284,13 @@ class TestVerifyPhaseInMainPipeline:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_verify_skipped_when_disabled(
-        self, mock_run, mock_parallel, tmp_git_repo: Path
-    ):
+        self, mock_run: MagicMock, mock_parallel: MagicMock, tmp_git_repo: Path
+    ) -> None:
         """(e) Verify skipped when config.phases.verify is False."""
         config = _config(
             phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True, verify=False),
         )
-        save_config(tmp_git_repo, config)
+        _ = save_config(tmp_git_repo, config)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
@@ -283,11 +318,11 @@ class TestVerifyPhaseInMainPipeline:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_heartbeat_touched_before_verify(
-        self, mock_run, mock_parallel, tmp_git_repo: Path
-    ):
+        self, mock_run: MagicMock, mock_parallel: MagicMock, tmp_git_repo: Path
+    ) -> None:
         """(f) Heartbeat file is touched before verify phase runs."""
         config = _config()
-        save_config(tmp_git_repo, config)
+        _ = save_config(tmp_git_repo, config)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
@@ -310,7 +345,6 @@ class TestVerifyPhaseInMainPipeline:
 
         assert log.status == RunStatus.COMPLETED
         # Heartbeat file should exist (touched by verify phase and others)
-        from colonyos.orchestrator import runs_dir_path
         heartbeat = runs_dir_path(tmp_git_repo) / "heartbeat"
         assert heartbeat.exists()
 
@@ -321,15 +355,15 @@ class TestVerifyPhaseIntegration:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_full_pipeline_verify_passes_first_try(
-        self, mock_run, mock_parallel, tmp_git_repo: Path
-    ):
+        self, mock_run: MagicMock, mock_parallel: MagicMock, tmp_git_repo: Path
+    ) -> None:
         """6.1 — Full pipeline with verify enabled; tests pass on first try.
 
         Verify that the complete phase ordering is correct and costs accumulate
         through the verify phase into the final run log.
         """
         config = _config()
-        save_config(tmp_git_repo, config)
+        _ = save_config(tmp_git_repo, config)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN, cost_usd=0.50),
@@ -368,15 +402,15 @@ class TestVerifyPhaseIntegration:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_full_pipeline_verify_fails_fix_succeeds(
-        self, mock_run, mock_parallel, tmp_git_repo: Path
-    ):
+        self, mock_run: MagicMock, mock_parallel: MagicMock, tmp_git_repo: Path
+    ) -> None:
         """6.2 — Full pipeline; verify fails, fix succeeds on first attempt.
 
         Validates the full phase sequence including a fix iteration, and that
         the run completes successfully with delivery.
         """
         config = _config(verify=VerifyConfig(max_fix_attempts=2))
-        save_config(tmp_git_repo, config)
+        _ = save_config(tmp_git_repo, config)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
@@ -418,8 +452,8 @@ class TestVerifyPhaseIntegration:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_full_pipeline_verify_disabled(
-        self, mock_run, mock_parallel, tmp_git_repo: Path
-    ):
+        self, mock_run: MagicMock, mock_parallel: MagicMock, tmp_git_repo: Path
+    ) -> None:
         """6.3 — Full pipeline with verify disabled; verify skipped, deliver proceeds.
 
         Confirms the pipeline goes directly from Learn to Deliver with no
@@ -428,7 +462,7 @@ class TestVerifyPhaseIntegration:
         config = _config(
             phases=PhasesConfig(plan=True, implement=True, review=True, deliver=True, verify=False),
         )
-        save_config(tmp_git_repo, config)
+        _ = save_config(tmp_git_repo, config)
 
         mock_run.side_effect = [
             _fake_phase_result(Phase.PLAN),
@@ -460,8 +494,8 @@ class TestVerifyPhaseIntegration:
     @patch("colonyos.orchestrator.run_phases_parallel_sync")
     @patch("colonyos.orchestrator.run_phase_sync")
     def test_resume_from_failed_verify(
-        self, mock_run, mock_parallel, tmp_git_repo: Path
-    ):
+        self, mock_run: MagicMock, mock_parallel: MagicMock, tmp_git_repo: Path
+    ) -> None:
         """6.4 — Resume from a failed verify; pipeline resumes at verify phase.
 
         Simulates a run that failed during verify (decision was the last
@@ -469,7 +503,7 @@ class TestVerifyPhaseIntegration:
         review and re-run from verify (via learn) through deliver.
         """
         config = _config()
-        save_config(tmp_git_repo, config)
+        _ = save_config(tmp_git_repo, config)
 
         # Build a RunLog representing a prior failed run where decision
         # was the last successful phase (verify failed after it).
@@ -538,84 +572,66 @@ class TestVerifyPhaseIntegration:
 class TestVerifyDetectedFailures:
     """Unit tests for _verify_detected_failures — the critical decision boundary."""
 
-    def test_empty_output_returns_false(self):
-        from colonyos.orchestrator import _verify_detected_failures
+    def test_empty_output_returns_false(self) -> None:
         assert _verify_detected_failures("") is False
-        assert _verify_detected_failures(None) is False
 
-    def test_sentinel_pass(self):
-        from colonyos.orchestrator import _verify_detected_failures
+    def test_sentinel_pass(self) -> None:
         assert _verify_detected_failures("All 42 tests passed\n\nVERIFY_RESULT: PASS") is False
 
-    def test_sentinel_fail(self):
-        from colonyos.orchestrator import _verify_detected_failures
+    def test_sentinel_fail(self) -> None:
         assert _verify_detected_failures("3 tests failed\n\nVERIFY_RESULT: FAIL") is True
 
-    def test_sentinel_case_insensitive(self):
-        from colonyos.orchestrator import _verify_detected_failures
+    def test_sentinel_case_insensitive(self) -> None:
         assert _verify_detected_failures("verify_result: pass") is False
         assert _verify_detected_failures("verify_result: fail") is True
 
-    def test_sentinel_overrides_ambiguous_output(self):
+    def test_sentinel_overrides_ambiguous_output(self) -> None:
         """Sentinel takes priority even when body mentions 'failed'."""
-        from colonyos.orchestrator import _verify_detected_failures
         output = "test_error_handler PASSED\n42 passed, 0 failed\n\nVERIFY_RESULT: PASS"
         assert _verify_detected_failures(output) is False
 
-    def test_sentinel_fail_overrides_pass_language(self):
-        from colonyos.orchestrator import _verify_detected_failures
+    def test_sentinel_fail_overrides_pass_language(self) -> None:
         output = "All tests passed... NOT. 1 test actually failed\n\nVERIFY_RESULT: FAIL"
         assert _verify_detected_failures(output) is True
 
-    def test_fallback_zero_failed_returns_false(self):
+    def test_fallback_zero_failed_returns_false(self) -> None:
         """'0 failed' in pytest output should NOT trigger false positive."""
-        from colonyos.orchestrator import _verify_detected_failures
         assert _verify_detected_failures("42 passed, 0 failed") is False
 
-    def test_fallback_zero_errors_returns_false(self):
-        from colonyos.orchestrator import _verify_detected_failures
+    def test_fallback_zero_errors_returns_false(self) -> None:
         assert _verify_detected_failures("42 passed, 0 errors") is False
 
-    def test_fallback_nonzero_failed(self):
-        from colonyos.orchestrator import _verify_detected_failures
+    def test_fallback_nonzero_failed(self) -> None:
         assert _verify_detected_failures("40 passed, 2 failed") is True
 
-    def test_fallback_nonzero_errors(self):
-        from colonyos.orchestrator import _verify_detected_failures
+    def test_fallback_nonzero_errors(self) -> None:
         assert _verify_detected_failures("1 error in test_auth") is True
 
-    def test_fallback_all_tests_passed(self):
-        from colonyos.orchestrator import _verify_detected_failures
+    def test_fallback_all_tests_passed(self) -> None:
         assert _verify_detected_failures("All tests passed") is False
         assert _verify_detected_failures("all tests pass") is False
 
-    def test_fallback_no_recognisable_signal(self):
+    def test_fallback_no_recognisable_signal(self) -> None:
         """Unknown output defaults to False (tests assumed passing)."""
-        from colonyos.orchestrator import _verify_detected_failures
         assert _verify_detected_failures("some random output") is False
 
-    def test_class_name_error_handler_no_false_positive(self):
+    def test_class_name_error_handler_no_false_positive(self) -> None:
         """Names like 'ErrorHandler' or 'test_error_handler' must not trigger."""
-        from colonyos.orchestrator import _verify_detected_failures
         output = "test_error_handler PASSED\nErrorHandler validated\n42 passed"
         assert _verify_detected_failures(output) is False
 
-    def test_fallback_10_failures(self):
-        from colonyos.orchestrator import _verify_detected_failures
+    def test_fallback_10_failures(self) -> None:
         assert _verify_detected_failures("10 failed, 32 passed") is True
 
 
 class TestComputeNextPhaseLearn:
     """Tests for _compute_next_phase with 'learn' mapping."""
 
-    def test_learn_maps_to_verify(self):
-        from colonyos.orchestrator import _compute_next_phase
+    def test_learn_maps_to_verify(self) -> None:
         assert _compute_next_phase("learn") == "verify"
 
-    def test_decision_still_maps_to_verify(self):
-        from colonyos.orchestrator import _compute_next_phase
+    def test_decision_still_maps_to_verify(self) -> None:
         assert _compute_next_phase("decision") == "verify"
 
-    def test_verify_maps_to_deliver(self):
-        from colonyos.orchestrator import _compute_next_phase
+    def test_verify_maps_to_deliver(self) -> None:
         assert _compute_next_phase("verify") == "deliver"

@@ -632,7 +632,7 @@ class TestSlackKillSwitch:
             ),
         )
         d = Daemon(tmp_repo, config, dry_run=True)
-        result = d._handle_control_command("U12345", "halt")
+        d._handle_control_command("U12345", "halt")
         assert d._state.paused is True
 
     def test_start_aliases_resume(self, tmp_repo: Path):
@@ -2556,7 +2556,6 @@ class TestPipelineStartedAtTracking:
 
         captured_started_at: list[float | None] = []
 
-        original_execute = daemon_instance._execute_item
 
         def spy_execute(i: QueueItem) -> RunLog:
             captured_started_at.append(daemon_instance._pipeline_started_at)
@@ -2687,7 +2686,7 @@ class TestWatchdogThread:
         old_mtime = time.time() - 300
         os.utime(hb_file, (old_mtime, old_mtime))
 
-        with patch("colonyos.daemon.request_active_phase_cancel", return_value=1) as mock_cancel, \
+        with patch("colonyos.daemon.request_active_phase_cancel", return_value=1), \
              patch.object(daemon, "_watchdog_recover") as mock_recover:
             daemon._watchdog_check()
 
@@ -2724,7 +2723,7 @@ class TestWatchdogThread:
         assert daemon._pipeline_started_at is None
         assert daemon._current_running_item is None
         assert item.status == QueueItemStatus.FAILED
-        assert "watchdog" in item.error.lower()
+        assert "watchdog" in (item.error or "").lower()
 
     def test_no_false_positive_with_fresh_heartbeat(self, tmp_repo: Path):
         """Watchdog should NOT fire when heartbeat file is fresh."""
@@ -3066,7 +3065,7 @@ class TestWatchdogIntegration:
         # --- Verify recovery ---
         # 1. Stuck item should be marked FAILED
         assert stuck_item.status == QueueItemStatus.FAILED
-        assert "watchdog" in stuck_item.error.lower()
+        assert "watchdog" in (stuck_item.error or "").lower()
 
         # 2. Pipeline state should be fully reset
         assert daemon._pipeline_running is False

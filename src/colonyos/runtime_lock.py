@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from colonyos.cancellation import register_cancel_callback, unregister_cancel_callback
 from colonyos.daemon_state import atomic_write_json
@@ -200,10 +200,6 @@ def _registry_path(repo_root: Path) -> Path:
     return repo_root / _RUNTIME_REGISTRY_FILE
 
 
-def _lock_path(repo_root: Path) -> Path:
-    return repo_root / _RUNTIME_LOCK_FILE
-
-
 def _read_lock_record(lock_path: Path) -> RuntimeProcessRecord | None:
     try:
         data = json.loads(lock_path.read_text(encoding="utf-8") or "{}")
@@ -211,7 +207,7 @@ def _read_lock_record(lock_path: Path) -> RuntimeProcessRecord | None:
         return None
     if not isinstance(data, dict):
         return None
-    return RuntimeProcessRecord.from_dict(data)
+    return RuntimeProcessRecord.from_dict(cast(dict[str, Any], data))
 
 
 def _load_registry_records(repo_root: Path) -> list[RuntimeProcessRecord]:
@@ -224,17 +220,19 @@ def _load_registry_records(repo_root: Path) -> list[RuntimeProcessRecord]:
         return []
     if not isinstance(data, dict):
         return []
-    raw_records = data.get("processes", [])
-    if not isinstance(raw_records, list):
+    data_dict = cast(dict[str, Any], data)
+    raw_records_obj = data_dict.get("processes", [])
+    if not isinstance(raw_records_obj, list):
         return []
+    raw_records = cast(list[object], raw_records_obj)
 
     live_records: list[RuntimeProcessRecord] = []
     changed = False
-    for raw_record in raw_records:
-        if not isinstance(raw_record, dict):
+    for raw_record_obj in raw_records:
+        if not isinstance(raw_record_obj, dict):
             changed = True
             continue
-        record = RuntimeProcessRecord.from_dict(raw_record)
+        record = RuntimeProcessRecord.from_dict(cast(dict[str, Any], raw_record_obj))
         if record is None or not _process_exists(record.pid):
             changed = True
             continue
@@ -313,7 +311,7 @@ def _signal_pids(pids: set[int], sig: signal.Signals) -> None:
 
 def _wait_for_exit(pids: set[int], *, timeout_seconds: float) -> set[int]:
     deadline = time.monotonic() + timeout_seconds
-    remaining = {pid for pid in pids if _process_exists(pid)}
+    remaining: set[int] = {pid for pid in pids if _process_exists(pid)}
     while remaining and time.monotonic() < deadline:
         time.sleep(0.1)
         remaining = {pid for pid in remaining if _process_exists(pid)}

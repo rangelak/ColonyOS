@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from typing import cast
+from unittest.mock import MagicMock
+
 import pytest
 
-from colonyos.cli import _handle_tui_command, _AUTO_COMMAND_SIGNAL
+from colonyos.cli import _AUTO_COMMAND_SIGNAL, _handle_tui_command
+from colonyos.config import ColonyConfig
 
 
 def _tui_available() -> bool:
@@ -25,12 +29,11 @@ pytestmark = pytest.mark.skipif(
 class TestAutoTokenParsing:
     """Verify that auto command tokens are parsed correctly for TUI routing."""
 
-    def _make_config(self, auto_approve: bool = True) -> object:
+    def _make_config(self, auto_approve: bool = True) -> ColonyConfig:
         """Create a minimal config mock for _handle_tui_command."""
-        from unittest.mock import MagicMock
-        config = MagicMock()
+        config = MagicMock(spec=ColonyConfig)
         config.auto_approve = auto_approve
-        return config
+        return cast(ColonyConfig, config)
 
     def test_auto_command_signal_returned(self) -> None:
         """auto --no-confirm should return _AUTO_COMMAND_SIGNAL."""
@@ -45,6 +48,7 @@ class TestAutoTokenParsing:
         handled, output, should_exit = _handle_tui_command("auto", config=config)
         assert handled is True
         assert output != _AUTO_COMMAND_SIGNAL
+        assert output is not None
         assert "auto_approve" in output
 
     def test_auto_with_auto_approve_config(self) -> None:
@@ -152,7 +156,6 @@ class TestGitignoreLogsEntry:
 
     def test_logs_in_entries_needed(self) -> None:
         """The init module should include .colonyos/logs/ in gitignore entries."""
-        import ast
         from pathlib import Path
 
         init_path = Path("src/colonyos/init.py")
