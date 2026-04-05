@@ -1823,13 +1823,13 @@ def _extract_verdict(result_text: str) -> str:
 
 
 def _verify_detected_failures(verify_output: str) -> bool:
-    """Return True if the verify agent output indicates test failures.
+    """Return True if the verify agent output indicates lint, type, or test failures.
 
     Parses the structured ``VERIFY_RESULT: PASS/FAIL`` sentinel emitted by the
     verify agent.  Falls back to regex-based heuristics when the sentinel is
     missing (e.g. older instruction templates or non-standard runners).
 
-    Defaults to False (tests passed) when the output is ambiguous or empty.
+    Defaults to False (all checks passed) when the output is ambiguous or empty.
     """
     if not verify_output:
         return False
@@ -1839,12 +1839,18 @@ def _verify_detected_failures(verify_output: str) -> bool:
     if sentinel_match:
         return sentinel_match.group(1).upper() == "FAIL"
 
-    # --- Fallback: regex heuristics for common test-runner output ---
-    # Match non-zero failure/error counts (e.g. "3 failed", "1 error") but NOT
-    # "0 failed" or "0 errors", which caused false-positives in the previous
-    # substring-matching implementation.
+    # --- Fallback: regex heuristics ---
+
+    # Test/lint/type failures: non-zero failure/error counts
+    # Matches "3 failed", "1 error", "12 errors", "2 failures" — covers pytest,
+    # ruff ("Found 5 errors"), and pyright ("3 errors, 0 warnings").
     nonzero_fail = re.search(r"\b[1-9]\d*\s+(?:failed|failures?|errors?)\b", verify_output, re.IGNORECASE)
     if nonzero_fail:
+        return True
+
+    # Ruff-specific: "Found N error(s)" at start of a line (ruff summary output)
+    ruff_found = re.search(r"^Found\s+[1-9]\d*\s+error", verify_output, re.IGNORECASE | re.MULTILINE)
+    if ruff_found:
         return True
 
     # Explicit zero-failure lines → tests passed
@@ -1856,8 +1862,10 @@ def _verify_detected_failures(verify_output: str) -> bool:
     lower = verify_output.lower()
     if "all tests passed" in lower or "all tests pass" in lower:
         return False
+    if "all checks passed" in lower or "all checks pass" in lower:
+        return False
 
-    # No recognisable signal — assume tests passed (safe default)
+    # No recognisable signal — assume checks passed (safe default)
     return False
 
 
@@ -5174,16 +5182,15 @@ def _run_pipeline(
                 _append_phase(verify_result)
                 _capture_phase_memory(memory_store, verify_result, log.run_id, config)
 
-                # Determine if tests passed by checking the output
                 verify_output = verify_result.artifacts.get("result", "")
-                tests_failed = _verify_detected_failures(verify_output)
+                checks_failed = _verify_detected_failures(verify_output)
 
-                if not tests_failed:
-                    _log("  Verify: all tests passed")
+                if not checks_failed:
+                    _log("  Verify: all checks passed (lint, type-check, tests)")
                     verify_passed = True
                     break
 
-                _log(f"  Verify: test failures detected (attempt {attempt + 1}/{config.verify.max_fix_attempts + 1})")
+                _log(f"  Verify: failures detected (attempt {attempt + 1}/{config.verify.max_fix_attempts + 1})")
 
                 # If we've used all fix attempts, don't try to fix again
                 if attempt >= config.verify.max_fix_attempts:
@@ -5239,7 +5246,7 @@ def _run_pipeline(
             if not verify_passed:
                 _fail_run_log(
                     repo_root, log,
-                    "Verify phase: tests still failing after all fix attempts. Delivery blocked.",
+                    "Verify phase: checks still failing after all fix attempts. Delivery blocked.",
                 )
                 return log
 

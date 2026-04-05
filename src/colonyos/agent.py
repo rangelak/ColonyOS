@@ -105,22 +105,38 @@ def _is_transient_error(exc: Exception) -> bool:
     # 2. Regex fallback — check all available text fields with word boundaries
     raw = str(exc)
     stderr = getattr(exc, "stderr", None) or ""
+    captured = getattr(exc, "_captured_stderr", None) or ""
     result = getattr(exc, "result", None) or ""
 
-    for text in (raw, stderr, result):
+    for text in (raw, stderr, captured, result):
         if any(pattern.search(text) for pattern in _TRANSIENT_PATTERNS):
             return True
 
     return False
 
 
+_PLACEHOLDER_STDERR = {"check stderr output for details"}
+
+
+def _is_real_stderr(value: str | None) -> bool:
+    """Return True if the stderr value contains real diagnostic content."""
+    if not value:
+        return False
+    return value.strip().lower() not in _PLACEHOLDER_STDERR
+
+
 def _friendly_error(exc: Exception) -> str:
     """Extract a human-readable message from SDK exceptions."""
     raw = str(exc)
     stderr = getattr(exc, "stderr", None) or ""
+    captured = getattr(exc, "_captured_stderr", None) or ""
     result = getattr(exc, "result", None) or ""
 
-    for text in (result, stderr, raw):
+    real_stderr = captured if captured else (stderr if _is_real_stderr(stderr) else "")
+
+    for text in (result, real_stderr, raw):
+        if not text:
+            continue
         lower = text.lower()
         if "credit balance" in lower:
             api_key_hint = ""
@@ -138,12 +154,13 @@ def _friendly_error(exc: Exception) -> str:
         if any(pattern.search(text) for pattern in _TRANSIENT_PATTERNS):
             return "API is temporarily overloaded. Will retry..."
 
-    if "exit code 1" in raw and not stderr:
-        return (
-            f"{raw} — the Claude CLI exited without details. "
-            "Try running `claude -p 'hello'` to check if it works."
-        )
-    return f"{raw}\n{stderr}".strip()
+    if real_stderr:
+        return f"{raw}\nCLI stderr:\n{real_stderr}"
+
+    return (
+        f"{raw} — the Claude CLI exited without details. "
+        "Try running `claude -p 'hello'` to check if it works."
+    )
 
 
 @dataclass
@@ -383,6 +400,15 @@ async def run_phase(
     for pass_idx, (current_model, pass_max) in enumerate(passes):
         for attempt in range(1, pass_max + 1):
             overall_attempt += 1
+
+            stderr_lines: list[str] = []
+            _MAX_STDERR_LINES = 200
+
+            def _capture_stderr(line: str, _buf: list[str] = stderr_lines) -> None:
+                if len(_buf) < _MAX_STDERR_LINES:
+                    _buf.append(line)
+                logger.debug("claude stderr: %s", line)
+
             if current_resume:
                 options = ClaudeAgentOptions(
                     cwd=cwd,
@@ -396,6 +422,7 @@ async def run_phase(
                     include_partial_messages=ui is not None,
                     resume=current_resume,
                     continue_conversation=True,
+                    stderr=_capture_stderr,
                 )
             else:
                 options = ClaudeAgentOptions(
@@ -408,6 +435,7 @@ async def run_phase(
                     allowed_tools=allowed_tools,
                     agents=agents,
                     include_partial_messages=ui is not None,
+                    stderr=_capture_stderr,
                 )
 
             attempt_result = await _run_phase_attempt(
@@ -421,6 +449,13 @@ async def run_phase(
 
             if attempt_result.error is not None:
                 exc = attempt_result.error
+                if stderr_lines:
+                    captured = "\n".join(stderr_lines[-50:])
+                    exc._captured_stderr = captured  # type: ignore[attr-defined]
+                    if hasattr(exc, "stderr") and not _is_real_stderr(
+                        getattr(exc, "stderr", None)
+                    ):
+                        exc.stderr = captured  # type: ignore[attr-defined]
                 last_exc = exc
                 is_transient = _is_transient_error(exc)
 
