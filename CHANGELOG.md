@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.4.6 — Plain-Language Slack Summaries, CI Fix, Lint Fix
+
+### Highlights
+- **Human-friendly Slack notifications**: All pipeline messages now go through an LLM to produce plain-language updates that non-technical team members can understand. Phase messages use friendly labels instead of internal jargon.
+- **Clickable PR links**: PR URLs in Slack run summaries and daily digests are now wrapped in `<>` so Slack renders them as clickable links.
+- **CI `gh pr checks` fix**: Fixed "unknown JSON field `conclusion`" error by migrating from the removed `conclusion`/`detailsUrl` fields to `bucket`/`link` with automatic mapping.
+- **Lint CI fix**: The GitHub Actions lint workflow now uses `uv sync --all-extras` so basedpyright can resolve types from optional dependencies (textual, slack-bolt).
+- **`.env.local` support**: The daemon now loads `COLONYOS_*` vars from `.env.local` in addition to `.env`, with `.env.local` taking precedence.
+
+### Changed
+- `src/colonyos/slack.py` — Replaced `generate_haiku()` with `generate_plain_summary()` producing first-person status updates; rewrote `SlackUI` phase messages to be non-technical; made PR URLs clickable in `format_run_summary()` and `format_daily_summary()`
+- `src/colonyos/ci.py` — Switched `gh pr checks --json` from `conclusion,detailsUrl` to `bucket,link` with `_bucket_to_conclusion()` mapping
+- `src/colonyos/maintenance.py` — Same `bucket` migration for `_fetch_ci_checks_for_pr()` with normalisation layer
+- `src/colonyos/cli.py` — Wired `generate_plain_summary()` into queue executor run summary posts; loads `.env.local`
+- `src/colonyos/daemon/__init__.py` — Wired `generate_plain_summary()` into daemon run summary posts
+- `src/colonyos/orchestrator.py` — Added plain-language follow-up after each review round
+- `.github/workflows/lint.yml` — Replaced `pip install` with `uv sync --all-extras`; run pre-commit via `uv run`
+
 ## 20260402_020000 — Daemon Inter-Queue Maintenance Cycle
 
 Adds an inter-queue maintenance cycle to the daemon that runs between queue items when switching back to `main`. Performs self-update detection with `os.execv` restart, branch sync scanning with Slack reporting, and CI fix auto-enqueueing for open PRs with failing checks. Includes budget caps, circuit breakers, and branch guards for safety.
