@@ -471,22 +471,27 @@ _DOTENV_ALLOWLIST_PREFIX = "COLONYOS_"
 
 
 def _load_dotenv() -> None:
-    """Load COLONYOS_* vars from .env; ignore everything else.
+    """Load COLONYOS_* vars from .env and .env.local; ignore everything else.
 
     Other keys (e.g. ANTHROPIC_API_KEY) are left alone so they don't
     override the Claude CLI's own auth.
+
+    .env.local is loaded after .env so it can override values (setdefault
+    means first writer wins, so we load .env.local first).
     """
     try:
         from dotenv import dotenv_values
     except ImportError:
         return
     repo_root = _find_repo_root()
-    env_path = repo_root / ".env"
-    if not env_path.is_file():
-        return
-    for key, value in dotenv_values(env_path).items():
-        if key.startswith(_DOTENV_ALLOWLIST_PREFIX) and value is not None:
-            os.environ.setdefault(key, value)
+    # Load .env.local first so its values take precedence over .env
+    for filename in (".env.local", ".env"):
+        env_path = repo_root / filename
+        if not env_path.is_file():
+            continue
+        for key, value in dotenv_values(env_path).items():
+            if key.startswith(_DOTENV_ALLOWLIST_PREFIX) and value is not None:
+                os.environ.setdefault(key, value)
 
 
 @click.group(invoke_without_command=True)
