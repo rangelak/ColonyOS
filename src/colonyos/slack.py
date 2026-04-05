@@ -827,6 +827,11 @@ class FanoutSlackUI:
         for target in self._targets:
             target.on_text_delta(*a)
 
+    def flush(self) -> None:
+        """Flush buffered notes on all targets."""
+        for target in self._targets:
+            target.flush()
+
     def on_turn_complete(self) -> None:
         for target in self._targets:
             target.on_turn_complete()

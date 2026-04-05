@@ -47,11 +47,11 @@
   - [x] 3.3 Use a cheap model (Haiku-class) for phase summaries to keep cost negligible (~$0.001 per call)
   - [x] 3.4 Apply `sanitize_outbound_slack()` to all generated summaries before posting
 
-- [ ] 4.0 Update FanoutSlackUI for edit-in-place pattern
+- [x] 4.0 Update FanoutSlackUI for edit-in-place pattern
   depends_on: [2.0]
-  - [ ] 4.1 Write tests for FanoutSlackUI with the new edit pattern — each target must independently track its own `_current_msg_ts` and buffer
-  - [ ] 4.2 Update `FanoutSlackUI` to ensure each `SlackUI` target manages its own message state — the fanout just delegates calls, each target handles its own `chat_update` lifecycle
-  - [ ] 4.3 Verify that merged request threads (via `notification_targets()`) each get properly consolidated messages
+  - [x] 4.1 Write tests for FanoutSlackUI with the new edit pattern — each target must independently track its own `_current_msg_ts` and buffer
+  - [x] 4.2 Update `FanoutSlackUI` to ensure each `SlackUI` target manages its own message state — the fanout just delegates calls, each target handles its own `chat_update` lifecycle
+  - [x] 4.3 Verify that merged request threads (via `notification_targets()`) each get properly consolidated messages
 
 - [ ] 5.0 Wire phase summaries into the pipeline execution flow
   depends_on: [2.0, 3.0]

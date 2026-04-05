@@ -23,6 +23,7 @@ from colonyos.config import ColonyConfig, SlackConfig, load_config, save_config
 from colonyos.models import Phase, PhaseResult, QueueItem, QueueItemStatus
 from colonyos.sanitize import XML_TAG_RE, sanitize_untrusted_content
 from colonyos.slack import (
+    FanoutSlackUI,
     SlackClient,
     SlackUI,
     SlackWatchState,
@@ -724,6 +725,163 @@ class TestSlackUI:
         ui.on_text_delta("hello")
         ui.on_turn_complete()
         client.chat_postMessage.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# FanoutSlackUI tests (Task 4.0)
+# ---------------------------------------------------------------------------
+
+
+class TestFanoutSlackUI:
+    """Each FanoutSlackUI target must independently track its own message state."""
+
+    def _make_target(self, channel: str, thread_ts: str, ts: str = "msg.001") -> tuple[MagicMock, SlackUI]:
+        client = _slack_client_with_ts(ts)
+        ui = SlackUI(client, channel, thread_ts)
+        return client, ui
+
+    def test_each_target_gets_independent_msg_ts(self) -> None:
+        """phase_header on fanout posts to each target; each stores its own ts."""
+        client_a, ui_a = self._make_target("C_A", "t.100", ts="a.001")
+        client_b, ui_b = self._make_target("C_B", "t.200", ts="b.001")
+        fanout = FanoutSlackUI(ui_a, ui_b)
+
+        fanout.phase_header("implement", 5.0, "sonnet")
+        assert ui_a._current_msg_ts == "a.001"
+        assert ui_b._current_msg_ts == "b.001"
+        # Each client got its own postMessage call
+        client_a.chat_postMessage.assert_called_once()
+        client_b.chat_postMessage.assert_called_once()
+        assert client_a.chat_postMessage.call_args[1]["channel"] == "C_A"
+        assert client_b.chat_postMessage.call_args[1]["channel"] == "C_B"
+
+    def test_phase_note_updates_each_target_independently(self) -> None:
+        """phase_note via fanout edits each target's own message."""
+        client_a, ui_a = self._make_target("C_A", "t.100", ts="a.002")
+        client_b, ui_b = self._make_target("C_B", "t.200", ts="b.002")
+        fanout = FanoutSlackUI(ui_a, ui_b)
+
+        fanout.phase_header("implement", 5.0, "sonnet")
+        fanout.phase_note("Task 1 done")
+        fanout.phase_note("Task 2 done")
+
+        # Each target used chat_update on its own ts
+        assert client_a.chat_update.call_count == 2
+        assert client_b.chat_update.call_count == 2
+        assert client_a.chat_update.call_args[1]["ts"] == "a.002"
+        assert client_b.chat_update.call_args[1]["ts"] == "b.002"
+        # Both have the full note content
+        assert "Task 2 done" in client_a.chat_update.call_args[1]["text"]
+        assert "Task 2 done" in client_b.chat_update.call_args[1]["text"]
+
+    def test_phase_complete_edits_each_target(self) -> None:
+        """phase_complete flushes and edits each target's message."""
+        client_a, ui_a = self._make_target("C_A", "t.100", ts="a.003")
+        client_b, ui_b = self._make_target("C_B", "t.200", ts="b.003")
+        fanout = FanoutSlackUI(ui_a, ui_b)
+
+        fanout.phase_header("plan", 5.0, "sonnet")
+        fanout.phase_note("Analyzing codebase")
+        fanout.phase_complete(0.5, 3, 5000)
+
+        # Each target got exactly 1 postMessage (header) and chat_updates (notes + complete)
+        assert client_a.chat_postMessage.call_count == 1
+        assert client_b.chat_postMessage.call_count == 1
+        # Final update includes header + notes + completion
+        final_a = client_a.chat_update.call_args[1]["text"]
+        final_b = client_b.chat_update.call_args[1]["text"]
+        for text in (final_a, final_b):
+            assert "Working on the plan" in text
+            assert "Analyzing codebase" in text
+            assert "Plan is ready" in text
+
+    def test_phase_error_posts_new_message_on_each_target(self) -> None:
+        """phase_error must post a new message on each target, not edit."""
+        client_a, ui_a = self._make_target("C_A", "t.100", ts="a.004")
+        client_b, ui_b = self._make_target("C_B", "t.200", ts="b.004")
+        fanout = FanoutSlackUI(ui_a, ui_b)
+
+        fanout.phase_header("review", 5.0, "sonnet")
+        fanout.phase_error("timeout")
+
+        # Each target: 1 postMessage (header) + 1 postMessage (error) = 2
+        assert client_a.chat_postMessage.call_count == 2
+        assert client_b.chat_postMessage.call_count == 2
+
+    def test_independent_buffers_across_targets(self) -> None:
+        """Each target maintains its own note buffer — no cross-contamination."""
+        client_a, ui_a = self._make_target("C_A", "t.100", ts="a.005")
+        client_b, ui_b = self._make_target("C_B", "t.200", ts="b.005")
+        fanout = FanoutSlackUI(ui_a, ui_b)
+
+        fanout.phase_header("implement", 5.0, "sonnet")
+        fanout.phase_note("shared note")
+
+        # Verify buffers are independent objects
+        assert ui_a._note_buffer is not ui_b._note_buffer
+        assert ui_a._note_buffer == ["shared note"]
+        assert ui_b._note_buffer == ["shared note"]
+
+    def test_flush_delegates_to_all_targets(self) -> None:
+        """flush() must forward to each target."""
+        client_a, ui_a = self._make_target("C_A", "t.100", ts="a.006")
+        client_b, ui_b = self._make_target("C_B", "t.200", ts="b.006")
+        fanout = FanoutSlackUI(ui_a, ui_b)
+
+        fanout.phase_header("implement", 5.0, "sonnet")
+        # Manually append to buffers to test flush
+        ui_a._note_buffer.append("buffered A")
+        ui_b._note_buffer.append("buffered B")
+        fanout.flush()
+
+        client_a.chat_update.assert_called_once()
+        client_b.chat_update.assert_called_once()
+
+    def test_merged_request_threads_each_get_consolidated_messages(self) -> None:
+        """Simulates notification_targets() returning multiple (channel, ts) pairs.
+
+        Each SlackUI target should produce exactly 1 postMessage per phase
+        and consolidate notes via chat_update — verifying the merged-thread
+        use case from FR-6.
+        """
+        # Simulate 3 merged request threads (different channels/threads)
+        targets = []
+        clients = []
+        for i in range(3):
+            client, ui = self._make_target(f"C_{i}", f"thread.{i}", ts=f"msg.{i}")
+            targets.append(ui)
+            clients.append(client)
+
+        fanout = FanoutSlackUI(*targets)
+
+        # Full phase lifecycle
+        fanout.phase_header("implement", 5.0, "sonnet")
+        fanout.phase_note("Task 1/3 done")
+        fanout.phase_note("Task 2/3 done")
+        fanout.phase_note("Task 3/3 done")
+        fanout.phase_complete(1.0, 10, 30000)
+
+        for i, client in enumerate(clients):
+            # Exactly 1 postMessage per target (from phase_header)
+            assert client.chat_postMessage.call_count == 1, f"target {i} had extra postMessages"
+            # chat_update called for notes + completion (4 total: 3 notes + 1 complete)
+            assert client.chat_update.call_count == 4, f"target {i} had wrong update count"
+            # Final update has consolidated content
+            final_text = client.chat_update.call_args[1]["text"]
+            assert "Task 3/3 done" in final_text
+            assert "Code is written" in final_text
+
+    def test_noop_methods_delegate_without_error(self) -> None:
+        """Streaming no-op methods should delegate without raising."""
+        _, ui_a = self._make_target("C_A", "t.100")
+        _, ui_b = self._make_target("C_B", "t.200")
+        fanout = FanoutSlackUI(ui_a, ui_b)
+
+        fanout.on_tool_start("Read")
+        fanout.on_tool_input_delta("{}")
+        fanout.on_tool_done()
+        fanout.on_text_delta("hello")
+        fanout.on_turn_complete()
 
 
 # ---------------------------------------------------------------------------
