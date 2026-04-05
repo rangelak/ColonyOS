@@ -1169,11 +1169,12 @@ def generate_phase_summary(
         "Respond in under 280 characters. No headers, no markdown formatting, "
         "no bullet points — just a plain-text sentence or two."
     )
-    user = f"{prompt_instruction}\n\n{context[:2000]}"
+    safe_context = sanitize_untrusted_content(context[:2000])
+    user = f"{prompt_instruction}\n\n{safe_context}"
 
     try:
         result = run_phase_sync(
-            Phase.TRIAGE,
+            Phase.SUMMARY,
             user,
             cwd=cwd,
             system_prompt=system,
@@ -1228,11 +1229,12 @@ def generate_plain_summary(
         "- Keep it warm and professional — like reporting to your boss.\n"
         "- Output ONLY the summary text, no headers or formatting."
     )
-    user = f"Here's what happened:\n{context[:2000]}"
+    safe_context = sanitize_untrusted_content(context[:2000])
+    user = f"Here's what happened:\n{safe_context}"
 
     try:
         result = run_phase_sync(
-            Phase.TRIAGE,  # reuse lightweight phase label
+            Phase.SUMMARY,
             user,
             cwd=cwd,
             system_prompt=system,
