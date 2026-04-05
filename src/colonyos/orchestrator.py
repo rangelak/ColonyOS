@@ -4800,7 +4800,7 @@ def _run_pipeline(
                     )
                     plan_ui.slack_note(plan_summary)  # type: ignore[union-attr]
                 except Exception:
-                    pass  # summary is best-effort
+                    logger.debug("Plan phase summary generation failed", exc_info=True)
                 plan_ui.phase_complete(
                     plan_result.cost_usd or 0.0,
                     0,
@@ -5055,7 +5055,7 @@ def _run_pipeline(
                             )
                             review_header_ui.slack_note(review_summary)  # type: ignore[union-attr]
                         except Exception:
-                            pass  # summary is best-effort
+                            logger.debug("Review phase summary generation failed", exc_info=True)
 
                     last_findings = _collect_review_findings(results, reviewers)
 

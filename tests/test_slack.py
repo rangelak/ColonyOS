@@ -617,6 +617,7 @@ class TestSlackUI:
         """phase_note should edit the phase message, not post a new one."""
         client = _slack_client_with_ts("hdr.004")
         ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 0  # disable debounce for unit test
         ui.phase_header("review", 5.0, "sonnet")
         ui.phase_note("Review round 1: 2 approved, 1 requested changes.")
         # Only 1 postMessage (from phase_header)
@@ -629,6 +630,7 @@ class TestSlackUI:
         """Multiple phase_note calls should update the same message, not create new ones."""
         client = _slack_client_with_ts("hdr.005")
         ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 0  # disable debounce for unit test
         ui.phase_header("implement", 5.0, "sonnet")
         ui.phase_note("Task 1 complete")
         ui.phase_note("Task 2 complete")
@@ -646,6 +648,7 @@ class TestSlackUI:
         """phase_complete should flush notes and include them in the final message."""
         client = _slack_client_with_ts("hdr.006")
         ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 0  # disable debounce for unit test
         ui.phase_header("implement", 5.0, "sonnet")
         ui.phase_note("Task 1 done")
         ui.phase_note("Task 2 done")
@@ -680,6 +683,7 @@ class TestSlackUI:
         """If chat_update fails, fall back to chat_postMessage."""
         client = _slack_client_with_ts("hdr.008")
         ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 0  # disable debounce for unit test
         ui.phase_header("plan", 5.0, "sonnet")
         # Make chat_update fail
         client.chat_update.side_effect = Exception("message_not_found")
@@ -693,6 +697,7 @@ class TestSlackUI:
     def test_slack_note_delegates_to_phase_note(self) -> None:
         client = _slack_client_with_ts("hdr.009")
         ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 0  # disable debounce for unit test
         ui.phase_header("implement", 5.0, "sonnet")
         ui.slack_note("progress update")
         client.chat_update.assert_called_once()
@@ -702,6 +707,7 @@ class TestSlackUI:
         """Starting a new phase resets the message ts and buffer."""
         client = _slack_client_with_ts("hdr.010")
         ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 0  # disable debounce for unit test
         ui.phase_header("plan", 5.0, "sonnet")
         ui.phase_note("plan note")
         # Start a new phase
@@ -728,6 +734,115 @@ class TestSlackUI:
 
 
 # ---------------------------------------------------------------------------
+# Debounce tests
+# ---------------------------------------------------------------------------
+
+
+class TestSlackUIDebounce:
+    """Verify that phase_note debounces rapid chat_update calls."""
+
+    def test_rapid_notes_debounced(self) -> None:
+        """Rapid phase_note calls within the debounce window should not all trigger chat_update."""
+        client = _slack_client_with_ts("hdr.d01")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 3.0  # explicit default
+        ui.phase_header("implement", 5.0, "sonnet")
+        # First note fires (since _last_flush_time starts at 0.0 which is far in the past)
+        ui.phase_note("Task 1 done")
+        assert client.chat_update.call_count == 1
+        # Rapid subsequent notes within 3s window are debounced
+        ui.phase_note("Task 2 done")
+        ui.phase_note("Task 3 done")
+        ui.phase_note("Task 4 done")
+        # Still only 1 chat_update — the rest were debounced
+        assert client.chat_update.call_count == 1
+        # But all notes are buffered
+        assert len(ui._note_buffer) == 4
+
+    def test_phase_complete_forces_flush_despite_debounce(self) -> None:
+        """phase_complete must always flush, even within the debounce window."""
+        client = _slack_client_with_ts("hdr.d02")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 3.0
+        ui.phase_header("implement", 5.0, "sonnet")
+        ui.phase_note("Task 1 done")
+        assert client.chat_update.call_count == 1
+        # Rapid follow-up debounced
+        ui.phase_note("Task 2 done")
+        assert client.chat_update.call_count == 1
+        # phase_complete forces flush
+        ui.phase_complete(1.0, 5, 10000)
+        assert client.chat_update.call_count == 2
+        final_text = client.chat_update.call_args[1]["text"]
+        assert "Task 1 done" in final_text
+        assert "Task 2 done" in final_text
+        assert "Code is written" in final_text
+
+    def test_explicit_flush_forces_despite_debounce(self) -> None:
+        """flush() must always push, ignoring debounce window."""
+        client = _slack_client_with_ts("hdr.d03")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 3.0
+        ui.phase_header("implement", 5.0, "sonnet")
+        ui.phase_note("buffered note")
+        assert client.chat_update.call_count == 1
+        # Another note within debounce window
+        ui.phase_note("second note")
+        assert client.chat_update.call_count == 1
+        # Explicit flush overrides debounce
+        ui.flush()
+        assert client.chat_update.call_count == 2
+        final_text = client.chat_update.call_args[1]["text"]
+        assert "second note" in final_text
+
+
+# ---------------------------------------------------------------------------
+# Outbound sanitization tests
+# ---------------------------------------------------------------------------
+
+
+class TestSlackUIOutboundSanitization:
+    """Verify that _flush_buffer sanitizes LLM-generated content before posting."""
+
+    def test_flush_sanitizes_secrets_in_notes(self) -> None:
+        """Secrets in phase_note content must be redacted before chat_update."""
+        client = _slack_client_with_ts("hdr.s01")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 0
+        ui.phase_header("implement", 5.0, "sonnet")
+        # Inject a fake API key that should be redacted
+        ui.phase_note("Using key sk-ant-api03-FAKESECRETKEY123456 for auth")
+        update_text = client.chat_update.call_args[1]["text"]
+        # The secret must be redacted
+        assert "sk-ant-api03-FAKESECRETKEY123456" not in update_text
+        assert "[REDACTED]" in update_text
+
+    def test_phase_complete_sanitizes_content(self) -> None:
+        """phase_complete flush also sanitizes content."""
+        client = _slack_client_with_ts("hdr.s02")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 0
+        ui.phase_header("plan", 5.0, "sonnet")
+        ui.phase_note("Found token sk-ant-api03-MYSECRET in config")
+        ui.phase_complete(0.5, 3, 5000)
+        final_text = client.chat_update.call_args[1]["text"]
+        assert "sk-ant-api03-MYSECRET" not in final_text
+
+    def test_fallback_post_also_sanitized(self) -> None:
+        """When chat_update fails and we fall back to postMessage, content is still sanitized."""
+        client = _slack_client_with_ts("hdr.s03")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 0
+        ui.phase_header("review", 5.0, "sonnet")
+        client.chat_update.side_effect = Exception("update_failed")
+        client.chat_postMessage.return_value = {"ok": True, "ts": "fallback.s03"}
+        ui.phase_note("Leaked key: sk-ant-api03-OOPS123")
+        fallback_text = client.chat_postMessage.call_args[1]["text"]
+        assert "sk-ant-api03-OOPS123" not in fallback_text
+        assert "[REDACTED]" in fallback_text
+
+
+# ---------------------------------------------------------------------------
 # FanoutSlackUI tests (Task 4.0)
 # ---------------------------------------------------------------------------
 
@@ -738,6 +853,7 @@ class TestFanoutSlackUI:
     def _make_target(self, channel: str, thread_ts: str, ts: str = "msg.001") -> tuple[MagicMock, SlackUI]:
         client = _slack_client_with_ts(ts)
         ui = SlackUI(client, channel, thread_ts)
+        ui._debounce_seconds = 0  # disable debounce for unit tests
         return client, ui
 
     def test_each_target_gets_independent_msg_ts(self) -> None:
@@ -2634,6 +2750,7 @@ class TestEndToEndMessageConsolidation:
     def _make_ui(self, ts: str = "msg.001") -> tuple[SlackUI, MagicMock]:
         client = _slack_client_with_ts(ts)
         ui = SlackUI(client, "C_E2E", "thread.e2e")
+        ui._debounce_seconds = 0  # disable debounce for E2E unit tests
         return ui, client
 
     # -- 6.1: Full 7-phase pipeline, single SlackUI, assert ≤7 postMessages --

@@ -646,6 +646,9 @@ class SlackUI:
         self._current_msg_ts: str | None = None
         self._phase_header_text: str = ""
         self._note_buffer: list[str] = []
+        # Debounce: track last flush time to avoid hitting Slack rate limits
+        self._last_flush_time: float = 0.0
+        self._debounce_seconds: float = 3.0
 
     # Map internal phase names to friendly labels for Slack
     _PHASE_LABELS: ClassVar[dict[str, tuple[str, str]]] = {
@@ -668,21 +671,33 @@ class SlackUI:
             parts.append(completion_label)
         return "\n".join(parts)
 
-    def _flush_buffer(self, completion_label: str | None = None) -> None:
+    def _flush_buffer(self, completion_label: str | None = None, force: bool = False) -> None:
         """Compose and update the current phase message via ``chat_update``.
 
         Falls back to ``chat_postMessage`` if the update fails (e.g. message
         was deleted or is too old).
+
+        Debounces rapid calls to respect Slack's Tier 2 rate limits (~1 req/sec).
+        Updates are sent immediately when *force* is True (used by
+        ``phase_complete`` and explicit ``flush`` calls) or when at least
+        ``_debounce_seconds`` have elapsed since the last successful flush.
         """
         if self._current_msg_ts is None:
             return
+        # Debounce: skip unless forced or enough time has passed
+        now = time.monotonic()
+        if not force and (now - self._last_flush_time) < self._debounce_seconds:
+            return
         body = self._compose_message(completion_label)
+        # Sanitize all outbound content (LLM-generated notes may contain secrets)
+        body = sanitize_outbound_slack(body)
         try:
             self._client.chat_update(
                 channel=self._channel,
                 ts=self._current_msg_ts,
                 text=body,
             )
+            self._last_flush_time = now
         except Exception:
             logger.debug(
                 "chat_update failed for ts=%s, falling back to chat_postMessage",
@@ -694,6 +709,7 @@ class SlackUI:
                 thread_ts=self._thread_ts,
                 text=body,
             )
+            self._last_flush_time = now
             ts = (resp or {}).get("ts")
             if ts:
                 self._current_msg_ts = ts
@@ -726,7 +742,7 @@ class SlackUI:
             phase_name, ("", f":white_check_mark: *{phase_name}* done"),
         )
         completion = f"{label} ({secs}s)"
-        self._flush_buffer(completion_label=completion)
+        self._flush_buffer(completion_label=completion, force=True)
         # Reset state for next phase
         self._current_msg_ts = None
         self._note_buffer = []
@@ -761,7 +777,7 @@ class SlackUI:
     def flush(self) -> None:
         """Explicitly flush any buffered notes to Slack."""
         if self._note_buffer and self._current_msg_ts:
-            self._flush_buffer()
+            self._flush_buffer(force=True)
 
     def on_tool_start(self, *a: object) -> None:
         pass
