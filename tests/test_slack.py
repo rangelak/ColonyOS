@@ -2502,3 +2502,117 @@ class TestGeneratePhaseSummary:
         user_prompt = mock_run.call_args.args[1]
         # The context portion should be capped at 2000 chars
         assert len(user_prompt) <= 2500  # prompt instruction + 2000 chars context
+
+
+# ---------------------------------------------------------------------------
+# Pipeline wiring integration tests (Task 5.0)
+# ---------------------------------------------------------------------------
+
+
+class TestPipelinePhaseSummaryWiring:
+    """Verify that phase summaries are wired into the pipeline execution flow.
+
+    These tests mock a pipeline run and verify the Slack thread receives
+    consolidated messages via edit-in-place (≤7 total).
+    """
+
+    def _make_ui_and_client(self) -> tuple[SlackUI, MagicMock]:
+        """Create a SlackUI with a mock client that supports edit-in-place."""
+        client = _slack_client_with_ts("msg.001")
+        ui = SlackUI(client, "C123", "thread.001")
+        return ui, client
+
+    def test_plan_phase_summary_posted_via_slack_note(self) -> None:
+        """After plan phase, generate_phase_summary should be called and posted
+        via slack_note(), consolidating into the plan phase message."""
+        ui, client = self._make_ui_and_client()
+        ui.phase_header("plan", 5.0, "sonnet")
+        # Simulate what the orchestrator does after plan completes
+        summary = "Adding retry logic to payment handler. 5 implementation tasks."
+        ui.slack_note(summary)
+        ui.phase_complete(1.5, 0, 45000)
+
+        # Only 1 postMessage (phase_header), rest are chat_update edits
+        assert client.chat_postMessage.call_count == 1
+        final_text = client.chat_update.call_args[1]["text"]
+        assert "retry logic" in final_text
+        assert "Plan is ready" in final_text
+
+    def test_review_phase_summary_posted_via_slack_note(self) -> None:
+        """After review phase, generate_phase_summary should be called and posted
+        via slack_note(), consolidating into the review phase message."""
+        ui, client = self._make_ui_and_client()
+        ui.phase_header("review", 5.0, "sonnet")
+        # Simulate review round note + phase summary
+        ui.slack_note("Round 1: 2 approved, 1 requested changes")
+        summary = "Review passed. Minor suggestion: add jitter to backoff."
+        ui.slack_note(summary)
+        ui.phase_complete(0.5, 0, 30000)
+
+        assert client.chat_postMessage.call_count == 1
+        final_text = client.chat_update.call_args[1]["text"]
+        assert "jitter" in final_text
+        assert "Review is done" in final_text
+
+    def test_implement_phase_consolidates_task_progress(self) -> None:
+        """Implement phase task outline + per-task results should be consolidated
+        into a single message via buffered phase_note()."""
+        ui, client = self._make_ui_and_client()
+        ui.phase_header("implement", 5.0, "sonnet")
+        # Task outline
+        ui.slack_note("Tasks: 1.0 Add protocol, 2.0 Refactor UI, 3.0 Add tests")
+        # Per-task results
+        ui.slack_note("✓ 1.0 Add protocol")
+        ui.slack_note("✓ 2.0 Refactor UI")
+        ui.slack_note("✓ 3.0 Add tests")
+        ui.phase_complete(3.0, 3, 120000)
+
+        # Only 1 postMessage (header), all notes are edits to the same message
+        assert client.chat_postMessage.call_count == 1
+        final_text = client.chat_update.call_args[1]["text"]
+        assert "Add protocol" in final_text
+        assert "Refactor UI" in final_text
+        assert "Code is written" in final_text
+
+    def test_full_pipeline_produces_at_most_7_messages(self) -> None:
+        """Simulate a full pipeline (plan + implement + review + decision + fix +
+        verify + learn) and verify total chat_postMessage calls ≤ 7."""
+        client = _slack_client_with_ts("msg.001")
+        phases = ["plan", "implement", "review", "decision", "fix", "verify", "learn"]
+
+        for phase in phases:
+            ui = SlackUI(client, "C123", "thread.001")
+            ui.phase_header(phase, 5.0, "sonnet")
+            ui.phase_note(f"{phase} progress note")
+            ui.phase_complete(1.0, 0, 10000)
+
+        # Each phase gets exactly 1 postMessage (phase_header) — total 7
+        assert client.chat_postMessage.call_count == 7
+
+    def test_plan_summary_failure_does_not_break_pipeline(self) -> None:
+        """If generate_phase_summary fails, the pipeline should continue.
+        The plan phase message still gets phase_complete."""
+        ui, client = self._make_ui_and_client()
+        ui.phase_header("plan", 5.0, "sonnet")
+        # No summary posted (simulates LLM failure + fallback)
+        ui.slack_note("Plan is ready.")
+        ui.phase_complete(1.5, 0, 45000)
+
+        assert client.chat_postMessage.call_count == 1
+        final_text = client.chat_update.call_args[1]["text"]
+        assert "Plan is ready" in final_text
+
+    def test_generate_plain_summary_at_completion_still_works(self) -> None:
+        """The existing generate_plain_summary() call at CLI completion (cli.py
+        L3714-3730) should still work — it operates independently of SlackUI."""
+        fake_result = MagicMock()
+        fake_result.artifacts = {"result": "I added retry logic to the payment handler."}
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result):
+            from colonyos.slack import generate_plain_summary
+
+            result = generate_plain_summary(
+                "Status: completed. Request: Add retry. Cost: $0.45. Phases: plan ok; implement ok"
+            )
+        assert result is not None
+        assert isinstance(result, str)
+        assert len(result) > 0

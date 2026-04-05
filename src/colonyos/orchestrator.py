@@ -4788,6 +4788,25 @@ def _run_pipeline(
                     _fail_run_log(repo_root, log, "Plan phase failed")
                 return log
 
+            # Post a concise LLM-generated plan summary to the Slack thread
+            if plan_ui is not None:
+                try:
+                    from colonyos.slack import generate_phase_summary
+                    from colonyos.models import extract_result_text
+
+                    plan_context = extract_result_text(plan_result.artifacts)
+                    plan_summary = generate_phase_summary(
+                        "plan", plan_context, repo_root=repo_root,
+                    )
+                    plan_ui.slack_note(plan_summary)  # type: ignore[union-attr]
+                except Exception:
+                    pass  # summary is best-effort
+                plan_ui.phase_complete(
+                    plan_result.cost_usd or 0.0,
+                    0,
+                    plan_result.duration_ms,
+                )
+
         if plan_only:
             log.status = RunStatus.COMPLETED
             log.mark_finished()
@@ -5025,16 +5044,16 @@ def _run_pipeline(
                             total_rounds=config.max_fix_iterations + 1,
                         )
                         review_header_ui.slack_note(review_note)  # type: ignore[union-attr]
-                        # Post a plain-language summary of review findings
+                        # Post a concise LLM-generated review summary
                         try:
-                            from colonyos.slack import generate_plain_summary
+                            from colonyos.slack import generate_phase_summary
 
-                            review_plain = generate_plain_summary(
+                            review_summary = generate_phase_summary(
+                                "review",
                                 review_note,
                                 repo_root=repo_root,
                             )
-                            if review_plain:
-                                review_header_ui.slack_note(review_plain)  # type: ignore[union-attr]
+                            review_header_ui.slack_note(review_summary)  # type: ignore[union-attr]
                         except Exception:
                             pass  # summary is best-effort
 

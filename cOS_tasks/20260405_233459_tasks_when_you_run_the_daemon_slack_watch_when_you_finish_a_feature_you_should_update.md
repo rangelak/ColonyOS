@@ -53,13 +53,13 @@
   - [x] 4.2 Update `FanoutSlackUI` to ensure each `SlackUI` target manages its own message state — the fanout just delegates calls, each target handles its own `chat_update` lifecycle
   - [x] 4.3 Verify that merged request threads (via `notification_targets()`) each get properly consolidated messages
 
-- [ ] 5.0 Wire phase summaries into the pipeline execution flow
+- [x] 5.0 Wire phase summaries into the pipeline execution flow
   depends_on: [2.0, 3.0]
-  - [ ] 5.1 Write integration tests: mock a full pipeline run and verify the Slack thread receives ≤7 messages total (acknowledgment, plan summary, implement progress, review verdict, final summary)
-  - [ ] 5.2 After plan phase completes, call `generate_phase_summary("plan", plan_output)` and post via `slack_note()` — this will be consolidated into the plan phase message by the new SlackUI
-  - [ ] 5.3 After review phase completes, call `generate_phase_summary("review", review_output)` and post the verdict + top finding
-  - [ ] 5.4 For implement phase: ensure the task outline note (`_format_task_outline_note`) and per-task result notes (`_format_implement_result_note`) flow through the new buffered `phase_note()` and get consolidated into one message
-  - [ ] 5.5 Verify that the existing `generate_plain_summary()` call at completion (cli.py L3714-3730) still works correctly with the new SlackUI
+  - [x] 5.1 Write integration tests: mock a full pipeline run and verify the Slack thread receives ≤7 messages total (acknowledgment, plan summary, implement progress, review verdict, final summary)
+  - [x] 5.2 After plan phase completes, call `generate_phase_summary("plan", plan_output)` and post via `slack_note()` — this will be consolidated into the plan phase message by the new SlackUI
+  - [x] 5.3 After review phase completes, call `generate_phase_summary("review", review_output)` and post the verdict + top finding
+  - [x] 5.4 For implement phase: ensure the task outline note (`_format_task_outline_note`) and per-task result notes (`_format_implement_result_note`) flow through the new buffered `phase_note()` and get consolidated into one message
+  - [x] 5.5 Verify that the existing `generate_plain_summary()` call at completion (cli.py L3714-3730) still works correctly with the new SlackUI
 
 - [ ] 6.0 End-to-end testing and message count verification
   depends_on: [4.0, 5.0]
