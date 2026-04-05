@@ -25,20 +25,20 @@
   - [x] 1.4 Implement `sanitize_outbound_slack(text: str, max_chars: int = 3000) -> str` in `sanitize.py` — compose secret pattern redaction + length cap + existing `sanitize_for_slack()`
   - [x] 1.5 Add missing secret patterns to `SECRET_PATTERNS` in `sanitize.py`: `sk-ant-api03-*`, `-----BEGIN (RSA |EC )?PRIVATE KEY-----`, `"type": "service_account"`
 
-- [ ] 2.0 Refactor SlackUI to use edit-in-place message consolidation
+- [x] 2.0 Refactor SlackUI to use edit-in-place message consolidation
   depends_on: [1.0]
-  - [ ] 2.1 Write tests for the new SlackUI edit-in-place behavior:
+  - [x] 2.1 Write tests for the new SlackUI edit-in-place behavior:
     - `phase_header()` posts one message and stores its `ts`
     - `phase_note()` calls `chat_update` on the stored `ts` (appending content)
     - `phase_complete()` does a final `chat_update` with completion label
     - Multiple `phase_note()` calls result in ONE message (not multiple)
     - Debounce: rapid `phase_note` calls are batched within a time window
-  - [ ] 2.2 Add `_current_msg_ts: str | None` and `_note_buffer: list[str]` instance variables to SlackUI
-  - [ ] 2.3 Refactor `phase_header()` to call `chat_postMessage`, capture response `ts` into `_current_msg_ts`, and clear the note buffer
-  - [ ] 2.4 Refactor `phase_note()` and `slack_note()` to append text to `_note_buffer` and flush via `chat_update` to `_current_msg_ts` (with debounce — flush on phase transitions or every ~5 seconds)
-  - [ ] 2.5 Refactor `phase_complete()` to flush any remaining buffer, then `chat_update` the current message with the completion label appended
-  - [ ] 2.6 Keep `phase_error()` posting a NEW message (never edit) so errors are always visible
-  - [ ] 2.7 Add a `_flush_buffer()` helper that composes the phase header + accumulated notes + optional completion into a single message body, calls `chat_update`, and handles failures (fall back to `chat_postMessage` if update fails)
+  - [x] 2.2 Add `_current_msg_ts: str | None` and `_note_buffer: list[str]` instance variables to SlackUI
+  - [x] 2.3 Refactor `phase_header()` to call `chat_postMessage`, capture response `ts` into `_current_msg_ts`, and clear the note buffer
+  - [x] 2.4 Refactor `phase_note()` and `slack_note()` to append text to `_note_buffer` and flush via `chat_update` to `_current_msg_ts` (with debounce — flush on phase transitions or every ~5 seconds)
+  - [x] 2.5 Refactor `phase_complete()` to flush any remaining buffer, then `chat_update` the current message with the completion label appended
+  - [x] 2.6 Keep `phase_error()` posting a NEW message (never edit) so errors are always visible
+  - [x] 2.7 Add a `_flush_buffer()` helper that composes the phase header + accumulated notes + optional completion into a single message body, calls `chat_update`, and handles failures (fall back to `chat_postMessage` if update fails)
 
 - [ ] 3.0 Generate concise LLM summaries for plan and review phases
   depends_on: [1.0]

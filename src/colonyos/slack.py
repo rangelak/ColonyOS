@@ -626,6 +626,10 @@ class SlackUI:
 
     Implements the same interface as ``PhaseUI`` / ``NullUI`` from ``ui.py``
     but routes output to Slack threaded replies instead of the terminal.
+
+    Uses Slack's ``chat_update`` API to edit messages in-place, producing
+    **one message per phase** instead of many.  Notes are buffered and
+    flushed on phase transitions or via explicit ``flush()`` calls.
     """
 
     def __init__(
@@ -638,6 +642,10 @@ class SlackUI:
         self._channel = channel
         self._thread_ts = thread_ts
         self._current_phase: str | None = None
+        # Edit-in-place state
+        self._current_msg_ts: str | None = None
+        self._phase_header_text: str = ""
+        self._note_buffer: list[str] = []
 
     # Map internal phase names to friendly labels for Slack
     _PHASE_LABELS: ClassVar[dict[str, tuple[str, str]]] = {
@@ -651,6 +659,45 @@ class SlackUI:
         "learn": (":bulb: Extracting lessons learned", ":bulb: Lessons recorded"),
     }
 
+    def _compose_message(self, completion_label: str | None = None) -> str:
+        """Build the full message body from header + buffered notes + optional completion."""
+        parts: list[str] = [self._phase_header_text]
+        if self._note_buffer:
+            parts.append("\n".join(self._note_buffer))
+        if completion_label:
+            parts.append(completion_label)
+        return "\n".join(parts)
+
+    def _flush_buffer(self, completion_label: str | None = None) -> None:
+        """Compose and update the current phase message via ``chat_update``.
+
+        Falls back to ``chat_postMessage`` if the update fails (e.g. message
+        was deleted or is too old).
+        """
+        if self._current_msg_ts is None:
+            return
+        body = self._compose_message(completion_label)
+        try:
+            self._client.chat_update(
+                channel=self._channel,
+                ts=self._current_msg_ts,
+                text=body,
+            )
+        except Exception:
+            logger.debug(
+                "chat_update failed for ts=%s, falling back to chat_postMessage",
+                self._current_msg_ts,
+                exc_info=True,
+            )
+            resp = self._client.chat_postMessage(
+                channel=self._channel,
+                thread_ts=self._thread_ts,
+                text=body,
+            )
+            ts = (resp or {}).get("ts")
+            if ts:
+                self._current_msg_ts = ts
+
     def phase_header(
         self,
         phase_name: str,
@@ -663,11 +710,14 @@ class SlackUI:
         msg = label
         if extra:
             msg += f" — {extra}"
-        self._client.chat_postMessage(
+        self._phase_header_text = msg
+        self._note_buffer = []
+        resp = self._client.chat_postMessage(
             channel=self._channel,
             thread_ts=self._thread_ts,
             text=msg,
         )
+        self._current_msg_ts = (resp or {}).get("ts")
 
     def phase_complete(self, cost: float, turns: int, duration_ms: int) -> None:
         secs = duration_ms // 1000
@@ -675,14 +725,15 @@ class SlackUI:
         _, label = self._PHASE_LABELS.get(
             phase_name, ("", f":white_check_mark: *{phase_name}* done"),
         )
-        self._client.chat_postMessage(
-            channel=self._channel,
-            thread_ts=self._thread_ts,
-            text=f"{label} ({secs}s)",
-        )
+        completion = f"{label} ({secs}s)"
+        self._flush_buffer(completion_label=completion)
+        # Reset state for next phase
+        self._current_msg_ts = None
+        self._note_buffer = []
+        self._phase_header_text = ""
 
     def phase_error(self, error: str) -> None:
-        """Post a generic error message — internal details are logged, not posted."""
+        """Post a generic error message — always a NEW message so errors are visible."""
         logger.error("SlackUI phase error: %s", error)
         phase_name = self._current_phase or "Phase"
         label = {
@@ -701,14 +752,16 @@ class SlackUI:
         note = text.strip()
         if not note:
             return
-        self._client.chat_postMessage(
-            channel=self._channel,
-            thread_ts=self._thread_ts,
-            text=note,
-        )
+        self._note_buffer.append(note)
+        self._flush_buffer()
 
     def slack_note(self, text: str) -> None:
         self.phase_note(text)
+
+    def flush(self) -> None:
+        """Explicitly flush any buffered notes to Slack."""
+        if self._note_buffer and self._current_msg_ts:
+            self._flush_buffer()
 
     def on_tool_start(self, *a: object) -> None:
         pass

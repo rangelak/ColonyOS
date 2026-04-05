@@ -563,9 +563,17 @@ class TestFormatPhaseBreakdownLine:
 # ---------------------------------------------------------------------------
 
 
+def _slack_client_with_ts(ts: str = "msg.001") -> MagicMock:
+    """Slack mock whose chat_postMessage returns a ts for edit-in-place."""
+    client = _slack_client_mock()
+    client.chat_postMessage.return_value = {"ok": True, "ts": ts}
+    client.chat_update.return_value = {"ok": True, "ts": ts}
+    return client
+
+
 class TestSlackUI:
-    def test_phase_header_posts_message(self) -> None:
-        client = _slack_client_mock()
+    def test_phase_header_posts_message_and_stores_ts(self) -> None:
+        client = _slack_client_with_ts("hdr.001")
         ui = SlackUI(client, "C123", "1234.5")
         ui.phase_header("implement", 5.0, "sonnet")
         client.chat_postMessage.assert_called_once()
@@ -573,32 +581,137 @@ class TestSlackUI:
         assert call_kwargs["channel"] == "C123"
         assert call_kwargs["thread_ts"] == "1234.5"
         assert "Writing the code" in call_kwargs["text"]
+        # ts is captured for later chat_update calls
+        assert ui._current_msg_ts == "hdr.001"
 
-    def test_phase_complete_posts_message(self) -> None:
-        client = _slack_client_mock()
+    def test_phase_complete_edits_message(self) -> None:
+        """phase_complete should chat_update the phase message, not post a new one."""
+        client = _slack_client_with_ts("hdr.002")
         ui = SlackUI(client, "C123", "1234.5")
         ui.phase_header("implement", 5.0, "sonnet")
         ui.phase_complete(1.5, 10, 30000)
-        call_kwargs = client.chat_postMessage.call_args[1]
-        assert "Code is written" in call_kwargs["text"]
+        # Only 1 postMessage (from phase_header), completion uses chat_update
+        assert client.chat_postMessage.call_count == 1
+        client.chat_update.assert_called_once()
+        update_kwargs = client.chat_update.call_args[1]
+        assert "Code is written" in update_kwargs["text"]
+        assert update_kwargs["ts"] == "hdr.002"
 
-    def test_phase_error_posts_generic_message(self) -> None:
-        client = _slack_client_mock()
+    def test_phase_error_posts_new_message(self) -> None:
+        """Errors always post a NEW message — never hidden in an edit."""
+        client = _slack_client_with_ts("hdr.003")
         ui = SlackUI(client, "C123", "1234.5")
         ui.phase_header("review", 5.0, "sonnet")
         ui.phase_error("something broke")
+        # phase_header + phase_error = 2 postMessage calls
+        assert client.chat_postMessage.call_count == 2
         call_kwargs = client.chat_postMessage.call_args[1]
         # Error details must NOT be echoed to Slack (security)
         assert "something broke" not in call_kwargs["text"]
         assert "review" in call_kwargs["text"].lower()
         assert "Looking into it" in call_kwargs["text"]
 
-    def test_phase_note_posts_message(self) -> None:
-        client = _slack_client_mock()
+    def test_phase_note_edits_in_place(self) -> None:
+        """phase_note should edit the phase message, not post a new one."""
+        client = _slack_client_with_ts("hdr.004")
         ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_header("review", 5.0, "sonnet")
         ui.phase_note("Review round 1: 2 approved, 1 requested changes.")
-        call_kwargs = client.chat_postMessage.call_args[1]
-        assert "Review round 1" in call_kwargs["text"]
+        # Only 1 postMessage (from phase_header)
+        assert client.chat_postMessage.call_count == 1
+        client.chat_update.assert_called_once()
+        update_kwargs = client.chat_update.call_args[1]
+        assert "Review round 1" in update_kwargs["text"]
+
+    def test_multiple_notes_produce_one_message(self) -> None:
+        """Multiple phase_note calls should update the same message, not create new ones."""
+        client = _slack_client_with_ts("hdr.005")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_header("implement", 5.0, "sonnet")
+        ui.phase_note("Task 1 complete")
+        ui.phase_note("Task 2 complete")
+        ui.phase_note("Task 3 complete")
+        # Only 1 postMessage (from phase_header); all notes are chat_update
+        assert client.chat_postMessage.call_count == 1
+        assert client.chat_update.call_count == 3
+        # Final update contains all notes
+        final_text = client.chat_update.call_args[1]["text"]
+        assert "Task 1 complete" in final_text
+        assert "Task 2 complete" in final_text
+        assert "Task 3 complete" in final_text
+
+    def test_phase_complete_includes_buffered_notes(self) -> None:
+        """phase_complete should flush notes and include them in the final message."""
+        client = _slack_client_with_ts("hdr.006")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_header("implement", 5.0, "sonnet")
+        ui.phase_note("Task 1 done")
+        ui.phase_note("Task 2 done")
+        ui.phase_complete(1.0, 5, 10000)
+        # The final chat_update (from phase_complete) includes header + notes + completion
+        final_text = client.chat_update.call_args[1]["text"]
+        assert "Writing the code" in final_text
+        assert "Task 1 done" in final_text
+        assert "Task 2 done" in final_text
+        assert "Code is written" in final_text
+        assert "10s" in final_text
+
+    def test_phase_note_without_header_does_not_crash(self) -> None:
+        """phase_note before any phase_header should not crash."""
+        client = _slack_client_with_ts()
+        ui = SlackUI(client, "C123", "1234.5")
+        # No phase_header called — _current_msg_ts is None
+        ui.phase_note("orphan note")
+        # Note is buffered but no update sent (no message to edit)
+        client.chat_update.assert_not_called()
+        client.chat_postMessage.assert_not_called()
+
+    def test_empty_note_is_ignored(self) -> None:
+        client = _slack_client_with_ts("hdr.007")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_header("plan", 5.0, "sonnet")
+        ui.phase_note("   ")
+        # Empty note should not trigger an update
+        client.chat_update.assert_not_called()
+
+    def test_chat_update_failure_falls_back_to_post(self) -> None:
+        """If chat_update fails, fall back to chat_postMessage."""
+        client = _slack_client_with_ts("hdr.008")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_header("plan", 5.0, "sonnet")
+        # Make chat_update fail
+        client.chat_update.side_effect = Exception("message_not_found")
+        client.chat_postMessage.return_value = {"ok": True, "ts": "fallback.001"}
+        ui.phase_note("Important note")
+        # Fell back to postMessage (2 calls total: header + fallback)
+        assert client.chat_postMessage.call_count == 2
+        fallback_kwargs = client.chat_postMessage.call_args[1]
+        assert "Important note" in fallback_kwargs["text"]
+
+    def test_slack_note_delegates_to_phase_note(self) -> None:
+        client = _slack_client_with_ts("hdr.009")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_header("implement", 5.0, "sonnet")
+        ui.slack_note("progress update")
+        client.chat_update.assert_called_once()
+        assert "progress update" in client.chat_update.call_args[1]["text"]
+
+    def test_phase_header_resets_state(self) -> None:
+        """Starting a new phase resets the message ts and buffer."""
+        client = _slack_client_with_ts("hdr.010")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_header("plan", 5.0, "sonnet")
+        ui.phase_note("plan note")
+        # Start a new phase
+        client.chat_postMessage.return_value = {"ok": True, "ts": "hdr.011"}
+        ui.phase_header("implement", 5.0, "sonnet")
+        assert ui._current_msg_ts == "hdr.011"
+        assert ui._note_buffer == []
+        # Notes from old phase don't leak into new phase
+        ui.phase_note("implement note")
+        final_text = client.chat_update.call_args[1]["text"]
+        assert "plan note" not in final_text
+        assert "implement note" in final_text
 
     def test_noop_methods(self) -> None:
         """Streaming callbacks are no-ops and don't raise."""
@@ -933,7 +1046,7 @@ class TestPromptPreambleSecurity:
 
 class TestSlackUIErrorSanitization:
     def test_phase_error_does_not_echo_details(self) -> None:
-        client = _slack_client_mock()
+        client = _slack_client_with_ts()
         ui = SlackUI(client, "C123", "1234.5")
         ui.phase_error("/home/user/.env: permission denied")
         call_kwargs = client.chat_postMessage.call_args[1]
