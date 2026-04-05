@@ -719,12 +719,14 @@ class TestFetchCIChecksForPR:
     def test_returns_check_list(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = _completed(
             stdout=json.dumps([
-                {"name": "test", "state": "COMPLETED", "conclusion": "SUCCESS"},
-                {"name": "lint", "state": "COMPLETED", "conclusion": "FAILURE"},
+                {"name": "test", "state": "COMPLETED", "bucket": "pass"},
+                {"name": "lint", "state": "COMPLETED", "bucket": "fail"},
             ])
         )
         result = _FETCH_CI_CHECKS_FOR_PR(10, tmp_path)
         assert len(result) == 2
+        assert result[0]["conclusion"] == "SUCCESS"
+        assert result[1]["conclusion"] == "FAILURE"
 
     @patch("colonyos.maintenance.subprocess.run")
     def test_gh_failure_returns_empty(self, mock_run: MagicMock, tmp_path: Path) -> None:

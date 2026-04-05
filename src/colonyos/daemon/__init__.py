@@ -748,6 +748,7 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
             FanoutSlackUI,
             SlackUI,
             format_phase_breakdown_line,
+            generate_haiku,
             post_message,
             post_run_summary,
         )
@@ -816,6 +817,13 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
         if notification is not None and targets:
             client, _channel, _thread_ts = notification
             try:
+                breakdown = [format_phase_breakdown_line(phase) for phase in log.phases]
+                haiku = generate_haiku(
+                    f"Status: {log.status.value}. Summary: {item.summary or ''}. "
+                    f"Cost: ${log.total_cost_usd:.2f}. "
+                    f"Phases: {'; '.join(breakdown)}",
+                    repo_root=self.repo_root,
+                )
                 for target_channel, target_ts in targets:
                     post_run_summary(
                         client,
@@ -826,8 +834,9 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
                         branch_name=log.branch_name,
                         pr_url=log.pr_url,
                         summary=item.summary,
-                        phase_breakdown=[format_phase_breakdown_line(phase) for phase in log.phases],
+                        phase_breakdown=breakdown,
                         demand_count=item.demand_count,
+                        haiku=haiku,
                     )
             except Exception:
                 logger.debug("Failed to post final queue summary", exc_info=True)

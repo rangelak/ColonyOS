@@ -3251,6 +3251,7 @@ def _watch_slack_impl(
         create_slack_app,
         extract_raw_from_formatted_prompt,
         format_phase_breakdown_line,
+        generate_haiku,
         is_valid_git_ref,
         post_acknowledgment,
         post_run_summary,
@@ -3546,6 +3547,7 @@ def _watch_slack_impl(
             branch_name: str | None,
             pr_url: str | None,
             phase_breakdown: list[str],
+            haiku: str | None = None,
         ) -> None:
             for channel, thread_ts in self._notification_targets(item):
                 post_run_summary(
@@ -3559,6 +3561,7 @@ def _watch_slack_impl(
                     summary=item.summary,
                     phase_breakdown=phase_breakdown,
                     demand_count=item.demand_count,
+                    haiku=haiku,
                 )
 
         def _execute_item(self, item_to_run: QueueItem) -> None:
@@ -3708,6 +3711,13 @@ def _watch_slack_impl(
                         except Exception:
                             logger.debug("Failed to add tada reaction", exc_info=True)
 
+                breakdown = [format_phase_breakdown_line(phase) for phase in log.phases]
+                haiku = generate_haiku(
+                    f"Status: {log.status.value}. Summary: {item_to_run.summary or ''}. "
+                    f"Cost: ${log.total_cost_usd:.2f}. "
+                    f"Phases: {'; '.join(breakdown)}",
+                    repo_root=self._repo_root,
+                )
                 self._post_run_summary_to_targets(
                     client,
                     item_to_run,
@@ -3715,7 +3725,8 @@ def _watch_slack_impl(
                     total_cost=log.total_cost_usd,
                     branch_name=log.branch_name,
                     pr_url=log.pr_url,
-                    phase_breakdown=[format_phase_breakdown_line(phase) for phase in log.phases],
+                    phase_breakdown=breakdown,
+                    haiku=haiku,
                 )
 
             # Check consecutive failure circuit breaker
@@ -3970,6 +3981,13 @@ def _watch_slack_impl(
                         except Exception:
                             logger.debug("Failed to add tada reaction", exc_info=True)
 
+                breakdown = [format_phase_breakdown_line(phase) for phase in log.phases]
+                haiku = generate_haiku(
+                    f"Status: {log.status.value}. Summary: {item_to_run.summary or ''}. "
+                    f"Cost: ${log.total_cost_usd:.2f}. "
+                    f"Phases: {'; '.join(breakdown)}",
+                    repo_root=self._repo_root,
+                )
                 self._post_run_summary_to_targets(
                     client,
                     item_to_run,
@@ -3977,7 +3995,8 @@ def _watch_slack_impl(
                     total_cost=log.total_cost_usd,
                     branch_name=log.branch_name,
                     pr_url=log.pr_url,
-                    phase_breakdown=[format_phase_breakdown_line(phase) for phase in log.phases],
+                    phase_breakdown=breakdown,
+                    haiku=haiku,
                 )
 
     queue_executor = QueueExecutor(

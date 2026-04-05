@@ -312,6 +312,7 @@ def format_run_summary(
     summary: str | None = None,
     phase_breakdown: list[str] | None = None,
     demand_count: int = 1,
+    haiku: str | None = None,
 ) -> str:
     """Format the final run summary for a Slack thread."""
     parts: list[str] = []
@@ -325,10 +326,13 @@ def format_run_summary(
     if branch_name:
         parts.append(f"Branch: `{branch_name}`")
     if pr_url:
-        parts.append(f"PR: {pr_url}")
+        parts.append(f"PR: <{pr_url}>")
     if phase_breakdown:
         parts.append("*Phase breakdown*")
         parts.extend(phase_breakdown)
+    if haiku:
+        parts.append("")
+        parts.append(f"_{haiku}_")
     return "\n".join(parts)
 
 
@@ -434,7 +438,7 @@ def format_daily_summary(
             label = item.summary or item.source_value or item.id
             line = f"• `{label}`"
             if item.pr_url:
-                line += f" — {item.pr_url}"
+                line += f" — <{item.pr_url}>"
             line += f" | ${item.cost_usd:.2f}"
             parts.append(line)
         parts.append("")
@@ -505,6 +509,7 @@ def post_run_summary(
     summary: str | None = None,
     phase_breakdown: list[str] | None = None,
     demand_count: int = 1,
+    haiku: str | None = None,
 ) -> None:
     """Post the final run summary as a threaded reply."""
     post_message(
@@ -518,6 +523,7 @@ def post_run_summary(
             summary,
             phase_breakdown,
             demand_count,
+            haiku=haiku,
         ),
         thread_ts=thread_ts,
     )
@@ -1012,6 +1018,58 @@ def _parse_triage_response(raw_text: str) -> TriageResult:
         base_branch=raw_branch,
         reasoning=str(data.get("reasoning", "")),
     )
+
+
+def generate_haiku(
+    context: str,
+    *,
+    repo_root: Path | None = None,
+) -> str | None:
+    """Generate a haiku (5-7-5) summarising *context* for non-technical readers.
+
+    Uses a cheap LLM call (Haiku model, no tools, tiny budget).
+    Returns ``None`` on any failure — haiku is decorative and must never
+    block the pipeline or prevent notifications from posting.
+    """
+    from colonyos.agent import run_phase_sync
+    from colonyos.models import Phase, extract_result_text
+
+    cwd = repo_root if repo_root is not None else Path.cwd()
+
+    system = (
+        "You are a haiku poet for a software engineering team's Slack channel. "
+        "Your audience includes non-technical people (sales, marketing, leadership). "
+        "Given a context block describing what just happened in a coding pipeline, "
+        "write exactly ONE haiku (three lines: 5 syllables / 7 syllables / 5 syllables) "
+        "that captures the essence of the work in plain, joyful language anyone can understand. "
+        "Do NOT use jargon like 'refactor', 'lint', 'CI', 'merge', 'PR', 'deploy'. "
+        "Use metaphors from nature, craft, or everyday life. "
+        "Output ONLY the three lines of the haiku, nothing else."
+    )
+    user = f"Context:\n{context[:1000]}"
+
+    try:
+        result = run_phase_sync(
+            Phase.TRIAGE,  # reuse lightweight phase label
+            user,
+            cwd=cwd,
+            system_prompt=system,
+            model="haiku",
+            budget_usd=0.01,
+            allowed_tools=[],
+            timeout_seconds=30,
+        )
+        text = extract_result_text(result.artifacts).strip()
+        if not text:
+            return None
+        # Collapse to a single line separated by " / " for compact Slack display
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            return " / ".join(lines[:3])
+        return None
+    except Exception:
+        logger.debug("Haiku generation failed", exc_info=True)
+        return None
 
 
 def triage_message(

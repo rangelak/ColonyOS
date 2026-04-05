@@ -51,8 +51,8 @@ class TestParsePrRef:
 class TestFetchPrChecks:
     def test_success(self, tmp_path: Path) -> None:
         mock_output = json.dumps([
-            {"name": "test", "state": "completed", "conclusion": "success", "detailsUrl": ""},
-            {"name": "lint", "state": "completed", "conclusion": "failure", "detailsUrl": "http://x/runs/123"},
+            {"name": "test", "state": "completed", "bucket": "pass", "link": ""},
+            {"name": "lint", "state": "completed", "bucket": "fail", "link": "http://x/runs/123"},
         ])
         with patch("colonyos.ci.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=mock_output, stderr="")
@@ -61,6 +61,7 @@ class TestFetchPrChecks:
         assert checks[0].name == "test"
         assert checks[0].conclusion == "success"
         assert checks[1].conclusion == "failure"
+        assert checks[1].details_url == "http://x/runs/123"
 
     def test_gh_not_found(self, tmp_path: Path) -> None:
         with patch("colonyos.ci.subprocess.run", side_effect=FileNotFoundError):

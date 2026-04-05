@@ -405,6 +405,15 @@ def format_branch_sync_report(branches: list[BranchStatus]) -> str | None:
 
 _CI_FAILURE_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"})
 
+# Map ``gh pr checks --json bucket`` values (uppercased) to legacy conclusion strings.
+_BUCKET_CONCLUSION_MAP: dict[str, str] = {
+    "PASS": "SUCCESS",
+    "FAIL": "FAILURE",
+    "PENDING": "",
+    "SKIPPING": "SKIPPED",
+    "CANCEL": "CANCELLED",
+}
+
 
 @dataclass(frozen=True)
 class CIFixCandidate:
@@ -467,7 +476,8 @@ def _fetch_ci_checks_for_pr(
 ) -> list[dict[str, str]]:
     """Fetch CI check statuses for a single PR.
 
-    Returns a list of dicts with ``name``, ``state``, ``conclusion``.
+    Returns a list of normalised dicts with ``name``, ``state``, ``conclusion``
+    (mapped from the ``gh pr checks --json bucket`` field).
     Returns an empty list on any error (non-raising variant of
     :func:`colonyos.ci.fetch_pr_checks`).
     """
@@ -475,7 +485,7 @@ def _fetch_ci_checks_for_pr(
         result = subprocess.run(
             [
                 "gh", "pr", "checks", str(pr_number),
-                "--json", "name,state,conclusion",
+                "--json", "name,state,bucket",
             ],
             capture_output=True,
             text=True,
@@ -507,7 +517,17 @@ def _fetch_ci_checks_for_pr(
     out: list[dict[str, str]] = []
     for el in data_list:
         if isinstance(el, dict):
-            out.append(cast(dict[str, str], el))
+            raw = cast(dict[str, Any], el)
+            # Normalise ``bucket`` from ``gh pr checks`` into the
+            # ``conclusion`` / ``state`` keys the rest of the codebase
+            # expects.  ``bucket`` returns: pass/fail/pending/skipping/cancel.
+            bucket = str(raw.get("bucket", "")).upper()
+            normalised: dict[str, str] = {
+                "name": str(raw.get("name", "")),
+                "state": "COMPLETED" if bucket in ("PASS", "FAIL", "CANCEL", "SKIPPING") else str(raw.get("state", "")),
+                "conclusion": _BUCKET_CONCLUSION_MAP.get(bucket, bucket),
+            }
+            out.append(normalised)
     return out
 
 

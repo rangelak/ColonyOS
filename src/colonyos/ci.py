@@ -23,6 +23,22 @@ logger = logging.getLogger(__name__)
 # Maximum characters of CI log per failed step (tail-biased).
 _CI_LOG_CHAR_CAP = 12_000
 
+# Mapping from ``gh pr checks --json bucket`` values to the legacy
+# ``conclusion`` strings used throughout the codebase.  The ``bucket``
+# field returns: pass, fail, pending, skipping, cancel.
+_BUCKET_TO_CONCLUSION: dict[str, str] = {
+    "pass": "success",
+    "fail": "failure",
+    "pending": "",
+    "skipping": "skipped",
+    "cancel": "cancelled",
+}
+
+
+def _bucket_to_conclusion(bucket: str) -> str:
+    """Map a ``gh pr checks`` bucket value to a legacy conclusion string."""
+    return _BUCKET_TO_CONCLUSION.get(bucket.lower(), bucket)
+
 # Matches full GitHub PR URLs like https://github.com/owner/repo/pull/42
 _PR_URL_RE = re.compile(r"https?://github\.com/[^/]+/[^/]+/pull/(\d+)")
 
@@ -49,7 +65,13 @@ def parse_pr_ref(ref: str) -> int:
 
 @dataclass(frozen=True)
 class CheckResult:
-    """Represents a single CI check run result."""
+    """Represents a single CI check run result.
+
+    The ``conclusion`` field is mapped from ``gh pr checks --json bucket``
+    which returns one of: pass, fail, pending, skipping, cancel.
+    Legacy callers that compare against ``"failure"``/``"success"`` are
+    handled by the mapping in :func:`fetch_pr_checks`.
+    """
 
     name: str
     state: str
@@ -66,7 +88,7 @@ def fetch_pr_checks(pr_number: int, repo_root: Path) -> list[CheckResult]:
         result = subprocess.run(
             [
                 "gh", "pr", "checks", str(pr_number),
-                "--json", "name,state,conclusion,detailsUrl",
+                "--json", "name,state,bucket,link",
             ],
             capture_output=True,
             text=True,
@@ -101,8 +123,8 @@ def fetch_pr_checks(pr_number: int, repo_root: Path) -> list[CheckResult]:
         checks.append(CheckResult(
             name=item.get("name", ""),
             state=item.get("state", ""),
-            conclusion=item.get("conclusion", ""),
-            details_url=item.get("detailsUrl", ""),
+            conclusion=_bucket_to_conclusion(item.get("bucket", "")),
+            details_url=item.get("link", ""),
         ))
     return checks
 

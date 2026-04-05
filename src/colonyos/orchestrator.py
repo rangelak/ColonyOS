@@ -5018,14 +5018,27 @@ def _run_pipeline(
                     if progress_tracker is not None:
                         progress_tracker.print_summary(round_num=iteration + 1)
                     if review_header_ui is not None:
-                        review_header_ui.slack_note(  # type: ignore[union-attr]
-                            _format_review_round_note(
-                                results,
-                                reviewers,
-                                round_num=iteration + 1,
-                                total_rounds=config.max_fix_iterations + 1,
-                            )
+                        review_note = _format_review_round_note(
+                            results,
+                            reviewers,
+                            round_num=iteration + 1,
+                            total_rounds=config.max_fix_iterations + 1,
                         )
+                        review_header_ui.slack_note(review_note)  # type: ignore[union-attr]
+                        # Post a haiku summarising the review findings
+                        try:
+                            from colonyos.slack import generate_haiku
+
+                            review_haiku = generate_haiku(
+                                review_note,
+                                repo_root=repo_root,
+                            )
+                            if review_haiku:
+                                review_header_ui.slack_note(  # type: ignore[union-attr]
+                                    f"_{review_haiku}_"
+                                )
+                        except Exception:
+                            pass  # haiku is decorative
 
                     last_findings = _collect_review_findings(results, reviewers)
 
