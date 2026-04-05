@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest.mock
 
-from colonyos.sanitize import XML_TAG_RE, sanitize_ci_logs, sanitize_for_slack, sanitize_untrusted_content, strip_slack_links
+from colonyos.sanitize import XML_TAG_RE, sanitize_ci_logs, sanitize_for_slack, sanitize_outbound_slack, sanitize_untrusted_content, strip_slack_links
 
 
 class TestSanitizeUntrustedContent:
@@ -449,3 +449,108 @@ class TestSanitizeDisplayText:
         assert "# Heading" in result
         assert "- item 1" in result
         assert result.count("\n") == text.count("\n")
+
+
+class TestNewSecretPatterns:
+    """Tests for secret patterns added for outbound Slack sanitization."""
+
+    def test_redacts_anthropic_api_key(self) -> None:
+        result = sanitize_ci_logs("key=sk-ant-api03-abcdef1234567890")
+        assert "sk-ant-api03-" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_pem_private_key(self) -> None:
+        pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg...\n-----END PRIVATE KEY-----"
+        result = sanitize_ci_logs(pem)
+        assert "BEGIN PRIVATE KEY" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_rsa_private_key(self) -> None:
+        pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBog...\n-----END RSA PRIVATE KEY-----"
+        result = sanitize_ci_logs(pem)
+        assert "BEGIN RSA PRIVATE KEY" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_ec_private_key(self) -> None:
+        pem = "-----BEGIN EC PRIVATE KEY-----\nMHQCAQ...\n-----END EC PRIVATE KEY-----"
+        result = sanitize_ci_logs(pem)
+        assert "BEGIN EC PRIVATE KEY" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_gcp_service_account_fragment(self) -> None:
+        text = 'config: {"type": "service_account", "project_id": "my-proj"}'
+        result = sanitize_ci_logs(text)
+        assert '"type": "service_account"' not in result
+        assert "[REDACTED]" in result
+
+    def test_preserves_non_secret_text(self) -> None:
+        text = "Deploying to production with 3 replicas."
+        assert sanitize_ci_logs(text) == text
+
+
+class TestSanitizeOutboundSlack:
+    """Tests for sanitize_outbound_slack() — outbound LLM content sanitization."""
+
+    def test_redacts_anthropic_api_key(self) -> None:
+        result = sanitize_outbound_slack("Here is key: sk-ant-api03-abcdef1234567890xyz")
+        assert "sk-ant-api03-" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_pem_header(self) -> None:
+        pem = "cert: -----BEGIN PRIVATE KEY-----\ndata\n-----END PRIVATE KEY-----"
+        result = sanitize_outbound_slack(pem)
+        assert "BEGIN PRIVATE KEY" not in result
+
+    def test_redacts_gcp_service_account(self) -> None:
+        text = 'Found {"type": "service_account"} in config'
+        result = sanitize_outbound_slack(text)
+        assert '"type": "service_account"' not in result
+
+    def test_enforces_max_chars_default(self) -> None:
+        long_text = "a" * 5000
+        result = sanitize_outbound_slack(long_text)
+        assert len(result) <= 3000
+
+    def test_enforces_custom_max_chars(self) -> None:
+        text = "a" * 200
+        result = sanitize_outbound_slack(text, max_chars=100)
+        assert len(result) <= 100
+
+    def test_truncation_adds_ellipsis(self) -> None:
+        text = "a" * 5000
+        result = sanitize_outbound_slack(text)
+        assert result.endswith("…")
+
+    def test_short_text_not_truncated(self) -> None:
+        text = "All good — PR #42 merged."
+        result = sanitize_outbound_slack(text)
+        # Content is sanitized (mrkdwn escaping) but not truncated
+        assert "…" not in result
+
+    def test_sanitizes_slack_mrkdwn(self) -> None:
+        result = sanitize_outbound_slack("*bold* and @here")
+        assert "\\*bold\\*" in result
+        assert "@here" not in result
+        assert "[mention]" in result
+
+    def test_composes_secret_redaction_and_mrkdwn(self) -> None:
+        """Secrets are redacted AND mrkdwn is escaped in one pass."""
+        text = "Key: sk-ant-api03-secret123 and *formatted*"
+        result = sanitize_outbound_slack(text)
+        assert "sk-ant-api03-" not in result
+        assert "\\*formatted\\*" in result
+
+    def test_empty_string(self) -> None:
+        assert sanitize_outbound_slack("") == ""
+
+    def test_preserves_clean_text(self) -> None:
+        text = "Deployment completed successfully in 42s."
+        assert sanitize_outbound_slack(text) == text
+
+    def test_redacts_github_token_in_llm_output(self) -> None:
+        result = sanitize_outbound_slack("Found token ghp_abc123XYZ in the logs")
+        assert "ghp_abc123XYZ" not in result
+
+    def test_redacts_bearer_token(self) -> None:
+        result = sanitize_outbound_slack("Authorization: Bearer eyJhbGciOi...")
+        assert "eyJhbGciOi" not in result

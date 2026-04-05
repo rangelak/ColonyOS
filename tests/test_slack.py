@@ -7,6 +7,7 @@ from pathlib import Path
 from types import ModuleType
 from collections.abc import Mapping, Sequence
 from typing import (
+    Any,
     Callable,
     TypedDict,
     Unpack,
@@ -1894,16 +1895,33 @@ class TestSlackClientProtocol:
     """Tests for SlackClient Protocol type."""
 
     def test_protocol_defines_required_methods(self) -> None:
-        """SlackClient Protocol should define the 5 Slack methods we use."""
+        """SlackClient Protocol should define the 6 Slack methods we use."""
         from colonyos.slack import SlackClient
 
         # Verify the Protocol class defines the expected method signatures
         members = [m for m in dir(SlackClient) if not m.startswith("_")]
         assert "chat_postMessage" in members
+        assert "chat_update" in members
         assert "reactions_add" in members
         assert "reactions_remove" in members
         assert "reactions_get" in members
         assert "conversations_list" in members
+
+    def test_chat_update_method_signature(self) -> None:
+        """chat_update should accept channel, ts, text and kwargs."""
+        hints = get_type_hints(SlackClient.chat_update)
+        assert "channel" in hints
+        assert "ts" in hints
+        assert "text" in hints
+        assert hints["return"] == dict[str, Any]
+
+    def test_mock_client_has_chat_update(self) -> None:
+        """MagicMock(spec=SlackClient) should expose chat_update."""
+        client = _slack_client_mock()
+        client.chat_update(channel="C123", ts="1234.5", text="updated")
+        client.chat_update.assert_called_once_with(
+            channel="C123", ts="1234.5", text="updated",
+        )
 
     def test_functions_use_typed_client(self) -> None:
         """Public functions should accept SlackClient, not Any."""
