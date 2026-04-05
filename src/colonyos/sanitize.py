@@ -30,13 +30,13 @@ SECRET_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"ghs_\w+"),          # GitHub server tokens
     re.compile(r"github_pat_\w+"),   # GitHub fine-grained personal access tokens
     re.compile(r"gho_\w+"),          # GitHub OAuth tokens
+    re.compile(r"sk-ant-api03-\S+"),  # Anthropic API keys (must precede generic sk- pattern)
     re.compile(r"sk-\w+"),           # OpenAI / Stripe secret keys
     re.compile(r"AKIA\w+"),          # AWS access key IDs
     re.compile(r"Bearer\s+\S+"),     # Bearer tokens
     re.compile(r"xoxb-\S+"),         # Slack bot tokens
     re.compile(r"xoxp-\S+"),         # Slack user tokens
     re.compile(r"npm_\w+"),          # npm tokens
-    re.compile(r"sk-ant-api03-\S+"),  # Anthropic API keys
     re.compile(r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC )?PRIVATE KEY-----"),  # PEM private keys
     re.compile(r'"type"\s*:\s*"service_account"'),  # GCP service account JSON fragments
     # High-entropy base64 blobs (>40 chars) adjacent to secret-like keywords.

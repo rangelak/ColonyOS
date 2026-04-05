@@ -647,7 +647,7 @@ class SlackUI:
         self._phase_header_text: str = ""
         self._note_buffer: list[str] = []
         # Debounce: track last flush time to avoid hitting Slack rate limits
-        self._last_flush_time: float = 0.0
+        self._last_flush_time: float = float("-inf")
         self._debounce_seconds: float = 3.0
 
     # Map internal phase names to friendly labels for Slack
@@ -733,7 +733,18 @@ class SlackUI:
             thread_ts=self._thread_ts,
             text=msg,
         )
-        self._current_msg_ts = (resp or {}).get("ts")
+        ts = (resp or {}).get("ts")
+        if ts:
+            self._current_msg_ts = ts
+        else:
+            # No ts returned — edit-in-place won't work for this phase.
+            # Log a warning; phase_note will fall back to individual posts.
+            logger.warning(
+                "phase_header chat_postMessage returned no ts for phase=%s; "
+                "notes will be posted as individual messages",
+                phase_name,
+            )
+            self._current_msg_ts = None
 
     def phase_complete(self, cost: float, turns: int, duration_ms: int) -> None:
         secs = duration_ms // 1000
@@ -749,7 +760,12 @@ class SlackUI:
         self._phase_header_text = ""
 
     def phase_error(self, error: str) -> None:
-        """Post a generic error message — always a NEW message so errors are visible."""
+        """Post a generic error message — always a NEW message so errors are visible.
+
+        Resets edit-in-place state so that any subsequent ``phase_note`` calls
+        do not attempt to edit the pre-error message (which would silently
+        hide notes or create confusing interleaving).
+        """
         logger.error("SlackUI phase error: %s", error)
         phase_name = self._current_phase or "Phase"
         label = {
@@ -763,10 +779,25 @@ class SlackUI:
             thread_ts=self._thread_ts,
             text=f":x: {label}. Looking into it.",
         )
+        # Reset edit-in-place state so subsequent notes don't edit the pre-error message
+        self._current_msg_ts = None
+        self._note_buffer = []
+        self._phase_header_text = ""
 
     def phase_note(self, text: str) -> None:
         note = text.strip()
         if not note:
+            return
+        if self._current_msg_ts is None:
+            # No edit-in-place message available (header returned no ts, or
+            # state was reset after an error).  Post as individual message
+            # so notes are never silently dropped.
+            body = sanitize_outbound_slack(note)
+            self._client.chat_postMessage(
+                channel=self._channel,
+                thread_ts=self._thread_ts,
+                text=body,
+            )
             return
         self._note_buffer.append(note)
         self._flush_buffer()

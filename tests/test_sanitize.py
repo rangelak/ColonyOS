@@ -554,3 +554,20 @@ class TestSanitizeOutboundSlack:
     def test_redacts_bearer_token(self) -> None:
         result = sanitize_outbound_slack("Authorization: Bearer eyJhbGciOi...")
         assert "eyJhbGciOi" not in result
+
+    def test_anthropic_key_pattern_precedes_generic_sk(self) -> None:
+        """sk-ant-api03-... must be fully redacted in one pass, not partially
+        matched by the generic sk-\\w+ pattern (which would leave the suffix exposed)."""
+        key = "sk-ant-api03-abcdef1234567890xyzABCDEF"
+        result = sanitize_ci_logs(f"ANTHROPIC_API_KEY={key}")
+        # Entire key must be gone — no suffix leakage
+        assert "abcdef1234567890" not in result
+        assert "api03" not in result
+        assert "[REDACTED]" in result
+
+    def test_generic_sk_still_redacted_after_reorder(self) -> None:
+        """The generic sk-\\w+ pattern must still redact OpenAI/Stripe keys
+        after the Anthropic-specific pattern was moved ahead of it."""
+        result = sanitize_ci_logs("key=sk-abc123def456")
+        assert "sk-abc123def456" not in result
+        assert "[REDACTED]" in result

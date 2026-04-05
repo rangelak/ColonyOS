@@ -662,14 +662,16 @@ class TestSlackUI:
         assert "10s" in final_text
 
     def test_phase_note_without_header_does_not_crash(self) -> None:
-        """phase_note before any phase_header should not crash."""
+        """phase_note before any phase_header should not crash.
+        With no _current_msg_ts, falls back to individual post."""
         client = _slack_client_with_ts()
         ui = SlackUI(client, "C123", "1234.5")
         # No phase_header called — _current_msg_ts is None
         ui.phase_note("orphan note")
-        # Note is buffered but no update sent (no message to edit)
+        # No chat_update (no message to edit); note posted individually
         client.chat_update.assert_not_called()
-        client.chat_postMessage.assert_not_called()
+        assert client.chat_postMessage.call_count == 1
+        assert "orphan note" in client.chat_postMessage.call_args[1]["text"]
 
     def test_empty_note_is_ignored(self) -> None:
         client = _slack_client_with_ts("hdr.007")
@@ -747,7 +749,7 @@ class TestSlackUIDebounce:
         ui = SlackUI(client, "C123", "1234.5")
         ui._debounce_seconds = 3.0  # explicit default
         ui.phase_header("implement", 5.0, "sonnet")
-        # First note fires (since _last_flush_time starts at 0.0 which is far in the past)
+        # First note fires (since _last_flush_time starts at -inf)
         ui.phase_note("Task 1 done")
         assert client.chat_update.call_count == 1
         # Rapid subsequent notes within 3s window are debounced
@@ -3111,3 +3113,90 @@ class TestEndToEndMessageConsolidation:
         # Each target: 1 header + 1 error = 2 postMessages
         assert client_a.chat_postMessage.call_count == 2
         assert client_b.chat_postMessage.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Fix iteration 3: phase_error resets state, phase_header no-ts fallback,
+# _last_flush_time initialization
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseErrorResetsEditState:
+    """phase_error must reset edit-in-place state so subsequent notes
+    don't silently edit the pre-error message."""
+
+    def test_phase_error_resets_msg_ts(self) -> None:
+        client = _slack_client_with_ts("hdr.err1")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 0
+        ui.phase_header("implement", 5.0, "sonnet")
+        assert ui._current_msg_ts == "hdr.err1"
+        ui.phase_error("crash")
+        assert ui._current_msg_ts is None
+        assert ui._note_buffer == []
+        assert ui._phase_header_text == ""
+
+    def test_note_after_error_posts_individually(self) -> None:
+        """After phase_error resets state, subsequent phase_note should
+        fall back to individual chat_postMessage (not edit the pre-error msg)."""
+        client = _slack_client_with_ts("hdr.err2")
+        ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 0
+        ui.phase_header("implement", 5.0, "sonnet")
+        ui.phase_error("timeout")
+        # Reset state — clear call counts for clarity
+        client.chat_update.reset_mock()
+        post_count_before = client.chat_postMessage.call_count
+
+        ui.phase_note("Recovery note")
+
+        # Note posted as individual message, not via chat_update
+        assert client.chat_update.call_count == 0
+        assert client.chat_postMessage.call_count == post_count_before + 1
+        last_call = client.chat_postMessage.call_args[1]
+        assert "Recovery note" in last_call["text"]
+
+
+class TestPhaseHeaderNoTsFallback:
+    """When phase_header's chat_postMessage returns no ts, notes must
+    fall back to individual posts instead of being silently dropped."""
+
+    def test_no_ts_from_header_notes_posted_individually(self) -> None:
+        client = _slack_client_mock()
+        client.chat_postMessage.return_value = {"ok": True}  # no "ts" key
+        ui = SlackUI(client, "C123", "1234.5")
+        ui._debounce_seconds = 0
+        ui.phase_header("plan", 5.0, "sonnet")
+
+        assert ui._current_msg_ts is None
+        ui.phase_note("Planning step 1")
+        ui.phase_note("Planning step 2")
+
+        # Header + 2 individual notes = 3 postMessage calls
+        assert client.chat_postMessage.call_count == 3
+        # No chat_update calls since edit-in-place is disabled
+        assert client.chat_update.call_count == 0
+
+    def test_no_ts_from_header_notes_still_sanitized(self) -> None:
+        """Fallback notes must still go through outbound sanitization."""
+        client = _slack_client_mock()
+        client.chat_postMessage.return_value = {"ok": True}  # no "ts"
+        ui = SlackUI(client, "C123", "1234.5")
+        ui.phase_header("plan", 5.0, "sonnet")
+
+        ui.phase_note("Found key sk-abc123secret456")
+
+        # The secret should be redacted in the posted message
+        last_call = client.chat_postMessage.call_args[1]
+        assert "sk-abc123secret456" not in last_call["text"]
+        assert "[REDACTED]" in last_call["text"]
+
+
+class TestLastFlushTimeInit:
+    """_last_flush_time must be initialized to -inf so the first flush
+    always fires regardless of monotonic() value."""
+
+    def test_initial_last_flush_time_is_neg_inf(self) -> None:
+        client = _slack_client_with_ts("hdr.init")
+        ui = SlackUI(client, "C123", "1234.5")
+        assert ui._last_flush_time == float("-inf")
