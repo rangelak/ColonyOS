@@ -61,11 +61,11 @@
   - [x] 5.4 For implement phase: ensure the task outline note (`_format_task_outline_note`) and per-task result notes (`_format_implement_result_note`) flow through the new buffered `phase_note()` and get consolidated into one message
   - [x] 5.5 Verify that the existing `generate_plain_summary()` call at completion (cli.py L3714-3730) still works correctly with the new SlackUI
 
-- [ ] 6.0 End-to-end testing and message count verification
+- [x] 6.0 End-to-end testing and message count verification
   depends_on: [4.0, 5.0]
-  - [ ] 6.1 Write an end-to-end test that simulates a full 7-phase pipeline run with SlackUI and counts total `chat_postMessage` calls — assert ≤7
-  - [ ] 6.2 Write a test for the fix-round scenario (thread-fix request) — verify fix rounds also use consolidated messages
-  - [ ] 6.3 Write a test for error scenarios — verify `phase_error()` always posts a new message, never gets hidden in an edit
-  - [ ] 6.4 Write a test for `chat_update` failure fallback — if edit fails, SlackUI falls back to posting a new message
-  - [ ] 6.5 Verify no regressions in existing `test_slack.py` and `test_slack_queue.py`
-  - [ ] 6.6 Manual smoke test: run `colonyos daemon slack watch` against a test Slack channel and verify thread has ≤7 messages with rich LLM content
+  - [x] 6.1 Write an end-to-end test that simulates a full 7-phase pipeline run with SlackUI and counts total `chat_postMessage` calls — assert ≤7
+  - [x] 6.2 Write a test for the fix-round scenario (thread-fix request) — verify fix rounds also use consolidated messages
+  - [x] 6.3 Write a test for error scenarios — verify `phase_error()` always posts a new message, never gets hidden in an edit
+  - [x] 6.4 Write a test for `chat_update` failure fallback — if edit fails, SlackUI falls back to posting a new message
+  - [x] 6.5 Verify no regressions in existing `test_slack.py` and `test_slack_queue.py`
+  - [x] 6.6 Manual smoke test: run `colonyos daemon slack watch` against a test Slack channel and verify thread has ≤7 messages with rich LLM content

@@ -2616,3 +2616,333 @@ class TestPipelinePhaseSummaryWiring:
         assert result is not None
         assert isinstance(result, str)
         assert len(result) > 0
+
+
+# ---------------------------------------------------------------------------
+# End-to-end message consolidation tests (Task 6.0)
+# ---------------------------------------------------------------------------
+
+
+class TestEndToEndMessageConsolidation:
+    """End-to-end tests verifying the full pipeline produces ≤7 messages.
+
+    Unlike TestPipelinePhaseSummaryWiring (which tests individual phase wiring),
+    these tests simulate a realistic full pipeline lifecycle using a single
+    SlackUI instance across all phases — matching real daemon behaviour.
+    """
+
+    def _make_ui(self, ts: str = "msg.001") -> tuple[SlackUI, MagicMock]:
+        client = _slack_client_with_ts(ts)
+        ui = SlackUI(client, "C_E2E", "thread.e2e")
+        return ui, client
+
+    # -- 6.1: Full 7-phase pipeline, single SlackUI, assert ≤7 postMessages --
+
+    def test_full_7_phase_pipeline_message_count(self) -> None:
+        """Simulate a complete 7-phase pipeline run through a single SlackUI
+        and verify total chat_postMessage calls ≤ 7 (one per phase)."""
+        ui, client = self._make_ui()
+
+        phases = ["plan", "implement", "review", "decision", "fix", "verify", "learn"]
+
+        for phase in phases:
+            ui.phase_header(phase, 5.0, "sonnet")
+            # Simulate typical notes each phase would produce
+            ui.phase_note(f"{phase} in progress…")
+            ui.phase_note(f"{phase} additional detail")
+            ui.phase_complete(1.0, 3, 15000)
+
+        # Each phase: exactly 1 postMessage (header). No extra messages.
+        assert client.chat_postMessage.call_count == 7
+        # All notes consolidated via chat_update — many updates, but no extra posts
+        assert client.chat_update.call_count > 0
+
+    def test_full_pipeline_with_rich_notes_stays_under_limit(self) -> None:
+        """Simulate a realistic pipeline with plan summary, implement task
+        progress, and review verdict — all via a single SlackUI."""
+        ui, client = self._make_ui()
+
+        # -- Plan phase --
+        ui.phase_header("plan", 5.0, "sonnet")
+        ui.phase_note("Adding retry logic to payment handler. 5 tasks.")
+        ui.phase_complete(1.5, 0, 45000)
+
+        # -- Implement phase with multiple task updates --
+        ui.phase_header("implement", 5.0, "sonnet")
+        ui.phase_note("Tasks: 1.0 Protocol, 2.0 Refactor, 3.0 Tests, 4.0 Fanout, 5.0 Wire")
+        for i in range(1, 6):
+            ui.phase_note(f"✓ Task {i}.0 complete")
+        ui.phase_complete(3.0, 5, 120000)
+
+        # -- Review phase --
+        ui.phase_header("review", 5.0, "sonnet")
+        ui.phase_note("Round 1: 2 approved, 1 requested changes")
+        ui.phase_note("Review passed. Minor: add jitter to backoff.")
+        ui.phase_complete(0.5, 0, 30000)
+
+        # -- Decision phase --
+        ui.phase_header("decision", 5.0, "sonnet")
+        ui.phase_note("Approved with minor suggestions")
+        ui.phase_complete(0.1, 0, 5000)
+
+        # -- Fix phase --
+        ui.phase_header("fix", 5.0, "sonnet")
+        ui.phase_note("Applying jitter suggestion")
+        ui.phase_complete(0.5, 1, 20000)
+
+        # -- Verify phase --
+        ui.phase_header("verify", 5.0, "sonnet")
+        ui.phase_note("All checks passed")
+        ui.phase_complete(0.1, 0, 10000)
+
+        # -- Learn phase --
+        ui.phase_header("learn", 5.0, "sonnet")
+        ui.phase_note("Extracted 2 lessons")
+        ui.phase_complete(0.1, 0, 5000)
+
+        # ≤7 total postMessages (one per phase header)
+        assert client.chat_postMessage.call_count == 7
+
+        # Many notes were posted but ALL via chat_update, not new messages
+        # 1 (plan) + 6 (implement: outline + 5 tasks) + 2 (review) + 1 (decision)
+        # + 1 (fix) + 1 (verify) + 1 (learn) = 13 notes
+        # + 7 phase_complete flushes = 20 chat_update calls
+        assert client.chat_update.call_count == 20
+
+    def test_notes_between_phases_do_not_leak(self) -> None:
+        """Verify note buffers reset between phases — content from an
+        earlier phase never appears in a later phase's message."""
+        ui, client = self._make_ui()
+
+        ui.phase_header("plan", 5.0, "sonnet")
+        ui.phase_note("plan-only content XYZ")
+        ui.phase_complete(1.0, 0, 10000)
+
+        ui.phase_header("implement", 5.0, "sonnet")
+        ui.phase_note("implement content ABC")
+        ui.phase_complete(1.0, 0, 10000)
+
+        # Get the final chat_update for implement phase (the last call)
+        final_update_text = client.chat_update.call_args[1]["text"]
+        assert "implement content ABC" in final_update_text
+        assert "plan-only content XYZ" not in final_update_text
+
+    # -- 6.2: Fix-round scenario (thread-fix request) --
+
+    def test_fix_round_uses_consolidated_messages(self) -> None:
+        """When a user requests a fix in the thread, the fix round should
+        also use consolidated messages — one message per phase, not many."""
+        ui, client = self._make_ui()
+
+        # Initial pipeline run (abbreviated: plan + implement + review)
+        for phase in ("plan", "implement", "review"):
+            ui.phase_header(phase, 5.0, "sonnet")
+            ui.phase_note(f"{phase} note")
+            ui.phase_complete(1.0, 0, 10000)
+
+        initial_post_count = client.chat_postMessage.call_count
+        assert initial_post_count == 3
+
+        # Fix round triggered by user thread reply
+        ui.phase_header("fix", 5.0, "sonnet")
+        ui.phase_note("Fixing: applying user-requested change")
+        ui.phase_note("✓ Fix task 1 done")
+        ui.phase_note("✓ Fix task 2 done")
+        ui.phase_complete(0.8, 2, 25000)
+
+        # Fix round adds exactly 1 more postMessage (phase_header)
+        assert client.chat_postMessage.call_count == initial_post_count + 1
+
+        # All fix notes are edits, not new messages
+        fix_final_text = client.chat_update.call_args[1]["text"]
+        assert "Fix task 1 done" in fix_final_text
+        assert "Fix task 2 done" in fix_final_text
+        assert "Fixes applied" in fix_final_text
+
+    def test_multiple_fix_rounds_each_get_one_message(self) -> None:
+        """Multiple consecutive fix rounds each get exactly one postMessage."""
+        ui, client = self._make_ui()
+
+        # Initial phases
+        for phase in ("plan", "implement", "review", "decision"):
+            ui.phase_header(phase, 5.0, "sonnet")
+            ui.phase_complete(1.0, 0, 10000)
+
+        assert client.chat_postMessage.call_count == 4
+
+        # Two fix rounds
+        for round_num in range(1, 3):
+            ui.phase_header("fix", 5.0, "sonnet")
+            ui.phase_note(f"Fix round {round_num}: applying changes")
+            ui.phase_complete(0.5, 1, 10000)
+
+            ui.phase_header("verify", 5.0, "sonnet")
+            ui.phase_note(f"Verify round {round_num}: checks passed")
+            ui.phase_complete(0.1, 0, 5000)
+
+        # 4 initial + 2 fix headers + 2 verify headers = 8
+        assert client.chat_postMessage.call_count == 8
+        # Still just one postMessage per phase entry — consolidated
+
+    # -- 6.3: Error scenarios --
+
+    def test_phase_error_always_posts_new_message_never_hidden(self) -> None:
+        """phase_error must always post a NEW message in the thread so
+        errors are immediately visible — never hidden inside an edit."""
+        ui, client = self._make_ui()
+
+        ui.phase_header("implement", 5.0, "sonnet")
+        ui.phase_note("Task 1 done")
+        ui.phase_note("Task 2 done")
+
+        # Error occurs mid-phase
+        ui.phase_error("Agent crashed with OOM")
+
+        # 1 postMessage (header) + 1 postMessage (error) = 2
+        assert client.chat_postMessage.call_count == 2
+
+        # The error message is a separate postMessage, not a chat_update
+        error_call = client.chat_postMessage.call_args_list[1]
+        error_text = error_call[1]["text"]
+        assert ":x:" in error_text
+        # Error details must NOT be echoed (security)
+        assert "OOM" not in error_text
+        assert "crashed" not in error_text
+
+    def test_error_after_multiple_phases_stays_visible(self) -> None:
+        """An error in a later phase should still get its own message,
+        not be collapsed into a previous phase's edit."""
+        ui, client = self._make_ui()
+
+        # Successful phases
+        ui.phase_header("plan", 5.0, "sonnet")
+        ui.phase_note("Plan summary")
+        ui.phase_complete(1.0, 0, 10000)
+
+        ui.phase_header("implement", 5.0, "sonnet")
+        ui.phase_note("Task 1 done")
+        ui.phase_complete(1.0, 0, 10000)
+
+        # Error during review
+        ui.phase_header("review", 5.0, "sonnet")
+        ui.phase_error("timeout exceeded")
+
+        # 3 headers + 1 error = 4 postMessages
+        assert client.chat_postMessage.call_count == 4
+        error_text = client.chat_postMessage.call_args[1]["text"]
+        assert ":x:" in error_text
+        assert "timeout" not in error_text
+
+    def test_error_message_does_not_echo_error_details(self) -> None:
+        """Verify that error messages never echo raw error text to Slack,
+        regardless of how sensitive the error content is."""
+        ui, client = self._make_ui()
+
+        ui.phase_header("implement", 5.0, "sonnet")
+        sensitive_errors = [
+            "sk-ant-api03-SECRET_KEY_HERE",
+            "ConnectionError: https://internal.corp/api",
+            "-----BEGIN RSA PRIVATE KEY-----",
+        ]
+        for err in sensitive_errors:
+            client.chat_postMessage.reset_mock()
+            ui.phase_error(err)
+            error_text = client.chat_postMessage.call_args[1]["text"]
+            assert err not in error_text
+
+    # -- 6.4: chat_update failure fallback --
+
+    def test_chat_update_failure_falls_back_to_new_message(self) -> None:
+        """When chat_update fails (e.g., message deleted), SlackUI should
+        fall back to posting a new message and update _current_msg_ts."""
+        ui, client = self._make_ui("hdr.100")
+        ui.phase_header("implement", 5.0, "sonnet")
+
+        # Make chat_update fail
+        client.chat_update.side_effect = Exception("message_not_found")
+        client.chat_postMessage.return_value = {"ok": True, "ts": "fallback.100"}
+
+        ui.phase_note("Task 1 done")
+
+        # Fell back to postMessage (1 header + 1 fallback)
+        assert client.chat_postMessage.call_count == 2
+        fallback_text = client.chat_postMessage.call_args[1]["text"]
+        assert "Task 1 done" in fallback_text
+
+    def test_chat_update_failure_recovers_for_subsequent_notes(self) -> None:
+        """After a fallback, subsequent phase_note calls should use the
+        new message ts for chat_update."""
+        ui, client = self._make_ui("hdr.200")
+        ui.phase_header("implement", 5.0, "sonnet")
+
+        # First update fails — triggers fallback
+        client.chat_update.side_effect = Exception("message_not_found")
+        client.chat_postMessage.return_value = {"ok": True, "ts": "fallback.200"}
+        ui.phase_note("Task 1 done")
+
+        # Now fix chat_update so it works again
+        client.chat_update.side_effect = None
+        client.chat_update.return_value = {"ok": True, "ts": "fallback.200"}
+        ui.phase_note("Task 2 done")
+
+        # The second note should have used chat_update on the fallback ts
+        last_update = client.chat_update.call_args
+        assert last_update is not None
+        assert last_update[1]["ts"] == "fallback.200"
+        assert "Task 2 done" in last_update[1]["text"]
+
+    def test_chat_update_failure_during_phase_complete(self) -> None:
+        """If chat_update fails during phase_complete, the completion
+        message should still be posted via fallback."""
+        ui, client = self._make_ui("hdr.300")
+        ui.phase_header("implement", 5.0, "sonnet")
+        ui.phase_note("Task 1 done")
+
+        # Make chat_update fail for the phase_complete flush
+        client.chat_update.side_effect = Exception("channel_not_found")
+        client.chat_postMessage.return_value = {"ok": True, "ts": "fallback.300"}
+
+        ui.phase_complete(1.0, 1, 10000)
+
+        # phase_complete should have fallen back to postMessage
+        fallback_text = client.chat_postMessage.call_args[1]["text"]
+        assert "Code is written" in fallback_text
+
+    # -- 6.5: Regression guards --
+
+    def test_fanout_e2e_full_pipeline(self) -> None:
+        """FanoutSlackUI across 2 targets through a full pipeline — each
+        target should independently get ≤7 postMessages."""
+        client_a = _slack_client_with_ts("a.001")
+        client_b = _slack_client_with_ts("b.001")
+        ui_a = SlackUI(client_a, "C_A", "thread.a")
+        ui_b = SlackUI(client_b, "C_B", "thread.b")
+        fanout = FanoutSlackUI(ui_a, ui_b)
+
+        phases = ["plan", "implement", "review", "decision", "fix", "verify", "learn"]
+        for phase in phases:
+            fanout.phase_header(phase, 5.0, "sonnet")
+            fanout.phase_note(f"{phase} progress")
+            fanout.phase_complete(1.0, 0, 10000)
+
+        assert client_a.chat_postMessage.call_count == 7
+        assert client_b.chat_postMessage.call_count == 7
+        # Both targets should have the same number of chat_update calls
+        assert client_a.chat_update.call_count == client_b.chat_update.call_count
+
+    def test_fanout_error_during_e2e_still_visible_on_all_targets(self) -> None:
+        """If an error occurs during a fanout pipeline run, ALL targets
+        should get the error as a new message."""
+        client_a = _slack_client_with_ts("a.002")
+        client_b = _slack_client_with_ts("b.002")
+        ui_a = SlackUI(client_a, "C_A", "thread.a")
+        ui_b = SlackUI(client_b, "C_B", "thread.b")
+        fanout = FanoutSlackUI(ui_a, ui_b)
+
+        fanout.phase_header("implement", 5.0, "sonnet")
+        fanout.phase_note("Task 1 done")
+        fanout.phase_error("agent timeout")
+
+        # Each target: 1 header + 1 error = 2 postMessages
+        assert client_a.chat_postMessage.call_count == 2
+        assert client_b.chat_postMessage.call_count == 2
