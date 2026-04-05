@@ -1,5 +1,18 @@
 # Changelog
 
+## 20260406_060000 — Slack Thread Message Consolidation
+
+Consolidates Slack thread output from ~50 messages per pipeline run to ~5 messages by using `chat_update` to edit messages in-place, posting LLM-generated phase summaries, and collapsing per-task progress into a single updating message. Errors always get their own message for visibility.
+
+**Key files modified:**
+- `src/colonyos/slack.py` — Added `chat_update` to SlackClient protocol; refactored `SlackUI` to edit-in-place with one message per phase; added `FanoutSlackUI.flush()`; added `generate_phase_summary()` for concise LLM summaries
+- `src/colonyos/orchestrator.py` — Wired phase summaries into pipeline execution flow
+- `src/colonyos/sanitize.py` — Added outbound secret sanitization patterns (`sk-ant-`, PEM headers, GCP fragments) with 3,000-char ceiling
+- `tests/test_slack_consolidation.py` — End-to-end tests for message consolidation behavior
+
+**PRD:** `cOS_prds/20260405_233459_prd_when_you_run_the_daemon_slack_watch_when_you_finish_a_feature_you_should_update.md`
+**Tasks:** `cOS_tasks/20260405_233459_tasks_when_you_run_the_daemon_slack_watch_when_you_finish_a_feature_you_should_update.md`
+
 ## v0.4.6 — Plain-Language Slack Summaries, CI Fix, Lint Fix
 
 ### Highlights
