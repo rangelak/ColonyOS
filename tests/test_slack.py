@@ -571,7 +571,7 @@ class TestSlackUI:
         call_kwargs = client.chat_postMessage.call_args[1]
         assert call_kwargs["channel"] == "C123"
         assert call_kwargs["thread_ts"] == "1234.5"
-        assert "implement" in call_kwargs["text"]
+        assert "Writing the code" in call_kwargs["text"]
 
     def test_phase_complete_posts_message(self) -> None:
         client = _slack_client_mock()
@@ -579,8 +579,7 @@ class TestSlackUI:
         ui.phase_header("implement", 5.0, "sonnet")
         ui.phase_complete(1.5, 10, 30000)
         call_kwargs = client.chat_postMessage.call_args[1]
-        assert "implement" in call_kwargs["text"]
-        assert "completed" in call_kwargs["text"]
+        assert "Code is written" in call_kwargs["text"]
 
     def test_phase_error_posts_generic_message(self) -> None:
         client = _slack_client_mock()
@@ -590,8 +589,8 @@ class TestSlackUI:
         call_kwargs = client.chat_postMessage.call_args[1]
         # Error details must NOT be echoed to Slack (security)
         assert "something broke" not in call_kwargs["text"]
-        assert "review" in call_kwargs["text"]
-        assert "Check server logs" in call_kwargs["text"]
+        assert "review" in call_kwargs["text"].lower()
+        assert "Looking into it" in call_kwargs["text"]
 
     def test_phase_note_posts_message(self) -> None:
         client = _slack_client_mock()
@@ -940,7 +939,7 @@ class TestSlackUIErrorSanitization:
         # Internal path/details must NOT appear in the posted message
         assert "/home/user" not in call_kwargs["text"]
         assert "permission denied" not in call_kwargs["text"]
-        assert "Check server logs" in call_kwargs["text"]
+        assert "Looking into it" in call_kwargs["text"]
 
 
 # ---------------------------------------------------------------------------

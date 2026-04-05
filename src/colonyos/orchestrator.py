@@ -5025,20 +5025,18 @@ def _run_pipeline(
                             total_rounds=config.max_fix_iterations + 1,
                         )
                         review_header_ui.slack_note(review_note)  # type: ignore[union-attr]
-                        # Post a haiku summarising the review findings
+                        # Post a plain-language summary of review findings
                         try:
-                            from colonyos.slack import generate_haiku
+                            from colonyos.slack import generate_plain_summary
 
-                            review_haiku = generate_haiku(
+                            review_plain = generate_plain_summary(
                                 review_note,
                                 repo_root=repo_root,
                             )
-                            if review_haiku:
-                                review_header_ui.slack_note(  # type: ignore[union-attr]
-                                    f"_{review_haiku}_"
-                                )
+                            if review_plain:
+                                review_header_ui.slack_note(review_plain)  # type: ignore[union-attr]
                         except Exception:
-                            pass  # haiku is decorative
+                            pass  # summary is best-effort
 
                     last_findings = _collect_review_findings(results, reviewers)
 

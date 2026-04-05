@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Protocol, runtime_checkable
 
 from colonyos.config import LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS, SlackConfig, load_config, runs_dir_path
 from colonyos.models import extract_result_text
@@ -312,13 +312,15 @@ def format_run_summary(
     summary: str | None = None,
     phase_breakdown: list[str] | None = None,
     demand_count: int = 1,
-    haiku: str | None = None,
+    plain_summary: str | None = None,
 ) -> str:
     """Format the final run summary for a Slack thread."""
     parts: list[str] = []
     icon = ":white_check_mark:" if status == "completed" else ":x:"
     parts.append(f"{icon} *Pipeline {status}*")
-    if summary:
+    if plain_summary:
+        parts.append(plain_summary)
+    elif summary:
         parts.append(summary)
     parts.append(f"Total cost: ${total_cost:.4f}")
     if demand_count > 1:
@@ -330,9 +332,6 @@ def format_run_summary(
     if phase_breakdown:
         parts.append("*Phase breakdown*")
         parts.extend(phase_breakdown)
-    if haiku:
-        parts.append("")
-        parts.append(f"_{haiku}_")
     return "\n".join(parts)
 
 
@@ -509,7 +508,7 @@ def post_run_summary(
     summary: str | None = None,
     phase_breakdown: list[str] | None = None,
     demand_count: int = 1,
-    haiku: str | None = None,
+    plain_summary: str | None = None,
 ) -> None:
     """Post the final run summary as a threaded reply."""
     post_message(
@@ -523,7 +522,7 @@ def post_run_summary(
             summary,
             phase_breakdown,
             demand_count,
-            haiku=haiku,
+            plain_summary=plain_summary,
         ),
         thread_ts=thread_ts,
     )
@@ -636,6 +635,18 @@ class SlackUI:
         self._thread_ts = thread_ts
         self._current_phase: str | None = None
 
+    # Map internal phase names to friendly labels for Slack
+    _PHASE_LABELS: ClassVar[dict[str, tuple[str, str]]] = {
+        # phase_name: (starting_label, completed_label)
+        "plan": (":memo: Working on the plan", ":memo: Plan is ready"),
+        "implement": (":hammer_and_wrench: Writing the code", ":hammer_and_wrench: Code is written"),
+        "review": (":mag: Reviewing the changes", ":mag: Review is done"),
+        "decision": (":scales: Making the final call", ":scales: Decision made"),
+        "fix": (":wrench: Fixing issues from review", ":wrench: Fixes applied"),
+        "verify": (":white_check_mark: Running final checks", ":white_check_mark: Checks passed"),
+        "learn": (":bulb: Extracting lessons learned", ":bulb: Lessons recorded"),
+    }
+
     def phase_header(
         self,
         phase_name: str,
@@ -644,7 +655,8 @@ class SlackUI:
         extra: str = "",
     ) -> None:
         self._current_phase = phase_name
-        msg = f":gear: Starting *{phase_name}* phase (${budget:.2f} budget, {model})"
+        label, _ = self._PHASE_LABELS.get(phase_name, (f":gear: Starting *{phase_name}*", ""))
+        msg = label
         if extra:
             msg += f" — {extra}"
         self._client.chat_postMessage(
@@ -656,20 +668,29 @@ class SlackUI:
     def phase_complete(self, cost: float, turns: int, duration_ms: int) -> None:
         secs = duration_ms // 1000
         phase_name = self._current_phase or "Phase"
+        _, label = self._PHASE_LABELS.get(
+            phase_name, ("", f":white_check_mark: *{phase_name}* done"),
+        )
         self._client.chat_postMessage(
             channel=self._channel,
             thread_ts=self._thread_ts,
-            text=f":white_check_mark: *{phase_name}* completed — ${cost:.2f}, {turns} turns, {secs}s",
+            text=f"{label} ({secs}s)",
         )
 
     def phase_error(self, error: str) -> None:
         """Post a generic error message — internal details are logged, not posted."""
         logger.error("SlackUI phase error: %s", error)
         phase_name = self._current_phase or "Phase"
+        label = {
+            "plan": "Ran into a problem while planning",
+            "implement": "Ran into a problem while writing code",
+            "review": "Ran into a problem during review",
+            "fix": "Ran into a problem applying fixes",
+        }.get(phase_name, f"*{phase_name}* ran into a problem")
         self._client.chat_postMessage(
             channel=self._channel,
             thread_ts=self._thread_ts,
-            text=f":x: *{phase_name}* failed. Check server logs for details.",
+            text=f":x: {label}. Looking into it.",
         )
 
     def phase_note(self, text: str) -> None:
@@ -1020,15 +1041,19 @@ def _parse_triage_response(raw_text: str) -> TriageResult:
     )
 
 
-def generate_haiku(
+def generate_plain_summary(
     context: str,
     *,
     repo_root: Path | None = None,
 ) -> str | None:
-    """Generate a haiku (5-7-5) summarising *context* for non-technical readers.
+    """Generate a plain-language summary of pipeline activity for non-technical readers.
+
+    Takes raw technical context (phase results, costs, verdicts, etc.) and
+    produces 1-3 sentences that a sales person or executive would enjoy reading.
+    Written in first person like a personal employee reporting back to the boss.
 
     Uses a cheap LLM call (Haiku model, no tools, tiny budget).
-    Returns ``None`` on any failure — haiku is decorative and must never
+    Returns ``None`` on any failure — summaries are best-effort and must never
     block the pipeline or prevent notifications from posting.
     """
     from colonyos.agent import run_phase_sync
@@ -1037,16 +1062,22 @@ def generate_haiku(
     cwd = repo_root if repo_root is not None else Path.cwd()
 
     system = (
-        "You are a haiku poet for a software engineering team's Slack channel. "
-        "Your audience includes non-technical people (sales, marketing, leadership). "
-        "Given a context block describing what just happened in a coding pipeline, "
-        "write exactly ONE haiku (three lines: 5 syllables / 7 syllables / 5 syllables) "
-        "that captures the essence of the work in plain, joyful language anyone can understand. "
-        "Do NOT use jargon like 'refactor', 'lint', 'CI', 'merge', 'PR', 'deploy'. "
-        "Use metaphors from nature, craft, or everyday life. "
-        "Output ONLY the three lines of the haiku, nothing else."
+        "You are a helpful engineering assistant reporting progress to your team's "
+        "Slack channel. Your audience includes non-technical people — sales reps, "
+        "marketing, leadership — who want to know what actually changed and why "
+        "it matters. Write like a friendly colleague giving a quick status update.\n\n"
+        "Rules:\n"
+        "- Write 1-3 short sentences in first person (\"I implemented...\", \"I fixed...\").\n"
+        "- Describe WHAT was done in plain language anyone can understand.\n"
+        "- Focus on the business impact or user-visible change, not technical details.\n"
+        "- NEVER use jargon like refactor, lint, CI, merge conflict, PR, deploy, "
+        "pipeline, phase, basedpyright, ruff, etc.\n"
+        "- If something failed, say what went wrong in simple terms.\n"
+        "- If a review found issues, describe them in plain language.\n"
+        "- Keep it warm and professional — like reporting to your boss.\n"
+        "- Output ONLY the summary text, no headers or formatting."
     )
-    user = f"Context:\n{context[:1000]}"
+    user = f"Here's what happened:\n{context[:2000]}"
 
     try:
         result = run_phase_sync(
@@ -1055,20 +1086,14 @@ def generate_haiku(
             cwd=cwd,
             system_prompt=system,
             model="haiku",
-            budget_usd=0.01,
+            budget_usd=0.02,
             allowed_tools=[],
             timeout_seconds=30,
         )
         text = extract_result_text(result.artifacts).strip()
-        if not text:
-            return None
-        # Collapse to a single line separated by " / " for compact Slack display
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        if lines:
-            return " / ".join(lines[:3])
-        return None
+        return text if text else None
     except Exception:
-        logger.debug("Haiku generation failed", exc_info=True)
+        logger.debug("Plain summary generation failed", exc_info=True)
         return None
 
 
