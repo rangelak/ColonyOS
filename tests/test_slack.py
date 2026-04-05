@@ -32,6 +32,7 @@ from colonyos.slack import (
     extract_base_branch,
     extract_prompt_from_mention,
     extract_prompt_text,
+    generate_phase_summary,
     has_bot_mention,
     extract_raw_from_formatted_prompt,
     format_daily_summary,
@@ -2256,3 +2257,90 @@ class TestThreadFixTemplateDefensiveInstructions:
         assert "user-supplied input" in content
         # Both sections should have the note
         assert content.count("Security note") >= 2
+
+
+class TestGeneratePhaseSummary:
+    """Tests for generate_phase_summary() — concise LLM summaries for Slack."""
+
+    def test_plan_summary_returns_string_under_280_chars(self, tmp_path: Path) -> None:
+        """A successful LLM call should return a sanitized string ≤280 chars."""
+        fake_result = MagicMock()
+        fake_result.artifacts = {"result": "Modifying 3 files to add retry logic. 5 tasks total."}
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result):
+            result = generate_phase_summary("plan", "some plan context", repo_root=tmp_path)
+        assert isinstance(result, str)
+        assert len(result) <= 280
+        assert "retry" in result.lower()
+
+    def test_review_summary_returns_string_under_280_chars(self, tmp_path: Path) -> None:
+        """Review phase summary should capture verdict info."""
+        fake_result = MagicMock()
+        fake_result.artifacts = {"result": "Approved. Minor nit: add docstring to helper."}
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result):
+            result = generate_phase_summary("review", "review output here", repo_root=tmp_path)
+        assert isinstance(result, str)
+        assert len(result) <= 280
+
+    def test_empty_context_returns_fallback(self, tmp_path: Path) -> None:
+        """Empty LLM response should fall back to deterministic string."""
+        fake_result = MagicMock()
+        fake_result.artifacts = {"result": ""}
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result):
+            result = generate_phase_summary("plan", "", repo_root=tmp_path)
+        assert result == "Plan is ready."
+
+    def test_llm_failure_returns_fallback(self, tmp_path: Path) -> None:
+        """LLM exception should return fallback, not raise."""
+        with patch("colonyos.agent.run_phase_sync", side_effect=RuntimeError("LLM down")):
+            result = generate_phase_summary("plan", "some context", repo_root=tmp_path)
+        assert result == "Plan is ready."
+
+    def test_review_fallback_on_failure(self, tmp_path: Path) -> None:
+        """Review phase fallback should be 'Review complete.'."""
+        with patch("colonyos.agent.run_phase_sync", side_effect=TimeoutError("timeout")):
+            result = generate_phase_summary("review", "some context", repo_root=tmp_path)
+        assert result == "Review complete."
+
+    def test_unknown_phase_returns_generic_fallback(self, tmp_path: Path) -> None:
+        """Unknown phase names should return a generic fallback without calling LLM."""
+        result = generate_phase_summary("unknown_phase", "context", repo_root=tmp_path)
+        # sanitize_for_slack escapes underscores, so check the core content
+        assert "complete." in result
+
+    def test_uses_haiku_model(self, tmp_path: Path) -> None:
+        """Phase summaries should use the cheap Haiku model."""
+        fake_result = MagicMock()
+        fake_result.artifacts = {"result": "Summary text."}
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result) as mock_run:
+            generate_phase_summary("plan", "context", repo_root=tmp_path)
+        call_kwargs = mock_run.call_args
+        assert call_kwargs.kwargs["model"] == "haiku"
+
+    def test_sanitizes_secrets_in_output(self, tmp_path: Path) -> None:
+        """Secrets in LLM output must be redacted before returning."""
+        fake_result = MagicMock()
+        fake_result.artifacts = {"result": "Modified auth using key sk-ant-api03-SECRETKEY123"}
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result):
+            result = generate_phase_summary("plan", "context", repo_root=tmp_path)
+        assert "sk-ant-api03" not in result
+        assert "[REDACTED]" in result
+
+    def test_truncates_long_llm_output(self, tmp_path: Path) -> None:
+        """LLM output exceeding 280 chars should be truncated."""
+        long_text = "A" * 500
+        fake_result = MagicMock()
+        fake_result.artifacts = {"result": long_text}
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result):
+            result = generate_phase_summary("plan", "context", repo_root=tmp_path)
+        assert len(result) <= 280
+
+    def test_context_truncated_to_2000_chars(self, tmp_path: Path) -> None:
+        """Input context passed to LLM should be capped at 2000 chars."""
+        big_context = "x" * 5000
+        fake_result = MagicMock()
+        fake_result.artifacts = {"result": "Summary."}
+        with patch("colonyos.agent.run_phase_sync", return_value=fake_result) as mock_run:
+            generate_phase_summary("plan", big_context, repo_root=tmp_path)
+        user_prompt = mock_run.call_args.args[1]
+        # The context portion should be capped at 2000 chars
+        assert len(user_prompt) <= 2500  # prompt instruction + 2000 chars context

@@ -40,12 +40,12 @@
   - [x] 2.6 Keep `phase_error()` posting a NEW message (never edit) so errors are always visible
   - [x] 2.7 Add a `_flush_buffer()` helper that composes the phase header + accumulated notes + optional completion into a single message body, calls `chat_update`, and handles failures (fall back to `chat_postMessage` if update fails)
 
-- [ ] 3.0 Generate concise LLM summaries for plan and review phases
+- [x] 3.0 Generate concise LLM summaries for plan and review phases
   depends_on: [1.0]
-  - [ ] 3.1 Write tests for `generate_phase_summary(phase_name, context, repo_root)` — verify it returns ≤280 chars, handles empty context, falls back to deterministic summary on LLM failure
-  - [ ] 3.2 Implement `generate_phase_summary()` in `slack.py` — reuse the `generate_plain_summary()` pattern (L1044+) with a tighter prompt: "Summarize this {phase} output for a Slack notification in under 280 characters. Be specific about what changed."
-  - [ ] 3.3 Use a cheap model (Haiku-class) for phase summaries to keep cost negligible (~$0.001 per call)
-  - [ ] 3.4 Apply `sanitize_outbound_slack()` to all generated summaries before posting
+  - [x] 3.1 Write tests for `generate_phase_summary(phase_name, context, repo_root)` — verify it returns ≤280 chars, handles empty context, falls back to deterministic summary on LLM failure
+  - [x] 3.2 Implement `generate_phase_summary()` in `slack.py` — reuse the `generate_plain_summary()` pattern (L1044+) with a tighter prompt: "Summarize this {phase} output for a Slack notification in under 280 characters. Be specific about what changed."
+  - [x] 3.3 Use a cheap model (Haiku-class) for phase summaries to keep cost negligible (~$0.001 per call)
+  - [x] 3.4 Apply `sanitize_outbound_slack()` to all generated summaries before posting
 
 - [ ] 4.0 Update FanoutSlackUI for edit-in-place pattern
   depends_on: [2.0]

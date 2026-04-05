@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Protocol, runtime_che
 
 from colonyos.config import LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS, SlackConfig, load_config, runs_dir_path
 from colonyos.models import extract_result_text
-from colonyos.sanitize import sanitize_untrusted_content, strip_slack_links
+from colonyos.sanitize import sanitize_outbound_slack, sanitize_untrusted_content, strip_slack_links
 
 if TYPE_CHECKING:
     from colonyos.models import QueueItem
@@ -1096,6 +1096,79 @@ def _parse_triage_response(raw_text: str) -> TriageResult:
         base_branch=raw_branch,
         reasoning=str(data.get("reasoning", "")),
     )
+
+
+_PHASE_SUMMARY_PROMPTS: dict[str, str] = {
+    "plan": (
+        "Summarize this plan for a Slack notification in under 280 characters. "
+        "Say what files/components will change and how many implementation tasks there are. "
+        "Be specific. Output ONLY the summary text."
+    ),
+    "review": (
+        "Summarize this code review for a Slack notification in under 280 characters. "
+        "State the verdict (approved / changes requested) and the single most important finding. "
+        "Be specific. Output ONLY the summary text."
+    ),
+}
+
+_PHASE_SUMMARY_FALLBACKS: dict[str, str] = {
+    "plan": "Plan is ready.",
+    "review": "Review complete.",
+}
+
+
+def generate_phase_summary(
+    phase_name: str,
+    context: str,
+    *,
+    repo_root: Path | None = None,
+) -> str:
+    """Generate a concise ≤280-char summary of a phase for Slack.
+
+    Uses a cheap Haiku-class LLM call to produce a human-readable summary
+    of the plan or review phase output.  On any failure (timeout, empty
+    response, LLM error) falls back to a short deterministic string so
+    callers always get a usable result.
+
+    The returned text is already sanitized for outbound Slack posting
+    (secrets redacted, length capped, mrkdwn-safe).
+    """
+    from colonyos.agent import run_phase_sync
+    from colonyos.models import Phase, extract_result_text
+
+    cwd = repo_root if repo_root is not None else Path.cwd()
+    fallback = _PHASE_SUMMARY_FALLBACKS.get(phase_name, f"{phase_name.title()} complete.")
+
+    prompt_instruction = _PHASE_SUMMARY_PROMPTS.get(phase_name)
+    if prompt_instruction is None:
+        return sanitize_outbound_slack(fallback, max_chars=280)
+
+    system = (
+        "You are a concise engineering assistant writing Slack notifications. "
+        "Respond in under 280 characters. No headers, no markdown formatting, "
+        "no bullet points — just a plain-text sentence or two."
+    )
+    user = f"{prompt_instruction}\n\n{context[:2000]}"
+
+    try:
+        result = run_phase_sync(
+            Phase.TRIAGE,
+            user,
+            cwd=cwd,
+            system_prompt=system,
+            model="haiku",
+            budget_usd=0.02,
+            allowed_tools=[],
+            timeout_seconds=30,
+        )
+        text = extract_result_text(result.artifacts).strip()
+        if not text:
+            return sanitize_outbound_slack(fallback, max_chars=280)
+        # Enforce the 280-char target via outbound sanitization
+        return sanitize_outbound_slack(text, max_chars=280)
+    except Exception:
+        logger.debug("Phase summary generation failed for %s", phase_name, exc_info=True)
+        return sanitize_outbound_slack(fallback, max_chars=280)
 
 
 def generate_plain_summary(
