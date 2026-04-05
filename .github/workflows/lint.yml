@@ -33,8 +33,7 @@ jobs:
 
       - name: Install dev dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          uv sync --all-extras
 
       - name: Run lint hooks on changed files
         env:
@@ -55,4 +54,4 @@ jobs:
           fi
 
           printf 'Linting %s changed files\n' "${#files[@]}"
-          pre-commit run --show-diff-on-failure --files "${files[@]}"
+          uv run pre-commit run --show-diff-on-failure --files "${files[@]}"
