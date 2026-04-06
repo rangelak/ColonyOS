@@ -30,15 +30,15 @@
   - [x] 2.2 In `src/colonyos/instructions/implement_parallel.md`, add a dependency installation rule to the Rules section: "If your task requires a new dependency, add it to the manifest file and run the install command. Do not add dependencies unrelated to task {task_id}."
   - [x] 2.3 Run the full test suite to confirm no regressions
 
-- [ ] 3.0 Update fix-phase instruction templates
+- [x] 3.0 Update fix-phase instruction templates
   depends_on: [1.0]
-  - [ ] 3.1 In `src/colonyos/instructions/fix.md`, replace "Do not introduce new dependencies unless absolutely necessary to resolve a finding" (line 56) with: "If resolving a finding requires a new dependency or if existing dependencies are not installed, add it to the manifest file and run the install command. Do not add dependencies unrelated to the review findings."
-  - [ ] 3.2 In `src/colonyos/instructions/fix_standalone.md`, apply the same replacement (line 53)
-  - [ ] 3.3 In `src/colonyos/instructions/ci_fix.md`, replace the dependency line (line 55) with: "If resolving a CI failure requires installing dependencies (e.g., missing modules), run the project's install command. If a new dependency is genuinely needed, add it to the manifest file first. Do not add dependencies unrelated to the CI failure."
-  - [ ] 3.4 In `src/colonyos/instructions/verify_fix.md`, replace the dependency line (line 68) with: "If fixing a failure requires installing missing dependencies, run the project's install command. Do not add new dependencies unless the fix genuinely requires one."
-  - [ ] 3.5 In `src/colonyos/instructions/thread_fix.md`, replace the dependency line (line 71) with: "If the fix request requires a new dependency, add it to the manifest file and run the install command. Do not add dependencies unrelated to the fix request."
-  - [ ] 3.6 In `src/colonyos/instructions/thread_fix_pr_review.md`, apply the same replacement pattern (line 76)
-  - [ ] 3.7 Run the full test suite to confirm no regressions
+  - [x] 3.1 In `src/colonyos/instructions/fix.md`, replace "Do not introduce new dependencies unless absolutely necessary to resolve a finding" (line 56) with: "If resolving a finding requires a new dependency or if existing dependencies are not installed, add it to the manifest file and run the install command. Do not add dependencies unrelated to the review findings."
+  - [x] 3.2 In `src/colonyos/instructions/fix_standalone.md`, apply the same replacement (line 53)
+  - [x] 3.3 In `src/colonyos/instructions/ci_fix.md`, replace the dependency line (line 55) with: "If resolving a CI failure requires installing dependencies (e.g., missing modules), run the project's install command. If a new dependency is genuinely needed, add it to the manifest file first. Do not add dependencies unrelated to the CI failure."
+  - [x] 3.4 In `src/colonyos/instructions/verify_fix.md`, replace the dependency line (line 68) with: "If fixing a failure requires installing missing dependencies, run the project's install command. Do not add new dependencies unless the fix genuinely requires one."
+  - [x] 3.5 In `src/colonyos/instructions/thread_fix.md`, replace the dependency line (line 71) with: "If the fix request requires a new dependency, add it to the manifest file and run the install command. Do not add dependencies unrelated to the fix request."
+  - [x] 3.6 In `src/colonyos/instructions/thread_fix_pr_review.md`, apply the same replacement pattern (line 76)
+  - [x] 3.7 Run the full test suite to confirm no regressions
 
 - [ ] 4.0 Update recovery and review instructions
   depends_on: [1.0]

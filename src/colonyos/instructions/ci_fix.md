@@ -52,4 +52,4 @@ Commit all fixes on branch `{branch_name}` with a clear commit message describin
 - Make incremental commits on the existing branch (do not create a new branch)
 - Follow existing code conventions exactly
 - Every fix must maintain or improve existing test coverage
-- Do not introduce new dependencies unless absolutely necessary to resolve a CI failure
+- If resolving a CI failure requires installing dependencies (e.g., missing modules), run the project's install command. If a new dependency is genuinely needed, add it to the manifest file first. Do not add dependencies unrelated to the CI failure.

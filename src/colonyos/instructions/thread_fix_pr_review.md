@@ -73,6 +73,6 @@ Do **NOT** push to the remote - the Deliver phase handles pushing.
 - Do NOT push commits - the Deliver phase is responsible for pushing
 - Follow existing code conventions exactly
 - Every fix must have corresponding test coverage
-- Do not introduce new dependencies unless absolutely necessary
+- If the fix request requires a new dependency, add it to the manifest file and run the install command. Do not add dependencies unrelated to the fix request.
 - Keep changes minimal and targeted
 - Do NOT use suppression comments (# type: ignore, # noqa, etc.) as fixes

@@ -53,4 +53,4 @@ Commit all fixes on branch `{branch_name}` with a clear commit message describin
 - Make incremental commits on the existing branch (do not create a new branch)
 - Follow existing code conventions exactly
 - Every fix must have corresponding test coverage
-- Do not introduce new dependencies unless absolutely necessary to resolve a finding
+- If resolving a finding requires a new dependency or if existing dependencies are not installed, add it to the manifest file and run the install command. Do not add dependencies unrelated to the review findings.
