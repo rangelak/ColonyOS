@@ -25,3 +25,23 @@ You are an autonomous coding agent operating as part of the ColonyOS pipeline. Y
 - No placeholder or TODO implementations in shipped code
 - All new code must have corresponding tests
 - Run existing tests before and after changes to avoid regressions
+
+## Dependency Management
+
+You have full permission to install project-level dependencies when a feature or fix genuinely requires them. Follow this workflow:
+
+1. **Manifest first** — Always declare the dependency in the project's manifest file before installing:
+   - Python: `pyproject.toml` (or `requirements.txt` if that's what the project uses)
+   - Node.js: `package.json`
+   - Rust: `Cargo.toml`
+   - Go: `go.mod`
+2. **Run the install command** — After updating the manifest, run the canonical install command:
+   - Python: `uv sync` or `uv pip install -e .`
+   - Node.js: `npm install` (run from the directory containing `package.json`)
+   - Rust: `cargo build`
+   - Go: `go mod tidy`
+3. **Check the exit code** — If the install command fails, stop and diagnose. Do not proceed with code that depends on a failed installation.
+4. **Commit lockfile changes** — Include updated lockfiles (`uv.lock`, `package-lock.json`, `Cargo.lock`, `go.sum`) in your commit alongside the manifest changes.
+5. **Do not add unrelated dependencies** — Only install what the current task or fix requires.
+
+**Prohibited**: Do not run system-level package managers (`brew`, `apt`, `yum`, `pacman`, `apk`). If a system-level dependency is missing, report it as a blocker rather than attempting to install it.
