@@ -106,6 +106,9 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
         If True, do not execute pipelines — just log what would run.
     verbose:
         Enable verbose logging.
+    fresh:
+        If True, discard persisted queue and daemon state on startup so the
+        daemon begins with a clean slate.
     """
 
     def __init__(
@@ -118,6 +121,7 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
         max_hours: float | None = None,
         dry_run: bool = False,
         verbose: bool = False,
+        fresh: bool = False,
     ) -> None:
         self.repo_root = repo_root
         self.config = config or load_config(repo_root)
@@ -134,6 +138,9 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
             else max_budget if max_budget is not None else self.daemon_config.daily_budget_usd
         )
         self.max_hours = max_hours
+
+        if fresh:
+            self._clear_persisted_state()
 
         # Shared mutable state — protected by _lock
         self._lock = threading.Lock()
@@ -2055,6 +2062,14 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
     # ------------------------------------------------------------------
     # State helpers
     # ------------------------------------------------------------------
+
+    def _clear_persisted_state(self) -> None:
+        """Remove queue.json and daemon_state.json so the daemon starts fresh."""
+        for name in ("queue.json", "daemon_state.json"):
+            path = self.repo_root / ".colonyos" / name
+            if path.exists():
+                path.unlink()
+                logger.info("Removed stale %s (--fresh)", name)
 
     def _persist_state(self) -> None:
         """Persist daemon state atomically."""
