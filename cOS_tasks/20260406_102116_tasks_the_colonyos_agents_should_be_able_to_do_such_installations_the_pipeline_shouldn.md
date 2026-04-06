@@ -46,9 +46,9 @@
   - [x] 4.2 In `src/colonyos/instructions/review.md`, expand "No unnecessary dependencies added" checklist item to: "No unnecessary dependencies added; any new dependencies are declared in manifest files with lockfile changes committed; no system-level packages installed"
   - [x] 4.3 Run the full test suite to confirm no regressions
 
-- [ ] 5.0 Final integration verification
+- [x] 5.0 Final integration verification
   depends_on: [2.0, 3.0, 4.0]
-  - [ ] 5.1 Run the full test suite (`pytest`) to confirm all tests pass
-  - [ ] 5.2 Run linter (`ruff check .`) and type checker (`basedpyright`) to confirm no issues
-  - [ ] 5.3 Verify all modified instruction files load correctly by checking `_load_instruction()` works for each modified template name
-  - [ ] 5.4 Review all changes for consistency — ensure the dependency guidance language is coherent across all templates and the base instructions are not contradicted by phase-specific instructions
+  - [x] 5.1 Run the full test suite (`pytest`) to confirm all tests pass
+  - [x] 5.2 Run linter (`ruff check .`) and type checker (`basedpyright`) to confirm no issues
+  - [x] 5.3 Verify all modified instruction files load correctly by checking `_load_instruction()` works for each modified template name
+  - [x] 5.4 Review all changes for consistency — ensure the dependency guidance language is coherent across all templates and the base instructions are not contradicted by phase-specific instructions
