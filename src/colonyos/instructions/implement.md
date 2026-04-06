@@ -49,7 +49,7 @@ After all tasks are complete:
 ## Rules
 
 - Follow existing code conventions exactly
-- Do not add unnecessary dependencies
+- When a feature requires a new dependency, add it to the appropriate manifest file (e.g., `pyproject.toml`, `package.json`) and run the project's install command (e.g., `uv sync`, `npm install`). Verify the import works before proceeding. Do not add dependencies unrelated to the feature.
 - Do not modify unrelated code
 - Every code change must have a corresponding test
 - Commit frequently with meaningful messages

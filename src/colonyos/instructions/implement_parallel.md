@@ -76,3 +76,4 @@ Example: `Add rate limiting middleware (task {task_id})`
 - Do NOT implement tasks that are not {task_id}
 - ALWAYS write tests for new functionality
 - ALWAYS follow existing code conventions
+- If your task requires a new dependency, add it to the manifest file and run the install command. Do not add dependencies unrelated to task {task_id}.

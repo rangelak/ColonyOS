@@ -24,11 +24,11 @@
   - [x] 1.2 Add a new "## Dependency Management" section to `src/colonyos/instructions/base.md` after the "Quality Standards" section, covering: when to install, manifest-first workflow, canonical install commands (uv sync, npm install), prohibition on system-level packages (brew/apt), and exit code checking
   - [x] 1.3 Run the full test suite to confirm no regressions
 
-- [ ] 2.0 Update implement phase instructions
+- [x] 2.0 Update implement phase instructions
   depends_on: [1.0]
-  - [ ] 2.1 In `src/colonyos/instructions/implement.md`, replace "Do not add unnecessary dependencies" (line 52) with positive guidance: "When a feature requires a new dependency, add it to the appropriate manifest file (e.g., `pyproject.toml`, `package.json`) and run the project's install command (e.g., `uv sync`, `npm install`). Verify the import works before proceeding. Do not add dependencies unrelated to the feature."
-  - [ ] 2.2 In `src/colonyos/instructions/implement_parallel.md`, add a dependency installation rule to the Rules section: "If your task requires a new dependency, add it to the manifest file and run the install command. Do not add dependencies unrelated to task {task_id}."
-  - [ ] 2.3 Run the full test suite to confirm no regressions
+  - [x] 2.1 In `src/colonyos/instructions/implement.md`, replace "Do not add unnecessary dependencies" (line 52) with positive guidance: "When a feature requires a new dependency, add it to the appropriate manifest file (e.g., `pyproject.toml`, `package.json`) and run the project's install command (e.g., `uv sync`, `npm install`). Verify the import works before proceeding. Do not add dependencies unrelated to the feature."
+  - [x] 2.2 In `src/colonyos/instructions/implement_parallel.md`, add a dependency installation rule to the Rules section: "If your task requires a new dependency, add it to the manifest file and run the install command. Do not add dependencies unrelated to task {task_id}."
+  - [x] 2.3 Run the full test suite to confirm no regressions
 
 - [ ] 3.0 Update fix-phase instruction templates
   depends_on: [1.0]
