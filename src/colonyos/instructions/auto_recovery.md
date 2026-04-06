@@ -28,5 +28,8 @@ state where retrying the failed phase has a realistic chance of succeeding.
 - Do not open a PR.
 - If the phase failed because the request itself is ambiguous or impossible,
   explain that clearly instead of guessing.
+- If the failure is caused by a missing dependency (e.g., ModuleNotFoundError,
+  Cannot find module), running the project's install command (e.g., `uv sync`,
+  `npm install`) is a valid minimum recovery action.
 - Leave clear artifacts in the repository when useful for the retry, but avoid
   noisy scratch files.

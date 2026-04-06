@@ -40,11 +40,11 @@
   - [x] 3.6 In `src/colonyos/instructions/thread_fix_pr_review.md`, apply the same replacement pattern (line 76)
   - [x] 3.7 Run the full test suite to confirm no regressions
 
-- [ ] 4.0 Update recovery and review instructions
+- [x] 4.0 Update recovery and review instructions
   depends_on: [1.0]
-  - [ ] 4.1 In `src/colonyos/instructions/auto_recovery.md`, add a bullet to the Rules section: "If the failure is caused by a missing dependency (e.g., ModuleNotFoundError, Cannot find module), running the project's install command (e.g., `uv sync`, `npm install`) is a valid minimum recovery action."
-  - [ ] 4.2 In `src/colonyos/instructions/review.md`, expand "No unnecessary dependencies added" checklist item to: "No unnecessary dependencies added; any new dependencies are declared in manifest files with lockfile changes committed; no system-level packages installed"
-  - [ ] 4.3 Run the full test suite to confirm no regressions
+  - [x] 4.1 In `src/colonyos/instructions/auto_recovery.md`, add a bullet to the Rules section: "If the failure is caused by a missing dependency (e.g., ModuleNotFoundError, Cannot find module), running the project's install command (e.g., `uv sync`, `npm install`) is a valid minimum recovery action."
+  - [x] 4.2 In `src/colonyos/instructions/review.md`, expand "No unnecessary dependencies added" checklist item to: "No unnecessary dependencies added; any new dependencies are declared in manifest files with lockfile changes committed; no system-level packages installed"
+  - [x] 4.3 Run the full test suite to confirm no regressions
 
 - [ ] 5.0 Final integration verification
   depends_on: [2.0, 3.0, 4.0]
