@@ -4271,6 +4271,8 @@ def run_pipeline_for_queue_item(
 
     branch_name_override = _queue_item_branch_name_override(item, config)
 
+    force = item.source_type == "ci-fix"
+
     log = run_orchestrator(
         prompt_text,
         repo_root=repo_root,
@@ -4282,6 +4284,7 @@ def run_pipeline_for_queue_item(
         branch_name_override=branch_name_override,
         source_issue=source_issue,
         source_issue_url=source_issue_url,
+        force=force,
     )
 
     return log
@@ -4297,6 +4300,7 @@ def _launch_daemon_tui(
     allow_all_control_users: bool,
     verbose: bool,
     dry_run: bool,
+    fresh: bool = False,
 ) -> None:
     """Launch daemon mode inside the existing Textual shell."""
     import threading
@@ -4381,6 +4385,8 @@ def _launch_daemon_tui(
             command.append("--verbose")
         if dry_run:
             command.append("--dry-run")
+        if fresh:
+            command.append("--fresh")
         restart_attempt = 0
         while not shutdown_requested.is_set():
             process = subprocess.Popen(
@@ -4508,6 +4514,12 @@ def _launch_daemon_tui(
 @click.option("--tui/--no-tui", default=None, help="Run daemon inside the Textual UI when available.")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose logging.")
 @click.option("--dry-run", is_flag=True, help="Log what would run without executing pipelines.")
+@click.option(
+    "--fresh",
+    is_flag=True,
+    help="Discard persisted queue and daemon state on startup so the daemon begins with a clean slate. "
+    "Useful when stale state from a previous run causes repeated failures.",
+)
 def daemon(
     max_budget: float | None,
     unlimited_budget: bool,
@@ -4516,6 +4528,7 @@ def daemon(
     tui: bool | None,
     verbose: bool,
     dry_run: bool,
+    fresh: bool,
 ) -> None:
     """Start the autonomous daemon — Slack + GitHub + CEO + cleanup in one process."""
     import logging as _logging
@@ -4582,6 +4595,7 @@ def daemon(
                 allow_all_control_users=allow_all_control_users,
                 verbose=verbose,
                 dry_run=dry_run,
+                fresh=fresh,
             )
             return
         except ImportError as exc:
@@ -4623,6 +4637,7 @@ def daemon(
         max_hours=max_hours,
         dry_run=dry_run,
         verbose=verbose,
+        fresh=fresh,
     )
 
     try:
