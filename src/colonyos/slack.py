@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Protocol, runtime_che
 
 from colonyos.config import LIGHTWEIGHT_PHASE_TIMEOUT_SECONDS, SlackConfig, load_config, runs_dir_path
 from colonyos.models import extract_result_text
-from colonyos.sanitize import sanitize_untrusted_content, strip_slack_links
+from colonyos.sanitize import sanitize_outbound_slack, sanitize_untrusted_content, strip_slack_links
 
 if TYPE_CHECKING:
     from colonyos.models import QueueItem
@@ -56,6 +56,10 @@ class SlackClient(Protocol):
 
     def reactions_get(
         self, *, channel: str, timestamp: str, full: bool, **kwargs: Any
+    ) -> dict[str, Any]: ...
+
+    def chat_update(
+        self, *, channel: str, ts: str, text: str, **kwargs: Any
     ) -> dict[str, Any]: ...
 
     def conversations_list(self, **kwargs: Any) -> dict[str, Any]: ...
@@ -622,6 +626,10 @@ class SlackUI:
 
     Implements the same interface as ``PhaseUI`` / ``NullUI`` from ``ui.py``
     but routes output to Slack threaded replies instead of the terminal.
+
+    Uses Slack's ``chat_update`` API to edit messages in-place, producing
+    **one message per phase** instead of many.  Notes are buffered and
+    flushed on phase transitions or via explicit ``flush()`` calls.
     """
 
     def __init__(
@@ -634,6 +642,13 @@ class SlackUI:
         self._channel = channel
         self._thread_ts = thread_ts
         self._current_phase: str | None = None
+        # Edit-in-place state
+        self._current_msg_ts: str | None = None
+        self._phase_header_text: str = ""
+        self._note_buffer: list[str] = []
+        # Debounce: track last flush time to avoid hitting Slack rate limits
+        self._last_flush_time: float = float("-inf")
+        self._debounce_seconds: float = 3.0
 
     # Map internal phase names to friendly labels for Slack
     _PHASE_LABELS: ClassVar[dict[str, tuple[str, str]]] = {
@@ -647,6 +662,58 @@ class SlackUI:
         "learn": (":bulb: Extracting lessons learned", ":bulb: Lessons recorded"),
     }
 
+    def _compose_message(self, completion_label: str | None = None) -> str:
+        """Build the full message body from header + buffered notes + optional completion."""
+        parts: list[str] = [self._phase_header_text]
+        if self._note_buffer:
+            parts.append("\n".join(self._note_buffer))
+        if completion_label:
+            parts.append(completion_label)
+        return "\n".join(parts)
+
+    def _flush_buffer(self, completion_label: str | None = None, force: bool = False) -> None:
+        """Compose and update the current phase message via ``chat_update``.
+
+        Falls back to ``chat_postMessage`` if the update fails (e.g. message
+        was deleted or is too old).
+
+        Debounces rapid calls to respect Slack's Tier 2 rate limits (~1 req/sec).
+        Updates are sent immediately when *force* is True (used by
+        ``phase_complete`` and explicit ``flush`` calls) or when at least
+        ``_debounce_seconds`` have elapsed since the last successful flush.
+        """
+        if self._current_msg_ts is None:
+            return
+        # Debounce: skip unless forced or enough time has passed
+        now = time.monotonic()
+        if not force and (now - self._last_flush_time) < self._debounce_seconds:
+            return
+        body = self._compose_message(completion_label)
+        # Sanitize all outbound content (LLM-generated notes may contain secrets)
+        body = sanitize_outbound_slack(body)
+        try:
+            self._client.chat_update(
+                channel=self._channel,
+                ts=self._current_msg_ts,
+                text=body,
+            )
+            self._last_flush_time = now
+        except Exception:
+            logger.debug(
+                "chat_update failed for ts=%s, falling back to chat_postMessage",
+                self._current_msg_ts,
+                exc_info=True,
+            )
+            resp = self._client.chat_postMessage(
+                channel=self._channel,
+                thread_ts=self._thread_ts,
+                text=body,
+            )
+            self._last_flush_time = now
+            ts = (resp or {}).get("ts")
+            if ts:
+                self._current_msg_ts = ts
+
     def phase_header(
         self,
         phase_name: str,
@@ -659,11 +726,25 @@ class SlackUI:
         msg = label
         if extra:
             msg += f" — {extra}"
-        self._client.chat_postMessage(
+        self._phase_header_text = msg
+        self._note_buffer = []
+        resp = self._client.chat_postMessage(
             channel=self._channel,
             thread_ts=self._thread_ts,
             text=msg,
         )
+        ts = (resp or {}).get("ts")
+        if ts:
+            self._current_msg_ts = ts
+        else:
+            # No ts returned — edit-in-place won't work for this phase.
+            # Log a warning; phase_note will fall back to individual posts.
+            logger.warning(
+                "phase_header chat_postMessage returned no ts for phase=%s; "
+                "notes will be posted as individual messages",
+                phase_name,
+            )
+            self._current_msg_ts = None
 
     def phase_complete(self, cost: float, turns: int, duration_ms: int) -> None:
         secs = duration_ms // 1000
@@ -671,14 +752,20 @@ class SlackUI:
         _, label = self._PHASE_LABELS.get(
             phase_name, ("", f":white_check_mark: *{phase_name}* done"),
         )
-        self._client.chat_postMessage(
-            channel=self._channel,
-            thread_ts=self._thread_ts,
-            text=f"{label} ({secs}s)",
-        )
+        completion = f"{label} ({secs}s)"
+        self._flush_buffer(completion_label=completion, force=True)
+        # Reset state for next phase
+        self._current_msg_ts = None
+        self._note_buffer = []
+        self._phase_header_text = ""
 
     def phase_error(self, error: str) -> None:
-        """Post a generic error message — internal details are logged, not posted."""
+        """Post a generic error message — always a NEW message so errors are visible.
+
+        Resets edit-in-place state so that any subsequent ``phase_note`` calls
+        do not attempt to edit the pre-error message (which would silently
+        hide notes or create confusing interleaving).
+        """
         logger.error("SlackUI phase error: %s", error)
         phase_name = self._current_phase or "Phase"
         label = {
@@ -692,19 +779,36 @@ class SlackUI:
             thread_ts=self._thread_ts,
             text=f":x: {label}. Looking into it.",
         )
+        # Reset edit-in-place state so subsequent notes don't edit the pre-error message
+        self._current_msg_ts = None
+        self._note_buffer = []
+        self._phase_header_text = ""
 
     def phase_note(self, text: str) -> None:
         note = text.strip()
         if not note:
             return
-        self._client.chat_postMessage(
-            channel=self._channel,
-            thread_ts=self._thread_ts,
-            text=note,
-        )
+        if self._current_msg_ts is None:
+            # No edit-in-place message available (header returned no ts, or
+            # state was reset after an error).  Post as individual message
+            # so notes are never silently dropped.
+            body = sanitize_outbound_slack(note)
+            self._client.chat_postMessage(
+                channel=self._channel,
+                thread_ts=self._thread_ts,
+                text=body,
+            )
+            return
+        self._note_buffer.append(note)
+        self._flush_buffer()
 
     def slack_note(self, text: str) -> None:
         self.phase_note(text)
+
+    def flush(self) -> None:
+        """Explicitly flush any buffered notes to Slack."""
+        if self._note_buffer and self._current_msg_ts:
+            self._flush_buffer(force=True)
 
     def on_tool_start(self, *a: object) -> None:
         pass
@@ -769,6 +873,11 @@ class FanoutSlackUI:
     def on_text_delta(self, *a: object) -> None:
         for target in self._targets:
             target.on_text_delta(*a)
+
+    def flush(self) -> None:
+        """Flush buffered notes on all targets."""
+        for target in self._targets:
+            target.flush()
 
     def on_turn_complete(self) -> None:
         for target in self._targets:
@@ -1041,6 +1150,80 @@ def _parse_triage_response(raw_text: str) -> TriageResult:
     )
 
 
+_PHASE_SUMMARY_PROMPTS: dict[str, str] = {
+    "plan": (
+        "Summarize this plan for a Slack notification in under 280 characters. "
+        "Say what files/components will change and how many implementation tasks there are. "
+        "Be specific. Output ONLY the summary text."
+    ),
+    "review": (
+        "Summarize this code review for a Slack notification in under 280 characters. "
+        "State the verdict (approved / changes requested) and the single most important finding. "
+        "Be specific. Output ONLY the summary text."
+    ),
+}
+
+_PHASE_SUMMARY_FALLBACKS: dict[str, str] = {
+    "plan": "Plan is ready.",
+    "review": "Review complete.",
+}
+
+
+def generate_phase_summary(
+    phase_name: str,
+    context: str,
+    *,
+    repo_root: Path | None = None,
+) -> str:
+    """Generate a concise ≤280-char summary of a phase for Slack.
+
+    Uses a cheap Haiku-class LLM call to produce a human-readable summary
+    of the plan or review phase output.  On any failure (timeout, empty
+    response, LLM error) falls back to a short deterministic string so
+    callers always get a usable result.
+
+    The returned text is already sanitized for outbound Slack posting
+    (secrets redacted, length capped, mrkdwn-safe).
+    """
+    from colonyos.agent import run_phase_sync
+    from colonyos.models import Phase, extract_result_text
+
+    cwd = repo_root if repo_root is not None else Path.cwd()
+    fallback = _PHASE_SUMMARY_FALLBACKS.get(phase_name, f"{phase_name.title()} complete.")
+
+    prompt_instruction = _PHASE_SUMMARY_PROMPTS.get(phase_name)
+    if prompt_instruction is None:
+        return sanitize_outbound_slack(fallback, max_chars=280)
+
+    system = (
+        "You are a concise engineering assistant writing Slack notifications. "
+        "Respond in under 280 characters. No headers, no markdown formatting, "
+        "no bullet points — just a plain-text sentence or two."
+    )
+    safe_context = sanitize_untrusted_content(context[:2000])
+    user = f"{prompt_instruction}\n\n{safe_context}"
+
+    try:
+        result = run_phase_sync(
+            Phase.SUMMARY,
+            user,
+            cwd=cwd,
+            system_prompt=system,
+            model="haiku",
+            budget_usd=0.02,
+            allowed_tools=[],
+            timeout_seconds=30,
+        )
+        text = extract_result_text(result.artifacts).strip()
+        if not text:
+            return sanitize_outbound_slack(fallback, max_chars=280)
+        # Enforce the 280-char target via outbound sanitization
+        return sanitize_outbound_slack(text, max_chars=280)
+    except Exception:
+        logger.debug("Phase summary generation failed for %s", phase_name, exc_info=True)
+        return sanitize_outbound_slack(fallback, max_chars=280)
+
+
 def generate_plain_summary(
     context: str,
     *,
@@ -1077,11 +1260,12 @@ def generate_plain_summary(
         "- Keep it warm and professional — like reporting to your boss.\n"
         "- Output ONLY the summary text, no headers or formatting."
     )
-    user = f"Here's what happened:\n{context[:2000]}"
+    safe_context = sanitize_untrusted_content(context[:2000])
+    user = f"Here's what happened:\n{safe_context}"
 
     try:
         result = run_phase_sync(
-            Phase.TRIAGE,  # reuse lightweight phase label
+            Phase.SUMMARY,
             user,
             cwd=cwd,
             system_prompt=system,

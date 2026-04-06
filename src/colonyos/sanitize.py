@@ -30,12 +30,15 @@ SECRET_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"ghs_\w+"),          # GitHub server tokens
     re.compile(r"github_pat_\w+"),   # GitHub fine-grained personal access tokens
     re.compile(r"gho_\w+"),          # GitHub OAuth tokens
+    re.compile(r"sk-ant-api03-\S+"),  # Anthropic API keys (must precede generic sk- pattern)
     re.compile(r"sk-\w+"),           # OpenAI / Stripe secret keys
     re.compile(r"AKIA\w+"),          # AWS access key IDs
     re.compile(r"Bearer\s+\S+"),     # Bearer tokens
     re.compile(r"xoxb-\S+"),         # Slack bot tokens
     re.compile(r"xoxp-\S+"),         # Slack user tokens
     re.compile(r"npm_\w+"),          # npm tokens
+    re.compile(r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC )?PRIVATE KEY-----"),  # PEM private keys
+    re.compile(r'"type"\s*:\s*"service_account"'),  # GCP service account JSON fragments
     # High-entropy base64 blobs (>40 chars) adjacent to secret-like keywords.
     re.compile(
         r"(?i)(?:TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL|API_?KEY)\s*[:=]\s*[A-Za-z0-9+/]{40,}={0,2}"
@@ -134,6 +137,33 @@ def sanitize_ci_logs(text: str) -> str:
     text = sanitize_untrusted_content(text)
     for pattern in SECRET_PATTERNS:
         text = pattern.sub(_REDACTED, text)
+    return text
+
+
+_DEFAULT_OUTBOUND_MAX_CHARS = 3000
+
+
+def sanitize_outbound_slack(text: str, max_chars: int = _DEFAULT_OUTBOUND_MAX_CHARS) -> str:
+    """Sanitize LLM-generated content before posting to Slack.
+
+    Composes three passes:
+    1. Secret-pattern redaction (``SECRET_PATTERNS``)
+    2. Character length cap (default 3,000 chars) with trailing ellipsis
+    3. Slack mrkdwn safety via ``sanitize_for_slack()``
+
+    This is the **outbound** counterpart to the *inbound* functions
+    (``sanitize_untrusted_content``, ``sanitize_for_slack``) that handle
+    user-supplied content flowing *into* prompts.  Here, the risk is LLM
+    output leaking secrets or injecting Slack formatting.
+    """
+    # 1. Redact secrets
+    for pattern in SECRET_PATTERNS:
+        text = pattern.sub(_REDACTED, text)
+    # 2. Enforce character ceiling
+    if len(text) > max_chars:
+        text = text[: max_chars - 1] + "…"
+    # 3. Sanitize Slack mrkdwn metacharacters & mentions
+    text = sanitize_for_slack(text)
     return text
 
 

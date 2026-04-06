@@ -78,6 +78,7 @@ class Phase(str, Enum):
     NUKE = "nuke"
     QA = "qa"  # Intent Router: read-only Q&A agent for codebase questions
     SWEEP = "sweep"
+    SUMMARY = "summary"  # Lightweight LLM calls for Slack message summaries
 
 
 class TaskStatus(str, Enum):

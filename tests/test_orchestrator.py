@@ -187,6 +187,7 @@ class TestPhaseReviewEnum:
             Phase.NUKE,
             Phase.QA,
             Phase.SWEEP,
+            Phase.SUMMARY,
         ]
 
     def test_fix_phase_exists(self):
