@@ -65,7 +65,7 @@ If `git commit` fails because pre-commit hooks report additional issues:
 - Fix the code, not the tests — unless the test is genuinely incorrect
 - Make minimal, targeted changes — do not refactor or improve unrelated code
 - Do not add new features or functionality
-- Do not introduce new dependencies unless absolutely necessary
+- If fixing a failure requires installing missing dependencies, run the project's install command. Do not add new dependencies unless the fix genuinely requires one.
 - Follow existing code conventions exactly
 - Run ALL checks after fixing (lint, type-check, tests) — not just the ones that failed
 - Do not suppress errors to make checks pass (e.g., no `@pytest.mark.skip`, no `# type: ignore`, no `# noqa`, no `# ruff: noqa`)

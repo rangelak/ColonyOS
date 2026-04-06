@@ -17,7 +17,7 @@ You are reviewing the implementation on branch `{branch_name}` against the PRD a
 - [ ] All tests pass
 - [ ] No linter errors introduced
 - [ ] Code follows existing project conventions
-- [ ] No unnecessary dependencies added
+- [ ] No unnecessary dependencies added; any new dependencies are declared in manifest files with lockfile changes committed; no system-level packages installed
 - [ ] No unrelated changes included
 
 ### Safety

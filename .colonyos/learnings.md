@@ -1,15 +1,6 @@
 # ColonyOS Learnings Ledger
 
 
-## Run: run-20260320_041029-963bfe43be
-_Date: 2026-03-20 | Feature: add_a_parallel_implement_mode_that_spawns_multiple_agent_ses_
-
-- **[code-quality]** `finally` blocks restoring state must capture return values before cleanup; calling getters after state change returns wrong data.
-- **[testing]** Missing test coverage for phases/code paths explicitly required by PRDs often indicates the code itself was never implemented.
-- **[architecture]** Separate deterministic logic (git checks, validation) from LLM calls to avoid wasting compute on closed-form answers.
-- **[code-quality]** Use `removeprefix("* ")` not `lstrip("* ")` when stripping known prefixes; lstrip removes any matching chars.
-- **[security]** Fail-closed on external API errors (GitHub, network) is the correct default; fail-open creates silent security gaps.
-
 ## Run: run-20260320_011056-33ff47e4ff
 _Date: 2026-03-20 | Feature: add_a_parallel_progress_tracker_that_provides_real_time_visi_
 
@@ -176,3 +167,12 @@ _Date: 2026-04-06 | Feature: when_you_run_the_daemon_slack_watch_when_you_finish
 - **[code-quality]** Reusing enum values for semantically different operations (e.g., Phase.TRIAGE for summaries) corrupts cost attribution and telemetry.
 - **[code-quality]** Bare `except Exception: pass` blocks swallow import and runtime errors silently; always log at debug level minimum.
 - **[architecture]** Resource handles (DB connections, API clients) should be passed caller-to-callee, not reopened per function call.
+
+## Run: run-20260406_102116-2f5769d446
+_Date: 2026-04-06 | Feature: the_colonyos_agents_should_be_able_to_do_such_installations__
+
+- **[code-quality]** Negative prohibitions in LLM instruction templates cause over-inhibition; replace with positive actionable step-by-step workflows.
+- **[code-quality]** Error recovery handlers must reset all accumulated mutable state (buffers, timestamps, IDs) to prevent stale context in subsequent operations.
+- **[architecture]** Programmatic output constraints (hard truncation, sanitization) must backstop LLM prompt instructions; models don't reliably obey format directives.
+- **[code-quality]** Defensive try/except blocks must wrap all related operations in a group; leaving one call outside creates an inconsistent failure surface.
+- **[architecture]** Sibling templates serving the same role (e.g., review.md vs review_standalone.md) must be updated atomically to prevent enforcement drift.
