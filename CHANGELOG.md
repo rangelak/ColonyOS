@@ -1,5 +1,20 @@
 # Changelog
 
+## 20260406_121500 — Enable Dependency Installation in Pipeline Agents
+
+Replaced ambiguous "do not add dependencies" language across all mutation-phase instruction templates with clear positive guidance that tells agents exactly when and how to install project-level dependencies (manifest first → install command → verify → commit lockfile). This eliminates preventable `ModuleNotFoundError` pipeline failures caused by agents being afraid to run install commands.
+
+**Key files modified:**
+- `src/colonyos/instructions/base.md` — Added "Dependency Management" section with full workflow and safety rules
+- `src/colonyos/instructions/implement.md` — Replaced negative dependency guidance with positive instructions
+- `src/colonyos/instructions/implement_parallel.md` — Added dependency installation guidance
+- `src/colonyos/instructions/fix.md`, `fix_standalone.md`, `ci_fix.md`, `verify_fix.md`, `thread_fix.md`, `thread_fix_pr_review.md` — Updated fix-phase templates
+- `src/colonyos/instructions/review.md`, `review_standalone.md` — Expanded dependency checklist for reviewers
+- `src/colonyos/instructions/auto_recovery.md` — Added dependency install as valid recovery action
+
+**PRD:** `cOS_prds/20260406_102116_prd_the_colonyos_agents_should_be_able_to_do_such_installations_the_pipeline_shouldn.md`
+**Tasks:** `cOS_tasks/20260406_102116_tasks_the_colonyos_agents_should_be_able_to_do_such_installations_the_pipeline_shouldn.md`
+
 ## 20260406_060000 — Slack Thread Message Consolidation
 
 Consolidates Slack thread output from ~50 messages per pipeline run to ~5 messages by using `chat_update` to edit messages in-place, posting LLM-generated phase summaries, and collapsing per-task progress into a single updating message. Errors always get their own message for visibility.
