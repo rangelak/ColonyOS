@@ -3234,7 +3234,9 @@ class TestRunMaintenanceCycle:
 
     def _make_daemon(self, tmp_repo: Path, **daemon_kwargs) -> Daemon:
         cfg = ColonyConfig(daemon=DaemonConfig(daily_budget_usd=50.0, **daemon_kwargs))
-        return Daemon(tmp_repo, cfg, dry_run=True)
+        d = Daemon(tmp_repo, cfg, dry_run=True)
+        d._is_self_repo = True  # tests exercise self-update logic
+        return d
 
     @patch("colonyos.daemon.build_ci_fix_queue_items", return_value=[])
     @patch("colonyos.daemon.find_branches_with_failing_ci", return_value=[])
@@ -3384,13 +3386,26 @@ class TestRunMaintenanceCycle:
             d._run_maintenance_cycle()
         mock_scan.assert_not_called()
 
+    @patch("colonyos.daemon.pull_and_check_update", return_value=(True, "old", "new"))
+    def test_self_update_skipped_for_non_self_repo(self, mock_pull, tmp_repo: Path) -> None:
+        """Self-update is skipped when the daemon runs outside the ColonyOS repo."""
+        d = self._make_daemon(tmp_repo, self_update=True)
+        d._is_self_repo = False
+        with patch("colonyos.daemon.find_branches_with_failing_ci", return_value=[]), \
+             patch("colonyos.daemon.build_ci_fix_queue_items", return_value=[]):
+            d._run_maintenance_cycle()
+        # pull_and_check_update should NOT be called for non-self repos
+        mock_pull.assert_not_called()
+
 
 class TestStartupRollback:
     """Task 5.2 — daemon detects last_good_commit mismatch + recent start → rolls back."""
 
     def _make_daemon(self, tmp_repo: Path, **daemon_kwargs) -> Daemon:
         cfg = ColonyConfig(daemon=DaemonConfig(daily_budget_usd=50.0, **daemon_kwargs))
-        return Daemon(tmp_repo, cfg, dry_run=True)
+        d = Daemon(tmp_repo, cfg, dry_run=True)
+        d._is_self_repo = True  # tests exercise rollback logic
+        return d
 
     @patch("colonyos.daemon.os.execv")
     @patch("colonyos.daemon.run_self_update", return_value=True)
@@ -3427,7 +3442,9 @@ class TestSelfUpdateCircuitBreaker:
 
     def _make_daemon(self, tmp_repo: Path, **daemon_kwargs) -> Daemon:
         cfg = ColonyConfig(daemon=DaemonConfig(daily_budget_usd=50.0, **daemon_kwargs))
-        return Daemon(tmp_repo, cfg, dry_run=True)
+        d = Daemon(tmp_repo, cfg, dry_run=True)
+        d._is_self_repo = True  # tests exercise circuit breaker logic
+        return d
 
     @patch("colonyos.daemon.os.execv")
     @patch("colonyos.daemon.run_self_update", return_value=True)
@@ -3474,7 +3491,9 @@ class TestMaintenanceUptime:
 
     def _make_daemon(self, tmp_repo: Path, **daemon_kwargs) -> Daemon:
         cfg = ColonyConfig(daemon=DaemonConfig(daily_budget_usd=50.0, **daemon_kwargs))
-        return Daemon(tmp_repo, cfg, dry_run=True)
+        d = Daemon(tmp_repo, cfg, dry_run=True)
+        d._is_self_repo = True  # tests exercise uptime good-commit logic
+        return d
 
     @patch("colonyos.daemon.record_last_good_commit")
     def test_records_good_commit_after_uptime(
@@ -3580,7 +3599,9 @@ class TestCircuitBreakerNoResetOnRollback:
 
     def _make_daemon(self, tmp_repo: Path, **daemon_kwargs) -> Daemon:
         cfg = ColonyConfig(daemon=DaemonConfig(daily_budget_usd=50.0, **daemon_kwargs))
-        return Daemon(tmp_repo, cfg, dry_run=True)
+        d = Daemon(tmp_repo, cfg, dry_run=True)
+        d._is_self_repo = True  # tests exercise uptime good-commit logic
+        return d
 
     @patch("colonyos.daemon.read_last_good_commit", return_value="abc123")
     @patch("colonyos.daemon.record_last_good_commit")

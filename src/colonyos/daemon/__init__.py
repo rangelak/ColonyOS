@@ -191,6 +191,12 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
         self._good_commit_recorded: bool = False
         self._last_branch_sync_post: float = 0.0
 
+        # Detect whether this daemon is running inside the ColonyOS repo
+        # itself.  Self-update / rollback operations only make sense when
+        # repo_root *is* the ColonyOS source tree.
+        _colonyos_src = Path(__file__).resolve().parent.parent.parent.parent
+        self._is_self_repo: bool = self.repo_root.resolve() == _colonyos_src
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -1890,8 +1896,13 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
         (3) CI-fix enqueueing.  Called from ``_run_pipeline_for_item``
         finally block after ``restore_to_branch()`` returns to main.
         """
-        # 1. Pull latest and check for code changes
-        changed, old_sha, new_sha = pull_and_check_update(self.repo_root)
+        # 1. Pull latest and check for code changes (self-update only
+        #    applies when the daemon is running inside the ColonyOS repo).
+        if not self._is_self_repo:
+            changed = False
+            old_sha = new_sha = None
+        else:
+            changed, old_sha, new_sha = pull_and_check_update(self.repo_root)
 
         if changed and self.daemon_config.self_update:
             logger.info(
@@ -1944,7 +1955,7 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
         attempt to roll back to the last-good commit.  After 2 consecutive
         rollback failures, disable self-update and alert via Slack.
         """
-        if not self.daemon_config.self_update:
+        if not self.daemon_config.self_update or not self._is_self_repo:
             return
 
         if not should_rollback(self.repo_root, self._startup_time):
@@ -2009,7 +2020,7 @@ class Daemon(WatchdogMixin, ResilienceMixin, HelpersMixin):
         for the rest of the daemon's lifetime.  Also resets the
         consecutive failure counter on successful uptime.
         """
-        if not self.daemon_config.self_update:
+        if not self.daemon_config.self_update or not self._is_self_repo:
             return
         if self._good_commit_recorded:
             return
