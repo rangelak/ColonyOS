@@ -903,19 +903,18 @@ def _run_sequential_implement(
             system = _inject_memory_block(system, memory_store, "implement", user, config)
             user += _drain_injected_context(user_injection_provider)
 
-            ui: PhaseUI | NullUI | None = _make_ui()
-            if ui is not None:
-                safe_desc_ui = sanitize_for_slack(sanitize_untrusted_content(task_desc))
-                short_desc = safe_desc_ui[:_SLACK_TASK_DESC_MAX]
-                if len(safe_desc_ui) > _SLACK_TASK_DESC_MAX:
-                    short_desc = safe_desc_ui[:_SLACK_TASK_DESC_MAX - 3] + "..."
-                retry_label = f" (retry {attempt})" if attempt > 0 else ""
-                ui.phase_header(
-                    f"Implement [{task_id}] {short_desc}{retry_label}",
-                    per_task_budget,
-                    config.get_model(Phase.IMPLEMENT),
-                    branch_name,
-                )
+            # Use a task-scoped UI: the daemon/CLI factories return a nested
+            # stream UI (TUI/terminal only, no SlackUI) when ``task_id`` is
+            # passed. This suppresses per-task Slack spam — the parent
+            # "Implement" message already handles Slack communication and the
+            # final ``_format_implement_result_note`` summarizes every task.
+            try:
+                ui: PhaseUI | NullUI | None = _make_ui(task_id=task_id)
+            except TypeError:
+                # Legacy factories that don't accept ``task_id`` — fall back
+                # to no per-task UI so we never accidentally post per-task
+                # messages to Slack.
+                ui = None
 
             try:
                 result = run_phase_sync(
@@ -1095,15 +1094,31 @@ def _run_sequential_implement(
         "task_results": task_results,
     }
 
+    # Build a human-readable error message that includes per-task failure
+    # causes (not just counts), so downstream consumers — Slack, auto
+    # recovery, logs — know *why* tasks failed.
+    error_message: str | None = None
+    if not overall_success:
+        header = f"{len(failed)} task(s) failed, {len(blocked)} task(s) blocked"
+        detail_lines: list[str] = []
+        for fid in sorted(failed, key=_task_sort_key):
+            info = task_results.get(fid, {})
+            err_raw = str(info.get("error") or "").strip() or "(no error captured)"
+            # Flatten and cap per-task error so the merged message stays
+            # readable in Slack and logs.
+            err_flat = " ".join(err_raw.split())
+            if len(err_flat) > 400:
+                err_flat = err_flat[:397] + "..."
+            detail_lines.append(f"- [{fid}] {err_flat}")
+        error_message = header if not detail_lines else header + "\n" + "\n".join(detail_lines)
+
     return PhaseResult(
         phase=Phase.IMPLEMENT,
         success=overall_success,
         cost_usd=total_cost,
         duration_ms=total_duration_ms,
         artifacts=artifacts,
-        error=None if overall_success else (
-            f"{len(failed)} task(s) failed, {len(blocked)} task(s) blocked"
-        ),
+        error=error_message,
     )
 
 
@@ -1601,6 +1616,23 @@ def _format_implement_result_note(result: PhaseResult) -> str:
     if failed:
         parts.append(":x: *Failed:*")
         parts.append(_format_task_list_with_descriptions(failed, task_results))
+        # Per-task error excerpts so humans can see *why* each task failed
+        # without digging through daemon logs.
+        error_lines: list[str] = []
+        for task_id in sorted(failed, key=_task_sort_key):
+            info = task_results.get(task_id, {})
+            err_raw = str(info.get("error") or "").strip()
+            if not err_raw:
+                continue
+            excerpt = sanitize_for_slack(sanitize_untrusted_content(err_raw))
+            # Flatten multi-line errors to a single line for the summary view.
+            excerpt = " ".join(excerpt.split())
+            if len(excerpt) > 240:
+                excerpt = excerpt[:237] + "..."
+            error_lines.append(f"• `{task_id}`: {excerpt}")
+        if error_lines:
+            parts.append("*Errors:*")
+            parts.append("\n".join(error_lines))
     if blocked:
         parts.append(":no_entry_sign: *Blocked:*")
         parts.append(_format_task_list_with_descriptions(blocked, task_results))

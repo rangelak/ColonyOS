@@ -600,7 +600,11 @@ class TestSlackUI:
         assert update_kwargs["ts"] == "hdr.002"
 
     def test_phase_error_posts_new_message(self) -> None:
-        """Errors always post a NEW message — never hidden in an edit."""
+        """Errors always post a NEW message — never hidden in an edit.
+
+        The error excerpt is echoed (sanitized) so humans actually see
+        what went wrong instead of a vague "looking into it" placeholder.
+        """
         client = _slack_client_with_ts("hdr.003")
         ui = SlackUI(client, "C123", "1234.5")
         ui.phase_header("review", 5.0, "sonnet")
@@ -608,10 +612,10 @@ class TestSlackUI:
         # phase_header + phase_error = 2 postMessage calls
         assert client.chat_postMessage.call_count == 2
         call_kwargs = client.chat_postMessage.call_args[1]
-        # Error details must NOT be echoed to Slack (security)
-        assert "something broke" not in call_kwargs["text"]
-        assert "review" in call_kwargs["text"].lower()
-        assert "Looking into it" in call_kwargs["text"]
+        # Error excerpt must now be visible (post-sanitization) so operators
+        # can diagnose failures without digging through daemon logs.
+        assert "something broke" in call_kwargs["text"]
+        assert ":x:" in call_kwargs["text"]
 
     def test_phase_note_edits_in_place(self) -> None:
         """phase_note should edit the phase message, not post a new one."""
@@ -1322,15 +1326,20 @@ class TestPromptPreambleSecurity:
 
 
 class TestSlackUIErrorSanitization:
-    def test_phase_error_does_not_echo_details(self) -> None:
+    def test_phase_error_redacts_known_secret_patterns(self) -> None:
+        """Known secret patterns (API tokens, PEM keys) must be redacted
+        before the error excerpt is posted to Slack — but ordinary error
+        text (paths, messages) is echoed so humans can diagnose failures.
+        """
         client = _slack_client_with_ts()
         ui = SlackUI(client, "C123", "1234.5")
-        ui.phase_error("/home/user/.env: permission denied")
+        ui.phase_error("auth failed: Bearer sk-ant-api03-VERYSECRETKEY123")
         call_kwargs = client.chat_postMessage.call_args[1]
-        # Internal path/details must NOT appear in the posted message
-        assert "/home/user" not in call_kwargs["text"]
-        assert "permission denied" not in call_kwargs["text"]
-        assert "Looking into it" in call_kwargs["text"]
+        # Secret token must be redacted
+        assert "sk-ant-api03-VERYSECRETKEY123" not in call_kwargs["text"]
+        assert "REDACTED" in call_kwargs["text"]
+        # Non-secret error context is preserved so operators can triage
+        assert "auth failed" in call_kwargs["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -2972,9 +2981,9 @@ class TestEndToEndMessageConsolidation:
         error_call = client.chat_postMessage.call_args_list[1]
         error_text = error_call[1]["text"]
         assert ":x:" in error_text
-        # Error details must NOT be echoed (security)
-        assert "OOM" not in error_text
-        assert "crashed" not in error_text
+        # Error excerpt is now echoed so humans can diagnose
+        assert "OOM" in error_text
+        assert "crashed" in error_text
 
     def test_error_after_multiple_phases_stays_visible(self) -> None:
         """An error in a later phase should still get its own message,
@@ -2998,24 +3007,30 @@ class TestEndToEndMessageConsolidation:
         assert client.chat_postMessage.call_count == 4
         error_text = client.chat_postMessage.call_args[1]["text"]
         assert ":x:" in error_text
-        assert "timeout" not in error_text
+        # Error excerpt is now echoed
+        assert "timeout" in error_text
 
-    def test_error_message_does_not_echo_error_details(self) -> None:
-        """Verify that error messages never echo raw error text to Slack,
-        regardless of how sensitive the error content is."""
+    def test_error_message_redacts_secrets_in_error_text(self) -> None:
+        """Known secret patterns embedded in error text must be redacted
+        before posting. Non-secret error context is echoed so humans
+        can diagnose failures from Slack alone.
+        """
         ui, client = self._make_ui()
 
         ui.phase_header("implement", 5.0, "sonnet")
-        sensitive_errors = [
+        secret_tokens = [
             "sk-ant-api03-SECRET_KEY_HERE",
-            "ConnectionError: https://internal.corp/api",
-            "-----BEGIN RSA PRIVATE KEY-----",
+            "ghp_1234567890abcdefghij",
+            "-----BEGIN RSA PRIVATE KEY-----\nABC\n-----END RSA PRIVATE KEY-----",
         ]
-        for err in sensitive_errors:
+        for token in secret_tokens:
             client.chat_postMessage.reset_mock()
-            ui.phase_error(err)
+            ui.phase_error(f"auth error: {token}")
             error_text = client.chat_postMessage.call_args[1]["text"]
-            assert err not in error_text
+            # The raw secret token must not leak
+            assert token not in error_text
+            # But the contextual error message should still be visible
+            assert "auth error" in error_text
 
     # -- 6.4: chat_update failure fallback --
 

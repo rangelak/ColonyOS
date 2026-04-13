@@ -54,3 +54,19 @@ After all tasks are complete:
 - Every code change must have a corresponding test
 - Commit frequently with meaningful messages
 - If a task is unclear, make a reasonable decision and document it in a commit message
+
+## Handling Setup and Test Failures
+
+Treat common environmental failures as part of the job, not a reason to give up. You have Bash access — use it to diagnose and fix.
+
+- **`npm install` failures**: Read the full error output. Common fixes: delete `node_modules` and `package-lock.json` and re-run; bump or pin a conflicting peer dep; align `engines.node` with the installed Node version; use `--legacy-peer-deps` only as a last resort after investigating the real conflict. If the failure is truly outside your control (e.g., a private registry auth failure), stop and report it clearly.
+- **`uv sync` / `pip install` failures**: Check for version conflicts in `pyproject.toml`; make sure the Python version matches `requires-python`; rerun after fixing the constraint.
+- **Failing tests**: Read the actual test output (don't just rerun). Decide whether the test reveals a bug in your change (fix the code) or is a stale expectation (fix the test). Never delete tests to make them pass. Flaky tests should be rerun at most once; if they flake deterministically, investigate the race instead.
+- **Type / lint errors**: Fix them. These are first-class blockers, not noise.
+- **Build failures**: Read the stack trace, find the root cause, fix it. Do not work around by disabling features.
+
+If after a real diagnosis a failure is truly unrecoverable (e.g., requires credentials you don't have, a missing external service, a repo-wide issue beyond the task scope), stop and write a clear explanation of what blocked you and what you tried. Do not silently skip the task.
+
+## If You Are Retrying After a Previous Failure
+
+If the user prompt includes a "Previous Attempt Failed" section, that is the error from the last run. Read it carefully. Identify what went wrong — don't re-do the same thing and hope for a different outcome. Diagnose the specific failure (missing dep? test assertion? schema mismatch?) and address *that* root cause before touching anything else.

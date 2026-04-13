@@ -760,24 +760,38 @@ class SlackUI:
         self._phase_header_text = ""
 
     def phase_error(self, error: str) -> None:
-        """Post a generic error message — always a NEW message so errors are visible.
+        """Post a phase error message — always a NEW message so errors are visible.
 
-        Resets edit-in-place state so that any subsequent ``phase_note`` calls
-        do not attempt to edit the pre-error message (which would silently
-        hide notes or create confusing interleaving).
+        Includes a truncated excerpt of the error so humans (and subsequent
+        retry loops) can actually see *what* went wrong instead of a vague
+        "ran into a problem". Resets edit-in-place state so that any
+        subsequent ``phase_note`` calls do not attempt to edit the pre-error
+        message (which would silently hide notes or create confusing
+        interleaving).
         """
         logger.error("SlackUI phase error: %s", error)
         phase_name = self._current_phase or "Phase"
         label = {
-            "plan": "Ran into a problem while planning",
-            "implement": "Ran into a problem while writing code",
-            "review": "Ran into a problem during review",
-            "fix": "Ran into a problem applying fixes",
-        }.get(phase_name, f"*{phase_name}* ran into a problem")
+            "plan": "Planning failed",
+            "implement": "Implementation failed",
+            "review": "Review failed",
+            "fix": "Fix failed",
+        }.get(phase_name, f"*{phase_name}* failed")
+        # Include a truncated error excerpt so humans can diagnose without
+        # digging through daemon logs. ``sanitize_outbound_slack`` redacts
+        # known secret patterns (API tokens, PEM keys, etc.), escapes Slack
+        # mrkdwn metacharacters, and caps length. We deliberately do NOT
+        # wrap in a code block — the sanitizer escapes backticks, which
+        # would render as literal ``\``` inside a code fence.
+        excerpt = sanitize_outbound_slack((error or "").strip(), max_chars=600)
+        if excerpt:
+            text = f":x: {label}\n{excerpt}"
+        else:
+            text = f":x: {label} (no error details available)"
         self._client.chat_postMessage(
             channel=self._channel,
             thread_ts=self._thread_ts,
-            text=f":x: {label}. Looking into it.",
+            text=text,
         )
         # Reset edit-in-place state so subsequent notes don't edit the pre-error message
         self._current_msg_ts = None
